@@ -4,9 +4,12 @@
 
 Read `plans/initial/GOATR_PLAN.md`, your assigned topic, its dependencies, and
 `plans/initial/REFERENCES.md` before editing. Those documents own product
-contracts; README describes the infrastructure currently present. This checkout
-is a foundation, not completed package 1A. Do not invent product commands,
-dummy bindings, insecure native fallbacks, or passing runtime evidence.
+contracts. Keep README user-facing: product overview, availability, use and
+license only. Developer onboarding/tool commands belong in this file;
+implementation progress, verification status and next actions belong in the
+main plan. Do not duplicate topic contracts in onboarding or status summaries.
+Do not invent product commands, dummy bindings, insecure native fallbacks, or
+passing runtime evidence.
 
 ## One coordinator, isolated writers
 
@@ -49,11 +52,75 @@ plan status, README/AGENTS updates, and resolving overlapping assignments.
 
 ## Development and handoff
 
-Use the locked shell, not global pip/cargo/rustup/SDK installs. `.envrc` is
-`use flake`; use `nix develop path:.` while foundation files remain untracked.
-`make lint`, `make format`, `make format-check`, `make smoke`, and `make check`
-are shared local/CI entrypoints. Add only a runnable check that exercises actual
-new behavior; the dependency smoke is not a transport or product test.
+### Core onboarding and commands
+
+Install Nix with `nix-command` and `flakes` enabled, then run from this checkout:
+
+```sh
+nix develop
+```
+
+Optional direnv integration: review `.envrc`, then `direnv allow`. It contains
+only `use flake`. Before newly created files are tracked by Git, use
+`nix develop path:.` and `nix build path:.#companion --no-link`; Git-backed Nix
+flakes intentionally ignore untracked files.
+
+Use the locked shell, not global pip/cargo/rustup/SDK installs. The default shell
+uses the exact planned nixpkgs and rust-overlay revisions in `flake.lock` and
+supplies Python (aiohttp, cryptography, segno, packaging tools), Rust, cargo-ndk,
+maturin, Git, Make, Ruff and nixfmt. The lock pins the overlay's stable Rust
+selection and the entire Python dependency closure. The core shell is defined
+for Linux/macOS on x86_64/aarch64; execution evidence belongs in the main plan.
+
+Shared commands, also used by [GitHub Actions](.github/workflows/ci.yml):
+
+| Command inside `nix develop` | Purpose |
+|---|---|
+| `make lint` | Ruff Python lint/import checks |
+| `make format` | Format Python and `flake.nix` (modifies files) |
+| `make format-check` | Check formatting without modifying files |
+| `make smoke` | Direct package/dependency import smoke command |
+| `make check` | All non-building core checks |
+
+The Nix `companion` output is the Python package, **not** the planned full
+`goatr` executable/native closure. Runtime dependency versions are selected by
+the locked Nix graph; project metadata names dependencies without a second
+floating pip installation path. New source is read from the working checkout
+by `make`/the shell; use Nix package builds to check wheel installation/imports.
+Add only a runnable check that exercises actual new behavior; the dependency
+smoke is not a transport or product test.
+
+### Optional Android tools (Linux x86_64)
+
+The project owner explicitly accepted the **Android SDK license** for this
+project. Selecting either shell below opts into that project-scoped acceptance;
+no global Nix configuration or host license settings are changed. The core
+shell and CI do not pull in the SDK/NDK. Android tools are nonfree and keep their
+upstream license; do not publish an SDK cache without reviewing those terms.
+
+```sh
+nix develop .#android    # JDK 21, Gradle 9.8.0, SDK 37, NDK r28c
+nix develop .#emulator   # API-34 default x86_64 image + emulator
+```
+
+Use `path:.#android` / `path:.#emulator` before Git tracks the new files.
+Both shells provide the Android Rust target standard libraries, build-tools
+36.0.0, platform-tools 35.0.2, NDK 28.2.13676358 and command-line tools 21.0.
+The emulator is 36.6.11; its shell selects **API 34 only**, while the Android
+build shell selects the pinned metadata's **37.0** platform key.
+`ANDROID_HOME`, `ANDROID_SDK_ROOT`, `ANDROID_NDK_ROOT`, `JAVA_HOME` and the
+NixOS aapt2 override are supplied by the shell. The SDK is immutable; never use
+sdkmanager to install into its store path. Emulator runtime additionally needs
+owned AVD/device state and usable KVM.
+
+Before downloading/building their closures, evaluate the `android` and
+`emulator` shell derivation paths using the commands in
+[Testing](plans/initial/TESTING.md#current-infrastructure-checks).
+For build pins and source availability, read
+[Tech stack](plans/initial/TECH_STACK.md#foundation-availability-preflight);
+availability is not dependency compatibility or native/product evidence.
+
+### Verification and handoff discipline
 
 Workers do not run builds, tests, linters, formatters, or smoke checks mid-flight
 unless verification is their explicit assignment. After all owned changes land,
@@ -64,24 +131,13 @@ nix develop -c make check
 nix build .#companion --no-link
 ```
 
-For optional Android tool configuration, evaluate the `android` and `emulator`
-shell derivation paths before downloading/building their closures. Follow
-`plans/initial/TESTING.md` for later native/product gates, with owned resources.
-Do not call missing future commands to manufacture a pass or silently skip a
-selected backend. Never log secrets or touch another user's sessions/state.
+Follow `plans/initial/TESTING.md` for later native/product gates, with owned
+resources. Do not call missing future commands to manufacture a pass or
+silently skip a selected backend. Never log secrets or touch another user's
+sessions/state.
 
 Every handoff names changed paths, exact executed commands/results (or clearly
 unexecuted coordinator checks), source/lock identity, artifacts, actual behavior
 and precise blockers. No build/runtime/advisory/16-KiB claim without its own
 observed evidence. Source/URL availability alone is not compatibility evidence.
 
-## Next gates
-
-1. Finish 1A: retained secure FFI migration/lock/patches; same manifest and full
-   API for Python/Kotlin; both Android ABIs and host output; advisory, notices,
-   JNA inventory, static alignment and owned native-load evidence.
-2. Freeze 2A types/method table/canonical fixtures before adapters or dispatch;
-   then implement 2B state and phase 3 authorization/revocation.
-3. Complete real framed selected direct/relay action gates after 2–3. Provider,
-   UI, background and full integrated gates remain later phases, not foundation
-   acceptance. Keep plan verification status scoped to what actually ran.

@@ -88,9 +88,54 @@ Any implementation-time change to shared schema/config/identity/retention must u
 5. Report blockers precisely: missing source/version compatibility, provider credentials, signing/host-broker prerequisites, user-service access or public relay availability. Finish reachable work, fail unavailable backend paths clearly and do not bypass wrappers/security, substitute mocks or claim unexercised behavior. A blocked required gate remains blocked, not passed.
 6. Completion evidence identifies changed files, exact commands actually executed and their results, source/backend versions, provider PID/start/native conversation/Herdr identities, observed direct/relay paths, fresh emulator PNGs and camera coverage, plus any runtime limitations or remaining blockers. Never present proposed checks as already executed or alignment evidence as a real 16-KiB device run.
 
+## Current implementation status
+
+Status as of **2026-10-06**. Checked items describe the completed developer
+foundation only; package completion still requires its named deliverables and
+acceptance evidence above.
+
+- [x] Developer foundation: pinned Nix flake/lock; core and optional Android/
+  emulator tool shells; packageable Python namespace/non-native dependencies;
+  shared Make/CI entrypoints; license/provenance and developer/agent onboarding.
+- [ ] **1A — Native/build:** secure native migration, matching bindings/artifacts
+  and real Gradle integration remain incomplete.
+- [ ] **2A — Contract:** closed protocol/types and shared canonical fixtures.
+- [ ] **2B — State/storage:** reducers, durable state and bounded privacy/cache.
+- [ ] **3 — Security:** pairing, administration, authorization and revocation.
+- [ ] **4 — Topology/config:** discovery, proven identities and no-focus creation.
+- [ ] **5A — OMP:** stock live-session adapter and receipt-backed launch.
+- [ ] **5B — Codex:** shared-owner adapter and independent relay lifecycle.
+- [ ] **6 — Android facade:** real native app, controls and lifecycle behavior.
+- [ ] **7 — Delivery:** persistent/ntfy modes and authoritative notification entry.
+- [ ] **8 — Packaging/integration:** usable companion/setup and integrated suite.
+
+### Unexecuted product/runtime gates
+
+These are required, **not passed**. [Testing](TESTING.md) owns the exact checks
+and commands; tool availability and dependency imports do not satisfy them.
+
+- [ ] Secure native builds/advisory/manifest/JNA/ABI/alignment checks and native
+  loading; real 16-KiB runtime evidence remains unexercised.
+- [ ] Protocol/state/security fixtures and authenticated selected direct/relay
+  framed actions, including pairing and revocation.
+- [ ] Real Herdr/OMP/Codex identity, creation, dialogs, cancellation, reconnect,
+  generation replacement and mutation-receipt/restart gates.
+- [ ] Content/cache/privacy and Compose behavior checks.
+- [ ] Owned emulator, real APK, fresh UI PNGs and camera evidence.
+- [ ] Actual persistent/ntfy delivery, network changes and notification entry.
+- [ ] Full proposed command suite and isolated integrated smoke gates.
+
+Only Linux x86_64 availability was inspected in the foundation handoff, not
+cross-platform execution. The emulator was not launched; `/dev/kvm` was not
+visible on the inspected workstation. AGP/Kotlin/UI/JNA pins and upstream native
+sources resolved during [availability preflight](TECH_STACK.md#foundation-availability-preflight),
+but that is not proof of compatibility, API-37 compilation or secure native
+migration. No Gradle modules/wrapper, Maven locks/verification files or native
+outputs have been supplied.
+
 **Verification status: developer infrastructure only (2026-10-06).** The repository contains the pinned Nix flake/lock, core and optional Android/emulator tool shells, packageable Python namespace/non-native dependencies, shared Make/CI checks, license/provenance and developer/agent onboarding. The coordinator ran formatting, `make check` (Ruff, formatting and dependency-import smoke), and `nix build path:.#companion --no-link` successfully. Both Android/emulator shell derivations evaluated; the Android shell ran JDK21, Gradle9.8.0 and ADB35.0.2 successfully. See [Testing](TESTING.md#current-infrastructure-checks) for exact commands. No secure native migration, APK, provider, emulator or product runtime acceptance gate passed; the dependency smoke is not a product/native gate. CI is configured, not remotely exercised.
 
-**Next handoff: package1A remains incomplete.** Its integration owner must retain the secure source/patch/Cargo.lock identity, rebuild the complete compatible Python/Kotlin API and both native outputs, establish the real Gradle modules/wrapper/Maven locks, and execute advisory/manifest/JNA/ABI/alignment/native-loading checks. Freeze2A contracts before consumers; real selected direct/relay framed actions complete only after2–3. [Testing](TESTING.md#current-infrastructure-checks) lists the infrastructure checks the coordinator can run now; the later product suite remains required, not implemented or passed.
+**Next handoff: package 1A remains incomplete.** Its integration owner must retain the secure source/patch/Cargo.lock identity, rebuild the complete compatible Python/Kotlin API and both native outputs, establish the real Gradle modules/wrapper/Maven locks, and execute advisory/manifest/JNA/ABI/alignment/native-loading checks. Follow [Tech stack](TECH_STACK.md) for the full migration/build contract; do not substitute the unexamined published 1.1.0 wheel/AAR. Freeze 2A contracts before consumers; real selected direct/relay framed actions complete only after 2–3. [Testing](TESTING.md#current-infrastructure-checks) lists the infrastructure checks the coordinator can run now; the later product suite remains required, not implemented or passed.
 
 ## Assumptions & contingencies
 - Stock OMP/Codex only and desktop-only unsupported/custom dialogs are explicit user choices. Do not reintroduce Pi, agent forks, terminal emulation or unrelated model/settings/file-browser features to work around unavailable APIs.
