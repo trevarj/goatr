@@ -1,0 +1,34 @@
+# Local environments and Python outputs
+.direnv/
+.env
+.env.*
+!.envrc
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+/build/
+/dist/
+
+# Nix and Android outputs (retain every lock and verification file)
+/result
+/result-*
+.gradle/
+**/build/
+local.properties
+.cxx/
+.externalNativeBuild/
+/target/
+
+# Owned smoke evidence and private runtime state
+/evidence/
+/.gs-*/
+*.jks
+*.keystore
+
+# Editor-local metadata
+.idea/
+.vscode/
+.DS_Store

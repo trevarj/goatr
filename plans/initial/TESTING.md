@@ -4,7 +4,38 @@ Scope: the proposed implementation command suite, owned smoke resources and all 
 
 [Main plan](GOATR_PLAN.md) · [Main phase gates](GOATR_PLAN.md#implementation-phases-and-dependencies) · [Tech stack](TECH_STACK.md) · [Source anchors](REFERENCES.md#critical-files--anchors)
 
-**Current status: planning only (2026-10-06).** No Goatr builds, runtime checks, linters, tests or formatters were run in this documentation revision. All commands, scripts, test classes and evidence outputs below are implementation obligations, not existing tools claimed to pass. Source inspection establishes only the facts labelled in [References](REFERENCES.md).
+**Current status: developer infrastructure only (2026-10-06).** The pinned flake/lock, Python namespace/dependencies and Make/CI entrypoints exist. Coordinator verification passed formatting, lint, dependency-import smoke, companion wheel build/import checks, both optional shell evaluations and Android tool execution. The exact commands are below. The product commands/classes later in this document remain implementation obligations, not tools claimed to pass. [Tech stack](TECH_STACK.md#foundation-availability-preflight) records source/availability evidence.
+
+## Current infrastructure checks
+
+One coordinator runs these after integration, not each worker mid-flight:
+
+```sh
+nix develop path:. -c make check
+nix build path:.#companion --no-link
+nix eval --raw path:.#devShells.x86_64-linux.android.drvPath
+nix eval --raw path:.#devShells.x86_64-linux.emulator.drvPath
+```
+
+`path:.` includes the new files before Git tracks them; normal `nix develop` and
+`.#companion` work after integration tracks the foundation. `make check` runs
+Ruff, Python/Nix formatting checks and the direct package/dependency import
+smoke command. `make format` is the explicit modifying formatter. The Nix build checks
+the actual companion wheel/imports; it does **not** provide `goatr`, iroh or an
+Android artifact. The two `nix eval` commands only resolve optional tool-shell
+derivations without building/downloading their closures; neither proves an APK
+or an emulator run. SDK license acceptance is project-scoped and explicitly
+authorized. The current checks are also used by `.github/workflows/ci.yml`
+(core check and package build only).
+
+Optional Android tool execution, when the coordinator chooses to realize its
+large closure:
+
+```sh
+nix develop path:.#android -c bash -c 'java -version && gradle --version && adb version'
+```
+
+**Executed successfully:** `nix develop path:. -c make format`, all four current infrastructure commands above, and the optional Android tool command. Tool output reported OpenJDK21.0.12, Gradle9.8.0 and ADB35.0.2. The emulator shell was evaluated only; no emulator was launched. GitHub CI is configured but has not run remotely. Keep every product gate below required until its own implementation/dependencies/evidence exist.
 
 ## Proposed command suite
 

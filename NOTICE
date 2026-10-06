@@ -1,0 +1,26 @@
+Goatr
+Copyright (C) 2026 Goatr contributors
+
+The independently authored Goatr code and development configuration in this
+repository are licensed under the GNU General Public License, version 3 or
+(at your option) any later version (SPDX: GPL-3.0-or-later). See LICENSE.
+There is no warranty, to the extent permitted by applicable law.
+
+This foundation does not copy or redistribute application source from MOTD,
+AgentWire, Herdr, OMP, Codex, iroh-ffi, or their private deployment workspaces.
+The plans cite upstream sources; those references are not a license grant to
+copy source. Nix fetches development dependencies under their own licenses;
+Goatr's license does not relicense them. The Android SDK remains subject to
+Google's Android SDK license, accepted explicitly for this project's optional
+Android shells, not for the default core shell or global host configuration.
+
+Before copying or distributing third-party source/binaries in phase 1A,
+retain the original copyright/license files and applicable notices alongside
+the immutable source/patch/lock manifest. Review transitive redistribution
+obligations, including iroh-ffi (MIT OR Apache-2.0), UniFFI, and JNA. Do not
+reuse AgentWire code until its complete copyright/license notice is available.
+
+The complete GPL text in LICENSE was retrieved on 2026-10-06 from the SPDX
+license-list-data GPL-3.0-or-later text, representing GPL version 3:
+https://raw.githubusercontent.com/spdx/license-list-data/main/text/GPL-3.0-or-later.txt
+Canonical license: https://www.gnu.org/licenses/gpl-3.0.html

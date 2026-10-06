@@ -27,6 +27,68 @@ Use the following source-backed pins:
 
 The Nix flake uses the locked overlay's stable Rust toolchain with `aarch64-linux-android` and `x86_64-linux-android` standard libraries, JDK21, Python3, cargo-ndk, maturin and the pinned Android SDK/NDK. Commit no global tool installation: `.envrc` is exactly `use flake`. Build Android arm64-v8a and x86_64; the latter also supplies emulator proof. Provide a separate emulator shell using the API-34 default x86_64 image. Python runtime dependencies are rebuilt `iroh`, `aiohttp`, `cryptography`, and `segno`; pin them through the Nix closure, not floating runtime downloads. No OMP/Codex source builds.
 
+### Foundation availability preflight
+
+On 2026-10-06 the infrastructure handoff generated a real `flake.lock` with
+`nix flake lock path:.`. The requested revisions resolved without substitution:
+
+| Input | Locked NAR hash |
+|---|---|
+| nixpkgs `767b0d3ec98a143ad9ed7dfc0d5553510ac27133` | `sha256-tzMgSkV7kljEkqIjlgV6F+n+xD+/a35Db8bs7a4BFAo=` |
+| rust-overlay `e60029353d0c48d216bc4b065168ccd4079c166f` | `sha256-Y8eN7ki0Urx4Ojf4w1xSpWg8uk/3lJqK+E0Oth77rH0=` |
+
+Non-building Nix evaluation of those upstream packages selected Python3
+3.14.6, stable Rust1.99.0, JDK21.0.12+2, cargo-ndk4.1.2, maturin1.14.1,
+aiohttp3.14.1, cryptography49.0.0, segno1.6.6, Ruff0.15.20 and nixfmt1.4.0.
+The pinned nixpkgs default Gradle is **8.14.4**, not the planned9.8.0:
+the optional Android shell therefore uses nixpkgs' existing `mkGradle`
+packager with the real9.8.0 distribution and its upstream SHA-256,
+`bafd5ce9cfaea0fbccfdc8439a1ac42fbd4cd9c89dc9a988228d8a2639a58e6c`
+([distribution checksum](https://downloads.gradle.org/distributions/gradle-9.8.0-bin.zip.sha256)).
+No installed tool version was silently substituted for a plan pin.
+
+The [locked SDK metadata](https://github.com/NixOS/nixpkgs/blob/767b0d3ec98a143ad9ed7dfc0d5553510ac27133/pkgs/development/mobile/androidenv/repo.json)
+contains platform **37.0** (API37, revision2), build-tools36.0.0,
+platform-tools35.0.2 and NDK28.2.13676358/r28c with immutable archive URLs/hashes.
+The foundation uses that metadata key rather than guessing an absent `"37"`
+key. Command-line tools21.0 and emulator36.6.11 are explicitly selected from
+the same locked metadata; API34 default x86_64 is revision4. All selected Linux
+archive URLs returned HTTP200 to `curl --location --head` availability requests.
+The API37 Gradle compile/platform-path integration remains a1A build gate.
+
+Artifact preflight also returned HTTP200 for the exact planned AGP9.4.1,
+Kotlin2.4.20, Compose BOM2026.09.00, activity-compose1.13.0,
+lifecycle-runtime-ktx2.11.0, core-ktx1.19.1, coroutines1.11.0,
+serialization-json1.11.0, UnifiedPush connector3.3.5, CameraX core1.6.1,
+ZXing core3.5.4, Markwon core4.6.2 and JNA5.19.1 AAR/JAR. Requests used
+[Google Maven](https://dl.google.com/dl/android/maven2/) and
+[Maven Central](https://repo.maven.apache.org/maven2/), not alternative versions.
+POM/BOM requests and the corresponding concrete JAR/AAR URLs returned200;
+Lifecycle's Android binary was `lifecycle-runtime-ktx-android:2.11.0`.
+The two pinned GitHub source archives and crates.io iroh/iroh-base/iroh-relay1.3.0
+and rustls0.23.45 archives also resolved. This proves reachability only:
+no Maven/Cargo graph was resolved, migrated, compiled, audited or locked yet.
+
+The owner explicitly accepted the Android SDK license for this project.
+Acceptance and narrowly SDK-scoped unfree allowance live only in the optional
+Linux-x86_64 `android`/`emulator` shell import; the default four-system core shell
+does not require Android license acceptance or download its closure. No global
+settings were changed. The emulator shell selects API34 only, not a guessed
+API37 image. No `/dev/kvm` node was visible; emulator runtime is unexercised.
+
+Installed commands actually executed were Bash5.3.9, Nix2.34.8 and Git repository
+root resolution. `command -v` found Bash/Nix/Git/curl/direnv, but no Python3,
+Make, Java or Gradle on the current PATH; the shell supplies them. This preflight
+performed no Goatr build, test, lint, formatter, Android launch or runtime gate.
+Subsequent coordinator verification passed core formatting/lint/import smoke,
+the companion wheel build, both optional shell evaluations and Android tool
+execution (JDK21.0.12, Gradle9.8.0, ADB35.0.2). Exact commands are recorded in
+[Testing](TESTING.md#current-infrastructure-checks); no APK/emulator/native
+transport or provider gate was exercised.
+The foundation Python package deliberately excludes unexamined published iroh
+bindings. Secure source fetching/hashes/patches/Cargo.lock and the full native
+artifact/Gradle graph remain the next1A owner's handoff, not completed outputs.
+
 ### Native artifact ownership
 
 Nix is the **one native source-fetch/build owner**. Commit `flake.lock`, `third_party/iroh-ffi/patches/`, the patched `third_party/iroh-ffi/Cargo.lock`, and source revision/hash metadata; do not vendor a second independently patched tree or let Gradle download a different native implementation. Gradle dependency locking/verification metadata covers Kotlin/JNA/Android dependencies, separately from Cargo.
