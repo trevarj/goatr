@@ -27,7 +27,7 @@ Use the following source-backed pins:
 | nixpkgs | `767b0d3ec98a143ad9ed7dfc0d5553510ac27133` |
 | rust-overlay | `e60029353d0c48d216bc4b065168ccd4079c166f` |
 
-The intended Nix flake uses the locked overlay's stable Rust toolchain with `aarch64-linux-android` and `x86_64-linux-android` standard libraries, JDK21, cargo-ndk and the pinned Android SDK/NDK. Commit no global tool installation: `.envrc` is exactly `use flake`. Build Android arm64-v8a and x86_64; the latter also supplies emulator proof. Provide a separate emulator shell using the API-34 default x86_64 image. The companion calls iroh1.3.0 directly from Rust; it needs no host UniFFI binding, Python runtime or maturin build. No OMP/Codex source builds. Current foundation tooling still contains superseded Python dependencies until the actual Rust migration; this plan does not change those files.
+The current Nix flake uses the locked overlay's stable Rust toolchain; the optional Android shells add `aarch64-linux-android` and `x86_64-linux-android` standard libraries, JDK21, cargo-ndk and the pinned Android SDK/NDK. Commit no global tool installation: `.envrc` is exactly `use flake`. Build Android arm64-v8a and x86_64; the latter also supplies emulator proof. The separate emulator shell uses the API-34 default x86_64 image. The planned companion calls iroh1.3.0 directly from Rust; it needs no host UniFFI binding, Python runtime or maturin build. No OMP/Codex source builds. Obsolete Python tooling/package outputs have been removed independently of product implementation; current Make/CI check Nix formatting and Rust tool versions only. No Cargo package/lock or native product output exists yet.
 
 ### Companion Rust package and dependency resolution
 
@@ -47,11 +47,11 @@ On 2026-10-06 the infrastructure handoff generated a real `flake.lock` with
 | nixpkgs `767b0d3ec98a143ad9ed7dfc0d5553510ac27133` | `sha256-tzMgSkV7kljEkqIjlgV6F+n+xD+/a35Db8bs7a4BFAo=` |
 | rust-overlay `e60029353d0c48d216bc4b065168ccd4079c166f` | `sha256-Y8eN7ki0Urx4Ojf4w1xSpWg8uk/3lJqK+E0Oth77rH0=` |
 
-Historical pre-Rust foundation evaluation of those upstream packages selected
+Historical foundation evaluation before Python tooling removal selected
 Python3 3.14.6, stable Rust1.99.0, JDK21.0.12+2, cargo-ndk4.1.2, maturin1.14.1,
 aiohttp3.14.1, cryptography49.0.0, segno1.6.6, Ruff0.15.20 and nixfmt1.4.0.
-The Python/tool observations describe the superseded foundation only; they are
-not dependencies or verification of the intended Rust companion.
+These retained observations describe the earlier foundation only; removed
+Python/tool versions are not current dependencies or Rust product verification.
 The pinned nixpkgs default Gradle is **8.14.4**, not the planned9.8.0:
 the optional Android shell therefore uses nixpkgs' existing `mkGradle`
 packager with the real9.8.0 distribution and its upstream SHA-256,
@@ -88,19 +88,21 @@ does not require Android license acceptance or download its closure. No global
 settings were changed. The emulator shell selects API34 only, not a guessed
 API37 image. No `/dev/kvm` node was visible; emulator runtime is unexercised.
 
-Installed commands actually executed were Bash5.3.9, Nix2.34.8 and Git repository
-root resolution. `command -v` found Bash/Nix/Git/curl/direnv, but no Python3,
-Make, Java or Gradle on the current PATH; the shell supplies them. This preflight
-performed no Goatr build, test, lint, formatter, Android launch or runtime gate.
+During that historical preflight, installed commands actually executed were
+Bash5.3.9, Nix2.34.8 and Git repository root resolution. `command -v` found
+Bash/Nix/Git/curl/direnv, but no Python3, Make, Java or Gradle on that PATH;
+the then-current shell supplied them. The preflight performed no Goatr build,
+test, lint, formatter, Android launch or runtime gate.
 Subsequent coordinator verification passed core formatting/lint/import smoke,
 the companion wheel build, both optional shell evaluations and Android tool
 execution (JDK21.0.12, Gradle9.8.0, ADB35.0.2). Exact commands are recorded in
-[Testing](TESTING.md#current-infrastructure-checks); no APK/emulator/native
-transport or provider gate was exercised.
-The superseded foundation Python package deliberately excludes unexamined
-published iroh bindings. The Rust Cargo package/lock/Nix/Make/CI cutover,
-secure Android source fetching/hashes/patches/lock and full artifact/Gradle
-graph remain the next1A owner's handoff, not completed outputs.
+[Testing](TESTING.md#historical-retired-python-foundation-verification); no
+APK/emulator/native transport or provider gate was exercised. That retired
+Python package deliberately excluded unexamined published iroh bindings.
+Its tooling/package outputs have since been removed without rerunning these
+historical checks. The Rust Cargo package/lock/Nix outputs and Make/CI product
+gates, secure Android source fetching/hashes/patches/lock and full artifact/
+Gradle graph remain the next1A owner's handoff, not completed outputs.
 
 ### Native artifact ownership
 

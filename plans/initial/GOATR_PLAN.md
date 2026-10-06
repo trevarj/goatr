@@ -93,16 +93,21 @@ Any implementation-time change to shared schema/config/identity/retention must u
 
 ## Current implementation status
 
-Status as of **2026-10-06**. Checked items describe the completed generic
-developer foundation only; the superseded Python checks below are historical
-evidence, not a Rust completion claim. Package completion still requires its
-named deliverables and acceptance evidence above.
+Status as of **2026-10-06**. Checked items describe the generic developer
+foundation and removal of obsolete Python tooling only. Earlier Python checks
+are historical evidence, not verification of the current tool checks or Rust
+product completion. Package completion still requires its named deliverables
+and acceptance evidence above.
 
 - [x] Generic developer foundation: pinned Nix flake/lock; core and optional
   Android/emulator tool shells; shared Make/CI entrypoints; license/provenance
-  and developer/agent onboarding. Existing package checks remain Python-only.
-- [ ] **Rust foundation migration:** actual companion Cargo source/retained
-  lock, direct iroh dependency graph, Rust Nix package and Make/CI cutover.
+  and developer/agent onboarding.
+- [x] **Development-tool cutover:** removed the Python namespace, packaging and
+  tools; Make/CI now share Nix formatting and genuine Rust tool-version smoke.
+  `nix develop path:. -c make check` passed Nix formatting and executed
+  Cargo/rustc1.99.0, rustfmt1.10.0-stable and Clippy0.1.99; no product gate passed.
+- [ ] **Rust product foundation:** actual companion Cargo source/retained
+  lock, direct iroh dependency graph, Rust Nix package and Make/CI product gates.
 - [ ] **1A — Native/build:** secure Android FFI migration, complete generated
   Kotlin-facing API/artifacts, shared-provenance comparison and Gradle integration.
 - [ ] **2A — Contract:** closed protocol/types and shared canonical fixtures.
@@ -118,7 +123,7 @@ named deliverables and acceptance evidence above.
 ### Unexecuted product/runtime gates
 
 These are required, **not passed**. [Testing](TESTING.md) owns the exact checks
-and commands; tool availability and dependency imports do not satisfy them.
+and commands; tool availability and historical dependency imports do not satisfy them.
 
 - [ ] Secure native builds/advisory/manifest/JNA/ABI/alignment checks and native
   loading; real 16-KiB runtime evidence remains unexercised.
@@ -142,9 +147,9 @@ but that is not proof of compatibility, API-37 compilation or secure native
 migration. No Gradle modules/wrapper, Maven locks/verification files or native
 outputs have been supplied.
 
-**Historical verification status: superseded Python developer infrastructure only (2026-10-06).** The repository contains the pinned Nix flake/lock, core and optional Android/emulator tool shells, packageable Python namespace/non-native dependencies, shared Make/CI checks, license/provenance and developer/agent onboarding. The coordinator ran formatting, `make check` (Ruff, formatting and dependency-import smoke), and `nix build path:.#companion --no-link` successfully. Both Android/emulator shell derivations evaluated; the Android shell ran JDK21, Gradle9.8.0 and ADB35.0.2 successfully. See [Testing](TESTING.md#current-infrastructure-checks) for exact commands. No Rust companion, secure native migration, APK, provider, emulator or product runtime acceptance gate passed; the dependency smoke is not a product/native gate. CI is configured, not remotely exercised. This docs-only language revision creates no Cargo sources/lock or working Rust commands and leaves existing implementation/configuration unchanged.
+**Historical verification status: retired Python developer infrastructure only (2026-10-06, before tooling removal).** At that time the repository contained the pinned Nix flake/lock, core and optional Android/emulator tool shells, packageable Python namespace/non-native dependencies, shared Make/CI checks, license/provenance and developer/agent onboarding. The coordinator ran formatting, `make check` (Ruff, formatting and dependency-import smoke), and `nix build path:.#companion --no-link` successfully. Both Android/emulator shell derivations evaluated; the Android shell ran JDK21, Gradle9.8.0 and ADB35.0.2 successfully. See [Testing](TESTING.md#historical-retired-python-foundation-verification) for exact retired commands. No Rust companion, secure native migration, APK, provider, emulator or product runtime acceptance gate passed; the dependency smoke was not a product/native gate. CI was configured, not remotely exercised. The subsequent tooling removal creates no Cargo sources/lock or product outputs and has not rerun or extended this evidence.
 
-**Next handoff: Rust foundation migration and package1A remain incomplete.** Implement the single Cargo package/retained companion lock, direct iroh1.3.0 Rust executable/Nix package and corresponding Make/CI checks; remove the superseded Python runtime/tooling at that actual cutover. Independently retain secure Android FFI source/patch/lock identity, rebuild its complete compatible Kotlin-facing API/intended Android outputs, compare exact shared transport/security provenance without requiring identical locks or host/Android ABI, establish Gradle modules/wrapper/Maven locks, and execute both-graph advisory plus manifest/JNA/ABI/alignment/native-loading checks. Follow [Tech stack](TECH_STACK.md) for the full contract; do not substitute the unexamined published1.1.0 AAR. Freeze2A contracts before consumers; real selected direct/relay framed actions complete only after2–3. [Testing](TESTING.md#current-infrastructure-checks) lists current-only superseded infrastructure checks; the later Rust/product suite remains required, not implemented or passed.
+**Next handoff: Rust product foundation and package1A remain incomplete.** Implement the single Cargo package/retained companion lock, direct iroh1.3.0 Rust executable/Nix package and corresponding Make/CI product gates; the obsolete Python tooling has already been removed independently. Independently retain secure Android FFI source/patch/lock identity, rebuild its complete compatible Kotlin-facing API/intended Android outputs, compare exact shared transport/security provenance without requiring identical locks or host/Android ABI, establish Gradle modules/wrapper/Maven locks, and execute both-graph advisory plus manifest/JNA/ABI/alignment/native-loading checks. Follow [Tech stack](TECH_STACK.md) for the full contract; do not substitute the unexamined published1.1.0 AAR. Freeze2A contracts before consumers; real selected direct/relay framed actions complete only after2–3. [Testing](TESTING.md#current-infrastructure-checks) lists current development-tool checks; the later Rust/product suite remains required, not implemented or passed.
 
 ## Assumptions & contingencies
 - Stock OMP/Codex only and desktop-only unsupported/custom dialogs are explicit user choices. Do not reintroduce Pi, agent forks, terminal emulation or unrelated model/settings/file-browser features to work around unavailable APIs.

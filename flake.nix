@@ -19,7 +19,6 @@
         "x86_64-darwin"
         "aarch64-darwin"
       ];
-      project = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project;
       environments = lib.genAttrs systems (
         system:
         let
@@ -27,75 +26,23 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          ps = pkgs.python3Packages;
-          python = pkgs.python3.withPackages (ps: [
-            ps.aiohttp
-            ps.cryptography
-            ps.segno
-            ps.build
-            ps.setuptools
-            ps.wheel
-          ]);
           tools = [
-            python
             pkgs.git
             pkgs.gnumake
-            pkgs.ruff
             pkgs.nixfmt
-            pkgs.maturin
             pkgs.cargo-ndk
           ];
           rust = pkgs.rust-bin.stable.latest.default;
-          shellHook = ''
-            export PYTHONPATH="$PWD/companion''${PYTHONPATH:+:$PYTHONPATH}"
-            export PYTHONNOUSERSITE=1
-          '';
         in
         {
-          inherit
-            pkgs
-            tools
-            rust
-            shellHook
-            ;
-          companion = ps.buildPythonPackage {
-            pname = project.name;
-            inherit (project) version;
-            src = lib.fileset.toSource {
-              root = ./.;
-              fileset = lib.fileset.unions [
-                ./pyproject.toml
-                ./LICENSE
-                ./README.md
-                ./companion
-              ];
-            };
-            pyproject = true;
-            build-system = [
-              ps.setuptools
-              ps.wheel
-            ];
-            dependencies = [
-              ps.aiohttp
-              ps.cryptography
-              ps.segno
-            ];
-            pythonImportsCheck = [ "goatr_companion" ];
-            meta.license = lib.licenses.gpl3Plus;
-          };
+          inherit pkgs tools rust;
           coreShell = pkgs.mkShell {
             packages = tools ++ [ rust ];
-            inherit shellHook;
           };
         }
       );
     in
     {
-      packages = lib.mapAttrs (_: env: {
-        inherit (env) companion;
-        default = env.companion;
-      }) environments;
-
       devShells = lib.mapAttrs (
         system: env:
         {
@@ -150,7 +97,6 @@
                   gradle
                   sdk.androidsdk
                 ];
-                inherit (env) shellHook;
                 JAVA_HOME = "${androidPkgs.jdk21}";
                 ANDROID_HOME = sdkRoot;
                 ANDROID_SDK_ROOT = sdkRoot;

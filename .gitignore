@@ -1,18 +1,10 @@
-# Local environments and Python outputs
+# Local environments
 .direnv/
 .env
 .env.*
 !.envrc
-.venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-.ruff_cache/
-.pytest_cache/
-/build/
-/dist/
 
-# Nix and Android outputs (retain every lock and verification file)
+# Nix, Android and Rust outputs (retain every lock and verification file)
 /result
 /result-*
 .gradle/
@@ -20,7 +12,7 @@ __pycache__/
 local.properties
 .cxx/
 .externalNativeBuild/
-/target/
+target/
 
 # Owned smoke evidence and private runtime state
 /evidence/

@@ -4,29 +4,29 @@ Scope: the proposed implementation command suite, owned smoke resources and all 
 
 [Main plan](GOATR_PLAN.md) · [Main phase gates](GOATR_PLAN.md#implementation-phases-and-dependencies) · [Tech stack](TECH_STACK.md) · [Source anchors](REFERENCES.md#critical-files--anchors)
 
-**Current status: generic developer infrastructure only (2026-10-06), with a superseded Python foundation still installed.** The pinned flake/lock, Python namespace/dependencies and Make/CI entrypoints exist. Historical coordinator verification passed formatting, lint, dependency-import smoke, companion wheel build/import checks, both optional shell evaluations and Android tool execution. The exact commands are below; none verifies a Rust companion. Rust source/Cargo.lock, Nix packaging and Make/CI cutover remain unimplemented. The future Rust product commands/classes later in this document are implementation obligations, not runnable tools or claimed passes. [Tech stack](TECH_STACK.md#foundation-availability-preflight) records source/availability evidence.
+**Current status: development-tool foundation only (2026-10-06), with obsolete Python tooling removed.** The pinned flake/lock and core/optional Android shells remain; Make/CI now share Nix formatting checks and genuine Cargo/rustc/rustfmt/Clippy version smoke. The coordinator ran `nix develop path:. -c make check` successfully: Nix formatting passed, Cargo/rustc1.99.0, rustfmt1.10.0-stable and Clippy0.1.99 executed. There is no companion Cargo source/lock or Nix product package; tool execution is not a product gate. Earlier Python results remain historical evidence below. Future Rust product commands/classes remain implementation obligations, not runnable tools or claimed passes. [Tech stack](TECH_STACK.md#foundation-availability-preflight) records historical source/availability evidence.
 
 ## Current infrastructure checks
 
-These remain executable **current-only checks of the superseded Python foundation**, not the intended Rust acceptance suite. One coordinator runs them when checking existing infrastructure, not each worker mid-flight. Replace Python package/Make/CI checks only when the real Rust implementation/packaging exists; this documentation change does not migrate them:
+One coordinator runs these after integration, not each worker mid-flight.
+They check development tooling only, not the intended Rust acceptance suite:
 
 ```sh
 nix develop path:. -c make check
-nix build path:.#companion --no-link
 nix eval --raw path:.#devShells.x86_64-linux.android.drvPath
 nix eval --raw path:.#devShells.x86_64-linux.emulator.drvPath
 ```
 
-`path:.` includes the new files before Git tracks them; normal `nix develop` and
-`.#companion` work after integration tracks the foundation. `make check` runs
-Ruff, Python/Nix formatting checks and the direct package/dependency import
-smoke command. `make format` is the explicit modifying formatter. The Nix build checks
-the actual companion wheel/imports; it does **not** provide `goatr`, iroh or an
-Android artifact. The two `nix eval` commands only resolve optional tool-shell
-derivations without building/downloading their closures; neither proves an APK
-or an emulator run. SDK license acceptance is project-scoped and explicitly
-authorized. The current checks are also used by `.github/workflows/ci.yml`
-(core check and package build only).
+`path:.` includes newly created files before Git tracks them; normal
+`nix develop` works after integration. `make check` runs `nixfmt --check flake.nix`
+and `make smoke`: `cargo --version`, `rustc --version`, `rustfmt --version` and
+`cargo clippy --version`. `make format` modifies only `flake.nix`.
+CI runs the shared `make check` only; there is no product package build or
+nonexistent Cargo build/test gate. Version smoke proves tool executability,
+not product behavior. The two `nix eval` commands only resolve optional
+tool-shell derivations without building/downloading their closures; neither
+proves an APK or an emulator run. SDK license acceptance remains
+project-scoped and explicitly authorized.
 
 Optional Android tool execution, when the coordinator chooses to realize its
 large closure:
@@ -35,11 +35,32 @@ large closure:
 nix develop path:.#android -c bash -c 'java -version && gradle --version && adb version'
 ```
 
-**Executed successfully:** `nix develop path:. -c make format`, all four current infrastructure commands above, and the optional Android tool command. Tool output reported OpenJDK21.0.12, Gradle9.8.0 and ADB35.0.2. The emulator shell was evaluated only; no emulator was launched. GitHub CI is configured but has not run remotely. Keep every product gate below required until its own implementation/dependencies/evidence exist.
+## Historical retired Python foundation verification
+
+The following commands and results describe the **earlier 2026-10-06
+foundation before Python tooling removal**, not the current checks.
+Do not rerun them as current verification: the namespace and `companion`
+package output have been deleted, and `make check` now has different contents.
+The exact historically executed commands were:
+
+```sh
+nix develop path:. -c make format
+nix develop path:. -c make check
+nix build path:.#companion --no-link
+nix eval --raw path:.#devShells.x86_64-linux.android.drvPath
+nix eval --raw path:.#devShells.x86_64-linux.emulator.drvPath
+nix develop path:.#android -c bash -c 'java -version && gradle --version && adb version'
+```
+
+The historical `make check` ran Ruff, Python/Nix formatting and direct
+package/dependency import smoke. The historical Nix build checked the
+companion wheel installation/imports, not a Rust executable/native artifact.
+
+**Historical results: executed successfully before tooling removal.** All six archived commands above passed. Tool output reported OpenJDK21.0.12, Gradle9.8.0 and ADB35.0.2. The emulator shell was evaluated only; no emulator was launched. GitHub CI was configured but had not run remotely. No current-cutover verification is claimed or inferred from those results. Keep every product gate below required until its own implementation/dependencies/evidence exist.
 
 ## Proposed command suite
 
-Implementation must supply the named owners using Rust's built-in test harness/Tokio test support, existing Kotlin/JUnit/Compose tools and the pinned Nix environment; no new orchestration framework. `companion/examples/smoke.rs` and `companion/examples/check_native_libs.rs` are non-installed examples in the same Cargo package/library graph. The smoke example drives real packaged `goatr`, providers and owned Android resources, not an in-process mock. **None of the following Cargo/native/product commands is runnable until its proposed sources/locks/outputs exist.** After the actual migration, Make/CI must invoke the Rust package gates rather than Ruff/wheel imports. Run unit/native gates once after integration, then owned runtime gates:
+Implementation must supply the named owners using Rust's built-in test harness/Tokio test support, existing Kotlin/JUnit/Compose tools and the pinned Nix environment; no new orchestration framework. `companion/examples/smoke.rs` and `companion/examples/check_native_libs.rs` are non-installed examples in the same Cargo package/library graph. The smoke example drives real packaged `goatr`, providers and owned Android resources, not an in-process mock. **None of the following Cargo/native/product commands is runnable until its proposed sources/locks/outputs exist.** Once they exist, add the Rust product gates to Make/CI alongside the current development-tool checks. Run unit/native gates once after integration, then owned runtime gates:
 
 ```sh
 nix build .#goatr .#iroh-android

@@ -37,7 +37,7 @@ These are phase ownership boundaries, not claims that future files exist.
 
 | Owner | Paths/contracts |
 |---|---|
-| Foundation / 1A native-build | `flake.nix`, `flake.lock`, `.envrc`, `Makefile`, `.github/`, root notices; current-only superseded `pyproject.toml`; future `companion/Cargo.toml`/`Cargo.lock`, Rust package/Nix/Make/CI cutover, Gradle root/wrapper, `third_party/iroh-ffi/` with its own lock, `iroh-jvm/`, `iroh-android/`, native artifacts/provenance comparison |
+| Foundation / 1A native-build | `flake.nix`, `flake.lock`, `.envrc`, `Makefile`, `.github/`, root notices; future `companion/Cargo.toml`/`Cargo.lock`, Rust product Nix/Make/CI gates, Gradle root/wrapper, `third_party/iroh-ffi/` with its own lock, `iroh-jvm/`, `iroh-android/`, native artifacts/provenance comparison |
 | 2A protocol | `protocol/`, canonical wire schema/types/hash fixtures and Rust/Kotlin protocol consumers; owns every shared wire name and strict raw-token/duplicate-key/canonicalization rules |
 | 2B state/storage | Serialized reducers, generation/receipt/content/cache/read state and finite retention; coordinate shared Android/companion models with 2A |
 | 3 security | Pairing/admin/authorization/revocation contracts and key-store lifecycle; CLI arguments must match packaging contracts |
@@ -62,38 +62,32 @@ nix develop
 
 Optional direnv integration: review `.envrc`, then `direnv allow`. It contains
 only `use flake`. Before newly created files are tracked by Git, use
-`nix develop path:.` and `nix build path:.#companion --no-link`; Git-backed Nix
-flakes intentionally ignore untracked files.
+`nix develop path:.`; Git-backed Nix flakes intentionally ignore untracked files.
 
-Use the locked shell, not global pip/cargo/rustup/SDK installs. **The following
-describes the executable, superseded Python foundation only**, not the intended
-Rust companion. The default shell uses the exact planned nixpkgs and
-rust-overlay revisions in `flake.lock` and still supplies Python (aiohttp,
-cryptography, segno, packaging tools), Rust, cargo-ndk, maturin, Git, Make, Ruff
-and nixfmt. The lock pins the stable Rust selection and current Python closure.
-The core shell is defined for Linux/macOS on x86_64/aarch64; execution evidence
-belongs in the main plan. Python/maturin are not future companion requirements.
+Use the locked shell, not global cargo/rustup/SDK installs. The default shell
+uses the exact nixpkgs and rust-overlay revisions retained in `flake.lock` and
+supplies stable Rust (Cargo, rustc, rustfmt and Clippy), cargo-ndk, Git, Make and
+nixfmt. The core shell is defined for Linux/macOS on x86_64/aarch64; execution
+evidence belongs in the main plan. Python packaging/runtime/tooling has been
+removed; no companion Cargo package or product Nix output exists yet.
 
-Current-only shared commands, also used by
-[GitHub Actions](.github/workflows/ci.yml) until the actual Rust cutover:
+Current shared development-tool commands, also used by
+[GitHub Actions](.github/workflows/ci.yml):
 
 | Command inside `nix develop` | Purpose |
 |---|---|
-| `make lint` | Ruff Python lint/import checks |
-| `make format` | Format Python and `flake.nix` (modifies files) |
+| `make format` | Format `flake.nix` (modifies files) |
 | `make format-check` | Check formatting without modifying files |
-| `make smoke` | Direct package/dependency import smoke command |
-| `make check` | All non-building core checks |
+| `make smoke` | Report Cargo, rustc, rustfmt and Clippy versions |
+| `make check` | Nix formatting check and Rust development-tool smoke |
 
-The existing Nix `companion` output is the superseded Python package, **not**
-the planned Rust `goatr` executable/native closure. Its dependency versions are
-selected by the locked Nix graph, without a second floating pip install path.
-Current `make`/shell checks read the working checkout and Nix package builds
-check wheel installation/imports. Leave these descriptions truthful until the
-actual code/tooling migration; dependency imports prove neither Rust behavior
-nor transport/product acceptance.
+There are no current Nix product package outputs or Cargo build/test gates.
+The shared check reads the working checkout and verifies only Nix formatting
+and that the Rust development tools run; it proves neither Rust product
+behavior nor transport/native acceptance. Historical Python verification is
+retained separately in [Testing](plans/initial/TESTING.md#historical-retired-python-foundation-verification).
 
-### Intended Rust development after migration
+### Intended Rust product development
 
 Follow [Tech stack](plans/initial/TECH_STACK.md#companion-rust-package-and-dependency-resolution)
 for one companion Cargo package, direct iroh1.3.0 and a retained
@@ -115,9 +109,9 @@ nix develop -c cargo fmt --manifest-path companion/Cargo.toml -- --check
 nix develop -c cargo clippy --locked --manifest-path companion/Cargo.toml --all-targets -- -D warnings
 ```
 
-At that actual cutover, migrate Make/CI to these Rust package gates and retire
-Python packaging/runtime/maturin checks. Native-inventory and owned smoke/UI/
-background runners are non-installed examples in the same companion package;
+When the actual Cargo package/lock and native outputs exist, add the Rust
+product gates to Make/CI. Native-inventory and owned smoke/UI/background
+runners are non-installed examples in the same companion package;
 [Testing](plans/initial/TESTING.md#proposed-command-suite) owns their exact
 commands and unchanged acceptance gates. Do not create another helper package
 or orchestration framework. Internal `goatr codex-relay --binding PATH` uses the
@@ -157,18 +151,18 @@ availability is not dependency compatibility or native/product evidence.
 
 Workers do not run builds, tests, linters, formatters, or smoke checks mid-flight
 unless verification is their explicit assignment. After all owned changes land,
-one integration owner runs relevant checks once. Current-only superseded
-foundation checks (not Rust or documentation verification) are:
+one integration owner runs relevant checks once. Current development-tool
+checks (not Rust product or documentation verification) are:
 
 ```sh
 nix develop -c make check
-nix build .#companion --no-link
 ```
 
 Follow `plans/initial/TESTING.md` for future Rust/native/product gates and exact
 owned-resource commands. A docs-only plan change needs documentation
 consistency review, not execution of missing Cargo/native commands or rerunning
-historical Python evidence. Never manufacture a pass, silently skip a selected
+historical Python evidence. The tooling removal does not verify a product.
+Never manufacture a pass, silently skip a selected
 backend, log secrets or touch another user's sessions/state.
 
 Every handoff names changed paths, exact executed commands/results (or clearly
