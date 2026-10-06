@@ -1,0 +1,61 @@
+# Tech stack and native transport
+
+Scope: independent repository/build inputs, exact dependency pins, patched native bindings and the iroh connection lifecycle.
+
+[Main plan](GOATR_PLAN.md) · [Pairing/security](PAIRING_SECURITY.md) · [Protocol/state](PROTOCOL_STATE.md) · [Source anchors](REFERENCES.md#critical-files--anchors)
+
+## Repository and pinned build inputs
+
+Create one repository with `:app`, `:iroh-jvm`, `:iroh-android`, `companion/goatr_companion/`, `protocol/`, `tools/`, and reproducible source inputs under `third_party/iroh-ffi/`. Use `org.example.goatr` as the illustrative application ID/namespace throughout these plans, label `Goatr`, debug suffix `.debug`, GPL-3.0-or-later with retained source notices. Choose a publisher-controlled release ID before distributing the app and update source paths and launch commands together. Use constructor wiring, not Hilt; do not import MOTD application/IRC/AI modules.
+
+Use the following source-backed pins:
+
+| Component | Pin |
+|---|---|
+| Gradle / AGP / Kotlin plugins / JDK | 9.8.0 / 9.4.1 / 2.4.20 / 21 |
+| minSdk / compileSdk / targetSdk | 26 / 37 / 36 |
+| Android SDK build tools / platform tools / NDK | 36.0.0 / 35.0.2 / 28.2.13676358 (r28c) |
+| Compose BOM / activity-compose / lifecycle / core-ktx | 2026.09.00 / 1.13.0 / 2.11.0 / 1.19.1 |
+| coroutines / serialization-json | 1.11.0 / 1.11.0 |
+| UnifiedPush / CameraX / ZXing | 3.3.5 / 1.6.1 / 3.5.4 |
+| Native Markdown | `io.noties.markwon:core:4.6.2` |
+| Iroh FFI source | [n0-computer/iroh-ffi](https://github.com/n0-computer/iroh-ffi/tree/5e451092dba0c1a09ee83ff6e5be37b1152a5c58), `5e451092dba0c1a09ee83ff6e5be37b1152a5c58` (1.1.0) |
+| Iroh core/base/relay | 1.3.0; core release source [v1.3.0 commit](https://github.com/n0-computer/iroh/tree/0072d7d84b233f9e7185eb676f049beaf557ac03) |
+| JNA | `net.java.dev.jna:jna:5.19.1@aar` on Android; matching JAR only for JVM |
+| nixpkgs | `767b0d3ec98a143ad9ed7dfc0d5553510ac27133` |
+| rust-overlay | `e60029353d0c48d216bc4b065168ccd4079c166f` |
+
+The Nix flake uses the locked overlay's stable Rust toolchain with `aarch64-linux-android` and `x86_64-linux-android` standard libraries, JDK21, Python3, cargo-ndk, maturin and the pinned Android SDK/NDK. Commit no global tool installation: `.envrc` is exactly `use flake`. Build Android arm64-v8a and x86_64; the latter also supplies emulator proof. Provide a separate emulator shell using the API-34 default x86_64 image. Python runtime dependencies are rebuilt `iroh`, `aiohttp`, `cryptography`, and `segno`; pin them through the Nix closure, not floating runtime downloads. No OMP/Codex source builds.
+
+### Native artifact ownership
+
+Nix is the **one native source-fetch/build owner**. Commit `flake.lock`, `third_party/iroh-ffi/patches/`, the patched `third_party/iroh-ffi/Cargo.lock`, and source revision/hash metadata; do not vendor a second independently patched tree or let Gradle download a different native implementation. Gradle dependency locking/verification metadata covers Kotlin/JNA/Android dependencies, separately from Cargo.
+
+| Producer | Input | Output and consumer |
+|---|---|---|
+| Nix patched-source derivation | Immutable FFI source, patch series, retained lock | One source/lock identity for host and Android; generated APIs checked against it |
+| Nix `iroh-android` package | That source, UniFFI generator from same lock, NDK/rust targets | Directory containing `jniLibs/arm64-v8a/libiroh_ffi.so`, `jniLibs/x86_64/libiroh_ffi.so`, generated Kotlin source and source/lock manifest; **not** a separately fetched AAR |
+| Nix host Python derivation | Same source/lock and maturin/UniFFI Python build | Rebuilt `iroh` Python package+host native library inside `packages.goatr` Python closure with aiohttp/cryptography/segno |
+| Gradle `:iroh-jvm` | Nix-generated Kotlin source only | Plain binding classes JAR, no native resources; JNA compileOnly, JVM testRuntimeOnly matching JAR |
+| Gradle `:iroh-android` | `:iroh-jvm`, Nix jniLibs and pinned IrohAndroid context seam | Android AAR packaging Rust natives/context helper, JNA5.19.1 AAR supplies `libjnidispatch.so`; exclude plain JNA JAR transitively |
+| Gradle `:app` | `:iroh-android` and native UI | APK with exactly intended ABI variants; alignment/loading gate checks Rust and JNA libraries |
+
+Expose immutable native output as `GOATR_IROH_ANDROID` in the dev shell; Gradle sync/staging task only copies/declares these inputs under its build directory, never rebuilds/fetches Rust. Missing/mismatched manifest fails with `nix build .#iroh-android` guidance. Shared generated Kotlin is produced once by Nix, not separately in both modules. JVM transport smoke may consume host native output explicitly, never package it into Android.
+
+## Patched native bindings
+
+Fetch the pinned FFI source reproducibly during build and maintain only necessary patches/generated-binding wiring in Goatr. Its release lock currently resolves vulnerable core 1.0.2: update core/base/relay to 1.3.0, resolve and retain Cargo.lock, and require rustls >=0.23.45. GHSA-7cq4-mhxw-xw78 and GHSA-jx4g-cg2x-jc35 must be absent from the resolved graph. Do not use the published unexamined 1.1.0 AAR/wheel as the native implementation. Adapt source to 1.3.0 API differences while retaining the upstream public binding API; do not downgrade the core to make it compile.
+
+In fetched `src/endpoint.rs`, add three small binding methods: async `Endpoint.network_change()` forwarding core `Endpoint::network_change().await`; `EndpointBuilder.disable_port_mapping()` forwarding `.portmapper_config(PortmapperConfig::Disabled)`; and `EndpointBuilder.clear_ip_transports()` forwarding the same core builder method. The last supports a real relay-only smoke, not a user-visible transport mode. These core 1.3.0 APIs were read in `iroh/src/endpoint.rs` at lines 516, 803 and 1671. Production disables automatic router mapping and uses N0 discovery/public relays. Persist endpoint secret keys and build matching Kotlin/Python bindings from the same source/lock. Use JNA 5.19.1 consistently, excluding its plain JAR on Android. Validate both native libraries and APK 16-KiB compatibility; https://github.com/java-native-access/jna/issues/1647 explains the older ARM64 loading failure.
+
+The three extensions are a proposed minimal patch, **not proof that the1.1.0→1.3.0 migration is otherwise source-compatible**. Gate phase1 on compiling the entire existing generated Kotlin/Python API, rebuilding both bindings from the same manifest, resolved-advisory checks, Android context JNI linkage and native loading. If any core/UniFFI API moved, make the smallest source-backed adaptation or stop with the exact incompatibility; no vulnerable published-wheel/AAR fallback. Pinned FFI already exposes `paths`, `watch_paths` and `watch_path_events`; use their selected-path evidence, not another reachability detector.
+
+## Endpoint and stream lifecycle
+
+`GoatrConnection.kt` calls `computer.iroh.IrohAndroid.installAndroidContext(applicationContext)` before endpoints; the pinned `kotlin/android/.../IrohAndroid.kt` source confirms the helper/JNI name, while post-upgrade runtime linkage remains a gate. Register one ConnectivityManager callback per endpoint owner, coalesce network-change notifications into the new async native method, unregister and cancel native path watches on shutdown. Keep only applicationContext. Python installs `iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())` before endpoint use.
+
+Use one endpoint per running installation, one reliable bidirectional stream per phone/host connection, ALPN `goatr/1`; no gossip, datagrams, replication or transport plugin layer. Dispose streams/connections/watch handles explicitly; shutdown awaits bounded native closure and recreates endpoint with the retained secret, never a new pairing identity. Companion owns provider reducers independently of phone connections. Duplicate authenticated connections follow [security newest-hello-wins](PAIRING_SECURITY.md#pairing-capability-and-authenticated-handshake); reconnection/sequence recovery follows protocol, not a second transport state machine. Android background handoff closes only its transport after verified push ACK; never desktop providers.
+
+## Acceptance gates
+
+See [native libraries](TESTING.md#native-libraries), [direct and relay transport](TESTING.md#direct-and-relay-transport), [network changes](TESTING.md#background-delivery). These are required implementation checks, not recorded passing results.
