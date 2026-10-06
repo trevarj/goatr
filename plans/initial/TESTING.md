@@ -4,11 +4,11 @@ Scope: the proposed implementation command suite, owned smoke resources and all 
 
 [Main plan](GOATR_PLAN.md) · [Main phase gates](GOATR_PLAN.md#implementation-phases-and-dependencies) · [Tech stack](TECH_STACK.md) · [Source anchors](REFERENCES.md#critical-files--anchors)
 
-**Current status: developer infrastructure only (2026-10-06).** The pinned flake/lock, Python namespace/dependencies and Make/CI entrypoints exist. Coordinator verification passed formatting, lint, dependency-import smoke, companion wheel build/import checks, both optional shell evaluations and Android tool execution. The exact commands are below. The product commands/classes later in this document remain implementation obligations, not tools claimed to pass. [Tech stack](TECH_STACK.md#foundation-availability-preflight) records source/availability evidence.
+**Current status: generic developer infrastructure only (2026-10-06), with a superseded Python foundation still installed.** The pinned flake/lock, Python namespace/dependencies and Make/CI entrypoints exist. Historical coordinator verification passed formatting, lint, dependency-import smoke, companion wheel build/import checks, both optional shell evaluations and Android tool execution. The exact commands are below; none verifies a Rust companion. Rust source/Cargo.lock, Nix packaging and Make/CI cutover remain unimplemented. The future Rust product commands/classes later in this document are implementation obligations, not runnable tools or claimed passes. [Tech stack](TECH_STACK.md#foundation-availability-preflight) records source/availability evidence.
 
 ## Current infrastructure checks
 
-One coordinator runs these after integration, not each worker mid-flight:
+These remain executable **current-only checks of the superseded Python foundation**, not the intended Rust acceptance suite. One coordinator runs them when checking existing infrastructure, not each worker mid-flight. Replace Python package/Make/CI checks only when the real Rust implementation/packaging exists; this documentation change does not migrate them:
 
 ```sh
 nix develop path:. -c make check
@@ -39,28 +39,37 @@ nix develop path:.#android -c bash -c 'java -version && gradle --version && adb 
 
 ## Proposed command suite
 
-Implementation must supply the named runners/tests using stdlib unittest, existing Kotlin/JUnit/Compose tools and the pinned Nix environment; no new orchestration framework. Run unit/native gates once after integration, then owned runtime gates:
+Implementation must supply the named owners using Rust's built-in test harness/Tokio test support, existing Kotlin/JUnit/Compose tools and the pinned Nix environment; no new orchestration framework. `companion/examples/smoke.rs` and `companion/examples/check_native_libs.rs` are non-installed examples in the same Cargo package/library graph. The smoke example drives real packaged `goatr`, providers and owned Android resources, not an in-process mock. **None of the following Cargo/native/product commands is runnable until its proposed sources/locks/outputs exist.** After the actual migration, Make/CI must invoke the Rust package gates rather than Ruff/wheel imports. Run unit/native gates once after integration, then owned runtime gates:
 
 ```sh
 nix build .#goatr .#iroh-android
-nix develop -c python3 -m unittest discover -s companion/tests
-nix develop -c bash ./gradlew :iroh-jvm:test :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
-nix develop -c python3 tools/check-native-libs.py app/build/outputs/apk/debug/app-debug.apk
-nix develop -c python3 tools/smoke.py --transport direct --evidence-dir evidence/direct
-nix develop -c python3 tools/smoke.py --transport relay --evidence-dir evidence/relay
-nix develop -c python3 tools/smoke.py --backend omp --backend codex --evidence-dir evidence/providers
+nix develop -c cargo test --locked --manifest-path companion/Cargo.toml
+nix develop -c cargo fmt --manifest-path companion/Cargo.toml -- --check
+nix develop -c cargo clippy --locked --manifest-path companion/Cargo.toml --all-targets -- -D warnings
+nix develop .#android -c bash ./gradlew :iroh-jvm:test :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+nix develop -c cargo run --locked --manifest-path companion/Cargo.toml --example check_native_libs -- app/build/outputs/apk/debug/app-debug.apk
+nix develop -c cargo run --locked --manifest-path companion/Cargo.toml --example smoke -- --transport direct --evidence-dir evidence/direct
+nix develop -c cargo run --locked --manifest-path companion/Cargo.toml --example smoke -- --transport relay --evidence-dir evidence/relay
+nix develop -c cargo run --locked --manifest-path companion/Cargo.toml --example smoke -- --backend omp --backend codex --evidence-dir evidence/providers
 ```
+
+Future plugin lifecycle execution uses the **same** smoke example, not a separate runner/package. Run in the pre-provisioned disposable Linux test environment described below; `$release_rev`/`$upgrade_rev` must be separately reviewed real immutable public commits containing the implemented plugin/Rust package. No supplied commit is implied and this command is unexecutable until those artifacts exist:
+
+```sh
+nix develop -c cargo run --locked --manifest-path companion/Cargo.toml --example smoke -- --herdr-plugin --release-ref "$release_rev" --upgrade-ref "$upgrade_rev" --evidence-dir evidence/herdr-plugin
+```
+
 
 Owned emulator/UI execution (runner refuses an existing/unowned device at the selected serial; it records the created AVD/process identity):
 
 ```sh
-nix develop .#emulator -c python3 tools/smoke.py --prepare-emulator --api 34 --serial emulator-5580 --evidence-dir evidence/android34
-nix develop -c env ANDROID_SERIAL=emulator-5580 bash ./gradlew :app:connectedDebugAndroidTest --stacktrace
-nix develop -c adb -s emulator-5580 install -r app/build/outputs/apk/debug/app-debug.apk
-nix develop -c adb -s emulator-5580 shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p org.example.goatr.debug
-nix develop -c python3 tools/smoke.py --ui --serial emulator-5580 --backend omp --backend codex --evidence-dir evidence/ui
-nix develop -c python3 tools/smoke.py --background persistent --serial emulator-5580 --evidence-dir evidence/persistent
-nix develop -c python3 tools/smoke.py --background ntfy --serial emulator-5580 --evidence-dir evidence/ntfy
+nix develop .#emulator -c cargo run --locked --manifest-path companion/Cargo.toml --example smoke -- --prepare-emulator --api 34 --serial emulator-5580 --evidence-dir evidence/android34
+nix develop .#android -c env ANDROID_SERIAL=emulator-5580 bash ./gradlew :app:connectedDebugAndroidTest --stacktrace
+nix develop .#android -c adb -s emulator-5580 install -r app/build/outputs/apk/debug/app-debug.apk
+nix develop .#android -c adb -s emulator-5580 shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p org.example.goatr.debug
+nix develop .#android -c cargo run --locked --manifest-path companion/Cargo.toml --example smoke -- --ui --serial emulator-5580 --backend omp --backend codex --evidence-dir evidence/ui
+nix develop .#android -c cargo run --locked --manifest-path companion/Cargo.toml --example smoke -- --background persistent --serial emulator-5580 --evidence-dir evidence/persistent
+nix develop .#android -c cargo run --locked --manifest-path companion/Cargo.toml --example smoke -- --background ntfy --serial emulator-5580 --evidence-dir evidence/ntfy
 ```
 
 `--ui` uses real installed APK, Compose semantics/UIAutomator and real owned companion/providers, saves fresh `adb exec-out screencap -p` PNG bytes plus UI hierarchy/logcat filtered of secrets. `--background` drives visible mode selection, actual registered distributor/foreground service, generates real provider attention and exercises click/resnapshot; it cannot replace network delivery with a mock and call the gate passed. API34 default smoke is baseline, not proof of target36/newer restrictions. Repeat owned instrumentation/UI/background on API36 (or newer platform whose behavior is claimed), with `--prepare-emulator --api 36 --serial emulator-5582` and matching serial arguments; image/distributor unavailability is blocked evidence, not a pass.
@@ -75,52 +84,77 @@ Transport-only modes run real packaged companion and second real iroh client; lo
 
 Before cleanup, persist exact created endpoint identities, units, Linux boot/PID-start/socket inodes, Herdr name/socket, admin socket/private-parent path and ownership, runtime/config/state paths and emulator ownership in the run manifest. Cleanup targets only those still-matching owned resources; never wildcard-kill or delete pre-existing state. Service failures leave safe diagnostic evidence, not unrecorded leaks. Missing credentials/signing/ADB/host broker/user-service/public relay/ntfy prerequisites are named blocked gates; do not copy credentials, weaken wrappers/TLS, or substitute mocks.
 
+### Plugin registry, roots and unit isolation
+
+`--herdr-plugin` owns one phase8 lifecycle gate within the existing smoke example. Before any registration/install, exclusively create a private run root and set scoped **absolute** `XDG_CONFIG_HOME`/`XDG_STATE_HOME` for its Herdr and Goatr processes. Record Herdr's actual release/debug app directory (`herdr`/`herdr-dev`), registry/config file identities, managed checkout generations, plugin config/state, Goatr config/state/install lock, final retained Nix output roots/store paths, activation pointers and exact source commits. The pinned `config::io`/plugin paths source supports these XDG roots; `HERDR_CONFIG_PATH` alone is not registry isolation. Assert actual resolved paths lie within owned roots, and no production registration/enabled state/default profile is read or changed. Keep the real XDG_RUNTIME_DIR unchanged and preflight wrapper-visible paths/Unix-socket lengths.
+
+Full installer setup/service/pair tests require a **pre-provisioned disposable Linux login/test environment**, with Herdr/plugin/companion under the same test UID, its own real unchanged XDG_RUNTIME_DIR/user manager and available actual installed wrappers. Do not create users/install Nix/use sudo during smoke. The production-default Goatr admin socket must be absent/unowned by any pre-existing process in that isolated account; otherwise block before effects. This exercises the real setup-generated service and ordinary pane pairing without inventing a setup admin-socket override or contacting a deployment user's daemon. Existing direct-launch smoke still uses its owned `--admin-socket` on every admin invocation. Service units retain actual packaged names in this exclusive account: reserve/record exact unit names, actual user-manager lookup/link destination, unit path/content identity, `ExecStart`, effective private config/state and Linux boot/PID-start before testing. A client XDG override alone does not prove the user manager loads isolated units/environment. Pre-existing/declarative unit conflicts block; never adopt them or claim unit-prefix ownership by name alone.
+
+Use a disposable local filesystem Nix store/environment for the actual GC-survival subtest, or record that subtest blocked; never run GC or mutate store settings on the workstation's production/shared store. Build roots remain outside managed plugin checkouts. Record the registered root's **absolute final link path**, its resolved output/closure and all active/previous/independent-unit references. Before cleanup record the exact registry entries, root links/pointers, unit/process/checkout leases and private config/state owned by the run. Stop/remove only still-matching owned serve/test processes/units and registrations; remove only their proven unused output links/private test data. Never manually delete store paths, edit profiles, wildcard-remove registries/units or kill Herdr/providers/TUIs merely to release roots. Fixture preservation of pre-existing external installs and independently alive services must be evidenced before the runner's separate owned-resource teardown.
+
+
 ## Required behavior checks
 
-Each row below names a runnable owner from the command suite and observable evidence. The suite must implement these test modules/classes; paths are proposed, not assertions they exist.
+Each row below names a runnable acceptance owner from the command suite and observable evidence. The Rust integration-test paths are proposed owners, not assertions they exist or a mandate for speculative files; existing module-local tests may fulfill the same ownership if mapped explicitly. Preserve every named gate when arranging the implementation.
+
+### Herdr plugin installation and lifecycle
+
+Owner: phase8 packaging/integration, `companion/examples/smoke.rs --herdr-plugin`, with focused fixtures in the existing companion package for source/ownership/activation transitions. Manifest/source fixtures supplement, not replace, **real** pinned Herdr CLI/terminal, GitHub install, Nix build/GC, Rust setup/service/admin and framed authorization evidence. Record exact deployed Herdr/Nix versions/source provenance, commands/exit status, reviewed plugin/package commits/locks, private registry/root/unit identities and sanitized observations:
+
+1. Parse `plugins/goatr/herdr-plugin.toml`, discover `goatr.install-setup` and `installer`; verify Linux/min0.9.3 acceptance and no build/startup/events/link-handler commands. Exercise an actual too-old binary and unsupported host when claiming those runtime gates; fixtures alone are labelled fixtures. Check deployed `plugin.list`, action/list/invoke, pane/open schema/argv/env against the immutable source baseline; a0.9.3 label alone is not a pass.
+2. Real local `plugin link` and public `plugin install --ref <reviewed-full-commit> trevarj/goatr/plugins/goatr` register only in the isolated registry. Record requested/resolved commit and package provenance, offline registration, explicit remote source/command confirmation, local-link overwrite refusal and no companion side effect at install/enable/server startup. Noninteractive `--yes` is permitted only for the already-reviewed isolated source. Missing public release artifacts block that gate, not an invented SDK/API prerequisite.
+3. Invoke the actual action through the intended running Herdr session. It uses injected `HERDR_BIN_PATH` and opens the declared interactive overlay; observe a real terminal accepting install/setup input, visible progress/results/errors and prior focus restored on dismissal. Action/log command launch is not install success. Cancel/decline/pane-close before consent has no package/unit/key/config/pairing effects; cancellation after effects reports its exact completed stage, terminates owned children, releases the installer lock and preserves the previous working state.
+4. Exercise missing Nix, unsupported version/features/local-store permissions, unavailable Git/network/build inputs, unsafe roots and unit permissions. Fail accurately with no sudo/tool/profile/cache/trusted-key/provider/global-setting mutation. A compatible external/declarative installation remains usable without Nix; incompatible/manager-owned conflicts are diagnosed, never overwritten/adopted/shadowed/removed. Test actual build/setup failure as well as deterministic stage fault injection.
+5. Fresh consented build records the exact final `--out-link`/output suffix/store artifact/root registration, invokes the same packaged absolute `goatr setup` and selects verified wrapper-accessible paths. Declining optional serve start leaves no running daemon/window and gives usable absolute serve→pair instructions. Separately consented owned user service reaches real local health; explicit pane pairing plus a real iroh client completes **pair→hello→host.snapshot→device.unpair** (minimum authorization/action exchange). No hidden phone installer/admin operation. Do not capture QR/token in evidence: inspect actual Herdr action/build/plugin logs and installer records for secret absence, without persisting the matching secret.
+6. Rerun preserves host/project IDs, keys, paired state/config/receipts and identical owned units/artifacts; no duplicate daemon/admin socket or competing key store. Simultaneously invoke across panes/named servers: one owned install lock covers effects, the other reports busy, and a later invocation re-reads source/ownership rather than clobbers completed work. Dirty/local development builds are explicitly disclosed/isolated and cannot replace production release ownership.
+7. Explicit pinned new-release plugin reinstall leaves old panes on old files and causes no companion change by itself. The requested companion upgrade builds/preflights a candidate while the previous working artifact/unit/config/state stays valid. Exercise failure/cancel/crash before/after root creation, setup commit, pointer/unit/record transitions and service health: previous working installation is preserved/restored and rerun reconciles actual ownership. State-format incompatibility blocks promotion, never silently migrates destructively. Old/stale installer cannot implicitly downgrade; equal-version/different-source ambiguity does not masquerade as an upgrade. Restart declined reports staged, not live.
+8. In the disposable Nix store, ordinary GC retains active/previous/all independently in-use closures at their **unchanged registered absolute root locations**; a separate atomic activation pointer is not mistaken for a GC root. Plugin checkout/generation cleanup cannot invalidate those executables. Herdr/provider/owner/TUI/Codex-relay PID/start/unit/executable bindings survive serve/plugin exit/update/restart unchanged; exact absolute `ExecStart` and cwd/config must not reference the plugin checkout. No hidden lifetime propagation or implicit relay restart/pruning.
+9. Disable/unlink/uninstall prevents future entrypoints according to pinned source, preserves existing pane leases and independent companion/service/data, and triggers no imaginary uninstall callback. Separately consented companion removal proves owned unit/path/content/store-root identities, stops/removes only owned serve resources, preserves keys/devices/config/receipts/records by default and reports independently in-use roots retained. External/declarative installs and desktop sessions remain untouched. Purge is another explicit local choice, never inferred from plugin uninstall.
+10. Cleanup evidence enumerates exact registry entries/root locations/unit/process identities removed or intentionally retained, and demonstrates untouched production registry/default profile/socket/provider settings and preserved external fixture resources. Unavailable deployed-API/source match, reviewed public releases, isolated login/store/user-manager/wrapper permissions or real GC/service/network evidence are named **blocked**, never mocked/skipped into success.
+
 
 ### Protocol fixture parity
 
-`companion/tests/test_protocol.py`, Kotlin `ProtocolFixtureTest`, shared `protocol/fixtures/`:
-- Every method/result/error/event/type union, malformed/unknown behavior, framed Unicode/partial reads, recursive duplicate keys, surrogate/byte/member/depth bounds, UUID/Uint/timestamp and decimal-string rules. Include negative-zero/exponent/noninteger rejection and boolean-as-int.
-- Shared canonical bytes/SHA256 and fixed-key HMAC vectors; method/default/field-order/array-order changes; exact answer-choice membership; no raw numbers leaking from native MCP forms.
+`companion/tests/protocol.rs`, Kotlin `ProtocolFixtureTest`, shared `protocol/fixtures/`:
+- Every method/result/error/event/type union, malformed/unknown behavior, framed Unicode/partial reads, recursive duplicate keys (including allowed nested maps), surrogate/byte/member/depth bounds, UUID/Uint/timestamp and decimal-string rules. Include raw-token negative-zero/exponent/noninteger rejection and rejection of booleans as integers before conversion.
+- Shared canonical bytes/SHA256 and fixed-key HMAC vectors; method/default/field-order/array-order changes; exact answer-choice membership; no raw numbers leaking from native MCP forms. Prove the independent Rust/Kotlin canonicalizer matches key/escape/integer/default semantics; exact normalized decimal comparison/native-token emission covers the full128-byte bound and preserves integer/string JSON-RPC IDs without floats.
 - Auth/hello/receipt lookup/stale boot/target/dispatch check order; same-ID/same-hash lookup produces zero writes, changed payload conflict, old-boot status recovery, peer isolation and all timeout outcomes.
 - Snapshot response precedes seq1; duplicate/gap/overflow resync, reconnect replacement, bounded history/content/page/inventory/form capacity and error mapping. No silent dropped request/history transition.
-- `test_pairing.py`/`PairingTest`: exact admin NDJSON/credentials/private socket bounds; identical `--admin-socket PATH` handling for serve/pair/devices/revoke, unchanged omitted-option production default, rejection of relative/oversized/symlink/wrong-owner/nonprivate paths and wrong peer UID on client/server, absent overridden serve without fallback or second identity owner; wrong/expired/reused token, response-loss→known hello, unknown hello rejection, attempt limits, duplicate connections, deviceName/token lengths, restart expiry, scan/paste malformed input. Assert **zero session reads/provider operations before authorization**.
+- `companion/tests/pairing.rs`/`PairingTest`: exact admin NDJSON/credentials/private socket bounds; identical `--admin-socket PATH` handling for serve/pair/devices/revoke, unchanged omitted-option production default, rejection of relative/oversized/symlink/wrong-owner/nonprivate paths and wrong peer UID on client/server, absent overridden serve without fallback or second identity owner; wrong/expired/reused token, response-loss→known hello, unknown hello rejection, attempt limits, duplicate connections, deviceName/token lengths, restart expiry, scan/paste malformed input. Assert **zero session reads/provider operations before authorization**.
 
 ### Revocation fence
 
-`test_security.py` plus `smoke.py --backend ...` fault points:
+`companion/tests/security.rs` plus `--example smoke -- --backend ...` fault points:
 - Pause immediately before provider write, every creation stage and push attempt; revoke then release: no subsequent native effect/publish. Already-started bounded write may settle, desktop work remains alive; stuck boundary yields uncertain and cannot resume later.
 - Admin completion waits for earlier write boundaries; self-unpair emits only its final response then closes; queued subscriptions/receipts/notifications inaccessible. Peer A cannot query B receipts/read-watermarks.
 - Full host authority: two supported sessions inside/outside configured project list both appear and allow history/control/notifications for an authorized peer, neither for unknown peer; new creation outside configured projects rejected.
 
 ### Native libraries
 
-`nix build`, `:iroh-jvm:test`, `NativeLoadTest` instrumentation, `check-native-libs.py`:
-- Artifact manifest proves one FFI source/patch/lock across Kotlin/Python, full generated API compiles, resolved graph excludes GHSA-7cq4-mhxw-xw78/GHSA-jx4g-cg2x-jc35 and rustls meets pin. Record dependency/advisory snapshot, not version-name inference.
+`nix build`, `:iroh-jvm:test`, `NativeLoadTest` instrumentation, `companion/examples/check_native_libs.rs`:
+- Android artifact manifest proves one FFI source/patch/lock across its native outputs/generated Kotlin, full Kotlin-facing API compiles, and Rust companion compiles against direct iroh. Compare exact selected core/base/relay1.3.0 version/source/checksum or immutable revision and intended secure Rustls selection across independently retained companion/FFI locks/manifests; full locks/features and host/Android ABI need not be identical. Both resolved graphs (including duplicates) exclude GHSA-7cq4-mhxw-xw78/GHSA-jx4g-cg2x-jc35 and Rustls meets >=0.23.45. Record exact dependency/features/TLS/system-SQLite provenance, license evidence and advisory database identity/date, not version-name inference. Any host FFI is a JVM-only test input, not a companion dependency.
 - Inspect APK ABI/native inventory, JNA AAR exclusion of desktop natives/JAR, Rust and JNA ELF/APK16-KiB alignment. Load both libraries and Android JNI context on owned emulator.
 - Document API/ABI/device page size. Static alignment is not proof of running on a16-KiB device; unavailable real16-KiB runtime stays explicitly unexercised. Record copied-source notices and reproducible build input/license checks.
 
 ### Direct and relay transport
 
-`smoke.py --transport direct|relay`:
-- Direct uses endpoints without relays and explicit local address hints, observes selected direct path. Relay uses public N0 plus patched clear_ip_transports on **both** endpoints, observes selected relay path and completes identical framed authorized exchange.
+`--example smoke -- --transport direct|relay`:
+- Direct uses endpoints without relays and explicit local address hints, observes selected direct path. Relay uses public N0 plus core `clear_ip_transports` on both endpoints (direct Rust call; patched binding when Android is the peer), observes selected relay path and completes identical framed authorized exchange. The transport-only second client also uses real direct iroh, not a host FFI requirement.
 - Source reference is core1.3.0 `endpoint_two_relay_only_no_ip`; no firewall changes/insecure TLS. Record actual selected-path events, not configured intent. Relay outage is blocked.
 - Network callbacks/path watches/streams release without leaks; endpoint recreation retains identity; duplicate phone connection policy has one active subscription set.
 
 ### Provider source parity
 
-`test_omp.py` and `test_codex.py`, shared sanitized pinned-source fixtures:
+`companion/tests/omp.rs` and `companion/tests/codex.rs`, shared sanitized pinned-source fixtures:
 - OMP registry privacy/bounds/races/duplicate processes; link normalization (including nested fragments/loopback), AES envelopes, hello/welcome/final snapshot, persisted-versus-transient boundary, rich-file versus placeholder merge, optional title slot/partial tail/replacement/truncation, unknown record handling, select/editor/cancel and room-recreation dialog loss.
 - OMP loopback relay wrong path/role/Host/Origin, nonupgrade, duplicate-host ownership, guest IDs/routing/room close, frame/queue overflow and configured test URL parity.
 - Codex every finite method/decision/question/MCP field type/constraint/default/native answer map, integer/string native IDs, offered grants only, session/policy labels, secret exclusion, unsupported forms/userVerification. Command fixtures must include the pinned **experimental runtime** fields: present restricted/reordered `availableDecisions` with exact amendment payloads, rejection of any unoffered base/amendment answer, empty list with no invented choices, malformed/unknown decisions→desktop-only, and absent-list defaults for network context (first allow proposal only), additional permissions, and plain/execpolicy requests in exact source order. Exercise precedence when fields coexist; never substitute defaults for a present list. Preserve full `additionalPermissions` and scope or make the whole request desktop-only for unsupported/oversized details. Include malformed/oversized fields and browser-open-not-resolved.
-- `test_codex_relay.py`: atomic manifest validation, socket/path/privacy bounds, owner/PID reuse, ready without consuming TUI slot, initial timeout, connected/disconnected/terminal_closed, bounded pending correlations, successful unsubscribe, unsolicited thread/started ignored, companion-independent helper/owner lifetime.
+- `companion/tests/codex_relay.rs`: atomic manifest validation, socket/path/privacy bounds, owner/PID reuse, ready without consuming TUI slot, initial timeout, connected/disconnected/terminal_closed, bounded pending correlations, successful unsubscribe, unsolicited thread/started ignored, companion-independent relay/owner lifetime. Exercise the same packaged `goatr codex-relay --binding PATH` binary in its own service, not a second helper executable or `serve` child.
 - Stable generated schemas omit experimental command fields and cannot alone define these source-parity fixtures; use the pinned runtime params, producer, decision conversion and legacy-default implementation linked in [References](REFERENCES.md#critical-files--anchors). Source fixtures still do not prove stock behavior: live provider gate separately checks loaded-list pagination, resume notification ordering, replay/first-response, native history pagination and busy turn/start.
 
 ### Live session and creation
 
-`test_config.py`, `test_herdr.py`, `smoke.py --backend omp --backend codex`:
+`companion/tests/config.rs`, `companion/tests/herdr.rs`, `--example smoke -- --backend omp --backend codex`:
 - Config schema/defaults/unknown keys/path ownership, project canonicalization and wrapper access, managed/symlinked conflicts, repeat setup preserving identity, optional service decline→foreground serve; one unavailable backend preserves the other. Owned smoke records unchanged XDG_RUNTIME_DIR and the same owned `--admin-socket` argument on serve and every admin command, proves pair/list/revoke and companion restart target only that socket, and leaves production admin socket/state untouched. No remote/TOML admin-path configuration or setup override is required.
 - Record actual Herdr shell resolution to the installed wrapper; no fictional executable launch arg or unverified env.PATH guarantee. Fail creation preflight if proof missing. Prove namespace path pairs reference the intended object and sockets satisfy byte bounds.
 - For each provider record owner PID/start, native conversation, Herdr incarnation/terminal, final binding and desktop geometry/focus before/after. Desktop and mobile prompts appear in the same native session without another engine/TUI or focus theft.
@@ -129,26 +163,26 @@ Each row below names a runnable owner from the command suite and observable evid
 
 ### Provider dialogs and cancellation
 
-`test_omp.py`/`test_codex.py`, `ProviderFormsTest` instrumentation, real-provider smoke:
+`companion/tests/omp.rs`/`companion/tests/codex.rs`, `ProviderFormsTest` instrumentation, real-provider smoke:
 - Native approval/questions resolved from each side, simultaneous/late duplicate response closes once; stale key cannot affect newer request. OMP sequential select/editor/cancel, current-work Stop and desktop-only custom dialogs.
 - Codex stale-turn cancellation rejected, offered session/policy grants exact, permissions scope explicit, secret input never stored, MCP standard types and explicit URL flow. Real first-response outcome is honest dispatched/unknown, never falsely this-phone-won.
 
 ### Reconnect and generation replacement
 
-`test_state.py`, `SessionRecoveryTest`, provider/UI smoke:
+`companion/tests/state.rs`, `SessionRecoveryTest`, provider/UI smoke:
 - Join mid-turn/pending request; native reconnect replaces generation and final snapshot precedes queued events. Owner/thread/terminal replacement changes sessionId; room replacement/reconnect keeps proven sessionId but replaces generation; pane routing alone does neither.
 - Companion boot invalidates all prior mutation contexts/handles. Old draft/request/content/cursor cannot retarget; file-history/newer-live precedence holds under racing pagination. Lost OMP room requests remain desktop-only, never replayed.
 
 ### Mutation receipts and companion restart
 
-`test_receipts.py`, `test_creation.py`, provider crash-point runner:
+`companion/tests/receipts.rs`, `companion/tests/creation.rs`, provider crash-point runner:
 - Fault every reserved→dispatching→native-write→receipt commit window, including pre-write crash. Drop reply and restart; action.status yields recorded outcome/uncertain, never automatic duplicate.
 - Only definitive no-effect is failed; ambiguous write or unknown create ID uncertain; OMP no-ack remains dispatched. Same-ID lookup after stale boot is harmless, changed payload conflicts, unknown/expired receipts never authorize resend.
 - Capacity/30-day retention, secret original/answer absent from SQLite/logs/drafts, keyed fingerprint fixtures, pending120-second create response and later action event/status. Revocation stops subsequent stages not already-started work. Companion restart leaves desktop owner/TUI/Herdr running.
 
 ### Content, cache and privacy
 
-`test_content.py`, `test_notifications.py`, Kotlin `SessionStoreTest`/`RecoveryDraftTest`:
+`companion/tests/content.rs`, `companion/tests/notifications.rs`, Kotlin `SessionStoreTest`/`RecoveryDraftTest`:
 - Exercise **every bound/eviction row** in protocol with boundary and +1 values; multibyte byte offsets, TTL/LRU/generation expiry, source truncation, cursor invalidation, oversize form desktop-only, cache stale/partial markers.
 - Offline required cached history, rotation and process-death recovery, local pre-send receipt does not erase draft, no retarget/automatic resend, protected-key loss fails closed. Secret answers/original pending JSON never enter persisted metadata or diagnostics.
 - Offline Forget removes all host-local private/cache/push/dedup state without claiming server revoke; Android backup/transfer exclusions cover all databases/files/keys. Attention sequence survives restart/rotation, watermark per-session/per-peer, retention gap reset, live/push dedup and replay suppression.
@@ -161,13 +195,13 @@ Execute **`:app:connectedDebugAndroidTest`**, not merely compileAndroidTest. `Na
 
 ### Emulator and camera evidence
 
-`smoke.py --ui --serial ...` owns resources, installs/launches real APK and sends/stops through visible UI against real companion/providers. Save fresh PNGs for pairing, all-branches OMP conversation/tool cards, Codex conversation/forms, partial/uncertain creation, cold/warm notification entry and offline cache. Correlate screenshot timestamp with commands and source/native identities.
+`--example smoke -- --ui --serial ...` owns resources, installs/launches real APK and sends/stops through visible UI against real companion/providers. Save fresh PNGs for pairing, all-branches OMP conversation/tool cards, Codex conversation/forms, partial/uncertain creation, cold/warm notification entry and offline cache. Correlate screenshot timestamp with commands and source/native identities.
 
 `QrDecoderTest` covers generated QR→padded/rotated camera planes and frame-finally closure; scanner instrumentation exercises lifecycle/cancellation and posted-callback disposal. Report actual camera input separately: paste and decoder fixtures do not prove camera hardware input. Never use a physical phone without authorization.
 
 ### Background delivery
 
-`test_push.py`/`test_notifications.py`, `PushStateTest`, explicit `smoke.py --background persistent|ntfy --serial ...`:
+`companion/tests/push.rs`/`companion/tests/notifications.rs`, `PushStateTest`, explicit `--example smoke -- --background persistent|ntfy --serial ...`:
 - Persist-before-register; probe before response; process death before/after persistence; duplicate probe/ACK/ACK-response loss; deadline restart; stale unregister/ACK/generation; endpoint rotation and old-key rejection; no handoff before confirmed ACK.
 - Event/probe payload alternatives (probe has no session), HMAC/base64/identity/size validation, same-ID live/push/retry dedup, durable sequence/read reconciliation, source completion versus disconnect, peer scoping/retention gap.
 - Approved-origin HTTPS validation, query preservation, redirect/DNS rebinding/private-target denial, TLS error/no insecure bypass, HTTP429/5xx/404/410/auth responses, retry horizon/queue bounds and revocation cancellation. Deterministic HTTP fixtures prove failure policy; real ntfy proves distributor delivery.

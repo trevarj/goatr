@@ -1,0 +1,24 @@
+advisors:
+  - name: default
+    model: openai-codex/gpt-6.1-sol:high
+    tools:
+      - read
+      - bash
+      - edit
+      - ast_grep
+      - ast_edit
+      - ask
+      - debug
+      - eval
+      - github
+      - glob
+      - grep
+      - find
+      - lsp
+      - checkpoint
+      - rewind
+      - task
+      - wait
+      - todo
+      - web_search
+      - write

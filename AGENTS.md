@@ -37,22 +37,22 @@ These are phase ownership boundaries, not claims that future files exist.
 
 | Owner | Paths/contracts |
 |---|---|
-| Foundation / 1A native-build | `flake.nix`, `flake.lock`, `.envrc`, `pyproject.toml`, `Makefile`, `.github/`, root notices; future Gradle root/wrapper, `third_party/iroh-ffi/`, `iroh-jvm/`, `iroh-android/`, native build/check tooling and artifact manifest |
-| 2A protocol | `protocol/`, canonical wire schema/types/hash fixtures and both Python/Kotlin protocol consumers; owns every shared wire name |
+| Foundation / 1A native-build | `flake.nix`, `flake.lock`, `.envrc`, `Makefile`, `.github/`, root notices; current-only superseded `pyproject.toml`; future `companion/Cargo.toml`/`Cargo.lock`, Rust package/Nix/Make/CI cutover, Gradle root/wrapper, `third_party/iroh-ffi/` with its own lock, `iroh-jvm/`, `iroh-android/`, native artifacts/provenance comparison |
+| 2A protocol | `protocol/`, canonical wire schema/types/hash fixtures and Rust/Kotlin protocol consumers; owns every shared wire name and strict raw-token/duplicate-key/canonicalization rules |
 | 2B state/storage | Serialized reducers, generation/receipt/content/cache/read state and finite retention; coordinate shared Android/companion models with 2A |
 | 3 security | Pairing/admin/authorization/revocation contracts and key-store lifecycle; CLI arguments must match packaging contracts |
 | 4 topology/config | Configuration/trust roots, runtime-path/wrapper resolution and Herdr session identity/creation contracts |
 | 5A OMP / 5B Codex | Separate provider-specific adapter paths only after 2–4 inputs are frozen |
 | 6 Android facade | `app/` UI/lifecycle, excluding shared wire/state/native ownership above |
 | 7 delivery | Foreground/UnifiedPush delivery seams, attention ownership shared with 2B and revocation with 3 |
-| 8 integration/packaging | Final executable/setup/service packaging, owned smoke runners and integrated evidence |
+| 8 integration/packaging | Final Rust executable/setup/service packaging, `plugins/goatr/herdr-plugin.toml` and one Bash dispatcher; retained owned Nix output/activation/upgrade/removal lifecycle outside Herdr checkouts; same-binary internal Codex relay, existing companion Rust smoke/native-inventory examples and integrated evidence |
 
 A topic edit belongs to its contract owner. The coordinator owns cross-topic
 plan status, README/AGENTS updates, and resolving overlapping assignments.
 
 ## Development and handoff
 
-### Core onboarding and commands
+### Current foundation onboarding and commands
 
 Install Nix with `nix-command` and `flakes` enabled, then run from this checkout:
 
@@ -65,14 +65,17 @@ only `use flake`. Before newly created files are tracked by Git, use
 `nix develop path:.` and `nix build path:.#companion --no-link`; Git-backed Nix
 flakes intentionally ignore untracked files.
 
-Use the locked shell, not global pip/cargo/rustup/SDK installs. The default shell
-uses the exact planned nixpkgs and rust-overlay revisions in `flake.lock` and
-supplies Python (aiohttp, cryptography, segno, packaging tools), Rust, cargo-ndk,
-maturin, Git, Make, Ruff and nixfmt. The lock pins the overlay's stable Rust
-selection and the entire Python dependency closure. The core shell is defined
-for Linux/macOS on x86_64/aarch64; execution evidence belongs in the main plan.
+Use the locked shell, not global pip/cargo/rustup/SDK installs. **The following
+describes the executable, superseded Python foundation only**, not the intended
+Rust companion. The default shell uses the exact planned nixpkgs and
+rust-overlay revisions in `flake.lock` and still supplies Python (aiohttp,
+cryptography, segno, packaging tools), Rust, cargo-ndk, maturin, Git, Make, Ruff
+and nixfmt. The lock pins the stable Rust selection and current Python closure.
+The core shell is defined for Linux/macOS on x86_64/aarch64; execution evidence
+belongs in the main plan. Python/maturin are not future companion requirements.
 
-Shared commands, also used by [GitHub Actions](.github/workflows/ci.yml):
+Current-only shared commands, also used by
+[GitHub Actions](.github/workflows/ci.yml) until the actual Rust cutover:
 
 | Command inside `nix develop` | Purpose |
 |---|---|
@@ -82,13 +85,43 @@ Shared commands, also used by [GitHub Actions](.github/workflows/ci.yml):
 | `make smoke` | Direct package/dependency import smoke command |
 | `make check` | All non-building core checks |
 
-The Nix `companion` output is the Python package, **not** the planned full
-`goatr` executable/native closure. Runtime dependency versions are selected by
-the locked Nix graph; project metadata names dependencies without a second
-floating pip installation path. New source is read from the working checkout
-by `make`/the shell; use Nix package builds to check wheel installation/imports.
-Add only a runnable check that exercises actual new behavior; the dependency
-smoke is not a transport or product test.
+The existing Nix `companion` output is the superseded Python package, **not**
+the planned Rust `goatr` executable/native closure. Its dependency versions are
+selected by the locked Nix graph, without a second floating pip install path.
+Current `make`/shell checks read the working checkout and Nix package builds
+check wheel installation/imports. Leave these descriptions truthful until the
+actual code/tooling migration; dependency imports prove neither Rust behavior
+nor transport/product acceptance.
+
+### Intended Rust development after migration
+
+Follow [Tech stack](plans/initial/TECH_STACK.md#companion-rust-package-and-dependency-resolution)
+for one companion Cargo package, direct iroh1.3.0 and a retained
+`companion/Cargo.lock`. Android retains its independently migrated FFI lock,
+generated Kotlin/context/JNA/ABI requirements; compare exact shared
+transport/security provenance, not entire locks or host/Android ABI. Host FFI
+is optional for actual JVM native tests only, never a companion dependency.
+Resolve compatible exact new crate versions/features during implementation and
+retain sources/checksums/licenses/advisory evidence; do not turn latest API
+documentation or upstream manifest ranges into fabricated application pins.
+
+The following are **future implementation commands**, not runnable or verified
+until the Rust package/lock/Nix outputs exist:
+
+```sh
+nix build .#goatr .#iroh-android
+nix develop -c cargo test --locked --manifest-path companion/Cargo.toml
+nix develop -c cargo fmt --manifest-path companion/Cargo.toml -- --check
+nix develop -c cargo clippy --locked --manifest-path companion/Cargo.toml --all-targets -- -D warnings
+```
+
+At that actual cutover, migrate Make/CI to these Rust package gates and retire
+Python packaging/runtime/maturin checks. Native-inventory and owned smoke/UI/
+background runners are non-installed examples in the same companion package;
+[Testing](plans/initial/TESTING.md#proposed-command-suite) owns their exact
+commands and unchanged acceptance gates. Do not create another helper package
+or orchestration framework. Internal `goatr codex-relay --binding PATH` uses the
+same packaged binary in an independent service, never a `serve` lifetime tie.
 
 ### Optional Android tools (Linux x86_64)
 
@@ -124,17 +157,19 @@ availability is not dependency compatibility or native/product evidence.
 
 Workers do not run builds, tests, linters, formatters, or smoke checks mid-flight
 unless verification is their explicit assignment. After all owned changes land,
-one integration owner runs the relevant checks once, including:
+one integration owner runs relevant checks once. Current-only superseded
+foundation checks (not Rust or documentation verification) are:
 
 ```sh
 nix develop -c make check
 nix build .#companion --no-link
 ```
 
-Follow `plans/initial/TESTING.md` for later native/product gates, with owned
-resources. Do not call missing future commands to manufacture a pass or
-silently skip a selected backend. Never log secrets or touch another user's
-sessions/state.
+Follow `plans/initial/TESTING.md` for future Rust/native/product gates and exact
+owned-resource commands. A docs-only plan change needs documentation
+consistency review, not execution of missing Cargo/native commands or rerunning
+historical Python evidence. Never manufacture a pass, silently skip a selected
+backend, log secrets or touch another user's sessions/state.
 
 Every handoff names changed paths, exact executed commands/results (or clearly
 unexecuted coordinator checks), source/lock identity, artifacts, actual behavior
