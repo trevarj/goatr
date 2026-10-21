@@ -23,7 +23,7 @@ data class SkillsDocumentState(val snapshot:SkillsSnapshot,val entry:SkillEntry,
 data class ChangesSnapshot(val key: ConversationKey,val source: Uuid,val ticket: Long,val changes: ChangesReadResult?,val loading: Boolean,val error: Boolean)
 data class ShellSelection(val host:String,val target:ShellTarget)
 data class ShellSnapshot(val selection:ShellSelection,val source:Uuid,val ticket:Long,val summary:ShellSummary,val text:String?,val truncated:Boolean,val loading:Boolean,val error:Boolean)
-data class ShellInputDraft(val value:androidx.compose.ui.text.input.TextFieldValue=androidx.compose.ui.text.input.TextFieldValue(),val revision:Long=0,val keys:Boolean=false,val keyCharacter:String="",val modifiers:ShellKeyModifiers=ShellKeyModifiers(false,false,false,false))
+data class ShellInputDraft(val value:androidx.compose.ui.text.input.TextFieldValue=androidx.compose.ui.text.input.TextFieldValue(),val revision:Long=0,val keys:Boolean=false,val keyCharacter:String="",val modifiers:TerminalModifierState=TerminalModifierState())
 data class ShellInputGate(val scope:ShellCreateScope,val loaded:Boolean,val prior:LocalAction?,val pending:Boolean,val observation:ShellInputObservation?=null)
 data class ShellCreateScope(val selection:ShellSelection,val source:Uuid,val ticket:Long)
 data class ShellCreationGate(val scope:ShellCreateScope,val loaded:Boolean,val prior:LocalAction?,val pending:Boolean)
@@ -273,7 +273,14 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
                         ?.firstOrNull { it.requestKey == key.third }
                     if (request == null || current != ConversationKey(key.first,key.second) || forms[key]?.source != view.sources[key.first]?.get(key.second)) forms.remove(key)?.clear()
                 }
-                shell?.let {shown->if(!shellAdmitted(shown)) closeShell() else shellInputGate?.takeIf {it.loaded && it.prior!=null && it.observation!=view.shellInputStatus[shown.selection.host]?.get(it.prior.metadata.actionId)}?.let {loadShellInput(it.scope)}}
+                shell?.let {shown->
+                    if(!shellAdmitted(shown)) closeShell()
+                    else {
+                        val scope=ShellCreateScope(shown.selection,shown.source,shown.ticket)
+                        if(runCatching {requireShellInputScope(scope)}.isFailure) clearShellModifiers(scope)
+                        shellInputGate?.takeIf {it.loaded && it.prior!=null && it.observation!=view.shellInputStatus[shown.selection.host]?.get(it.prior.metadata.actionId)}?.let {loadShellInput(it.scope)}
+                    }
+                }
                 terminal?.let {shown->if(selection!=shown.key || !foreground || view.sources[shown.key.host]?.get(shown.key.target)!=shown.source) closeTerminal()}
                 worktrees?.let {shown->if(selection!=shown.key || !foreground || view.sources[shown.key.host]?.get(shown.key.target)!=shown.source) closeWorktrees()}
                 artifacts?.let{shown->
@@ -1657,7 +1664,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             catch(_:Exception){shell?.takeIf {it.ticket==ticket && shellAdmitted(it)}?.let {shell=it.copy(text=null,loading=false,error=true)}}
         }
     }
-    fun closeShell() {shell?.selection?.let {key->shellInputDrafts[key]?.let {shellInputDrafts[key]=it.copy(modifiers=ShellKeyModifiers(false,false,false,false))}};clearShellDraftHost=null;shellInputGate=null;shellInputObservedStatus=null;shellInputSeparateStatus=null;shellInputPermitStatus=null;shellInputObserved=null;separateShellInput=null;shellInputPermit=null;shellInputGeneration++;shellMutationLease?.invalidate();shellMutationLease=null;shellTicket++;shellGateGeneration++;shell=null;shellJob?.cancel();shellJob=null;shellCreationGate=null;separateShellCreation=null;shellSeparatePermit=null}
+    fun closeShell() {shellInputDrafts.keys.toList().forEach {key->shellInputDrafts[key]?.let {shellInputDrafts[key]=it.copy(modifiers=TerminalModifierState())}};clearShellDraftHost=null;shellInputGate=null;shellInputObservedStatus=null;shellInputSeparateStatus=null;shellInputPermitStatus=null;shellInputObserved=null;separateShellInput=null;shellInputPermit=null;shellInputGeneration++;shellMutationLease?.invalidate();shellMutationLease=null;shellTicket++;shellGateGeneration++;shell=null;shellJob?.cancel();shellJob=null;shellCreationGate=null;separateShellCreation=null;shellSeparatePermit=null}
     fun refreshShell(){shell?.selection?.let {openShell(it.host,it.target)}}
     fun refreshTerminals() {
         val originalHost=host ?: return
@@ -1697,8 +1704,19 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         clearShellDraftHost=null
     }
     fun clearShellDraft(scope:ShellCreateScope){if(runCatching {requireShellInputScope(scope)}.isFailure)return;shellSubmittedDrafts.keys.filter {shellSubmittedDrafts[it]?.first==scope.selection}.forEach(shellSubmittedDrafts::remove);shellInputDrafts.remove(scope.selection)}
-    fun shellInputMode(scope:ShellCreateScope,keys:Boolean){if(runCatching {requireShellInputScope(scope)}.isFailure)return;if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16){notice="Terminal draft limit reached.";return};shellInputDrafts[scope.selection]=shellDraft(scope.selection).copy(keys=keys,modifiers=ShellKeyModifiers(false,false,false,false))}
-    fun shellInputModifiers(scope:ShellCreateScope,modifiers:ShellKeyModifiers){if(runCatching {requireShellInputScope(scope)}.isFailure)return;if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16)return;shellInputDrafts[scope.selection]=shellDraft(scope.selection).copy(modifiers=modifiers)}
+    fun shellInputMode(scope:ShellCreateScope,keys:Boolean){if(runCatching {requireShellInputScope(scope)}.isFailure)return;if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16){notice="Terminal draft limit reached.";return};shellInputDrafts[scope.selection]=shellDraft(scope.selection).copy(keys=keys,modifiers=TerminalModifierState())}
+    fun shellInputModifier(scope:ShellCreateScope,modifier:TerminalModifier,lock:Boolean) {
+        if(busy || !shellInputAllowed(scope))return
+        if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16)return
+        val draft=shellDraft(scope.selection)
+        shellInputDrafts[scope.selection]=draft.copy(modifiers=draft.modifiers.toggle(modifier,lock))
+    }
+    fun shellInputModifierTap(scope:ShellCreateScope,modifier:TerminalModifier,at:Long,doubleTapWindow:Long) {
+        if(busy || !shellInputAllowed(scope))return
+        if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16)return
+        val draft=shellDraft(scope.selection)
+        shellInputDrafts[scope.selection]=draft.copy(modifiers=draft.modifiers.tap(modifier,at,doubleTapWindow))
+    }
     private suspend fun retainedShellInput(scope:ShellCreateScope):LocalAction? {
         requireShellInputScope(scope);var after:Uuid?=null;var prior:LocalAction?=null;var latched:LocalAction?=null
         do {val page=store.localActions(scope.selection.host,after,100);requireShellInputScope(scope)
@@ -1732,10 +1750,22 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         if(!observation.unknown && action.authoritative && action.receipt!=null && !action.outcomeShown)displayed(scope.selection.host,action.receipt)
     }
     fun shellKeyCharacter(scope:ShellCreateScope,value:String){if(runCatching {requireShellInputScope(scope)}.isFailure)return;if(value.toByteArray().size>4 || scope.selection !in shellInputDrafts && shellInputDrafts.size>=16)return;shellInputDrafts[scope.selection]=shellDraft(scope.selection).copy(keyCharacter=value)}
-    private fun clearShellModifiers(scope:ShellCreateScope){shellInputDrafts[scope.selection]?.let {shellInputDrafts[scope.selection]=it.copy(modifiers=ShellKeyModifiers(false,false,false,false))}}
-    fun sendShellCharacter(scope:ShellCreateScope){val draft=shellDraft(scope.selection);clearShellModifiers(scope);sendShellInput(scope,ShellInput.Keys(listOf(ShellKeyEvent(ShellKey(ShellKeyName.Character,draft.keyCharacter),draft.modifiers))),null)}
+    private fun clearShellModifiers(scope:ShellCreateScope) {
+        val shown=shell ?: return
+        if(shown.selection!=scope.selection || shown.source!=scope.source || shown.ticket!=scope.ticket)return
+        shellInputDrafts[scope.selection]?.let {shellInputDrafts[scope.selection]=it.copy(modifiers=TerminalModifierState())}
+    }
+    private fun consumeShellKeyDraft(scope:ShellCreateScope):ShellInputDraft? {
+        if(runCatching {requireShellInputScope(scope)}.isFailure){clearShellModifiers(scope);return null}
+        if(busy || !shellInputAllowed(scope))return null
+        val draft=shellDraft(scope.selection)
+        // Capture the exact current key state first; only one-shot bits are consumed.
+        shellInputDrafts[scope.selection]?.let {shellInputDrafts[scope.selection]=it.copy(modifiers=it.modifiers.afterKey())}
+        return draft
+    }
+    fun sendShellCharacter(scope:ShellCreateScope){val draft=consumeShellKeyDraft(scope) ?: return;sendShellInput(scope,ShellInput.Keys(listOf(ShellKeyEvent(ShellKey(ShellKeyName.Character,draft.keyCharacter),draft.modifiers.wire()))),null)}
     fun sendShellText(scope:ShellCreateScope){val draft=shellDraft(scope.selection);clearShellModifiers(scope);sendShellInput(scope,ShellInput.Text(draft.value.text),draft.revision)}
-    fun sendShellKey(scope:ShellCreateScope,key:ShellKeyName){val draft=shellDraft(scope.selection);clearShellModifiers(scope);sendShellInput(scope,ShellInput.Keys(listOf(ShellKeyEvent(ShellKey(key),draft.modifiers))),null)}
+    fun sendShellKey(scope:ShellCreateScope,key:ShellKeyName){val draft=consumeShellKeyDraft(scope) ?: return;sendShellInput(scope,ShellInput.Keys(listOf(ShellKeyEvent(ShellKey(key),draft.modifiers.wire()))),null)}
     private fun sendShellInput(scope:ShellCreateScope,input:ShellInput,revision:Long?)=perform {
         requireShellInputScope(scope);input.validate()
         if(!shellInputAllowed(scope))throw StorePolicy(ErrorCode.NotReady)
@@ -1750,7 +1780,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val action=Uuid.random();val host=scope.selection.host;val boot=connection.state.value.hello[host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
         val oldAction=shellInputActions[scope.selection];val permit=shellInputPermit;val permitStatus=shellInputPermitStatus;shellInputPermit=null;shellInputPermitStatus=null;shellInputActions[scope.selection]=action
         if(revision!=null)shellSubmittedDrafts[action]=scope.selection to revision
-        shellInputDrafts[scope.selection]?.let {shellInputDrafts[scope.selection]=it.copy(modifiers=ShellKeyModifiers(false,false,false,false))}
+        shellInputDrafts[scope.selection]?.let {shellInputDrafts[scope.selection]=it.copy(modifiers=if(input is ShellInput.Keys) it.modifiers.afterKey() else TerminalModifierState())}
         shellInputGate=ShellInputGate(scope,false,prior,true)
         try {connection.mutate(host,Request(action,RequestBody.ShellInput(ShellInputParams(boot,scope.selection.target,input))),ordinaryComposer=false,shell=original)}
         catch(error:Exception){if(withContext(NonCancellable){store.localAction(host,action)}==null){if(oldAction==null)shellInputActions.remove(scope.selection)else shellInputActions[scope.selection]=oldAction;shellInputPermit=permit;shellInputPermitStatus=permitStatus;shellSubmittedDrafts.remove(action)};throw error}

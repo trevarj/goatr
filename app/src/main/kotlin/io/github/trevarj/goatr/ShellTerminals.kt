@@ -2,7 +2,6 @@
 package io.github.trevarj.goatr
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
@@ -184,22 +183,14 @@ private fun ShellInputPanel(snapshot:ShellSnapshot,model:GoatrViewModel) {
    Row(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
     FilterChip(selected=!draft.keys,onClick={model.shellInputMode(scope,false)},label={UiText("Text")},leadingIcon={GoatrIcon(MaterialGlyph.Edit,null)})
     FilterChip(selected=draft.keys,onClick={model.shellInputMode(scope,true)},label={UiText("Keys")},leadingIcon={GoatrIcon(MaterialGlyph.Terminal,null)})
-    UiText(if(draft.keys)"One key per tap" else "Exact text · no added Enter",style=MaterialTheme.typography.labelSmall,modifier=Modifier.weight(1f))
+    UiText(if(draft.keys)"Tap modifiers once; double-tap to lock" else "Exact text · no added Enter",style=MaterialTheme.typography.labelSmall,modifier=Modifier.weight(1f))
     TextButton(onClick={model.clearShellDraft(scope)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)){UiText("Clear draft")}
    }
    if(!draft.keys) Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.Bottom,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
     OutlinedTextField(value=draft.value,onValueChange={model.editShellDraft(scope,it)},modifier=Modifier.weight(1f).heightIn(min=56.dp,max=144.dp).testTag("shell_input_text"),placeholder={UiText("Terminal input")},maxLines=5)
     IconButton(onClick={model.sendShellText(scope)},enabled=enabled && draft.value.text.isNotEmpty(),modifier=Modifier.size(48.dp).testTag("shell_input_send")){GoatrIcon(MaterialGlyph.Send,"Send exact terminal text")}
    } else {
-    LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)) {
-     items(listOf("Shift","Ctrl","Alt","Super")) {name->
-      val selected=when(name){"Shift"->draft.modifiers.shift;"Ctrl"->draft.modifiers.ctrl;"Alt"->draft.modifiers.alt;else->draft.modifiers.superKey}
-      FilterChip(selected=selected,onClick={model.shellInputModifiers(scope,when(name){"Shift"->draft.modifiers.copy(shift=!selected);"Ctrl"->draft.modifiers.copy(ctrl=!selected);"Alt"->draft.modifiers.copy(alt=!selected);else->draft.modifiers.copy(superKey=!selected)})},label={UiText(name)})
-     }
-    }
-    LazyRow(horizontalArrangement=Arrangement.spacedBy(4.dp)) {
-     items(ShellKeyName.entries.filter {it!=ShellKeyName.Character}) {key->OutlinedButton(onClick={model.sendShellKey(scope,key)},enabled=enabled,modifier=Modifier.heightIn(min=48.dp).testTag("shell_key_"+key.name)){UiText(key.name)}}
-    }
+    TerminalKeyBar(draft.modifiers,enabled,{modifier,lock->model.shellInputModifier(scope,modifier,lock)},{modifier,at,window->model.shellInputModifierTap(scope,modifier,at,window)},{key->model.sendShellKey(scope,key)})
     Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
      OutlinedTextField(value=draft.keyCharacter,onValueChange={model.shellKeyCharacter(scope,it)},label={UiText("One character + modifiers")},singleLine=true,modifier=Modifier.weight(1f))
      IconButton(onClick={model.sendShellCharacter(scope)},enabled=enabled && draft.keyCharacter.isNotEmpty(),modifier=Modifier.size(48.dp)){GoatrIcon(MaterialGlyph.Send,"Send character key")}
