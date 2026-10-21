@@ -33,6 +33,7 @@ private data class ForegroundGeneration(val claim: RuntimeClaim, val ready: Comp
 
 /** Local-only list presentation; it never carries session, host, or receipt state. */
 data class SessionListPreferences(
+    val directoryView: SessionDirectoryView = SessionDirectoryView.Workspaces,
     val groupByStatus: Boolean = true,
     val showWorkspaceContext: Boolean = true,
     val showHostContext: Boolean = true,
@@ -141,6 +142,8 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     private val presentationPreferences = application.getSharedPreferences(PRESENTATION_PREFERENCES, Context.MODE_PRIVATE)
     private var appearanceState by mutableStateOf(loadAppearance())
     private var sessionListPreferencesState by mutableStateOf(loadSessionListPreferences())
+    var recentlyOpenedSessions by mutableStateOf<List<ConversationKey>>(emptyList())
+        private set
     var appearance: Appearance
         get() = appearanceState
         set(value) {
@@ -153,6 +156,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         set(value) {
             sessionListPreferencesState = value
             presentationPreferences.edit()
+                .putString(SESSION_DIRECTORY_VIEW_KEY, value.directoryView.name)
                 .putBoolean(SESSION_LIST_GROUP_BY_STATUS_KEY, value.groupByStatus)
                 .putBoolean(SESSION_LIST_SHOW_WORKSPACE_CONTEXT_KEY, value.showWorkspaceContext)
                 .putBoolean(SESSION_LIST_SHOW_HOST_CONTEXT_KEY, value.showHostContext)
@@ -335,10 +339,15 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         return Appearance.entries.firstOrNull { it.name == stored } ?: Appearance.System
     }
     private fun loadSessionListPreferences() = SessionListPreferences(
+        directoryView = loadSessionDirectoryView(),
         groupByStatus = presentationBoolean(SESSION_LIST_GROUP_BY_STATUS_KEY),
         showWorkspaceContext = presentationBoolean(SESSION_LIST_SHOW_WORKSPACE_CONTEXT_KEY),
         showHostContext = presentationBoolean(SESSION_LIST_SHOW_HOST_CONTEXT_KEY),
     )
+    private fun loadSessionDirectoryView(): SessionDirectoryView {
+        val stored=try {presentationPreferences.getString(SESSION_DIRECTORY_VIEW_KEY,null)} catch(_:ClassCastException) {null}
+        return SessionDirectoryView.entries.firstOrNull {it.name==stored} ?: SessionDirectoryView.Workspaces
+    }
     private fun presentationBoolean(key: String): Boolean = try { presentationPreferences.getBoolean(key, true) }
     catch (_: ClassCastException) { true }
     fun formMemory(key: ConversationKey,source: Uuid?,request: Uuid): FormMemory? {
@@ -407,6 +416,8 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val selected=ConversationKey(host,target)
         val previous=operation
         navigate(Screen.Conversation,host); selection = selected
+        // This records an explicit local open, never native activity or routing authority.
+        recentlyOpenedSessions=rememberExplicitSessionOpen(recentlyOpenedSessions,selected)
         viewModelScope.launch {
             previous?.cancelAndJoin()
             if(selection==selected && foreground && connection.state.value.hello.containsKey(host)) perform {
@@ -1510,6 +1521,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         catch (_: Exception) { notice = "Self-unpair was not confirmed. Server authority is unknown. Explicit local Forget remains available; use desktop goatr devices / goatr revoke DEVICE_ID to revoke." }
     }
     private fun clearHostMemory(host: String) {
+        recentlyOpenedSessions=recentlyOpenedSessions.filter {it.host!=host}
         if(attentionInbox?.host==host) closeAttentionInbox()
         if(shell?.selection?.host==host) closeShell()
         shellInputDrafts.keys.filter {it.host==host}.forEach(shellInputDrafts::remove)
@@ -1832,6 +1844,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val PRESENTATION_PREFERENCES = "local_presentation"
         const val APPEARANCE_KEY = "appearance"
+        const val SESSION_DIRECTORY_VIEW_KEY = "session_directory_view"
         const val SESSION_LIST_GROUP_BY_STATUS_KEY = "session_list_group_by_status"
         const val SESSION_LIST_SHOW_WORKSPACE_CONTEXT_KEY = "session_list_show_workspace_context"
         const val SESSION_LIST_SHOW_HOST_CONTEXT_KEY = "session_list_show_host_context"

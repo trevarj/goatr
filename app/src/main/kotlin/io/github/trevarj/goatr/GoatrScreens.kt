@@ -155,7 +155,7 @@ private fun sessionWorkspaceLabel(inventory: HostSnapshotResult,summary: Session
     val tab=graph.tabs.filter {it.tabId==pane.tabId}.singleOrNull() ?: return null
     return graph.workspaces.filter {it.workspaceId==tab.workspaceId}.singleOrNull()?.label?.value
 }
-private fun sessionStatusLabel(status: SessionStatus): String = when(status) {
+internal fun sessionStatusLabel(status: SessionStatus): String = when(status) {
     SessionStatus.Attention -> "Needs your attention"
     SessionStatus.Working -> "Working"
     SessionStatus.Idle -> "Idle"
@@ -385,37 +385,10 @@ private fun SessionPresentationRow(
     rowTag: String,
     onOpen: (Target) -> Unit,
 ) {
-    val target=Target(summary.sessionId,summary.generation)
-    val workspace=sessionWorkspaceLabel(inventory,summary)
-    val subtitle=listOfNotNull(
-        providerLabel(summary.provider),
-        hostName.takeIf {preferences.showHostContext},
-        workspace?.takeIf {preferences.showWorkspaceContext},
-        summary.connectivity.toString(),
-        if(staleDisplay) "stale display" else null,
-        summary.reason,
-    ).joinToString(" · ")
-    CompactRow(
-        conversationTitle(summary),
-        subtitle,
-        status={StatusPill(sessionStatusLabel(summary.status),sessionStatusEmphasis(summary.status))},
-        modifier=Modifier.testTag(rowTag),
-        onClick={onOpen(target)},
-    )
-    var details by remember(summary.sessionId,summary.generation) {mutableStateOf(false)}
-    DetailDisclosure(details,{details=!details},"${rowTag}_details")
-    if(details) GroupedSurface {
-        UiText("Provider: ${providerLabel(summary.provider)}",style=MaterialTheme.typography.bodySmall)
-        hostName?.let {UiText("Desktop: $it",style=MaterialTheme.typography.bodySmall)}
-        workspace?.let {UiText("Workspace: $it",style=MaterialTheme.typography.bodySmall)}
-        UiText("Authoritative status: ${sessionStatusLabel(summary.status)}",style=MaterialTheme.typography.bodySmall)
-        UiText("Session ID: ${target.sessionId.value}",style=MaterialTheme.typography.bodySmall)
-        UiText("Generation: ${target.generation.value}",style=MaterialTheme.typography.bodySmall)
-        Action("Open this conversation","${rowTag}_open") {onOpen(target)}
-    }
+    DirectoryAgentRow(summary,hostName,sessionWorkspaceLabel(inventory,summary),preferences,staleDisplay,rowTag,onOpen)
 }
 
-private fun sessionStatusEmphasis(status: SessionStatus): StatusEmphasis = when(status) {
+internal fun sessionStatusEmphasis(status: SessionStatus): StatusEmphasis = when(status) {
     SessionStatus.Attention -> StatusEmphasis.Attention
     SessionStatus.Working -> StatusEmphasis.Positive
     SessionStatus.Unknown -> StatusEmphasis.Muted
@@ -458,6 +431,9 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
             FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                 FilterChip(selected=filter==null,onClick={filter=null},label={UiText("All hosts")},modifier=Modifier.heightIn(min=48.dp).testTag("host_filter_all"))
                 store.hosts.forEach { paired->FilterChip(selected=filter==paired.hostId,onClick={filter=paired.hostId},label={UiText(paired.name)},modifier=Modifier.heightIn(min=48.dp).testTag("host_filter_${paired.hostId}"))}
+            }
+            SessionDirectoryMode(model.sessionListPreferences.directoryView) {mode->
+                model.sessionListPreferences=model.sessionListPreferences.copy(directoryView=mode)
             }
             OutlinedTextField(query,{query=it},label={UiText("Find sessions")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("session_search"))
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -510,23 +486,35 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                         UiText("Reconnect this host to read supported desktop sessions.",style=MaterialTheme.typography.bodySmall)
                     }
                 } else {
-                    var previousStatus: SessionStatus? = null
-                    rows.forEach {summary->
-                        if(model.sessionListPreferences.groupByStatus && previousStatus!=summary.status) {
-                            item(key="status_${paired.hostId}_${summary.status.name}_${summary.sessionId.value}_${summary.generation.value}") { GoatrSection(sessionGroupLabel(summary.status)) }
+                    if(model.sessionListPreferences.directoryView==SessionDirectoryView.Workspaces) {
+                        val directory=projectSessionDirectory(paired.hostId,inventory,ready,rows,narrowed)
+                        directory.workspaces.forEach {group->
+                            item(key=group.key.lazyKey) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}
                         }
-                        item(key="session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}") {
-                            SessionPresentationRow(
-                                summary=summary,
-                                inventory=inventory,
-                                hostName=paired.name,
-                                preferences=model.sessionListPreferences,
-                                staleDisplay=!ready,
-                                rowTag="session_${summary.sessionId.value}_${summary.generation.value}",
-                                onOpen={target->model.open(paired.hostId,target)},
-                            )
+                        if(directory.standalone.isNotEmpty()) item(key="standalone_heading_${paired.hostId}") {
+                            GoatrSection(if(ready) "Other agents" else "Last observed agents", "Workspace association unavailable")
                         }
-                        previousStatus=summary.status
+                        directory.standalone.forEach {summary->item(key="session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}") {
+                            DirectoryAgentRow(summary,paired.name,null,model.sessionListPreferences,!ready,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)})
+                        }}
+                    } else {
+                        val workspaceByTarget=projectSessionDirectory(paired.hostId,inventory,ready,rows).workspaces.flatMap {group->
+                            group.agents.map {Target(it.sessionId,it.generation) to group.workspace.label?.value}
+                        }.toMap()
+                        val cachedByTarget=cachedRows.associateBy {Target(it.summary.sessionId,it.summary.generation)}
+                        val recent=orderRecentlyOpened(paired.hostId,rows+cachedRows.map {it.summary},model.recentlyOpenedSessions)
+                        var previousStatus: SessionStatus? = null
+                        recent.forEach {summary->
+                            if(model.sessionListPreferences.groupByStatus && previousStatus!=summary.status) {
+                                item(key="status_${paired.hostId}_${summary.status.name}_${summary.sessionId.value}_${summary.generation.value}") {GoatrSection(sessionGroupLabel(summary.status))}
+                            }
+                            item(key="recent_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}") {
+                                val cached=cachedByTarget[Target(summary.sessionId,summary.generation)]
+                                val workspace=if(cached==null) workspaceByTarget[Target(summary.sessionId,summary.generation)] else null
+                                DirectoryAgentRow(summary,paired.name,workspace,model.sessionListPreferences,!ready || cached!=null,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)},cached?.partial)
+                            }
+                            previousStatus=summary.status
+                        }
                     }
                     inventory.unbound.forEach { row -> item(key="unbound_${paired.hostId}_${row.rowId.value}") { UnboundSessionRow(row) } }
 
@@ -534,9 +522,16 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                 if(rows.isEmpty() && cachedRows.isEmpty() && hasRecordedSessions && narrowed) item(key="filtered_empty_${paired.hostId}") {UiText("No sessions match these filters on this host.",style=MaterialTheme.typography.bodySmall)}
                 else if(inventory!=null && !hasRecordedSessions && inventory.unbound.isEmpty()) item(key="empty_${paired.hostId}") {UiText("No supported phone conversations are bound on this host.",style=MaterialTheme.typography.bodySmall)}
                 // Unbound setup rows stay separate; no provider or session status is inferred for them.
-                cachedRows.forEach {cached->item(key="cached_${paired.hostId}_${cached.summary.sessionId.value}_${cached.summary.generation.value}") {
-                    CompactRow(conversationTitle(cached.summary),"${providerLabel(cached.summary.provider)} · retained cache${if(cached.partial) " · partial" else ""}",status={StatusPill("Stale",StatusEmphasis.Muted)},modifier=Modifier.testTag("cached_session"),onClick={model.open(paired.hostId,Target(cached.summary.sessionId,cached.summary.generation))})
-                }}
+                if((model.sessionListPreferences.directoryView==SessionDirectoryView.Workspaces || inventory==null) && cachedRows.isNotEmpty()) {
+                    item(key="cached_heading_${paired.hostId}") {GoatrSection("Retained conversations", "Stale cache · workspace association unavailable")}
+                    val retained=if(model.sessionListPreferences.directoryView==SessionDirectoryView.RecentAgents) {
+                        val byTarget=cachedRows.associateBy {Target(it.summary.sessionId,it.summary.generation)}
+                        orderRecentlyOpened(paired.hostId,cachedRows.map {it.summary},model.recentlyOpenedSessions).map {byTarget.getValue(Target(it.sessionId,it.generation))}
+                    } else cachedRows
+                    retained.forEach {cached->item(key="cached_${paired.hostId}_${cached.summary.sessionId.value}_${cached.summary.generation.value}") {
+                        DirectoryAgentRow(cached.summary,paired.name,null,model.sessionListPreferences,true,"session_${paired.hostId}_${cached.summary.sessionId.value}_${cached.summary.generation.value}",{target->model.open(paired.hostId,target)},cached.partial)
+                    }}
+                }
                 item(key="host_actions_${paired.hostId}") { FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                     IconAction(MaterialGlyph.Terminal,"Terminals","host_terminals_${paired.hostId}",enabled=!model.busy) {model.terminals(paired.hostId)}
                     IconAction(MaterialGlyph.Desktop,"View host","host_sessions_${paired.hostId}",enabled=!model.busy) {model.sessions(paired.hostId)}
