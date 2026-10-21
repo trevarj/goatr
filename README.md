@@ -5,9 +5,9 @@ access to desktop Herdr sessions running stock OMP or Codex.
 
 ## Availability
 
-Goatr is not yet available to install or use. There is no runnable companion,
-Android app, or release artifact; installation and pairing instructions will be
-provided when the product is ready.
+Goatr is under development and not yet ready for use. No supported release or
+installation workflow is available; installation and pairing instructions will
+be provided when the product is ready.
 
 ## Intended scope
 

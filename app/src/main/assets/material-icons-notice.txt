@@ -1,0 +1,12 @@
+Material Icons
+Copyright 2014 Google Inc.
+
+The vector drawables named ic_material_*.xml are derived from Google Material
+Icons at revision 49d4db35df873165d6bd6ba09b063c7dafbac2f4 of
+https://github.com/google/material-design-icons.
+
+They are licensed under the Apache License, Version 2.0.
+License text: https://www.apache.org/licenses/LICENSE-2.0
+
+The source paths, pinned raw URLs, and source-file SHA256 values are retained
+with the implementation handoff inventory.

@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/n0-computer/iroh-ffi",
+  "revision": "5e451092dba0c1a09ee83ff6e5be37b1152a5c58",
+  "narHash": "sha256-6j4Ns2mUPbn0nR8KxBZGEAv/xTHxnnPIA26h4HL/kt4=",
+  "coreRepository": "https://github.com/n0-computer/iroh",
+  "coreRevision": "0072d7d84b233f9e7185eb676f049beaf557ac03",
+  "coreNarHash": "sha256-ugGYRESccGgkI8evd21NE3jzNgULDEHwuf0UWdqKp6A=",
+  "lockSha256": "8d40061adda95ca2be4701234974fa85e53ed4b0cbc35107f8b104ffaf88bd88",
+  "patchSha256": "4fe917260b784fd39d35182eae1636689e270e8e79a3ca6086646c17e9d58a2e",
+  "uniffiVersion": "0.31.2",
+  "contextSource": "kotlin/android/src/main/kotlin/computer/iroh/IrohAndroid.kt",
+  "contextSha256": "cfebed1cd331368f7874d9f28d4b64fa92466823d622d640031b640264b669b2",
+  "upstreamVersion": "1.1.0",
+  "coreVersion": "1.3.0",
+  "goatrPatchLicense": "GPL-3.0-or-later",
+  "synchronousWatchRegistration": {
+    "methods": [
+      "Connection.watch_paths",
+      "Connection.watch_path_events",
+      "Endpoint.watch_addr",
+      "Endpoint.watch_home_relay",
+      "Endpoint.watch_network_change"
+    ],
+    "runtime": "Private WatchHandle.spawn polls only immediate task registration once through UniFFI's existing async-compat Tokio runtime; no new runtime, dependency or public API",
+    "lifetime": "Stop and last-handle drop request abort, without joining or synchronously interrupting non-cooperative foreign code. Connection close cancels pending path callbacks; endpoint close cancels address/home-relay stream waits and callbacks. Terminal PathClosed delivery is not guaranteed on whole-connection shutdown.",
+    "sourceAnchors": [
+      "uniffi 0.31.2 tokio export adapter and uniffi_core async_compat re-export",
+      "async-compat 0.2.6 src/lib.rs:345-350,476-493",
+      "n0-future 0.3.2 src/lib.rs:83-101",
+      "iroh 1.3.0 src/endpoint.rs:1254-1259,1403-1408",
+      "iroh 1.3.0 src/socket/remote_map/remote_state/path_watcher.rs:251-293,499-555"
+    ],
+    "regressions": [
+      "foreign_thread_constructor_registration",
+      "foreign_thread_endpoint_watches_cancel_on_close",
+      "foreign_thread_path_watches_cancel_on_stop_drop_and_close"
+    ],
+    "verification": "Plain Rust tests use bounded callback and task-closure observations; not executed by worker. Path-event registration/natural closure is covered, not forced live path migration or guaranteed terminal-event delivery."
+  },
+  "networkChangeWatcher": {
+    "ownership": "One endpoint-owned lazy monitor and hint source, shared by clones and protocol-creator handles; monitor and hint channel are created only when watched",
+    "explicitHints": "Forward to core and the shared netwatch monitor; coalesce explicit Android hints through Tokio watch because Android RouteMonitor is a no-op and netwatch suppresses equal interface states",
+    "sourceAnchors": [
+      "netwatch 0.19.3 src/netmon/android.rs:14-18",
+      "netwatch 0.19.3 src/netmon/actor.rs:137-151",
+      "netwatch 0.19.3 src/netmon.rs:73-82"
+    ],
+    "lifetime": "WatchHandle.stop and last-handle drop request abort; endpoint.closed cancels monitor initialization and in-flight callbacks; Endpoint.close releases the shared monitor",
+    "regression": "explicit_network_hint_reaches_watchers_and_close_cancels_callback (not executed by worker)"
+  },
+  "advisoryDatabase": {
+    "repository": "https://github.com/RustSec/advisory-db",
+    "revision": "ef6173cbc5c50ec8166f9a5b28f07834144373ee",
+    "commitDate": "2026-10-03T08:14:03Z",
+    "retrievedAt": "2026-10-06",
+    "narHash": "sha256-fSs/HUa87mK3O5wV26zZdUU0WvJ3pbeE5WGNPpepZeI=",
+    "coverage": "Neither required GHSA is indexed in this snapshot; supplementary upstream version exclusions are required"
+  },
+  "advisoryExclusions": [
+    {
+      "id": "GHSA-7cq4-mhxw-xw78",
+      "source": "https://github.com/n0-computer/iroh/security/advisories/GHSA-7cq4-mhxw-xw78",
+      "package": "iroh",
+      "affected": ">=0.91.0, <=1.0.3",
+      "patched": "1.1.0",
+      "publishedAt": "2026-10-05",
+      "retrievedAt": "2026-10-06"
+    },
+    {
+      "id": "GHSA-jx4g-cg2x-jc35",
+      "source": "https://github.com/n0-computer/iroh/security/advisories/GHSA-jx4g-cg2x-jc35",
+      "package": "iroh-base",
+      "affected": ">=0.97.0, <=1.0.3",
+      "patched": "1.1.0",
+      "publishedAt": "2026-10-05",
+      "retrievedAt": "2026-10-06"
+    }
+  ]
+}

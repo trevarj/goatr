@@ -1,0 +1,631 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -34,10 +34,10 @@
+ [dependencies]
+ anyhow = "1.0.69"
+ async-trait = "0.1.80"
+-iroh = { version = "1.0.0" }
+-iroh-base = { version = "1.0.0" }
++iroh = { version = "=1.3.0" }
++iroh-base = { version = "=1.3.0" }
+ iroh-metrics = { version = "1.0.0" }
+-iroh-relay = { version = "1.0.0", default-features = false }
++iroh-relay = { version = "=1.3.0", default-features = false }
+ iroh-services = { version = "1.0.0", default-features = false }
+ iroh-tickets = { version = "1.0.0" }
+ n0-error = { version = "1.0.0" }
+@@ -50,6 +50,9 @@
+ serde = { version = "1.0.196", features = ["derive"] }
+ derive_more = { version = "2.0", features = ["debug"] }
+ n0-future = "0.3"
++# Security constraint shared by transport users in this independently locked graph.
++rustls = { version = "=0.23.45", default-features = false }
++netwatch = "=0.19.3"
+ 
+ 
+ [dev-dependencies]
+--- a/src/endpoint.rs
++++ b/src/endpoint.rs
+@@ -1,7 +1,7 @@
+ use std::{collections::HashMap, fmt::Debug, str::FromStr, sync::Arc};
+ 
+ use iroh::{
+-    endpoint::{self, presets, presets::Preset as _},
++    endpoint::{self, PortmapperConfig, presets, presets::Preset as _},
+     protocol::AcceptError,
+ };
+ use tokio::sync::Mutex;
+@@ -95,6 +95,16 @@
+         self.map(|b| b.relay_mode(mode));
+     }
+ 
++    /// Disable automatic UPnP, PCP and NAT-PMP router mapping.
++    pub fn disable_port_mapping(&self) {
++        self.map(|b| b.portmapper_config(PortmapperConfig::Disabled));
++    }
++
++    /// Remove direct IP transports for relay-only transport acceptance checks.
++    pub fn clear_ip_transports(&self) {
++        self.map(|b| b.clear_ip_transports());
++    }
++
+     /// Set the address the endpoint binds to (`host:port`).
+     pub fn bind_addr(&self, addr: String) -> Result<(), IrohError> {
+         let socket = std::net::SocketAddr::from_str(&addr).map_err(anyhow::Error::from)?;
+@@ -272,6 +282,8 @@
+ pub struct Endpoint {
+     inner: endpoint::Endpoint,
+     router: Option<iroh::protocol::Router>,
++    // Initialization needs this endpoint's runtime handle, only when first watched.
++    network_watch: Arc<std::sync::OnceLock<watch::NetworkWatch>>,
+ }
+ 
+ impl Endpoint {
+@@ -279,6 +291,7 @@
+         Endpoint {
+             inner: ep,
+             router: None,
++            network_watch: Arc::new(std::sync::OnceLock::new()),
+         }
+     }
+ 
+@@ -314,13 +327,14 @@
+ 
+         let builder = wrapper.take_inner()?;
+         let endpoint = builder.bind().await?;
++        let mut endpoint_wrapper = Endpoint::new(endpoint);
+ 
+         let router = match options.protocols {
+             Some(protocols) if !protocols.is_empty() => {
+-                let mut router_builder = iroh::protocol::Router::builder(endpoint.clone());
+-                let endpoint_wrapper = Arc::new(Endpoint::new(endpoint.clone()));
++                let mut router_builder = iroh::protocol::Router::builder(endpoint_wrapper.inner.clone());
++                let endpoint_handle = Arc::new(endpoint_wrapper.clone());
+                 for (alpn, creator) in protocols {
+-                    let handler = creator.create(endpoint_wrapper.clone());
++                    let handler = creator.create(endpoint_handle.clone());
+                     router_builder = router_builder.accept(alpn, ProtocolWrapper { handler });
+                 }
+                 Some(router_builder.spawn())
+@@ -328,10 +342,8 @@
+             _ => None,
+         };
+ 
+-        Ok(Endpoint {
+-            inner: endpoint,
+-            router,
+-        })
++        endpoint_wrapper.router = router;
++        Ok(endpoint_wrapper)
+     }
+ 
+     /// The [`EndpointId`] of this endpoint.
+@@ -396,9 +408,23 @@
+         } else {
+             self.inner.close().await;
+         }
++        if let Some(source) = self.network_watch.get() {
++            source.close().await;
++        }
+         Ok(())
+     }
+ 
++    /// Notify the native endpoint about an Android connectivity change.
++    #[uniffi::method(async_runtime = "tokio")]
++    pub async fn network_change(&self) {
++        self.inner.network_change().await;
++        if !self.inner.is_closed() {
++            if let Some(source) = self.network_watch.get() {
++                source.network_change().await;
++            }
++        }
++    }
++
+     /// Returns true if the endpoint has been closed.
+     pub fn is_closed(&self) -> bool {
+         self.inner.is_closed()
+@@ -515,8 +541,10 @@
+         &self,
+         callback: Arc<dyn NetworkChangeCallback>,
+     ) -> Arc<WatchHandle> {
++        self.network_watch
++            .get_or_init(|| watch::NetworkWatch::new(self.inner.clone()));
+         Arc::new(watch::spawn_network_change_watch(
+-            self.inner.clone(),
++            self.network_watch.clone(),
+             callback,
+         ))
+     }
+--- a/src/watch.rs
++++ b/src/watch.rs
+@@ -38,14 +38,23 @@
+ }
+ 
+ /// Handle to a running watcher task. Drop it (or call [`Self::stop`]) to
+-/// unregister the callback.
++/// request cancellation; suspended callbacks are dropped when the task aborts.
+ #[derive(uniffi::Object)]
+ pub struct WatchHandle {
+     task: Mutex<Option<AbortOnDropHandle<()>>>,
+ }
+ 
+ impl WatchHandle {
+-    pub(crate) fn new(task: AbortOnDropHandle<()>) -> Self {
++    pub(crate) fn spawn(
++        future: impl std::future::Future<Output = ()> + Send + 'static,
++    ) -> Self {
++        // ponytail: poll only registration through UniFFI's existing Tokio runtime.
++        let task = n0_future::future::now_or_never(
++            uniffi::deps::async_compat::Compat::new(async move {
++                AbortOnDropHandle::new(n0_future::task::spawn(future))
++            }),
++        )
++        .expect("watch task registration does not await");
+         Self {
+             task: Mutex::new(Some(task)),
+         }
+@@ -54,7 +63,7 @@
+ 
+ #[uniffi::export]
+ impl WatchHandle {
+-    /// Stop the watcher, aborting the background task.
++    /// Request background-task cancellation without waiting for it to finish.
+     #[uniffi::method(async_runtime = "tokio")]
+     pub async fn stop(&self) {
+         self.task.lock().await.take();
+@@ -65,48 +74,364 @@
+     endpoint: iroh::Endpoint,
+     cb: Arc<dyn AddrChangeCallback>,
+ ) -> WatchHandle {
+-    let task = n0_future::task::spawn(async move {
+-        let mut stream = endpoint.watch_addr().stream();
+-        while let Some(addr) = stream.next().await {
+-            let mapped: EndpointAddr = addr.into();
+-            if let Err(err) = cb.on_change(Arc::new(mapped)).await {
+-                tracing::warn!("addr change callback error: {err:?}");
+-                break;
+-            }
++    WatchHandle::spawn(async move {
++        tokio::select! {
++            biased;
++            _ = endpoint.closed() => {}
++            _ = async {
++                let mut stream = endpoint.watch_addr().stream();
++                while let Some(addr) = stream.next().await {
++                    let mapped: EndpointAddr = addr.into();
++                    if let Err(err) = cb.on_change(Arc::new(mapped)).await {
++                        tracing::warn!("addr change callback error: {err:?}");
++                        break;
++                    }
++                }
++            } => {}
+         }
+-    });
+-    WatchHandle::new(AbortOnDropHandle::new(task))
++    })
+ }
+ 
+ pub(crate) fn spawn_home_relay_watch(
+     endpoint: iroh::Endpoint,
+     cb: Arc<dyn HomeRelayCallback>,
+ ) -> WatchHandle {
+-    let task = n0_future::task::spawn(async move {
+-        let mut stream = endpoint.home_relay_status().stream();
+-        while let Some(statuses) = stream.next().await {
+-            let urls: Vec<String> = statuses.into_iter().map(|s| s.url().to_string()).collect();
+-            if let Err(err) = cb.on_change(urls).await {
+-                tracing::warn!("home relay callback error: {err:?}");
+-                break;
++    WatchHandle::spawn(async move {
++        tokio::select! {
++            biased;
++            _ = endpoint.closed() => {}
++            _ = async {
++                let mut stream = endpoint.home_relay_status().stream();
++                while let Some(statuses) = stream.next().await {
++                    let urls: Vec<String> = statuses.into_iter().map(|s| s.url().to_string()).collect();
++                    if let Err(err) = cb.on_change(urls).await {
++                        tracing::warn!("home relay callback error: {err:?}");
++                        break;
++                    }
++                }
++            } => {}
++        }
++    })
++}
++
++/// One lazily allocated monitor and explicit hint source for each FFI endpoint.
++pub(crate) struct NetworkWatch {
++    endpoint: iroh::Endpoint,
++    monitor: Mutex<Option<Arc<netwatch::netmon::Monitor>>>,
++    hints: tokio::sync::watch::Sender<()>,
++}
++
++impl NetworkWatch {
++    pub(crate) fn new(endpoint: iroh::Endpoint) -> Self {
++        Self {
++            endpoint,
++            monitor: Mutex::new(None),
++            hints: tokio::sync::watch::channel(()).0,
++        }
++    }
++
++    async fn monitor(&self) -> Option<Arc<netwatch::netmon::Monitor>> {
++        let mut guard = tokio::select! {
++            biased;
++            _ = self.endpoint.closed() => return None,
++            guard = self.monitor.lock() => guard,
++        };
++        if let Some(monitor) = &*guard {
++            return Some(monitor.clone());
++        }
++        let monitor = tokio::select! {
++            biased;
++            _ = self.endpoint.closed() => return None,
++            result = netwatch::netmon::Monitor::new() => match result {
++                Ok(monitor) => Arc::new(monitor),
++                Err(err) => {
++                    tracing::warn!("network monitor initialization failed: {err:?}");
++                    return None;
++                }
++            },
++        };
++        *guard = Some(monitor.clone());
++        Some(monitor)
++    }
++
++    pub(crate) async fn network_change(&self) {
++        // Android has no route monitor; netwatch suppresses equal interface states.
++        // Preserve the explicit ConnectivityManager hint even when State is equal.
++        self.hints.send_replace(());
++        if let Some(monitor) = self.monitor().await {
++            tokio::select! {
++                biased;
++                _ = self.endpoint.closed() => {}
++                result = monitor.network_change() => {
++                    if let Err(err) = result {
++                        tracing::warn!("network monitor notification failed: {err:?}");
++                    }
++                }
+             }
+         }
+-    });
+-    WatchHandle::new(AbortOnDropHandle::new(task))
++    }
++
++    pub(crate) async fn close(&self) {
++        self.monitor.lock().await.take();
++    }
+ }
+ 
+ pub(crate) fn spawn_network_change_watch(
+-    endpoint: iroh::Endpoint,
++    source: Arc<std::sync::OnceLock<NetworkWatch>>,
+     cb: Arc<dyn NetworkChangeCallback>,
+ ) -> WatchHandle {
+-    let task = n0_future::task::spawn(async move {
++    // Subscribe before spawning, so the first explicit hint cannot be missed.
++    let mut hints = source.get().expect("network watch initialized").hints.subscribe();
++    WatchHandle::spawn(async move {
++        let source = source.get().expect("network watch initialized");
++        let Some(monitor) = source.monitor().await else {
++            return;
++        };
++        let mut state = monitor.interface_state();
+         loop {
+-            endpoint.network_change().await;
+-            if let Err(err) = cb.on_change().await {
+-                tracing::warn!("network change callback error: {err:?}");
+-                break;
++            tokio::select! {
++                biased;
++                _ = source.endpoint.closed() => break,
++                changed = hints.changed() => {
++                    if changed.is_err() {
++                        break;
++                    }
++                }
++                changed = state.updated() => {
++                    if changed.is_err() {
++                        break;
++                    }
++                }
+             }
++            tokio::select! {
++                biased;
++                _ = source.endpoint.closed() => break,
++                result = cb.on_change() => {
++                    if let Err(err) = result {
++                        tracing::warn!("network change callback error: {err:?}");
++                        break;
++                    }
++                }
++            }
+         }
+-    });
+-    WatchHandle::new(AbortOnDropHandle::new(task))
++    })
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::time::Duration;
++    use tokio::{sync::mpsc, time::timeout};
++
++    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
++
++    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
++        n0_future::future::block_on(uniffi::deps::async_compat::Compat::new(async move {
++            timeout(TEST_TIMEOUT, future).await.expect("watch regression timed out")
++        }))
++    }
++
++    fn endpoint() -> Arc<crate::Endpoint> {
++        let builder = crate::EndpointBuilder::new();
++        builder.apply_minimal();
++        builder.disable_port_mapping();
++        builder.bind_addr("127.0.0.1:0".into()).unwrap();
++        builder.alpns(vec![b"iroh-ffi/watch-test".to_vec()]);
++        run(builder.bind()).unwrap()
++    }
++
++    struct CallbackDrop {
++        cancelled: std::sync::mpsc::Sender<&'static str>,
++        kind: &'static str,
++    }
++
++    impl Drop for CallbackDrop {
++        fn drop(&mut self) {
++            let _ = self.cancelled.send(self.kind);
++        }
++    }
++
++    struct PendingCallback {
++        entered: std::sync::mpsc::Sender<&'static str>,
++        cancelled: std::sync::mpsc::Sender<&'static str>,
++    }
++
++    impl PendingCallback {
++        async fn wait(&self, kind: &'static str) -> Result<(), CallbackError> {
++            let _drop = CallbackDrop { cancelled: self.cancelled.clone(), kind };
++            self.entered.send(kind).map_err(|_| CallbackError::Error)?;
++            std::future::pending().await
++        }
++    }
++
++    #[async_trait::async_trait]
++    impl AddrChangeCallback for PendingCallback {
++        async fn on_change(&self, _addr: Arc<EndpointAddr>) -> Result<(), CallbackError> {
++            self.wait("addr").await
++        }
++    }
++
++    #[async_trait::async_trait]
++    impl HomeRelayCallback for PendingCallback {
++        async fn on_change(&self, urls: Vec<String>) -> Result<(), CallbackError> {
++            assert!(urls.is_empty(), "minimal endpoint must not use a relay");
++            self.wait("home").await
++        }
++    }
++
++    #[async_trait::async_trait]
++    impl NetworkChangeCallback for PendingCallback {
++        async fn on_change(&self) -> Result<(), CallbackError> {
++            self.wait("network").await
++        }
++    }
++
++    #[async_trait::async_trait]
++    impl crate::PathChangeCallback for PendingCallback {
++        async fn on_change(&self, paths: Vec<crate::PathSnapshot>) -> Result<(), CallbackError> {
++            assert!(paths.iter().any(|path| path.is_ip && path.is_selected));
++            self.wait("paths").await
++        }
++    }
++
++    #[async_trait::async_trait]
++    impl crate::PathEventCallback for PendingCallback {
++        async fn on_event(&self, _event: crate::PathEvent) -> Result<(), CallbackError> {
++            self.wait("events").await
++        }
++    }
++
++    #[test]
++    fn foreign_thread_constructor_registration() {
++        assert!(tokio::runtime::Handle::try_current().is_err());
++        let (sent, received) = std::sync::mpsc::channel();
++        let handle = WatchHandle::spawn(async move {
++            assert!(tokio::runtime::Handle::try_current().is_ok());
++            sent.send(()).unwrap();
++        });
++        received.recv_timeout(TEST_TIMEOUT).unwrap();
++        run(async { handle.task.lock().await.take().unwrap().await.unwrap() });
++    }
++
++    #[test]
++    fn foreign_thread_endpoint_watches_cancel_on_close() {
++        let endpoint = endpoint();
++        let (entered, received) = std::sync::mpsc::channel();
++        let (cancelled, dropped) = std::sync::mpsc::channel();
++        let callback = Arc::new(PendingCallback { entered, cancelled });
++        assert!(tokio::runtime::Handle::try_current().is_err());
++        let addr = endpoint.watch_addr(callback.clone());
++        let home = endpoint.watch_home_relay(callback.clone());
++        let network = endpoint.watch_network_change(callback);
++        run(endpoint.network_change());
++        let mut observed: Vec<_> = (0..3)
++            .map(|_| received.recv_timeout(TEST_TIMEOUT).unwrap()).collect();
++        observed.sort_unstable();
++        assert_eq!(observed, ["addr", "home", "network"]);
++        run(async {
++            endpoint.close().await.unwrap();
++            for handle in [addr, home, network] {
++                handle.task.lock().await.take().unwrap().await.unwrap();
++            }
++        });
++        let mut cancelled: Vec<_> = (0..3)
++            .map(|_| dropped.recv_timeout(TEST_TIMEOUT).unwrap()).collect();
++        cancelled.sort_unstable();
++        assert_eq!(cancelled, ["addr", "home", "network"]);
++    }
++
++    #[test]
++    fn foreign_thread_path_watches_cancel_on_stop_drop_and_close() {
++        let server = endpoint();
++        let client = endpoint();
++        let server_addr = EndpointAddr::new(&server.id(), None, server.bound_sockets());
++        let (connection, peer) = run(async {
++            let accept = async {
++                let incoming = server.accept_next().await.unwrap();
++                incoming.accept().await.unwrap().connect().await.unwrap()
++            };
++            let (connection, peer) = tokio::join!(
++                client.connect(&server_addr, b"iroh-ffi/watch-test"), accept
++            );
++            (connection.unwrap(), peer)
++        });
++        let (entered, received) = std::sync::mpsc::channel();
++        let (cancelled, dropped) = std::sync::mpsc::channel();
++        let callback = Arc::new(PendingCallback { entered, cancelled });
++        assert!(tokio::runtime::Handle::try_current().is_err());
++        for stop in [true, false] {
++            let handle = connection.watch_paths(callback.clone());
++            assert_eq!(received.recv_timeout(TEST_TIMEOUT).unwrap(), "paths");
++            if stop {
++                run(handle.stop());
++                run(handle.stop());
++            }
++            drop(handle);
++            assert_eq!(dropped.recv_timeout(TEST_TIMEOUT).unwrap(), "paths");
++        }
++        let paths = connection.watch_paths(callback.clone());
++        let events = connection.watch_path_events(callback);
++        assert_eq!(received.recv_timeout(TEST_TIMEOUT).unwrap(), "paths");
++        connection.close(0, b"watch test complete").unwrap();
++        run(async {
++            for handle in [paths, events] {
++                handle.task.lock().await.take().unwrap().await.unwrap();
++            }
++            peer.closed().await;
++            client.close().await.unwrap();
++            server.close().await.unwrap();
++        });
++        assert_eq!(dropped.recv_timeout(TEST_TIMEOUT).unwrap(), "paths");
++        // Event streams have no initial replay. Registration and natural close
++        // are covered; shutdown does not guarantee a final PathEvent::Closed.
++    }
++
++    struct ReportChange {
++        changed: mpsc::Sender<()>,
++        block: bool,
++    }
++
++    #[async_trait::async_trait]
++    impl NetworkChangeCallback for ReportChange {
++        async fn on_change(&self) -> Result<(), CallbackError> {
++            self.changed.send(()).await.map_err(|_| CallbackError::Error)?;
++            if self.block {
++                std::future::pending::<()>().await;
++            }
++            Ok(())
++        }
++    }
++
++    #[tokio::test]
++    async fn explicit_network_hint_reaches_watchers_and_close_cancels_callback() {
++        let builder = crate::EndpointBuilder::new();
++        builder.apply_minimal();
++        builder.disable_port_mapping();
++        let endpoint = builder.bind().await.unwrap();
++        endpoint.network_change().await;
++
++        let cloned_endpoint = endpoint.as_ref().clone();
++        let (first_changed, mut first_received) = mpsc::channel(4);
++        let first = endpoint.watch_network_change(Arc::new(ReportChange {
++            changed: first_changed,
++            block: false,
++        }));
++        let (second_changed, mut second_received) = mpsc::channel(4);
++        let second = endpoint.watch_network_change(Arc::new(ReportChange {
++            changed: second_changed,
++            block: true,
++        }));
++        cloned_endpoint.network_change().await;
++        timeout(Duration::from_secs(3), first_received.recv()).await.unwrap().unwrap();
++        timeout(Duration::from_secs(3), second_received.recv()).await.unwrap().unwrap();
++
++        timeout(Duration::from_secs(1), first.stop()).await.unwrap();
++        timeout(Duration::from_secs(3), endpoint.close()).await.unwrap().unwrap();
++        // Await natural closure without calling stop: even an in-flight callback
++        // must be cancelled by endpoint.closed(), not keep the watcher alive.
++        let task = second.task.lock().await.take().unwrap();
++        timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
++        cloned_endpoint.network_change().await;
++        assert!(second_received.try_recv().is_err());
++    }
++}
+--- a/src/path.rs
++++ b/src/path.rs
+@@ -8,7 +8,7 @@
+ 
+ use iroh::endpoint::LocalTransportAddr;
+ use iroh_base::TransportAddr;
+-use n0_future::{StreamExt, task::AbortOnDropHandle};
++use n0_future::StreamExt;
+ 
+ use crate::{CallbackError, WatchHandle};
+ 
+@@ -198,7 +198,7 @@
+     conn: iroh::endpoint::Connection,
+     cb: Arc<dyn PathChangeCallback>,
+ ) -> WatchHandle {
+-    let task = n0_future::task::spawn(async move {
++    WatchHandle::spawn(async move {
+         let mut stream = conn.paths_stream();
+         while let Some(snapshot) = stream.next().await {
+             let mapped: Vec<PathSnapshot> = snapshot
+@@ -216,28 +216,36 @@
+                     }
+                 })
+                 .collect();
+-            if let Err(err) = cb.on_change(mapped).await {
++            let result = tokio::select! {
++                biased;
++                _ = conn.closed() => break,
++                result = cb.on_change(mapped) => result,
++            };
++            if let Err(err) = result {
+                 tracing::warn!("paths watch callback error: {err:?}");
+                 break;
+             }
+         }
+-    });
+-    WatchHandle::new(AbortOnDropHandle::new(task))
++    })
+ }
+ 
+ pub(crate) fn spawn_path_events_watch(
+     conn: iroh::endpoint::Connection,
+     cb: Arc<dyn PathEventCallback>,
+ ) -> WatchHandle {
+-    let task = n0_future::task::spawn(async move {
++    WatchHandle::spawn(async move {
+         let mut stream = conn.path_events();
+         while let Some(event) = stream.next().await {
+             let mapped: PathEvent = event.into();
+-            if let Err(err) = cb.on_event(mapped).await {
++            let result = tokio::select! {
++                biased;
++                _ = conn.closed() => break,
++                result = cb.on_event(mapped) => result,
++            };
++            if let Err(err) = result {
+                 tracing::warn!("path events callback error: {err:?}");
+                 break;
+             }
+         }
+-    });
+-    WatchHandle::new(AbortOnDropHandle::new(task))
++    })
+ }

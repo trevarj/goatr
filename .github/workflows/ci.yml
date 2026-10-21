@@ -1,4 +1,4 @@
-name: Foundation
+name: Native foundation
 
 on:
   push:
@@ -8,17 +8,32 @@ permissions:
   contents: read
 
 concurrency:
-  group: foundation-${{ github.ref }}
+  group: native-foundation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   core:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - name: Nix formatting and Rust toolchain smoke
+      - name: Rust product gates and formatting
         run: nix develop -c make check
+      - name: Locked direct Rust package
+        run: nix build .#goatr --no-link
+
+  android-bindings:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Secure two-ABI native producer
+        run: nix build .#iroh-android --no-link
+      - name: Complete Kotlin API and Android AAR
+        run: nix develop .#android -c make android-bindings

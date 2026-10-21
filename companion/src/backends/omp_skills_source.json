@@ -1,0 +1,65 @@
+{
+  "version": "18.8.7",
+  "files": [
+    {
+      "path": "package.json",
+      "sha256": "a683d52fb3f17780cd3285638a23d53dd7f986eaf5c0c550fedfa30ed5d19334",
+      "size": 17092
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63",
+      "size": 1144
+    },
+    {
+      "path": "dist/cli.js",
+      "sha256": "2a1f0be0d536031830c2de5abc1a0f7f06948e7c3fdcb77542ef70cba3497481",
+      "size": 29244903
+    },
+    {
+      "path": "src/index.ts",
+      "sha256": "12ad735d8978479589d467dfbeb79184409bf2e0b2bd075bda374d1757c7de3f",
+      "size": 2917
+    },
+    {
+      "path": "src/extensibility/extensions/types.ts",
+      "sha256": "c0b78c9414ec34ead5617b14a48b4750df0e1d2204eca002a9032c558b20c0ba",
+      "size": 78379
+    },
+    {
+      "path": "src/extensibility/extensions/loader.ts",
+      "sha256": "6ce3fcecb30caca84738683af80677638a9b6aa51b285709f32f5fad56bcd2c2",
+      "size": 22111
+    },
+    {
+      "path": "src/extensibility/extensions/get-commands-handler.ts",
+      "sha256": "cea30c70b2325e6423c94f3518f348f92b46f7490d23dcf3f2a9a8981eb85674",
+      "size": 2614
+    },
+    {
+      "path": "src/modes/runtime-init.ts",
+      "sha256": "eab4b6a00d52f036f654f9a331cea0239f2e6a2e060b11879b812a19485a54ae",
+      "size": 8876
+    },
+    {
+      "path": "src/modes/controllers/extension-ui-controller.ts",
+      "sha256": "43adde71e2e10945bc113cf385b6c02e653e4fb3d2825744f323f21fac64a010",
+      "size": 51482
+    },
+    {
+      "path": "src/extensibility/skills.ts",
+      "sha256": "50892b528c20ab1fc901dad90e3900f05433d64767710e288d1821c96f50ea85",
+      "size": 29216
+    },
+    {
+      "path": "src/modes/skill-command.ts",
+      "sha256": "2c604259aed6b49ce466bac0ee683718e76ea79d6a0e07ada5080ff67a5422f7",
+      "size": 4284
+    },
+    {
+      "path": "src/session/session-manager.ts",
+      "sha256": "36fbe849db547e34a86f705f542b9905ab2eab8f579253afb74e239799d3d227",
+      "size": 167701
+    }
+  ]
+}

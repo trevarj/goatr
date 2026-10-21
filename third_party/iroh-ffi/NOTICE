@@ -1,0 +1,64 @@
+Goatr's patched iroh-ffi binding source
+
+Original source: https://github.com/n0-computer/iroh-ffi
+Revision: 5e451092dba0c1a09ee83ff6e5be37b1152a5c58 (upstream package 1.1.0)
+Copyright 2025 N0, INC.
+Upstream license: MIT OR Apache-2.0; both original license texts are retained.
+
+Goatr modifications: Copyright (C) 2026 Goatr contributors.
+The independently authored Goatr changes are GPL-3.0-or-later (root LICENSE).
+The retained patch upgrades the core/base/relay graph to exactly 1.3.0,
+requires rustls 0.23.45, exposes network_change, disable_port_mapping and
+clear_ip_transports, and replaces the upstream network watcher notifier loop
+with one endpoint-owned lazy netwatch monitor shared by cloned/protocol
+handles. Explicit network_change calls notify both core and that monitor.
+Android RouteMonitor is a no-op and netwatch suppresses equal interface
+states, so Tokio watch preserves/coalesces actual Android connectivity hints
+without polling. Closing the endpoint cancels network-watcher initialization
+and in-flight callbacks and releases the shared monitor.
+All five synchronous UniFFI watches (Connection.watch_paths/watch_path_events
+and Endpoint.watch_addr/watch_home_relay/watch_network_change) register tasks
+through one private WatchHandle.spawn, single-polling immediate registration
+with UniFFI's existing async-compat Tokio runtime. No executor, runtime,
+dependency, generated-Kotlin patch or public API change is added.
+Connection close cancels pending path callbacks. Endpoint close cancels
+address/home-relay stream waits and pending callbacks even while clones remain.
+Stop and last-handle drop retain AbortOnDropHandle ownership and request abort;
+they do not join or synchronously interrupt non-cooperative foreign callbacks.
+Whole-connection shutdown does not guarantee final per-path Closed delivery.
+The patch retains the explicit-network-hint regression and adds plain Rust
+foreign-thread registration, actual loopback path callbacks and bounded
+stop/drop/connection-close/endpoint-close cancellation regressions.
+These regressions have not been executed by the patch worker.
+No existing public binding API is removed. Kotlin is generated during the
+Nix build by the UniFFI generator from the same retained FFI lock.
+
+The Android context helper is copied, unchanged, from:
+kotlin/android/src/main/kotlin/computer/iroh/IrohAndroid.kt
+It and src/android_init.rs retain the upstream MIT/Apache-2.0 terms.
+The source, patch and lock identities are in source.json; exact independently
+resolved registry checksums, features and license declarations are in
+dependencies.json. Its features describe Cargo metadata resolution across
+workspace members/targets, not an executed Android build or advisory audit.
+The runtime seam reuses locked UniFFI 0.31.2 (MPL-2.0), async-compat 0.2.6
+(MIT OR Apache-2.0), n0-future 0.3.2 (MIT OR Apache-2.0), Tokio 1.53.2 and
+tokio-util 0.7.19 (MIT); no dependency implementation is copied or modified.
+Their original crate license/NOTICE files remain packaged by the native
+producer. The FFI MIT/Apache-2.0 and Goatr GPL-3.0-or-later notices above remain.
+
+
+Core source: https://github.com/n0-computer/iroh
+Revision: 0072d7d84b233f9e7185eb676f049beaf557ac03 (1.3.0)
+Both graphs use registry artifacts with retained Cargo.lock checksums. Nix
+checks the core/base/relay artifacts' packaged .cargo_vcs_info.json against
+that revision. Iroh is MIT OR Apache-2.0, including any retained BSD notices.
+Nix outputs carry the license/NOTICE/COPYING files from locked crate archives.
+
+JNA 5.19.1 is a separate Maven dependency (Android AAR, JVM-only JAR).
+Its upstream license is LGPL-2.1-or-later OR Apache-2.0; Maven verification
+metadata retains the actual fetched artifact hashes. No published iroh AAR
+or host-native library is used by the Rust companion.
+
+Reproduction entrypoint: nix build path:.#goatr path:.#iroh-android
+This notice records source use, not successful compilation, native loading,
+advisory clearance, selected-path transport proof or 16-KiB runtime evidence.

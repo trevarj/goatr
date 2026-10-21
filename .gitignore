@@ -8,6 +8,7 @@
 /result
 /result-*
 .gradle/
+/.kotlin/
 **/build/
 local.properties
 .cxx/
@@ -24,3 +25,6 @@ target/
 .idea/
 .vscode/
 .DS_Store
+
+# Transient image-generation scratch output; retained assets live under brand/
+/output/

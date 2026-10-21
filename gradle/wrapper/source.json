@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "producer": "Gradle wrapper task",
+  "gradleVersion": "9.8.0",
+  "license": "Apache-2.0",
+  "distributionUrl": "https://services.gradle.org/distributions/gradle-9.8.0-bin.zip",
+  "distributionSha256": "bafd5ce9cfaea0fbccfdc8439a1ac42fbd4cd9c89dc9a988228d8a2639a58e6c",
+  "files": {
+    "gradlew": "a5a5c199ba02189ae8c46a334223371a20599d9c298ef65e7540ede4a3f72d59",
+    "gradlew.bat": "f17917f8dbe61182b149273ee78090fec1197442c3f38276af907bfa5190db16",
+    "gradle/wrapper/gradle-wrapper.jar": "238e777fcddd7e34f9708186085def2abd6e08e658505b38718d79d74c21abd5",
+    "gradle/wrapper/gradle-wrapper.properties": "e81b90975868be2513ca00d6a5a01303a406a5cb01a306210b887e983e4b17ae"
+  }
+}

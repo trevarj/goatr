@@ -1,0 +1,6 @@
+{
+  "tool": "built-in imagegen",
+  "prompt": "Use case: logo-brand. Asset type: Google Play feature graphic for Android app goatr. Use the supplied image as the exact brand logo reference: preserve the right-facing bold charcoal goat, horn shapes, pointed beard and >_ terminal cheek. Make a clean restrained flat landscape brand banner approximately 2.048:1 aspect ratio. Solid light neutral gray #D9DCD9 background. Place the logo to the left of a large lowercase wordmark reading exactly 'goatr', set in clean bold rounded sans-serif. Compose the logo and wordmark together as a centered horizontal lockup, occupying the middle 70% with generous outer margins. Charcoal logo and lettering. Crisp flat graphic. No shadows, gradients, textures, device mockups, screenshots, extra text, slogans, badges, UI or scenery. This is a banner, not a square icon. Only the exact text goatr.",
+  "reference": "brand/logos/03-terminal-goat-bold.png",
+  "export": "play-feature-1024x500.png"
+}

@@ -1,0 +1,41 @@
+[package]
+name = "goatr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "GPL-3.0-or-later"
+description = "Native foreground companion for Goatr"
+publish = false
+
+[dependencies]
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
+# Explicit security floor, independently resolved from the Android FFI graph.
+rustls = { version = "=0.23.45", default-features = false, features = ["std"] }
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "io-util", "signal", "process"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["raw_value", "arbitrary_precision"] }
+sha2 = "=0.11.0"
+hmac = "=0.13.0"
+uuid = { version = "=1.23.0", features = ["v4"] }
+base64 = "=0.23.1"
+rusqlite = { version = "=0.40.2", default-features = false }
+getrandom = "=0.4.3"
+libc = "=0.2.190"
+futures-util = "=0.3.34"
+clap = { version = "=4.6.7", default-features = false, features = ["std", "help", "usage", "error-context"] }
+qrcode = { version = "=0.14.1", default-features = false }
+toml_edit = { version = "=0.25.15", default-features = false, features = ["parse", "serde", "display"] }
+url = "=2.5.8"
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "alloc"] }
+axum = { version = "=0.8.8", default-features = false, features = ["http1", "tokio", "ws"] }
+tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+parking_lot = { version = "=0.12.5", default-features = false }
+
+reqwest = { version = "=0.13.5", default-features = false, features = ["http2", "rustls-no-provider"] }
+httpdate = "=1.0.3"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["test-util"] }
+http-body-util = { version = "=0.1.5", default-features = false }
+ring = { version = "=0.17.14", default-features = false, features = ["std"] }
