@@ -3,6 +3,7 @@ package io.github.trevarj.goatr
 
 import android.app.Activity
 import android.util.TypedValue
+import android.graphics.Typeface
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -30,6 +31,7 @@ import androidx.compose.ui.text.font.FontFamily
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
 import io.noties.markwon.MarkwonConfiguration
+import io.noties.markwon.core.MarkwonTheme
 import io.noties.markwon.image.AsyncDrawableLoader
 import org.commonmark.node.*
 import java.net.URI
@@ -38,6 +40,7 @@ import kotlinx.coroutines.CancellationException
 /** Native toolbar, accessibility and keyboard Copy all use the exact backing source. */
 private class MarkdownTextView(context: Context):TextView(context) {
     var backing: String=""
+    var renderer: Markwon?=null
     init {
         isSaveEnabled=false;isSaveFromParentEnabled=false;setTextIsSelectable(true);setPadding(0,0,0,0)
         customSelectionActionModeCallback=object: android.view.ActionMode.Callback {
@@ -77,8 +80,17 @@ fun MarkdownText(backing: String,onLink: (String)->Unit,modifier: Modifier=Modif
     val density=LocalDensity.current
     val foreground=MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor=MaterialTheme.colorScheme.primary.toArgb()
-    val markwon=remember(context) {
+    val codeBackground=MaterialTheme.colorScheme.surfaceVariant.toArgb()
+    val codeMargin=(8f*density.density).toInt()
+    val codeSize=(13f*density.density*density.fontScale).toInt()
+    val markwon=remember(context,foreground,codeBackground,codeMargin,codeSize) {
         Markwon.builder(context).usePlugin(object: AbstractMarkwonPlugin() {
+            override fun configureTheme(builder: MarkwonTheme.Builder) {
+                builder.codeTextColor(foreground).codeBlockTextColor(foreground)
+                    .codeBackgroundColor(codeBackground).codeBlockBackgroundColor(codeBackground)
+                    .codeTypeface(Typeface.MONOSPACE).codeBlockTypeface(Typeface.MONOSPACE)
+                    .codeTextSize(codeSize).codeBlockTextSize(codeSize).codeBlockMargin(codeMargin)
+            }
             override fun configureConfiguration(builder: MarkwonConfiguration.Builder) {
                 builder.asyncDrawableLoader(AsyncDrawableLoader.noOp()).linkResolver {_,url->if(safeHttpUrl(url)!=null) link(url)}
             }
@@ -113,8 +125,8 @@ fun MarkdownText(backing: String,onLink: (String)->Unit,modifier: Modifier=Modif
         view.hyphenationFrequency=Layout.HYPHENATION_FREQUENCY_NONE
         view.setLineSpacing(2f*density.density*density.fontScale,1f)
         view.setTextColor(foreground);view.setLinkTextColor(linkColor)
-        if(view.backing!=backing) {view.backing=backing;markwon.setMarkdown(view,backing)}
-    },onRelease={it.text="";it.backing=""})
+        if(view.backing!=backing || view.renderer!==markwon) {view.backing=backing;view.renderer=markwon;markwon.setMarkdown(view,backing)}
+    },onRelease={it.text="";it.backing="";it.renderer=null})
 }
 
 @Composable
@@ -161,10 +173,10 @@ fun HistoryCard(record: HistoryRecord,key: ConversationKey,source: Uuid?,model: 
     var details by remember(record.id,key,source) {mutableStateOf(false)}
     val user=record.role==Role.User
     Box(Modifier.fillMaxWidth(),contentAlignment=if(user) Alignment.CenterEnd else Alignment.CenterStart) {
-    Surface(color=if(user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,shape=MaterialTheme.shapes.large,border=if(user) null else BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant),modifier=Modifier.widthIn(max=720.dp).fillMaxWidth(if(user) 0.96f else 1f)) {
-    Column(Modifier.padding(8.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+    Surface(color=if(user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,contentColor=if(user) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,shape=MaterialTheme.shapes.large,border=if(user) null else BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant),modifier=Modifier.widthIn(max=if(user) 560.dp else 720.dp).fillMaxWidth(if(user) .88f else 1f).testTag(if(user) "history_user_message" else "history_native_message")) {
+    Column(Modifier.padding(if(user) 12.dp else 10.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
-            UiText(record.role.name,style=MaterialTheme.typography.labelLarge,color=if(user) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.weight(1f))
+            UiText(if(user) "You" else record.role.name,style=MaterialTheme.typography.labelLarge,color=if(user) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.weight(1f))
             DetailDisclosure(details,{
                 details=!details
                 if(!details) originalExpanded=false
@@ -178,7 +190,7 @@ fun HistoryCard(record: HistoryRecord,key: ConversationKey,source: Uuid?,model: 
             GroupedSurface {
                 // Native tool names can be paths; give name and status independent wrapping lines.
                 UiText("Tool · ${tool.name}",style=MaterialTheme.typography.titleSmall,modifier=Modifier.fillMaxWidth())
-                UiText(tool.status.toString(),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                UiText(tool.status.toString(),style=MaterialTheme.typography.labelMedium,color=if(tool.status==ToolStatus.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 TextButton(onClick={toolExpanded=!toolExpanded},modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("tool_expand")) {
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
                         GoatrIcon(MaterialGlyph.ExpandMore,null)

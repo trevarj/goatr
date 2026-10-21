@@ -971,6 +971,9 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     if(snippets) ComposerSnippetPicker(key,store.snippets.filter {it.hostId==key.host},model,model.composers[key].orEmpty().isEmpty()) {snippets=false}
     val pending=reducer?.pending.orEmpty()
     val history=reducer?.history ?: cache?.history.orEmpty()
+    val routineToolIds=history.filter {isRoutineToolRecord(it,reducer?.state?.activity?.toolRecordId)}.map {it.id}.toSet()
+    // Older browsing opens the routine records so native backscroll remains inspectable.
+    var routineToolsExpanded by remember(key,source,reducer?.browsingOlder) {mutableStateOf(reducer?.browsingOlder==true)}
     val focusedAction=model.focusedAction?.takeIf {(it.metadata.target==key.target || it.metadata.sourceTarget==key.target)}
     val latestTailIndex=when {
         history.isNotEmpty() -> history.size + if(focusedAction!=null) 1 else 0
@@ -1230,8 +1233,8 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
             if(summary?.provider==Provider.Omp) UiText("All branches; desktop-selected branch unavailable",style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("omp_branches"))
         },history={
             Box(Modifier.fillMaxSize().testTag("conversation_target_${key.target.sessionId.value}_${key.target.generation.value}")) {
-            LazyColumn(Modifier.fillMaxSize().testTag("conversation_list"),state=transcript,verticalArrangement=Arrangement.spacedBy(6.dp),contentPadding=PaddingValues(vertical=8.dp)) {
-                item(key="conversation_header") {
+            LazyColumn(Modifier.fillMaxSize().testTag("conversation_list"),state=transcript,contentPadding=PaddingValues(vertical=8.dp)) {
+                item(key="conversation_header") {Column(Modifier.padding(bottom=6.dp)) {
                     GoatrSection(summary?.provider?.let(::providerLabel) ?: "Provider unavailable",inventory?.let {current->summary?.let {sessionWorkspaceLabel(current,it)}})
                     var details by remember(key,source) {mutableStateOf(false)}
                     TextButton(onClick={details=!details},modifier=Modifier.testTag("conversation_details")) {UiText(if(details) "Hide details" else "Details")}
@@ -1244,57 +1247,51 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                     if(reducer?.browsingOlder==true) UiText("Viewing older history. Newer messages may be outside this window.")
                     if (reducer?.state?.summary?.capabilities?.history==true) UiText("Native backscroll keeps a local window of up to 1,000 completed records.")
                     reducer?.state?.activity?.let {activity->Heading("Live · ${activity.state}");activity.text?.let {ContentView(it,key,source,model)}}
-                }
+                    ToolActivitySummary(routineToolIds.size,routineToolsExpanded) {routineToolsExpanded=!routineToolsExpanded}
+                }}
                 // Keep the current canonical receipt near the header. Completed native history
                 // remains the follow target instead of being covered by this status card.
-                focusedAction?.let {action->item(key="receipt_${action.metadata.actionId.value}") {ReceiptPanel(key.host,action,model)}}
-                items(history,key={"history_${it.id.value}"},contentType={it.kind}) {record->Column(Modifier.testTag("history_record_${record.id.value}")) {HistoryCard(record,key,source,model)}}
-                items(model.actions[key.host].orEmpty().filter {it.metadata.target==key.target && it.metadata.actionId!=focusedAction?.metadata?.actionId},key={"receipt_${it.metadata.actionId.value}"}) {ReceiptPanel(key.host,it,model)}
+                focusedAction?.let {action->item(key="receipt_${action.metadata.actionId.value}") {Column(Modifier.padding(bottom=6.dp)) {ReceiptPanel(key.host,action,model)}}}
+                // Keep native keys/order/indices. Only visible bodies own spacing, so folded
+                // records occupy zero height without accumulating blank transcript gaps.
+                items(history,key={"history_${it.id.value}"},contentType={it.kind}) {record->
+                    if(routineToolsExpanded || record.id !in routineToolIds) Column(Modifier.padding(bottom=6.dp).testTag("history_record_${record.id.value}")) {HistoryCard(record,key,source,model)}
+                }
+                items(model.actions[key.host].orEmpty().filter {it.metadata.target==key.target && it.metadata.actionId!=focusedAction?.metadata?.actionId},key={"receipt_${it.metadata.actionId.value}"}) {Column(Modifier.padding(bottom=6.dp)) {ReceiptPanel(key.host,it,model)}}
                 item {ActionPaging(model,collapsed=true)}
             }
             }
         },editor={
-            ComposerOverflow(
-                browsingOlder = reducer?.browsingOlder == true,
-                refreshEnabled = !model.busy && key.host in connection.hello,
-                onSwitch = { switcher = true },
-                onRefresh = model::refresh,
-                onBrowseOlder = if (reducer != null && !reducer.browsingOlder) ({ model.older() }) else null,
-                browseOlderEnabled = !model.busy && source != null && reducer?.state?.summary?.capabilities?.history == true,
-                onLoadOlder = reducer?.nextCursor?.let { cursor -> { model.older(cursor) } },
-                loadOlderEnabled = !model.busy && source != null,
-                onSnippets = { snippets = true },
-                skillsEnabled = ready && source != null && summary?.capabilities?.skillsRead==true && summary.skillsGeneration!=null,
-                onSkills = { model.openSkills(key) },
-                terminalEnabled = ready && source != null && summary?.capabilities?.terminalRead==true,
-                onTerminal = { model.openTerminal(key) },
-                worktreesEnabled = ready && source != null && summary?.capabilities?.worktreesRead==true,
-                onWorktrees = { model.openWorktrees(key) },
-                changesEnabled = ready && source != null && summary?.capabilities?.changesRead==true,
-                onChanges = { model.openChanges(key) },
-                agentAliasEnabled = aliasAvailable && !model.busy,
-                onAgentAlias = {source?.let {aliasScope=model.beginAgentAlias(key,it);aliasName=""}},
-                workspaceRenameEnabled = workspaceRenameAvailable,
-                onWorkspaceRename = { workspaceLabel=currentWorkspaceLabel.orEmpty(); renameWorkspace=true },
-                stopEnabled = stopAllowed && request == null,
-                stopDisabledReason = when {
+            ConversationControlRail(
+                stopEnabled=stopAllowed && request==null,
+                stopDisabledReason=when {
                     request!=null -> "Close the current answer form before stopping."
                     readiness!=null -> readiness.message
                     else -> "Stopping is unavailable for this current native state."
                 },
-                onStop = model::stop,
-            )
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                onStop=model::stop,
+            ) {
+                ConversationControl(MaterialGlyph.Chat,"Switch conversation","switcher") {switcher=true}
+                ConversationControl(MaterialGlyph.Add,"Snippets","composer_snippets") {snippets=true}
+                ConversationControl(MaterialGlyph.Menu,"Skills","composer_skills",ready && source!=null && summary?.capabilities?.skillsRead==true && summary.skillsGeneration!=null,"Skills are not available for this session.") {model.openSkills(key)}
                 AttachmentPicker(enabled=ready && summary?.capabilities?.attachments==true && request==null,captureSourceTicket={model.startAttachmentPicker(key)},returnSourceTicket=model::returnAttachmentPicker,cancelSourceTicket=model::finishAttachmentPicker,isSourceTicketCurrent=model::attachmentAdmitted,onUpload=model::beginAttachmentUpload)
-                if(model.attachmentTransfer!=null)TextButton(onClick=model::showAttachments,modifier=Modifier.heightIn(min=48.dp)){AttachmentIconLabel(R.drawable.ic_material_attach_file,"Upload progress")}
-                store.attachments.filter {it.host==key.host&&it.target==key.target}.forEach {record->TextButton(onClick={model.showAttachmentRecovery(record)},modifier=Modifier.heightIn(min=48.dp)){AttachmentIconLabel(R.drawable.ic_material_description,"Retained upload")};TextButton(onClick={model.openRetainedAttachment(record)},enabled=ready&&summary?.capabilities?.attachments==true,modifier=Modifier.heightIn(min=48.dp).testTag("attachment_inspect_original")){AttachmentIconLabel(R.drawable.ic_material_attach_file,"Inspect for this conversation")}}
+                if(model.attachmentTransfer!=null) ConversationControl(R.drawable.ic_material_attach_file,"Upload progress","attachment_progress",onClick=model::showAttachments)
+                store.attachments.filter {it.host==key.host&&it.target==key.target}.forEach {record->
+                    ConversationControl(R.drawable.ic_material_description,"Retained upload","attachment_recovery_${record.uploadId.value}") {model.showAttachmentRecovery(record)}
+                    ConversationControl(R.drawable.ic_material_attach_file,"Inspect for this conversation","attachment_inspect_original",ready&&summary?.capabilities?.attachments==true) {model.openRetainedAttachment(record)}
+                }
+                if(summary?.capabilities?.artifacts==true) ConversationControl(MaterialGlyph.Folder,"Files","conversation_files",ready&&source!=null&&!model.busy) {model.beginArtifacts(key.host,ArtifactSource.Session(key.target))}
+                ConversationControl(MaterialGlyph.Terminal,"Terminal","terminal_open",ready&&source!=null&&summary?.capabilities?.terminalRead==true,"Terminal text is unavailable for this current native session.") {model.openTerminal(key)}
+                ConversationControl(MaterialGlyph.Desktop,"Worktrees","worktrees_open",ready&&source!=null&&summary?.capabilities?.worktreesRead==true,"Worktrees are unavailable for this current native session.") {model.openWorktrees(key)}
+                ConversationControl(MaterialGlyph.Terminal,"Changes","changes_open",ready&&source!=null&&summary?.capabilities?.changesRead==true,"Changes are unavailable for this current native session.") {model.openChanges(key)}
+                ConversationControl(MaterialGlyph.Add,"New session","agent_new_session",ready&&source!=null&&!model.busy) {model.beginAgentSession(key)}
+                ConversationControl(MaterialGlyph.Terminal,"New terminal in agent process directory","agent_terminal_new",ready&&source!=null&&summary?.capabilities?.terminalCreate==true&&!model.busy,"Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.") {model.beginAgentTerminal(key)}
+                ConversationControl(MaterialGlyph.Edit,"Agent alias","agent_alias_open",aliasAvailable&&!model.busy,"Agent alias is unavailable for this original native session.") {source?.let {aliasScope=model.beginAgentAlias(key,it);aliasName=""}}
+                ConversationControl(MaterialGlyph.Edit,"Rename workspace","workspace_rename_open",workspaceRenameAvailable,"Workspace rename is unavailable for this current native session.") {workspaceLabel=currentWorkspaceLabel.orEmpty();renameWorkspace=true}
+                ConversationControl(MaterialGlyph.Refresh,if(reducer?.browsingOlder==true) "Return to latest history" else "Refresh","conversation_refresh",!model.busy&&key.host in connection.hello,"Finish connecting or the current operation before refreshing",model::refresh)
+                if(reducer!=null && !reducer.browsingOlder) ConversationControl(MaterialGlyph.Back,"Browse native history","history_browse",!model.busy&&source!=null&&reducer.state?.summary?.capabilities?.history==true,"History is unavailable") {model.older()}
+                reducer?.nextCursor?.let {cursor->ConversationControl(MaterialGlyph.Back,"Load older native history","history_older",!model.busy&&source!=null,"Older history is unavailable") {model.older(cursor)}}
             }
-            FlowRow(Modifier.fillMaxWidth().heightIn(min=48.dp),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)){
-                if(summary?.capabilities?.artifacts==true)TextButton(onClick={model.beginArtifacts(key.host,ArtifactSource.Session(key.target))},enabled=ready&&source!=null&&!model.busy,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Folder,"Files")}
-                TextButton(onClick={model.beginAgentSession(key)},enabled=ready&&source!=null&&!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("agent_new_session")){IconLabel(MaterialGlyph.Add,"New session")}
-                TextButton(onClick={model.beginAgentTerminal(key)},enabled=ready&&source!=null&&summary?.capabilities?.terminalCreate==true&&!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("agent_terminal_new")){IconLabel(MaterialGlyph.Terminal,"New terminal in agent process directory")}
-            }
-            if(summary?.capabilities?.terminalCreate!=true)UiText("Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.",style=MaterialTheme.typography.bodySmall)
             val inlineReadiness=readiness?.takeIf {it.tag in listOf("conversation_gate_inventory","conversation_gate_receipt")}
             if(inlineReadiness!=null) {
                 Row(Modifier.fillMaxWidth().heightIn(min=48.dp),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
@@ -1309,6 +1306,7 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                     val unread=if(position>=0) history.size-position-1 else 0
                     TextButton(onClick={following=true;scope.launch {if(history.isNotEmpty() || focusedAction!=null) transcript.scrollToItem(latestTailIndex)}},modifier=Modifier.testTag("jump_latest")) {UiText(if(unread>0) "$unread new messages · Latest" else "Jump to latest")}
                 }
+                if(summary?.capabilities?.terminalCreate!=true) UiText("Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.",style=MaterialTheme.typography.bodySmall)
                 val promptCapability=summary?.capabilities
                 val promptCapabilityUnavailable=promptCapability?.let { !it.prompt || it.promptMode!=PromptMode.SubmitOrSteer } ?: true
                 val promptGate=readiness ?: when {
