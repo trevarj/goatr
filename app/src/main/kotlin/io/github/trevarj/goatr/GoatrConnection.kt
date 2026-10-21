@@ -722,7 +722,16 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             val reducer=live.reducers[session] ?: throw StorePolicy(ErrorCode.InvalidRequest)
             val decision=reducer.event(event)
             if(decision==SessionReducer.Decision.Resnapshot) {live.resnapshot.add(session);recover(live);return}
-            if(decision==SessionReducer.Decision.Applied && (event.body is EventBody.HistoryUpsert || event.body is EventBody.SessionState)) cache(live,reducer)
+            if(decision==SessionReducer.Decision.Applied) when(val body=event.body) {
+                is EventBody.HistoryUpsert -> {
+                    // Persist the retained post-merge records, never raw event placeholders
+                    // or unrelated history. Older browsing may reject a new event record.
+                    val changed=body.data.records.map {it.id}.toSet()
+                    cache(live,reducer,records=reducer.history.filter {it.id in changed})
+                }
+                is EventBody.SessionState -> cache(live,reducer,records=emptyList())
+                else -> Unit
+            }
         }
         publish()
     }
@@ -758,10 +767,10 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             } finally {live.recovery=null}
         }
     }
-    private suspend fun cache(live:Live,reducer:SessionReducer,snapshot:Boolean=false) {
+    private suspend fun cache(live:Live,reducer:SessionReducer,snapshot:Boolean=false,records:List<HistoryRecord> = reducer.history) {
         val summary=reducer.state?.summary ?: return
         val source=reducer.source ?: return
-        store.cache(live.host.hostId,summary,reducer.history.map(SafeDisplayHistory::redacted),reducer.partial,snapshot=snapshot,source=source)
+        store.cache(live.host.hostId,summary,records.map(SafeDisplayHistory::redacted),reducer.partial,snapshot=snapshot,source=source)
     }
     private fun publish() {
         mutable.value=ConnectionView(

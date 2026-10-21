@@ -531,6 +531,42 @@ class GoatrConnectionTest {
     @Test fun review_post_pre_send_continuation_cancel_before_frame_omp() = runBlocking { postPreSendContinuationCancellationDoesNotStartFrame(Provider.Omp) }
     @Test fun review_post_pre_send_continuation_returns_recovered_receipt_without_frame_omp() = runBlocking { postPreSendContinuationReturnsRecoveredReceiptWithoutFrame(Provider.Omp) }
     @Test fun review_post_pre_send_continuation_rejects_replacement_target_omp() = runBlocking { postPreSendContinuationRejectsReplacementTarget(Provider.Omp) }
+    @Test fun review_history_upsert_preserves_unaffected_sqlite_history_and_offline_content() = runBlocking {
+        withFixture(Provider.Omp) {fixture->
+            control("pending_view","sample" to JsonPrimitive("history"))
+            await(fixture,"actual completed source window cached") {
+                fixture.reducer().history.size==12 && fixture.reducer().mutationsEnabled &&
+                    fixture.store.state.value.cached.firstOrNull {it.hostId==fixture.host}?.history?.size==12
+            }
+            fun persistedRecords():Map<Id,Pair<Long,HistoryRecord>> = android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(fixture.databaseName).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+                db.rawQuery("SELECT id,at,data FROM records WHERE host=? AND session=?",arrayOf(fixture.host,fixture.target.sessionId.value)).use {rows->
+                    buildMap {while(rows.moveToNext()) put(Id(rows.getString(0)),rows.getLong(1) to Protocol.strictJson.decodeFromString(HistoryRecord.serializer(),rows.getString(2)))}
+                }
+            }
+            val before=persistedRecords()
+            assertEquals(12,before.size)
+            delay(25)
+            val response=control("completed_content","sample" to JsonPrimitive("inline_replacement"))
+            val content=Protocol.strictJson.decodeFromJsonElement(Content.serializer(),response.getValue("content"))
+            val changed=Id("fixture-completed-body")
+            await(fixture,"actual upsert committed to completed cache") {
+                fixture.store.state.value.cached.firstOrNull {it.hostId==fixture.host}?.history?.any {it.id==changed && it.text==content}==true
+            }
+            val merged=fixture.reducer().history.single {it.id==changed}
+            val after=persistedRecords()
+            assertEquals("A single native upsert must preserve every unrelated completed record and its persistence time",before,after.filterKeys {it in before})
+            assertEquals("Cache must contain the installed post-merge record",merged,after.getValue(changed).second)
+            fixture.connection.shutdown()
+            val offline=SessionStore(context,fixture.databaseName)
+            try {
+                offline.open()
+                val retained=offline.state.value.cached.single {it.hostId==fixture.host}
+                assertTrue(retained.stale)
+                assertEquals(before.values.map {it.second}.toSet()+merged,retained.history.toSet())
+            } finally {offline.close()}
+        }
+    }
+
     @Test fun review_transient_activity_never_rewrites_completed_sqlite_cache() = runBlocking {
         withFixture(Provider.Omp) {fixture->
             fun used():Long = android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(fixture.databaseName).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
