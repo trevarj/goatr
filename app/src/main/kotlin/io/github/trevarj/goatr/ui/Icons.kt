@@ -15,6 +15,7 @@ import androidx.annotation.DrawableRes
 internal enum class MaterialGlyph(@DrawableRes val drawable: Int) {
     Chat(R.drawable.ic_material_chat),
     Folder(R.drawable.ic_material_folder),
+    Filter(R.drawable.ic_material_filter_list),
     Visibility(R.drawable.ic_material_visibility),
     Desktop(R.drawable.ic_material_desktop_windows),
     Settings(R.drawable.ic_material_settings),

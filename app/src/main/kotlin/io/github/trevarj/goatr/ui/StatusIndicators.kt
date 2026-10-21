@@ -2,6 +2,7 @@
 package io.github.trevarj.goatr
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.*
 import androidx.compose.material3.Text as UiText
 import androidx.compose.runtime.Composable
@@ -15,6 +16,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontStyle
 
 @Composable
 internal fun StatusPill(label: String, emphasis: StatusEmphasis = StatusEmphasis.Neutral, modifier: Modifier = Modifier) {
@@ -29,13 +31,22 @@ internal fun StatusPill(label: String, emphasis: StatusEmphasis = StatusEmphasis
     }
 }
 
+/** Provider identity is outlined; filled pills communicate state, never provider health. */
+@Composable
+internal fun ProviderPill(provider: Provider, modifier: Modifier = Modifier) {
+    val ink=when(provider) {Provider.Omp->MaterialTheme.colorScheme.primary;Provider.Codex->MaterialTheme.colorScheme.tertiary}
+    Surface(modifier=modifier.heightIn(min=24.dp),color=MaterialTheme.colorScheme.surface,contentColor=ink,border=BorderStroke(1.dp,ink.copy(alpha=0.5f)),shape=MaterialTheme.shapes.small) {
+        UiText(providerLabel(provider),modifier=Modifier.padding(horizontal=8.dp,vertical=3.dp),style=MaterialTheme.typography.labelMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
+    }
+}
+
 internal enum class StatusEmphasis { Positive, Attention, Neutral, Muted }
 
 /** Reserves a small status column while only the non-authoritative refresh hint fades. */
 @Composable
 internal fun RefreshHint(refreshing: Boolean) {
     val alpha by animateFloatAsState(if(refreshing) 1f else 0f,animationSpec=tween(durationMillis=180),label="refresh hint")
-    UiText("Refreshing sessions",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=(if(refreshing) Modifier else Modifier.clearAndSetSemantics {}).alpha(alpha))
+    UiText("Refreshing sessions",style=MaterialTheme.typography.bodySmall,fontStyle=FontStyle.Italic,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=(if(refreshing) Modifier else Modifier.clearAndSetSemantics {}).alpha(alpha))
 }
 
 /** Keeps the composer gate slot stable while authoritative readiness changes. */

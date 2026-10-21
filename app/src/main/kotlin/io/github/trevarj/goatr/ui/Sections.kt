@@ -15,7 +15,7 @@ import androidx.compose.ui.semantics.semantics
 @Composable
 internal fun GoatrSection(title: String, detail: String? = null, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        UiText(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+        UiText(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.semantics { heading() })
         detail?.let { UiText(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }

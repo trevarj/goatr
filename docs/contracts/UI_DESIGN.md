@@ -22,7 +22,11 @@ with Sessions / Hosts / Settings as the primary destinations and Sessions as the
 landing console. Pairing, creation, conversation, native forms and receipt
 details remain first-class flows. Existing engine and native authority stay in
 place; see the [rewrite plan](../UI_POLISH_PLAN.md). A host filter is presentation
-state and never automatically selects a Target.
+state and never automatically selects a Target. Host/provider/status filter chips
+live in one scrollable filter-icon sheet with active count and Clear all; search
+and Workspace/Recent navigation remain outside. Shared label colors distinguish
+outlined provider identity from filled status. Semibold headings, italic quiet
+hints and monospace technical details retain readable themed contrast.
 
 Local session-list preferences may show or hide secondary host/workspace context
 and enable status headers. Defaults preserve the current complete presentation.

@@ -47,6 +47,10 @@ source review, compilation, screenshots or synthetic fixtures to native proof.
   transport and receipt internals in details. Reserve status space and use gentle
   transitions; routine refresh must not flicker or move content. Authority and
   permission loss still disable actions immediately.
+- Sessions keeps host, provider and status filter chips in one filter-icon sheet,
+  with an active count and Clear all. Search and view navigation stay visible.
+- Use semantic chip colors, semibold headings/labels, italic quiet hints and
+  monospace code/technical details. Keep diagnostic details behind expansion.
 - Use Material 3, official Material icons, comfortable wrapping and touch targets.
   Compact density must preserve readability and keyboard reachability.
 - Terminals are live interactive native-grid views with pan/zoom, no wrapping

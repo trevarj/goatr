@@ -11,6 +11,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 
 /** Local presentation only: none of these keys grant native session authority. */
@@ -77,7 +79,7 @@ internal fun SessionDirectoryMode(view: SessionDirectoryView, onChange: (Session
             FilterChip(selected=view==mode,onClick={onChange(mode)},label={UiText(if(mode==SessionDirectoryView.Workspaces) "Workspaces" else "Recent agents")},modifier=Modifier.heightIn(min=48.dp).testTag("session_view_${mode.name}"))
         }
     }
-    if(view==SessionDirectoryView.RecentAgents) UiText("Opened on this phone first · this app session",style=MaterialTheme.typography.bodySmall)
+    if(view==SessionDirectoryView.RecentAgents) UiText("Opened on this phone first · this app session",style=MaterialTheme.typography.bodySmall,fontStyle=FontStyle.Italic,color=MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
@@ -96,7 +98,7 @@ internal fun WorkspaceDirectoryCard(
             Column(Modifier.weight(1f).testTag("${tag}_agents").combinedClickable(onClickLabel=if(agentsExpanded) "Hide agents" else "Show agents",onClick={agentsExpanded=!agentsExpanded},onLongClickLabel="Workspace details",onLongClick={metadataExpanded=true}).heightIn(min=64.dp).padding(12.dp),verticalArrangement=Arrangement.spacedBy(3.dp)) {
                 UiText(title,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
                 UiText("$hostName · ${group.serverName}",style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-                UiText("${group.agents.size} ${if(group.agents.size==1) "agent" else "agents"} · native ${group.workspace.agentStatus}",style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+                UiText("${group.agents.size} available ${if(group.agents.size==1) "agent" else "agents"}",style=MaterialTheme.typography.labelMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
             }
             IconButton(onClick={metadataExpanded=!metadataExpanded},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("${tag}_details")) {
                 GoatrIcon(MaterialGlyph.ExpandMore,if(metadataExpanded) "Hide workspace details" else "Show workspace details")
@@ -105,7 +107,7 @@ internal fun WorkspaceDirectoryCard(
         if(metadataExpanded) Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
             UiText(title,style=MaterialTheme.typography.bodySmall)
             UiText("Desktop: $hostName\nServer: ${group.serverName}\nWorkspace number: ${group.workspace.number.value}\nNative status: ${group.workspace.agentStatus}\nDesktop focused: ${group.workspace.focused}",style=MaterialTheme.typography.bodySmall)
-            UiText("Server ID: ${group.key.server.value}\nIncarnation: ${group.key.incarnation.value}\nWorkspace ID: ${group.key.workspace.value}",style=MaterialTheme.typography.bodySmall)
+            UiText("Server ID: ${group.key.server.value}\nIncarnation: ${group.key.incarnation.value}\nWorkspace ID: ${group.key.workspace.value}",style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace)
         }
         if(agentsExpanded) Column(Modifier.padding(8.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
             if(group.agents.isEmpty()) UiText("No supported bound agents in this workspace.",style=MaterialTheme.typography.bodySmall)
@@ -132,13 +134,14 @@ internal fun DirectoryAgentRow(
     val target=Target(summary.sessionId,summary.generation)
     var details by remember(summary.sessionId,summary.generation) {mutableStateOf(false)}
     val title=summary.title.takeIf {it.isNotBlank()} ?: "${providerLabel(summary.provider)} conversation"
-    val subtitle=listOfNotNull(providerLabel(summary.provider),hostName.takeIf {preferences.showHostContext},workspace.takeIf {preferences.showWorkspaceContext},if(cachePartial!=null) "retained cache${if(cachePartial) " · partial" else ""}" else summary.connectivity.toString(),if(stale) "stale" else null,summary.reason).joinToString(" · ")
+    val subtitle=listOfNotNull(hostName.takeIf {preferences.showHostContext},workspace.takeIf {preferences.showWorkspaceContext},if(cachePartial!=null) "retained cache${if(cachePartial) " · partial" else ""}" else summary.connectivity.toString(),if(stale) "stale" else null,summary.reason).joinToString(" · ")
     Surface(shape=MaterialTheme.shapes.medium,color=MaterialTheme.colorScheme.surface,modifier=Modifier.fillMaxWidth().testTag(rowTag).combinedClickable(onClickLabel="Open conversation",onClick={onOpen(target)},onLongClickLabel="Conversation details and actions",onLongClick={details=true})) {
         Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
             UiText(title,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
             UiText(subtitle,style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
-                UiText(if(stale) "Stale · ${sessionStatusLabel(summary.status)}" else sessionStatusLabel(summary.status),style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f))
+            Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                ProviderPill(summary.provider)
+                StatusPill(if(stale) "Stale · ${sessionStatusLabel(summary.status)}" else sessionStatusLabel(summary.status),if(stale) StatusEmphasis.Muted else sessionStatusEmphasis(summary.status),Modifier.weight(1f))
                 IconButton(onClick={details=true},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("${rowTag}_details")) {GoatrIcon(MaterialGlyph.ExpandMore,"Conversation details and actions")}
             }
         }
@@ -147,11 +150,12 @@ internal fun DirectoryAgentRow(
         onDismissRequest={details=false},
         title={UiText(title)},
         text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+            ProviderPill(summary.provider)
             UiText(subtitle)
             UiText("${if(stale) "Last observed" else "Authoritative"} status: ${sessionStatusLabel(summary.status)}")
             hostName?.let {UiText("Desktop: $it")}
             workspace?.let {UiText("Workspace: $it")}
-            UiText("Session ID: ${target.sessionId.value}\nGeneration: ${target.generation.value}")
+            UiText("Session ID: ${target.sessionId.value}\nGeneration: ${target.generation.value}",fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall)
             summary.reason?.let {UiText(it)}
         }},
         confirmButton={TextButton(onClick={details=false;onOpen(target)},modifier=Modifier.testTag("${rowTag}_open")) {UiText("Open conversation")}},

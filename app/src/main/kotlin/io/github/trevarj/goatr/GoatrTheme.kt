@@ -11,6 +11,7 @@ import androidx.compose.material3.Text as UiText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,15 +49,15 @@ fun GoatrTheme(appearance: Appearance=Appearance.System,content: @Composable ()-
     val dark=when(appearance) {Appearance.System->isSystemInDarkTheme();Appearance.Light->false;Appearance.Dark->true}
     MaterialTheme(colorScheme=if(dark) DarkPalette else LightPalette,
         typography=Typography(
-            titleLarge=Typography().titleLarge.copy(fontSize=17.sp,lineHeight=22.sp),
-            titleMedium=Typography().titleMedium.copy(fontSize=13.sp,lineHeight=18.sp),
-            titleSmall=Typography().titleSmall.copy(fontSize=13.sp,lineHeight=18.sp),
+            titleLarge=Typography().titleLarge.copy(fontWeight=FontWeight.SemiBold,fontSize=17.sp,lineHeight=22.sp),
+            titleMedium=Typography().titleMedium.copy(fontWeight=FontWeight.SemiBold,fontSize=13.sp,lineHeight=18.sp),
+            titleSmall=Typography().titleSmall.copy(fontWeight=FontWeight.SemiBold,fontSize=13.sp,lineHeight=18.sp),
             bodyLarge=Typography().bodyLarge.copy(fontSize=13.sp,lineHeight=18.sp),
             bodyMedium=Typography().bodyMedium.copy(fontSize=12.sp,lineHeight=17.sp),
             bodySmall=Typography().bodySmall.copy(fontSize=12.sp,lineHeight=17.sp),
-            labelLarge=Typography().labelLarge.copy(fontSize=13.sp,lineHeight=18.sp),
-            labelMedium=Typography().labelMedium.copy(fontSize=11.sp,lineHeight=16.sp),
-            labelSmall=Typography().labelSmall.copy(fontSize=10.sp,lineHeight=14.sp),
+            labelLarge=Typography().labelLarge.copy(fontWeight=FontWeight.SemiBold,fontSize=13.sp,lineHeight=18.sp),
+            labelMedium=Typography().labelMedium.copy(fontWeight=FontWeight.SemiBold,fontSize=11.sp,lineHeight=16.sp),
+            labelSmall=Typography().labelSmall.copy(fontWeight=FontWeight.SemiBold,fontSize=10.sp,lineHeight=14.sp),
         ),
         shapes=Shapes(small=RoundedCornerShape(8.dp),medium=RoundedCornerShape(16.dp),large=RoundedCornerShape(24.dp)),content=content)
 }

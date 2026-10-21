@@ -246,6 +246,12 @@ The four newer vectors retain raw SVGs/URLs/hashes in
 fetch/path matching is recorded in `official-icons-observed-6b36e0ae-8148-477d-a194-23b040c4b6ad/outcome.json`.
 Source matching does not establish runtime rendering.
 
+The Sessions filter icon uses pinned Material
+[content/filter_list](https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/content/filter_list/materialicons/24px.svg).
+Raw SVG SHA256 is `da5f9ac466b2a296bdbbcee8eef2eaecf992207e83b8304451701e2e13a2bc0f`;
+geometry and existing Apache attribution are retained. Source and conversion
+evidence: `.goatr-session-filter-sheet-shlh_unb/icon-provenance.json`.
+
 Additional notification/play vectors use the same pinned source revision:
 [social/notifications](https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/social/notifications/materialicons/24px.svg)
 and [av/play_arrow](https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/av/play_arrow/materialicons/24px.svg).

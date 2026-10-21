@@ -415,6 +415,9 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
     var query by remember { mutableStateOf("") }
     var providerFilter by remember { mutableStateOf<Provider?>(null) }
     var statusFilter by remember { mutableStateOf<SessionStatus?>(null) }
+    var filtersOpen by remember { mutableStateOf(false) }
+    var expandedOtherHosts by remember { mutableStateOf(emptySet<String>()) }
+    val activeFilters=listOfNotNull(filter?.let {host->store.hosts.firstOrNull {it.hostId==host}?.name ?: "Selected host"},providerFilter?.let(::providerLabel),statusFilter?.let(::sessionGroupLabel))
     val narrowed=query.isNotEmpty() || providerFilter!=null || statusFilter!=null
     fun matches(summary:SessionSummary):Boolean=summary.title.contains(query,ignoreCase=true) && (providerFilter==null || summary.provider==providerFilter) && (statusFilter==null || summary.status==statusFilter)
     var choosingCreationHost by remember { mutableStateOf(false) }
@@ -428,23 +431,18 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
     Column(Modifier.fillMaxSize(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
         GoatrSection("Your sessions", "Pick up a conversation from any paired desktop.")
         if(store.hosts.isNotEmpty()) {
-            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                FilterChip(selected=filter==null,onClick={filter=null},label={UiText("All hosts")},modifier=Modifier.heightIn(min=48.dp).testTag("host_filter_all"))
-                store.hosts.forEach { paired->FilterChip(selected=filter==paired.hostId,onClick={filter=paired.hostId},label={UiText(paired.name)},modifier=Modifier.heightIn(min=48.dp).testTag("host_filter_${paired.hostId}"))}
-            }
             SessionDirectoryMode(model.sessionListPreferences.directoryView) {mode->
                 model.sessionListPreferences=model.sessionListPreferences.copy(directoryView=mode)
             }
-            OutlinedTextField(query,{query=it},label={UiText("Find sessions")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("session_search"))
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected=providerFilter==null,onClick={providerFilter=null},label={UiText("All providers")},modifier=Modifier.heightIn(min=48.dp).testTag("session_provider_all"))
-                Provider.entries.forEach {provider->FilterChip(selected=providerFilter==provider,onClick={providerFilter=provider},label={UiText(providerLabel(provider))},modifier=Modifier.heightIn(min=48.dp).testTag("session_provider_${provider.name}"))}
+            Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(query,{query=it},label={UiText("Find sessions")},singleLine=true,modifier=Modifier.weight(1f).testTag("session_search"))
+                IconButton(onClick={filtersOpen=true},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("session_filters_open")) {
+                    BadgedBox(badge={if(activeFilters.isNotEmpty()) Badge {UiText(activeFilters.size.toString())}}) {
+                        GoatrIcon(MaterialGlyph.Filter,if(activeFilters.isEmpty()) "Filters" else "Filters, ${activeFilters.size} active")
+                    }
+                }
             }
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected=statusFilter==null,onClick={statusFilter=null},label={UiText("All statuses")},modifier=Modifier.heightIn(min=48.dp).testTag("session_status_all"))
-                SessionStatus.entries.forEach {status->FilterChip(selected=statusFilter==status,onClick={statusFilter=status},label={UiText(sessionGroupLabel(status))},modifier=Modifier.heightIn(min=48.dp).testTag("session_status_${status.name}"))}
-            }
-            if(statusFilter!=null) UiText("Cached sessions use their last retained status, not a live status check.",style=MaterialTheme.typography.bodySmall)
+            if(activeFilters.isNotEmpty()) UiText(activeFilters.joinToString(" · "),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.testTag("session_filters_summary"))
 
         }
         LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("sessions_console"),verticalArrangement=Arrangement.spacedBy(6.dp),contentPadding=PaddingValues(bottom=if(creationHosts.isEmpty()) 16.dp else sessionsFabClearance)) {
@@ -469,10 +467,7 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                         FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                             IconAction(MaterialGlyph.Notification,"Unread activity","console_attention_inbox_${paired.hostId}",enabled=!model.busy&&model.foreground) {model.openConsoleAttentionInbox(paired.hostId)}
                             if(!online) IconAction(MaterialGlyph.Refresh,"Reconnect","host_reconnect_${paired.hostId}",enabled=!model.busy && model.foreground) {model.reconnect(paired.hostId)}
-                            if(inventory!=null) {
-                                if(online) IconAction(MaterialGlyph.Add,"New session","new_session_${paired.hostId}",enabled=!model.busy) {onNewSession(paired.hostId)}
-                                else OutlinedButton(onClick={onNewSession(paired.hostId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("new_session_${paired.hostId}")) {IconLabel(MaterialGlyph.Add,"New session")}
-                            }
+
                         }
                         if(!online) {
                             connection.connectionFailures[paired.hostId]?.let {failure->UiText(connectionFailureCopy(failure),style=MaterialTheme.typography.bodySmall)}
@@ -488,15 +483,28 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                 } else {
                     if(model.sessionListPreferences.directoryView==SessionDirectoryView.Workspaces) {
                         val directory=projectSessionDirectory(paired.hostId,inventory,ready,rows,narrowed)
-                        directory.workspaces.forEach {group->
+                        directory.workspaces.filter {it.agents.isNotEmpty()}.forEach {group->
                             item(key=group.key.lazyKey) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}
                         }
                         if(directory.standalone.isNotEmpty()) item(key="standalone_heading_${paired.hostId}") {
-                            GoatrSection(if(ready) "Other agents" else "Last observed agents", "Workspace association unavailable")
+                            GoatrSection(if(ready) "Available agents" else "Last observed agents", "Workspace association unavailable")
                         }
                         directory.standalone.forEach {summary->item(key="session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}") {
                             DirectoryAgentRow(summary,paired.name,null,model.sessionListPreferences,!ready,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)})
                         }}
+                        // These may contain shells or unbound panes; absence of a bound agent is not emptiness.
+                        val other=directory.workspaces.filter {it.agents.isEmpty()}
+                        if(other.isNotEmpty()) {
+                            val expanded=paired.hostId in expandedOtherHosts
+                            item(key="other_workspaces_${paired.hostId}") {
+                                TextButton(onClick={expandedOtherHosts=if(expanded) expandedOtherHosts-paired.hostId else expandedOtherHosts+paired.hostId},modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("other_workspaces_${paired.hostId}")) {
+                                    IconLabel(MaterialGlyph.ExpandMore,"${if(expanded) "Hide other workspaces" else "Other workspaces"} (${other.size})")
+                                }
+                            }
+                            if(expanded) other.forEach {group->
+                                item(key=group.key.lazyKey) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}
+                            }
+                        }
                     } else {
                         val workspaceByTarget=projectSessionDirectory(paired.hostId,inventory,ready,rows).workspaces.flatMap {group->
                             group.agents.map {Target(it.sessionId,it.generation) to group.workspace.label?.value}
@@ -544,6 +552,33 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
     if(creationHosts.isNotEmpty()) PrimaryActionFab(MaterialGlyph.Add,"New session","new_session",enabled=!model.busy,onClick={
         if(creationHosts.size==1) onNewSession(creationHosts.single().hostId) else choosingCreationHost=true
     },modifier=Modifier.align(androidx.compose.ui.Alignment.BottomEnd).padding(16.dp))
+    if(filtersOpen) ModalBottomSheet(onDismissRequest={filtersOpen=false},sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxWidth().semantics {testTagsAsResourceId=true}.navigationBarsPadding().imePadding().padding(horizontal=16.dp).testTag("session_filters_sheet"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
+                UiText("Filters",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).semantics {heading()})
+                TextButton(onClick={filter=null;providerFilter=null;statusFilter=null},enabled=activeFilters.isNotEmpty(),modifier=Modifier.heightIn(min=48.dp).testTag("session_filters_clear")) {UiText("Clear all")}
+                IconButton(onClick={filtersOpen=false},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("session_filters_close")) {GoatrIcon(MaterialGlyph.Close,"Close filters")}
+            }
+            Column(Modifier.weight(1f,fill=false).verticalScroll(rememberScrollState()).padding(bottom=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                GoatrSection("Desktop")
+                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                    FilterChip(selected=filter==null,onClick={filter=null},label={UiText("All hosts")},modifier=Modifier.heightIn(min=48.dp).testTag("host_filter_all"))
+                    store.hosts.forEach {paired->FilterChip(selected=filter==paired.hostId,onClick={filter=paired.hostId},label={UiText(paired.name)},modifier=Modifier.heightIn(min=48.dp).testTag("host_filter_${paired.hostId}"))}
+                }
+                GoatrSection("Provider")
+                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                    FilterChip(selected=providerFilter==null,onClick={providerFilter=null},label={UiText("All providers")},modifier=Modifier.heightIn(min=48.dp).testTag("session_provider_all"))
+                    Provider.entries.forEach {provider->FilterChip(selected=providerFilter==provider,onClick={providerFilter=provider},label={ProviderPill(provider)},modifier=Modifier.heightIn(min=48.dp).testTag("session_provider_${provider.name}"))}
+                }
+                GoatrSection("Status")
+                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                    FilterChip(selected=statusFilter==null,onClick={statusFilter=null},label={UiText("All statuses")},modifier=Modifier.heightIn(min=48.dp).testTag("session_status_all"))
+                    SessionStatus.entries.forEach {status->FilterChip(selected=statusFilter==status,onClick={statusFilter=status},label={StatusPill(sessionGroupLabel(status),sessionStatusEmphasis(status))},modifier=Modifier.heightIn(min=48.dp).testTag("session_status_${status.name}"))}
+                }
+                if(statusFilter!=null) UiText("Cached sessions use their last retained status, not a live status check.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
     if(choosingCreationHost) ModalBottomSheet(onDismissRequest={choosingCreationHost=false},containerColor=MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth().semantics {testTagsAsResourceId=true}.navigationBarsPadding().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             GoatrSection("Choose a desktop","Start a new session only on the desktop you select.")
