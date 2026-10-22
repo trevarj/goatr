@@ -50,7 +50,8 @@ class NavigationTest {
             ui.onNodeWithTag("pair_preview").performScrollTo().performClick()
             ui.onNodeWithTag("pair_authority").assertIsDisplayed().assertTextEquals(owner.preview!!.authority)
             assertTrue(owner.store.state.value.hosts.isEmpty())
-            ui.onNodeWithTag("pair_cancel").performScrollTo().performClick()
+            ui.onNodeWithTag("pair_cancel").assertIsDisplayed().performClick()
+            assertEquals(Screen.Connections,owner.screen)
             ui.onNodeWithTag("pair_confirm").assertDoesNotExist()
             assertTrue(owner.store.state.value.hosts.isEmpty())
             scenario.moveToState(Lifecycle.State.CREATED)
@@ -126,7 +127,7 @@ class CreationEligibilityTest {
         var created:Triple<Uuid,Uuid,Provider>?=null
         val memory=FormMemory()
         ui.setContent {MaterialTheme {Column(Modifier.verticalScroll(rememberScrollState())) {
-            CreateSession(inventory.value,hello,enabled.value,memory) {s,p,backend,_->created=Triple(s,p,backend)}
+            CreateSession(inventory.value,hello,enabled.value,memory,{}) {s,p,backend,_->created=Triple(s,p,backend)}
         }}}
         ui.onNodeWithTag("create_name").performScrollTo().performTextInput("First actual guarded attempt")
         ui.onNodeWithTag("session_create").performScrollTo().assertIsEnabled()

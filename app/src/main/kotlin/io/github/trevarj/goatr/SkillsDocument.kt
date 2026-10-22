@@ -17,28 +17,32 @@ import androidx.compose.ui.window.SecureFlagPolicy
 
 /** Full verified text only, memory-only and secure; no WebView or clipboard. */
 @Composable
-internal fun SkillsDocument(shown:SkillsDocumentState,model:GoatrViewModel){
+internal fun SkillsDocument(shown:SkillsDocumentState,model:GoatrViewModel,connectionStatus:String,compactConnectionStatus:String){
     Dialog(onDismissRequest=model::closeSkillsDocument,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)){
-        Surface(Modifier.fillMaxWidth().fillMaxHeight(.94f).padding(12.dp),shape=MaterialTheme.shapes.large){
-            Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
-                Row(Modifier.fillMaxWidth()){
-                    UiText(shown.entry.displayName ?: shown.entry.name,style=MaterialTheme.typography.titleMedium,modifier=Modifier.weight(1f))
+        Surface(Modifier.fillMaxWidth().fillMaxHeight(.94f).padding(16.dp),shape=MaterialTheme.shapes.large){
+            Column(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                GoatrTitleBar(shown.entry.displayName ?: shown.entry.name,connectionStatus,shown.loading,compactStatus=compactConnectionStatus,actions={
                     IconButton(onClick=model::closeSkillsDocument,modifier=Modifier.size(48.dp).testTag("skills_document_close")){GoatrIcon(MaterialGlyph.Close,"Close document")}
-                }
+                })
                 UiText("Original OMP skill document · read only",style=MaterialTheme.typography.labelMedium)
+                Box(Modifier.weight(1f).fillMaxWidth()) {
                 when{
-                    shown.loading->{LinearProgressIndicator(Modifier.fillMaxWidth());UiText("Reading and verifying the complete document…",style=MaterialTheme.typography.bodySmall)}
+                    shown.loading->UiText("Reading and verifying the complete document…",style=MaterialTheme.typography.bodySmall)
                     shown.failed->UiText("The complete document is unavailable, changed, expired or exceeded 1MiB. Close and refresh this original catalogue to inspect it again.",style=MaterialTheme.typography.bodyMedium)
                     shown.text!=null->{
                         val chunks=remember(shown.ticket,shown.text){
                             val text=shown.text;val parts=ArrayList<String>();var start=0
-                            while(start<text.length){var end=minOf(text.length,start+2048);if(end<text.length&&Character.isHighSurrogate(text[end-1]))end-=1;parts.add(text.substring(start,end));start=end};parts
+                            while(start<text.length){val newline=text.indexOf('\n',minOf(text.length,start+2048));val end=if(newline<0)text.length else newline+1;parts.add(text.substring(start,end));start=end};parts
                         }
-                        LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("skills_document_text"),verticalArrangement=Arrangement.spacedBy(0.dp)){
-                            itemsIndexed(chunks){_,text->UiText(text,style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,modifier=Modifier.fillMaxWidth())}
+                        LazyColumn(Modifier.fillMaxSize().testTag("skills_document_text"),verticalArrangement=Arrangement.spacedBy(0.dp)){
+                            itemsIndexed(chunks){index,text->
+                                val display=if(index<chunks.lastIndex) text.removeSuffix("\n").removeSuffix("\r") else text
+                                UiText(display,style=MaterialTheme.typography.bodyMedium,fontFamily=FontFamily.Monospace,modifier=Modifier.fillMaxWidth())
+                            }
                             if(chunks.isEmpty())item{UiText("Empty document",style=MaterialTheme.typography.bodySmall)}
                         }
                     }
+                }
                 }
             }
         }

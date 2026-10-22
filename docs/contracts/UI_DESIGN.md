@@ -28,6 +28,21 @@ and Workspace/Recent navigation remain outside. Shared label colors distinguish
 outlined provider identity from filled status. Semibold headings, italic quiet
 hints and monospace technical details retain readable themed contrast.
 
+Root pages and full-page feature surfaces use one compact48dp branded title bar,
+not a second strip above existing chrome. The landing wordmark is `goatr` beside
+the existing goat mark; other titles retain their route/native context.
+Back, Close and menu controls keep48dp targets and existing scope/semantics.
+Show observed transport, not an invented NativeReady state; preserve the full
+transport description in semantics and a fixed loading-indicator footprint.
+
+Collapsed list text uses default single-line title/context budgets with ellipsis
+and full Details/semantics, not asynchronous card expansion or giant blank
+reserves. Existing two-line notices stay bounded at two lines with system font
+scaling. Failure and refresh feedback share the existing hint footprint.
+Real membership, disclosure and order changes may use keyed placement or
+decorative-heading motion; never retain removed actionable graphs, animate
+permission loss or delay immediate warnings/gates.
+
 Local session-list preferences may show or hide secondary host/workspace context
 and enable status headers. Defaults preserve the current complete presentation.
 They persist only presentation booleans beside appearance, never identities,
@@ -153,7 +168,11 @@ does not determine an invented permission meaning.
 ## Control panels and primary actions
 
 Agent/session control surfaces place a compact Material icon control bar above
-the chat input and use FABs for primary actions. Supported controls retain their
+the chat input. Console New session is one in-flow48dp Add control with its
+existing host chooser, not an overlay. Host-scoped Sessions retains its primary
+FAB with matching content clearance; other primary-action surfaces retain their
+existing control pattern.
+Supported controls retain their
 existing exact Target, readiness, permission, reservation and receipt predicates.
 A connected transport does not imply mutation readiness. Composer and creation
 notices describe the actual existing gate: foreground/transport, current

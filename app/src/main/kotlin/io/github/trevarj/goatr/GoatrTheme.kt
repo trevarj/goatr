@@ -44,22 +44,27 @@ private val DarkPalette = darkColorScheme(
     outline=Color(0xFF8A938C),error=Color(0xFFFFB4AB),
 )
 
+private val GoatrTypography=Typography().let {base->
+    Typography(
+        titleLarge=base.titleLarge.copy(fontWeight=FontWeight.SemiBold,fontSize=22.sp,lineHeight=28.sp),
+        titleMedium=base.titleMedium.copy(fontWeight=FontWeight.SemiBold,fontSize=16.sp,lineHeight=22.sp),
+        titleSmall=base.titleSmall.copy(fontWeight=FontWeight.SemiBold,fontSize=15.sp,lineHeight=20.sp),
+        bodyLarge=base.bodyLarge.copy(fontSize=16.sp,lineHeight=24.sp),
+        bodyMedium=base.bodyMedium.copy(fontSize=14.sp,lineHeight=20.sp),
+        bodySmall=base.bodySmall.copy(fontSize=13.sp,lineHeight=18.sp),
+        labelLarge=base.labelLarge.copy(fontWeight=FontWeight.SemiBold,fontSize=14.sp,lineHeight=20.sp),
+        labelMedium=base.labelMedium.copy(fontWeight=FontWeight.SemiBold,fontSize=12.sp,lineHeight=16.sp),
+        labelSmall=base.labelSmall.copy(fontWeight=FontWeight.SemiBold,fontSize=11.sp,lineHeight=16.sp),
+    )
+}
+private val GoatrShapes=Shapes(small=RoundedCornerShape(8.dp),medium=RoundedCornerShape(16.dp),large=RoundedCornerShape(24.dp))
+
 @Composable
 fun GoatrTheme(appearance: Appearance=Appearance.System,content: @Composable ()->Unit) {
     val dark=when(appearance) {Appearance.System->isSystemInDarkTheme();Appearance.Light->false;Appearance.Dark->true}
     MaterialTheme(colorScheme=if(dark) DarkPalette else LightPalette,
-        typography=Typography(
-            titleLarge=Typography().titleLarge.copy(fontWeight=FontWeight.SemiBold,fontSize=17.sp,lineHeight=22.sp),
-            titleMedium=Typography().titleMedium.copy(fontWeight=FontWeight.SemiBold,fontSize=13.sp,lineHeight=18.sp),
-            titleSmall=Typography().titleSmall.copy(fontWeight=FontWeight.SemiBold,fontSize=13.sp,lineHeight=18.sp),
-            bodyLarge=Typography().bodyLarge.copy(fontSize=13.sp,lineHeight=18.sp),
-            bodyMedium=Typography().bodyMedium.copy(fontSize=12.sp,lineHeight=17.sp),
-            bodySmall=Typography().bodySmall.copy(fontSize=12.sp,lineHeight=17.sp),
-            labelLarge=Typography().labelLarge.copy(fontWeight=FontWeight.SemiBold,fontSize=13.sp,lineHeight=18.sp),
-            labelMedium=Typography().labelMedium.copy(fontWeight=FontWeight.SemiBold,fontSize=11.sp,lineHeight=16.sp),
-            labelSmall=Typography().labelSmall.copy(fontWeight=FontWeight.SemiBold,fontSize=10.sp,lineHeight=14.sp),
-        ),
-        shapes=Shapes(small=RoundedCornerShape(8.dp),medium=RoundedCornerShape(16.dp),large=RoundedCornerShape(24.dp)),content=content)
+        typography=GoatrTypography,
+        shapes=GoatrShapes,content=content)
 }
 
 /** Synthetic component fixture retained for the existing Compose contrast and reachability checks. */

@@ -2,6 +2,7 @@
 package io.github.trevarj.goatr
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -203,7 +204,7 @@ internal fun ChangesPatchReferenceSections(
     ChangesPatchSource.entries.forEach { source ->
         val patch = if (source == ChangesPatchSource.Staged) stagedPatch else unstagedPatch
         val projection = projectChangesPatch(source, patch, entryPaths)
-        UiText("${source.label.replaceFirstChar { it.uppercase() }} patch", style = MaterialTheme.typography.titleSmall)
+        GoatrSection("${source.label.replaceFirstChar {it.uppercase()}} patch")
         when {
             patch.isEmpty() -> UiText("No ${source.label} patch", style = MaterialTheme.typography.bodySmall)
             projection.unavailable -> UiText(
@@ -213,12 +214,14 @@ internal fun ChangesPatchReferenceSections(
             )
             else -> ChangesPatchReferencePicker(source, projection.files, onReference)
         }
-        UiText(
-            if (patch.isEmpty()) "No ${source.label} patch" else patch,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            softWrap = true,
-            modifier = Modifier.testTag("changes_${source.label}_patch"),
+        var rawDetails by remember(source,patch) {mutableStateOf(false)}
+        DetailDisclosure(rawDetails,{rawDetails=!rawDetails},"changes_${source.label}_details")
+        if(rawDetails) UiText(
+            if(patch.isEmpty()) "No ${source.label} patch" else patch,
+            style=MaterialTheme.typography.bodySmall,
+            fontFamily=FontFamily.Monospace,
+            softWrap=true,
+            modifier=Modifier.testTag("changes_${source.label}_patch"),
         )
     }
 }
@@ -242,20 +245,19 @@ private fun ChangesPatchReferencePicker(
     val pageStart = (hunkPage * pageSize).coerceAtMost(((choices.size - 1) / pageSize) * pageSize)
     val page = choices.subList(pageStart, minOf(pageStart + pageSize, choices.size))
     UiText("Choose a snapshot hunk", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    var previousFile:String?=null
     page.forEach { choice ->
+        if(previousFile!=choice.path) GoatrSection(choice.path,"${source.label} file")
+        previousFile=choice.path
         val hunk = choice.hunk
         GroupedSurface(Modifier.testTag("changes_${source.label}_hunk")) {
-            UiText(choice.path, style = MaterialTheme.typography.titleSmall, fontFamily = FontFamily.Monospace, softWrap = true)
+            UiText("Hunk ${choice.hunkIndex+1}",style=MaterialTheme.typography.titleSmall)
             UiText("Old ${formatRange(hunk.oldStart, hunk.oldCount)} · new ${formatRange(hunk.newStart, hunk.newCount)}", style = MaterialTheme.typography.bodySmall)
-            TextButton(
-                onClick = { onReference(ChangesReferenceSelection.Hunk(source, choice.path, choice.hunkIndex)) },
-                modifier = Modifier.heightIn(min = 48.dp).testTag("changes_reference_hunk"),
-            ) { IconLabel(MaterialGlyph.Add, "Add hunk reference") }
-            TextButton(
-                onClick = { expanded = if (expanded == choice) null else choice },
-                modifier = Modifier.heightIn(min = 48.dp).testTag("changes_reference_lines"),
-            ) { IconLabel(MaterialGlyph.ExpandMore, if (expanded == choice) "Hide line choices" else "Choose a line") }
-            if (expanded == choice) ChangesLineReferencePicker(source, choice, onReference)
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick={onReference(ChangesReferenceSelection.Hunk(source,choice.path,choice.hunkIndex))},modifier=Modifier.heightIn(min=48.dp).testTag("changes_reference_hunk")) {IconLabel(MaterialGlyph.Add,"Add hunk reference")}
+                TextButton(onClick={expanded=if(expanded==choice) null else choice},modifier=Modifier.heightIn(min=48.dp).testTag("changes_reference_lines")) {IconLabel(MaterialGlyph.ExpandMore,if(expanded==choice) "Hide line choices" else "Choose a line")}
+            }
+            if(expanded==choice) ChangesLineReferencePicker(source,choice,onReference)
         }
     }
     if (choices.size > pageSize) Row(Modifier.fillMaxWidth()) {
@@ -286,6 +288,7 @@ private fun ChangesLineReferencePicker(
     val pageStart = (linePage * pageSize).coerceAtMost(((selectable.size - 1) / pageSize) * pageSize)
     selectable.subList(pageStart, minOf(pageStart + pageSize, selectable.size)).forEach { (lineIndex, line) ->
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            UiText("Old ${line.oldLine?.toString() ?: "—"} · new ${line.newLine?.toString() ?: "—"}",style=MaterialTheme.typography.labelMedium)
             UiText(line.raw, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, softWrap = true)
             TextButton(
                 onClick = { onReference(ChangesReferenceSelection.Line(source, choice.path, choice.hunkIndex, lineIndex)) },

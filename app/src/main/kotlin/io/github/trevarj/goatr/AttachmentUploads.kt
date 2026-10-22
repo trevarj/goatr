@@ -51,18 +51,25 @@ internal class AttachmentRecovery(val generation:Any,record:LocalAttachmentUploa
 }
 
 @androidx.compose.runtime.Composable
-internal fun AttachmentTransferSheet(transfer:AttachmentTransfer,model:GoatrViewModel){
+internal fun AttachmentTransferSheet(transfer:AttachmentTransfer,model:GoatrViewModel,connectionStatus:String,compactConnectionStatus:String){
     var discard by remember(transfer){mutableStateOf(false)}
+    var details by remember(transfer){mutableStateOf(false)}
     val record=transfer.record
     androidx.compose.material3.AlertDialog(
         onDismissRequest=model::closeAttachments,
-        title={androidx.compose.material3.Text("Attachment")},
-        text={androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),verticalArrangement=androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)){
+        title={GoatrTitleBar("Attachment",connectionStatus,transfer.working,compactStatus=compactConnectionStatus)},
+        text={androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),verticalArrangement=androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp)){
             androidx.compose.material3.Text(transfer.prepared?.displayName ?: "Retained desktop attachment",softWrap=true)
             androidx.compose.material3.Text("${record.committedBytes} / ${record.size} bytes committed on the desktop")
-            if(transfer.working)androidx.compose.material3.LinearProgressIndicator(modifier=androidx.compose.ui.Modifier.fillMaxWidth())
+            androidx.compose.material3.LinearProgressIndicator(progress={record.committedBytes.toFloat()/record.size.toFloat()},modifier=androidx.compose.ui.Modifier.fillMaxWidth())
+            if(transfer.working)androidx.compose.material3.Text("Processing this action; the bar shows desktop-confirmed bytes only.",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)
             transfer.notice?.let {androidx.compose.material3.Text(it)}
-            transfer.receipt?.let {receipt->androidx.compose.material3.Text("Action ${receipt.actionId.value}: ${receipt.state.name}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)}
+            transfer.receipt?.let {receipt->androidx.compose.material3.Text("Action status: ${receipt.state.name}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)}
+            DetailDisclosure(details,{details=!details},"attachment_upload_details")
+            if(details) {
+                androidx.compose.material3.Text("Upload ${record.uploadId.value}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                transfer.receipt?.let {androidx.compose.material3.Text("Action ${it.actionId.value}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)}
+            }
             if(transfer.unknown)androidx.compose.material3.Text("Outcome unknown. Inspect the original action and desktop offset. No bytes are retried automatically.")
             if(record.published && !record.discarded)androidx.compose.material3.Text("Uploaded files expire after seven days. A path does not bypass the provider’s normal file permissions.")
             transfer.status?.progress?.providerPath?.let {path->androidx.compose.foundation.text.selection.SelectionContainer {androidx.compose.material3.Text(path,softWrap=true,style=androidx.compose.material3.MaterialTheme.typography.bodySmall)}}
@@ -85,14 +92,20 @@ internal fun AttachmentTransferSheet(transfer:AttachmentTransfer,model:GoatrView
 }
 
 @androidx.compose.runtime.Composable
-internal fun AttachmentRecoverySheet(recovery:AttachmentRecovery,model:GoatrViewModel){
+internal fun AttachmentRecoverySheet(recovery:AttachmentRecovery,model:GoatrViewModel,connectionStatus:String,compactConnectionStatus:String){
     var discard by remember(recovery){mutableStateOf(false)}
-    androidx.compose.material3.AlertDialog(onDismissRequest=model::closeAttachmentRecovery,title={androidx.compose.material3.Text("Retained attachment")},text={androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),verticalArrangement=androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)){
-        androidx.compose.material3.Text("Upload ${recovery.record.uploadId.value}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall,softWrap=true)
+    var details by remember(recovery){mutableStateOf(false)}
+    androidx.compose.material3.AlertDialog(onDismissRequest=model::closeAttachmentRecovery,title={GoatrTitleBar("Retained attachment",connectionStatus,recovery.loading,compactStatus=compactConnectionStatus)},text={androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),verticalArrangement=androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)){
         androidx.compose.material3.Text("${recovery.record.committedBytes} / ${recovery.record.size} last known committed bytes")
-        if(recovery.loading)androidx.compose.material3.LinearProgressIndicator(modifier=androidx.compose.ui.Modifier.fillMaxWidth())
+        androidx.compose.material3.LinearProgressIndicator(progress={recovery.record.committedBytes.toFloat()/recovery.record.size.toFloat()},modifier=androidx.compose.ui.Modifier.fillMaxWidth())
+        if(recovery.loading)androidx.compose.material3.Text("Checking retained desktop status…",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)
         recovery.status?.let {androidx.compose.material3.Text("Desktop state: ${it.state.name}")}
-        recovery.receipt?.let {androidx.compose.material3.Text("Action ${it.actionId.value}: ${it.state.name}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)}
+        recovery.receipt?.let {androidx.compose.material3.Text("Action status: ${it.state.name}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)}
+        DetailDisclosure(details,{details=!details},"attachment_recovery_details")
+        if(details) {
+            androidx.compose.material3.Text("Upload ${recovery.record.uploadId.value}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall,softWrap=true)
+            recovery.receipt?.let {androidx.compose.material3.Text("Action ${it.actionId.value}",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)}
+        }
         recovery.notice?.let {androidx.compose.material3.Text(it)}
         androidx.compose.material3.Text("These facts do not authorize upload or path insertion. Return to the exact original conversation for a fresh admitted view.")
         androidx.compose.material3.TextButton(onClick={model.openAttachmentOriginal(recovery)},enabled=!recovery.loading,modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Chat,"Open original conversation")}

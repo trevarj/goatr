@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package io.github.trevarj.goatr
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -8,8 +9,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.material3.Text as UiText
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.semantics.Role as SemanticsRole
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -74,9 +81,9 @@ internal fun orderRecentlyOpened(host: String, sessions: List<SessionSummary>, o
 
 @Composable
 internal fun SessionDirectoryMode(view: SessionDirectoryView, onChange: (SessionDirectoryView)->Unit) {
-    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-        SessionDirectoryView.entries.forEach {mode->
-            FilterChip(selected=view==mode,onClick={onChange(mode)},label={UiText(if(mode==SessionDirectoryView.Workspaces) "Workspaces" else "Recent agents")},modifier=Modifier.heightIn(min=48.dp).testTag("session_view_${mode.name}"))
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        SessionDirectoryView.entries.forEachIndexed {index,mode->
+            SegmentedButton(selected=view==mode,onClick={onChange(mode)},shape=SegmentedButtonDefaults.itemShape(index,SessionDirectoryView.entries.size),label={UiText(if(mode==SessionDirectoryView.Workspaces) "Workspaces" else "Recent agents",maxLines=2,overflow=TextOverflow.Ellipsis)},modifier=Modifier.heightIn(min=48.dp).testTag("session_view_${mode.name}"))
         }
     }
     if(view==SessionDirectoryView.RecentAgents) UiText("Opened on this phone first · this app session",style=MaterialTheme.typography.bodySmall,fontStyle=FontStyle.Italic,color=MaterialTheme.colorScheme.onSurfaceVariant)
@@ -89,27 +96,30 @@ internal fun WorkspaceDirectoryCard(
     preferences: SessionListPreferences,
     onOpen: (Target)->Unit,
 ) {
-    var agentsExpanded by remember(group.key) {mutableStateOf(false)}
-    var metadataExpanded by remember(group.key) {mutableStateOf(false)}
+    var agentsExpanded by rememberSaveable(group.key.lazyKey) {mutableStateOf(false)}
+    var metadataExpanded by rememberSaveable(group.key.lazyKey) {mutableStateOf(false)}
     val tag=group.key.tag
     val title=group.workspace.label?.value ?: "Workspace ${group.workspace.number.value} · label unavailable"
     OutlinedCard(Modifier.fillMaxWidth().testTag(tag)) {
         Row(Modifier.fillMaxWidth()) {
-            Column(Modifier.weight(1f).testTag("${tag}_agents").combinedClickable(onClickLabel=if(agentsExpanded) "Hide agents" else "Show agents",onClick={agentsExpanded=!agentsExpanded},onLongClickLabel="Workspace details",onLongClick={metadataExpanded=true}).heightIn(min=64.dp).padding(12.dp),verticalArrangement=Arrangement.spacedBy(3.dp)) {
-                UiText(title,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
-                UiText("$hostName · ${group.serverName}",style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-                UiText("${group.agents.size} available ${if(group.agents.size==1) "agent" else "agents"}",style=MaterialTheme.typography.labelMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
+            Row(Modifier.weight(1f).testTag("${tag}_agents").combinedClickable(role=SemanticsRole.Button,onClickLabel=if(agentsExpanded) "Hide agents" else "Show agents",onClick={agentsExpanded=!agentsExpanded},onLongClickLabel="Workspace details",onLongClick={metadataExpanded=true}).semantics {stateDescription=if(agentsExpanded) "Agents expanded" else "Agents collapsed"}.heightIn(min=64.dp).padding(16.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(3.dp)) {
+                    UiText(title,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    UiText("$hostName · ${group.serverName}",style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    UiText("${group.agents.size} ${if(group.agents.size==1) "agent" else "agents"}",style=MaterialTheme.typography.labelMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
+                }
+                GoatrIcon(MaterialGlyph.ExpandMore,null,Modifier.rotate(if(agentsExpanded) 180f else 0f))
             }
-            IconButton(onClick={metadataExpanded=!metadataExpanded},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("${tag}_details")) {
-                GoatrIcon(MaterialGlyph.ExpandMore,if(metadataExpanded) "Hide workspace details" else "Show workspace details")
+            IconButton(onClick={metadataExpanded=!metadataExpanded},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("${tag}_details").semantics {stateDescription=if(metadataExpanded) "Workspace details expanded" else "Workspace details collapsed"}) {
+                GoatrIcon(MaterialGlyph.Visibility,if(metadataExpanded) "Hide workspace details" else "Show workspace details")
             }
         }
-        if(metadataExpanded) Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+        if(metadataExpanded) Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             UiText(title,style=MaterialTheme.typography.bodySmall)
             UiText("Desktop: $hostName\nServer: ${group.serverName}\nWorkspace number: ${group.workspace.number.value}\nNative status: ${group.workspace.agentStatus}\nDesktop focused: ${group.workspace.focused}",style=MaterialTheme.typography.bodySmall)
             UiText("Server ID: ${group.key.server.value}\nIncarnation: ${group.key.incarnation.value}\nWorkspace ID: ${group.key.workspace.value}",style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace)
         }
-        if(agentsExpanded) Column(Modifier.padding(8.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+        if(agentsExpanded) Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             if(group.agents.isEmpty()) UiText("No supported bound agents in this workspace.",style=MaterialTheme.typography.bodySmall)
             group.agents.forEach {summary->
                 key(summary.sessionId,summary.generation) {
@@ -135,14 +145,37 @@ internal fun DirectoryAgentRow(
     var details by remember(summary.sessionId,summary.generation) {mutableStateOf(false)}
     val title=summary.title.takeIf {it.isNotBlank()} ?: "${providerLabel(summary.provider)} conversation"
     val subtitle=listOfNotNull(hostName.takeIf {preferences.showHostContext},workspace.takeIf {preferences.showWorkspaceContext},if(cachePartial!=null) "retained cache${if(cachePartial) " · partial" else ""}" else summary.connectivity.toString(),if(stale) "stale" else null,summary.reason).joinToString(" · ")
-    Surface(shape=MaterialTheme.shapes.medium,color=MaterialTheme.colorScheme.surface,modifier=Modifier.fillMaxWidth().testTag(rowTag).combinedClickable(onClickLabel="Open conversation",onClick={onOpen(target)},onLongClickLabel="Conversation details and actions",onLongClick={details=true})) {
-        Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            UiText(title,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
-            UiText(subtitle,style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-            Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                ProviderPill(summary.provider)
-                StatusPill(if(stale) "Stale · ${sessionStatusLabel(summary.status)}" else sessionStatusLabel(summary.status),if(stale) StatusEmphasis.Muted else sessionStatusEmphasis(summary.status),Modifier.weight(1f))
-                IconButton(onClick={details=true},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("${rowTag}_details")) {GoatrIcon(MaterialGlyph.ExpandMore,"Conversation details and actions")}
+    val lastObserved=stale || cachePartial!=null || summary.connectivity!=SessionConnectivity.Ready
+    val providerStatus=sessionStatusLabel(summary.status)
+    val statusText=when {
+        stale->"Stale · $providerStatus"
+        cachePartial!=null->"Cached · $providerStatus"
+        summary.connectivity!=SessionConnectivity.Ready->"${summary.connectivity} · $providerStatus"
+        else->providerStatus
+    }
+    Surface(shape=MaterialTheme.shapes.medium,color=MaterialTheme.colorScheme.surface,border=BorderStroke(1.dp,MaterialTheme.colorScheme.outline.copy(alpha=0.25f)),modifier=Modifier.fillMaxWidth().testTag(rowTag).combinedClickable(onClickLabel="Open conversation",onClick={onOpen(target)},onLongClickLabel="Conversation details and actions",onLongClick={details=true})) {
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(16.dp)) {
+            val stacked=maxWidth<320.dp || LocalDensity.current.fontScale>=1.3f
+            Column(Modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                if(stacked) Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                    ProviderPill(summary.provider,Modifier.testTag("${rowTag}_provider"))
+                    UiText(title,modifier=Modifier.weight(1f).testTag("${rowTag}_title"),style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
+                } else UiText(title,modifier=Modifier.testTag("${rowTag}_title"),style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
+                UiText(subtitle,modifier=Modifier.testTag("${rowTag}_subtitle"),style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+                Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                    if(!stacked) ProviderPill(summary.provider,Modifier.testTag("${rowTag}_provider"))
+                    Box(Modifier.weight(1f).testTag("${rowTag}_status")) {
+                        StatusPill(statusText,if(lastObserved) StatusEmphasis.Muted else sessionStatusEmphasis(summary.status))
+                    }
+                    Box(Modifier.size(16.dp)) {
+                        if(!stale && cachePartial==null && summary.connectivity==SessionConnectivity.Synchronizing) CircularProgressIndicator(
+                            modifier=Modifier.fillMaxSize(),
+                            color=MaterialTheme.colorScheme.onSurfaceVariant,
+                            strokeWidth=1.5.dp,
+                        )
+                    }
+                    IconButton(onClick={details=true},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("${rowTag}_details")) {GoatrIcon(MaterialGlyph.ExpandMore,"Conversation details and actions")}
+                }
             }
         }
     }
@@ -152,7 +185,7 @@ internal fun DirectoryAgentRow(
         text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {
             ProviderPill(summary.provider)
             UiText(subtitle)
-            UiText("${if(stale) "Last observed" else "Authoritative"} status: ${sessionStatusLabel(summary.status)}")
+            UiText("${if(lastObserved) "Last observed" else "Current"} status: $providerStatus")
             hostName?.let {UiText("Desktop: $it")}
             workspace?.let {UiText("Workspace: $it")}
             UiText("Session ID: ${target.sessionId.value}\nGeneration: ${target.generation.value}",fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall)

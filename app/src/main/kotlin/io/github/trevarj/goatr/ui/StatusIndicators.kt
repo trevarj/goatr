@@ -42,11 +42,24 @@ internal fun ProviderPill(provider: Provider, modifier: Modifier = Modifier) {
 
 internal enum class StatusEmphasis { Positive, Attention, Neutral, Muted }
 
-/** Reserves a small status column while only the non-authoritative refresh hint fades. */
+/** Keeps the refresh hint's footprint stable; progress exists only while refreshing. */
 @Composable
 internal fun RefreshHint(refreshing: Boolean) {
     val alpha by animateFloatAsState(if(refreshing) 1f else 0f,animationSpec=tween(durationMillis=180),label="refresh hint")
-    UiText("Refreshing sessions",style=MaterialTheme.typography.bodySmall,fontStyle=FontStyle.Italic,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=(if(refreshing) Modifier else Modifier.clearAndSetSemantics {}).alpha(alpha))
+    Row(
+        modifier=(if(refreshing) Modifier else Modifier.clearAndSetSemantics {}).alpha(alpha),
+        verticalAlignment=Alignment.CenterVertically,
+        horizontalArrangement=Arrangement.spacedBy(6.dp),
+    ) {
+        Box(Modifier.size(16.dp)) {
+            if(refreshing) CircularProgressIndicator(
+                modifier=Modifier.fillMaxSize(),
+                color=MaterialTheme.colorScheme.onSurfaceVariant,
+                strokeWidth=1.5.dp,
+            )
+        }
+        UiText("Refreshing sessions",style=MaterialTheme.typography.bodySmall,fontStyle=FontStyle.Italic,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis)
+    }
 }
 
 /** Keeps the composer gate slot stable while authoritative readiness changes. */

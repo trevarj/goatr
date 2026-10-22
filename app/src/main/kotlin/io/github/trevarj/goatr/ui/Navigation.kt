@@ -17,7 +17,7 @@ internal fun TopLevelNav(selected: Screen, onSessions: () -> Unit, onHosts: () -
         unselectedTextColor=MaterialTheme.colorScheme.onSurfaceVariant,
     )
     NavigationBar(containerColor=MaterialTheme.colorScheme.surface) {
-        NavigationBarItem(selected = selected == Screen.Sessions || selected == Screen.Conversation, onClick = onSessions, icon = { GoatrIcon(MaterialGlyph.Chat, null) }, label = { UiText("Sessions") }, colors=colors, modifier = Modifier.testTag("nav_sessions"))
+        NavigationBarItem(selected = selected == Screen.Sessions || selected == Screen.Conversation || selected == Screen.Terminals, onClick = onSessions, icon = { GoatrIcon(MaterialGlyph.Chat, null) }, label = { UiText("Sessions") }, colors=colors, modifier = Modifier.testTag("nav_sessions"))
         NavigationBarItem(selected = selected == Screen.Connections || selected == Screen.Pairing, onClick = onHosts, icon = { GoatrIcon(MaterialGlyph.Desktop, null) }, label = { UiText("Hosts") }, colors=colors, modifier = Modifier.testTag("nav_hosts"))
         NavigationBarItem(selected = selected == Screen.Settings, onClick = onSettings, icon = { GoatrIcon(MaterialGlyph.Settings, null) }, label = { UiText("Settings") }, colors=colors, modifier = Modifier.testTag("nav_settings"))
     }

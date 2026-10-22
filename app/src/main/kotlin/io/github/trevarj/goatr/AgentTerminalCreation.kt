@@ -24,12 +24,15 @@ internal class AgentTerminalCreation(val key:ConversationKey,val source:Uuid,val
     var prior by mutableStateOf<LocalAction?>(null);var separate by mutableStateOf<Uuid?>(null)
     var loading:Any?=null
 }
-@Composable internal fun AgentTerminalCreationDialog(shown:AgentTerminalCreation,model:GoatrViewModel){
-    AlertDialog(onDismissRequest=model::closeAgentTerminal,title={UiText("New terminal in agent process directory")},text={Column(Modifier.fillMaxWidth().heightIn(max=460.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)){
+@Composable internal fun AgentTerminalCreationDialog(shown:AgentTerminalCreation,model:GoatrViewModel,hostName:String,agentTitle:String,connectionStatus:String,compactConnectionStatus:String){
+    AlertDialog(onDismissRequest=model::closeAgentTerminal,title={GoatrTitleBar("New terminal beside agent",connectionStatus,!shown.loaded,compactStatus=compactConnectionStatus)},text={Column(Modifier.fillMaxWidth().heightIn(max=460.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)){
         UiText("Create an ordinary shell beside this exact agent on the selected desktop. Herdr uses the original agent process’s current OS directory, which may differ from its conversation directory.")
         UiText("The desktop stays unfocused. No command is sent and no existing terminal is closed.")
-        UiText("Host "+shown.key.host.take(12)+" · original session "+shown.key.target.sessionId.value,style=MaterialTheme.typography.bodySmall,softWrap=true)
-        if(!shown.loaded)LinearProgressIndicator(Modifier.fillMaxWidth())
+        UiText(hostName,style=MaterialTheme.typography.titleMedium)
+        UiText(agentTitle,style=MaterialTheme.typography.bodyMedium)
+        var details by remember(shown) {mutableStateOf(false)}
+        DetailDisclosure(details,{details=!details},"agent_terminal_details")
+        if(details) UiText("Host "+shown.key.host+" · original session "+shown.key.target.sessionId.value,style=MaterialTheme.typography.bodySmall,softWrap=true)
         shown.prior?.let {prior->ReceiptPanel(shown.key.host,prior,model)
             if(prior.authoritative&&prior.outcomeShown&&prior.receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain))TextButton(onClick={model.permitSeparateAgentTerminal(shown,prior.metadata.actionId)},enabled=!shown.pending,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Add,"Create a separate terminal")}
         }

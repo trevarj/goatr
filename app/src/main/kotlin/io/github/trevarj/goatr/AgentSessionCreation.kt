@@ -29,31 +29,33 @@ internal class AgentSessionCreation(val key:ConversationKey,val source:Uuid,val 
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable internal fun AgentSessionCreationSheet(shown:AgentSessionCreation,connection:ConnectionView,model:GoatrViewModel) {
+@Composable internal fun AgentSessionCreationSheet(shown:AgentSessionCreation,connection:ConnectionView,model:GoatrViewModel,hostName:String) {
     val inventory=connection.inventory[shown.key.host]
     val server=inventory?.servers?.singleOrNull {it.serverId==shown.server}
     ModalBottomSheet(onDismissRequest=model::closeAgentSession,sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
-        Column(Modifier.fillMaxWidth().heightIn(max=680.dp).navigationBarsPadding().imePadding().padding(16.dp).testTag("agent_session_creation"),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-            Row(Modifier.fillMaxWidth()) {
-                UiText("New session",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f))
-                TextButton(onClick=model::closeAgentSession,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Close,"Close")}
-            }
-            UiText("Start a separate workspace on this agent’s desktop server. Choose a configured project; this does not use the agent’s directory or place anything in its workspace.",style=MaterialTheme.typography.bodySmall)
-            UiText((server?.name?.value ?: "Original desktop server")+" · "+providerLabel(shown.provider),style=MaterialTheme.typography.labelLarge)
-            if(!shown.loaded)LinearProgressIndicator(Modifier.fillMaxWidth())
+        Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding().imePadding().padding(16.dp).testTag("agent_session_creation"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            GoatrTitleBar("New session",connectionLabel(shown.key.host,connection,model.connectingHosts[shown.key.host]==true),!shown.loaded,compactStatus=compactConnectionLabel(shown.key.host,connection,model.connectingHosts[shown.key.host]==true),actions={
+                IconButton(onClick=model::closeAgentSession,modifier=Modifier.size(48.dp)){GoatrIcon(MaterialGlyph.Close,"Close new session")}
+            })
             val prior=shown.prior
             if(prior!=null && shown.separate!=prior.metadata.actionId) {
-                Column(Modifier.fillMaxWidth().heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    UiText("Start a separate workspace on this agent’s desktop server. Choose a configured project; this does not use the agent’s directory or place anything in its workspace.",style=MaterialTheme.typography.bodySmall)
+                    UiText(hostName+" · "+(server?.name?.value ?: "Original desktop server")+" · "+providerLabel(shown.provider),style=MaterialTheme.typography.labelLarge)
                     ReceiptPanel(shown.key.host,prior,model)
                     UiText("This desktop’s retained creation is never retried. A separate session needs a new name and explicit confirmation.",style=MaterialTheme.typography.bodySmall)
                     if(prior.authoritative&&prior.outcomeShown&&prior.receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain))TextButton(onClick={model.prepareSeparateAgentSession(shown,prior.metadata.actionId)},enabled=!shown.pending&&!model.busy,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Add,"Start a separate session")}
                 }
             } else if(inventory!=null && server!=null) {
                 val gate=creationReadinessReason(connection.hello[shown.key.host],model.busy,connection.inventoryReady[shown.key.host]==true,connection.mutationReady[shown.key.host]==true,!model.agentSessionAllowed(shown))
-                Box(Modifier.fillMaxWidth().heightIn(min=280.dp,max=460.dp)) {
-                    CreateSession(inventory.copy(servers=listOf(server)),connection.hello[shown.key.host],model.agentSessionAllowed(shown)&&!model.busy,shown.memory,gate?.message,gate?.tag,pinnedProvider=shown.provider,requireProjectSelection=true) {_,project,_,name->model.createAgentSession(shown,project,name)}
+                Box(Modifier.fillMaxWidth().weight(1f)) {
+                    CreateSession(inventory.copy(servers=listOf(server)),connection.hello[shown.key.host],model.agentSessionAllowed(shown)&&!model.busy,shown.memory,{
+                        UiText("Start a separate workspace on this agent’s desktop server. Choose a configured project; this does not use the agent’s directory or place anything in its workspace.",style=MaterialTheme.typography.bodySmall)
+                        UiText(hostName+" · "+server.name.value+" · "+providerLabel(shown.provider),style=MaterialTheme.typography.labelLarge)
+                    },gate?.message,gate?.tag,pinnedProvider=shown.provider,requireProjectSelection=true) {_,project,_,name->model.createAgentSession(shown,project,name)}
                 }
             } else UiText("Refresh this original desktop’s session inventory before creating a session.")
+            UiText("Separate configured-project workspace; not beside this agent.",style=MaterialTheme.typography.bodySmall)
             TextButton(onClick={model.inspectAgentSession(shown)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Refresh,"Check retained creation")}
             if(shown.pending && shown.loaded)UiText("A creation is still pending or unknown. Inspect its receipt; no action is replayed.",style=MaterialTheme.typography.bodySmall)
         }

@@ -79,7 +79,7 @@ fun PairScanner(active: Boolean,onValue: (String)->Boolean) {
         } else {
             UiText(when {cameraFailed->"Camera unavailable. Paste still works; retry camera explicitly.";denied->"Camera permission denied. Paste remains available.";!hasCamera->"No camera. Paste an invitation below.";else->"Camera access is optional; scan or paste a desktop invitation."},modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
         }
-        if(hasCamera) Action(if(cameraFailed) "Retry camera" else "Allow camera","camera_permission",enabled=active) { if(granted) {cameraFailed=false;retry++} else permission.launch(Manifest.permission.CAMERA) }
+        if(hasCamera && (!granted || cameraFailed)) Action(if(granted) "Retry camera" else "Allow camera","camera_permission",enabled=active) { if(granted) {cameraFailed=false;retry++} else permission.launch(Manifest.permission.CAMERA) }
         // Never save capability input or expose it via selectable backing-copy controls.
         key(pasteLifetime) {OutlinedTextField(value=paste,onValueChange={paste=it},label={UiText("Paste pairing invitation (private memory only)")},modifier=Modifier.fillMaxWidth().testTag("pair_paste"),enabled=active,minLines=2)}
         Action("Preview invitation","pair_preview",enabled=active && paste.isNotEmpty()) { val raw=paste;paste="";pasteLifetime++;accept(raw) }

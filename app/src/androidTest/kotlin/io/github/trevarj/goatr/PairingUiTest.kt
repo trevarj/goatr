@@ -228,7 +228,7 @@ class PairingUiTest {
             failureStage="first-qr-no-pair"
             noPairEffect()
             failureStage="back"
-            ui.onNodeWithTag("pair_cancel").performScrollTo().performClick()
+            ui.onNodeWithTag("pair_cancel").assertIsDisplayed().performClick()
             ui.waitUntil(20000) {owner.screen==Screen.Connections && owner.preview==null && camera.cameraState.value?.type==CameraState.Type.CLOSED}
             ui.onNodeWithTag("pair_confirm").assertDoesNotExist()
             noPairEffect()
@@ -252,14 +252,14 @@ class PairingUiTest {
             failureStage="paste-no-pair"
             noPairEffect()
             failureStage="paste-closed"
-            ui.onNodeWithTag("pair_cancel").performScrollTo().performClick()
+            ui.onNodeWithTag("pair_cancel").assertIsDisplayed().performClick()
             ui.waitUntil(20000) {owner.preview==null && owner.screen==Screen.Connections && camera.cameraState.value?.type==CameraState.Type.CLOSED}
             failureStage="paste-no-pair"
             noPairEffect()
             failureStage="rapid-back"
             repeat(2) {
                 ui.onNodeWithTag("pair_begin").performClick();awaitRealFrames()
-                ui.onNodeWithTag("pair_cancel").performScrollTo().performClick()
+                ui.onNodeWithTag("pair_cancel").assertIsDisplayed().performClick()
                 ui.waitUntil(10000) {camera.cameraState.value?.type==CameraState.Type.CLOSED && owner.preview==null}
                 noPairEffect()
             }
@@ -290,7 +290,7 @@ class PairingUiTest {
                 ui.waitUntil(20000) {owner.preview?.name?.value==CAMERA_FRESH_FIXTURE_NAME && owner.preview?.expiresAt?.value==CAMERA_FRESH_FIXTURE_EXPIRY}
                 noPairEffect()
                 failureStage="back"
-                ui.onNodeWithTag("pair_cancel").performScrollTo().performClick()
+                ui.onNodeWithTag("pair_cancel").assertIsDisplayed().performClick()
                 ui.waitUntil(10000) {camera.cameraState.value?.type==CameraState.Type.CLOSED && owner.preview==null}
                 noPairEffect()
             } finally {scenario.onActivity {camera.cameraState.removeObserver(nativeError)}}

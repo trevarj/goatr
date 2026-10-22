@@ -9,6 +9,8 @@ import androidx.compose.material3.Text as UiText
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -32,11 +34,10 @@ internal fun skillSuggestionTrigger(provider:Provider,draft:String):String? {
 @Composable
 internal fun SkillsSuggestions(state:SkillsSuggestionsState,model:GoatrViewModel,modifier:Modifier=Modifier) {
     Surface(modifier.fillMaxWidth().testTag("skills_suggestions"),shape=MaterialTheme.shapes.medium,color=MaterialTheme.colorScheme.surfaceVariant) {
-        Column(Modifier.padding(horizontal=8.dp,vertical=4.dp),verticalArrangement=Arrangement.spacedBy(2.dp)) {
+        Column(Modifier.padding(horizontal=12.dp,vertical=8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
                 GoatrIcon(MaterialGlyph.Menu,null)
-                UiText("Skills",style=MaterialTheme.typography.labelMedium)
-                UiText(if(state.catalogue==null) "Load once; no reads while typing." else if(state.provider==Provider.Omp) "Append command text; keep typed trigger. Does not invoke." else "Append mention; keep typed trigger.",style=MaterialTheme.typography.labelSmall,maxLines=2,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f))
+                UiText(if(state.catalogue==null) "Skills · load once" else "Skills · draft only",style=MaterialTheme.typography.labelMedium,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f).semantics {contentDescription=if(state.catalogue==null) "Load the Skills catalogue once; no reads while typing." else if(state.provider==Provider.Omp) "Append command text; does not invoke a skill." else "Append mention; does not send a message."})
             }
             LazyRow(Modifier.fillMaxWidth().height(48.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                 if(state.catalogue==null) {

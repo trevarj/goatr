@@ -44,6 +44,7 @@ private class AttachmentPreparation(val ticket:AttachmentSourceTicket) {
 @Composable
 internal fun AttachmentPicker(
     enabled:Boolean,
+    connectionStatus:(AttachmentSourceTicket,Boolean)->String,
     captureSourceTicket:suspend ()->AttachmentSourceTicket?,
     returnSourceTicket:(AttachmentSourceTicket)->AttachmentSourceTicket?,
     cancelSourceTicket:(AttachmentSourceTicket?)->Unit,
@@ -144,8 +145,8 @@ internal fun AttachmentPicker(
     }
     if(current!=null)AlertDialog(
         onDismissRequest=::closeLocal,
-        title={UiText("Prepare attachment")},
-        text={Column(Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){
+        title={GoatrTitleBar("Prepare attachment",connectionStatus(current.ticket,false),current.preparing||current.cancelling,compactStatus=connectionStatus(current.ticket,true))},
+        text={Column(Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)){
             UiText("Up to 8 MiB. Original bytes are encrypted on this phone for up to one hour. No metadata is stripped.")
             when {
                 current.cancelling->UiText("Stopping local preparation…")
@@ -180,4 +181,4 @@ internal fun AttachmentPicker(
     )
 }
 
-@Composable internal fun AttachmentIconLabel(@androidx.annotation.DrawableRes icon:Int,label:String){Row(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically){Icon(androidx.compose.ui.res.painterResource(icon),null,modifier=Modifier.size(18.dp));UiText(label,maxLines=1,softWrap=false)}}
+@Composable internal fun AttachmentIconLabel(@androidx.annotation.DrawableRes icon:Int,label:String){Row(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically){Icon(androidx.compose.ui.res.painterResource(icon),null,modifier=Modifier.size(18.dp));UiText(label,softWrap=true)}}

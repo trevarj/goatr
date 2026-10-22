@@ -27,7 +27,7 @@ internal fun isRoutineToolRecord(record: HistoryRecord, activeToolRecordId: Id?)
 @Composable
 internal fun ToolActivitySummary(count: Int, expanded: Boolean, onToggle: ()->Unit) {
     if(count==0) return
-    Surface(color=MaterialTheme.colorScheme.surfaceVariant.copy(alpha=.45f),shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth()) {
+    Surface(color=MaterialTheme.colorScheme.surface,shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth()) {
         TextButton(onClick=onToggle,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("tool_activity_summary")) {
             GoatrIcon(MaterialGlyph.ExpandMore,null)
             Spacer(Modifier.width(8.dp))
@@ -38,10 +38,15 @@ internal fun ToolActivitySummary(count: Int, expanded: Boolean, onToggle: ()->Un
 
 /** A single scrollable control rail reserves Stop outside its horizontal viewport. */
 @Composable
-internal fun ConversationControlRail(stopEnabled: Boolean, stopDisabledReason: String, onStop: ()->Unit, controls: @Composable RowScope.()->Unit) {
-    Surface(color=MaterialTheme.colorScheme.surfaceVariant.copy(alpha=.45f),shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth().testTag("composer_overflow")) {
+internal fun ConversationControlRail(stopEnabled: Boolean, stopDisabledReason: String, onStop: ()->Unit, onMore: ()->Unit, controls: @Composable RowScope.()->Unit) {
+    Surface(color=MaterialTheme.colorScheme.surface,shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth().testTag("composer_overflow")) {
         Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically,content=controls)
+            TextButton(onClick=onMore,modifier=Modifier.heightIn(min=48.dp).testTag("conversation_more"),contentPadding=PaddingValues(horizontal=8.dp)) {
+                GoatrIcon(MaterialGlyph.Menu,null)
+                Spacer(Modifier.width(4.dp))
+                UiText("More",style=MaterialTheme.typography.labelMedium)
+            }
             VerticalDivider(Modifier.height(24.dp))
             ConversationControl(MaterialGlyph.Stop,"Stop","turn_stop",stopEnabled,stopDisabledReason,onStop)
         }

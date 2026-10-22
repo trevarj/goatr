@@ -4,12 +4,14 @@ package io.github.trevarj.goatr
 import android.app.Activity
 import android.util.TypedValue
 import android.graphics.Typeface
+import android.graphics.text.LineBreaker
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.text.Layout
+import androidx.core.widget.TextViewCompat
 import android.widget.TextView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -78,11 +80,14 @@ fun MarkdownText(backing: String,onLink: (String)->Unit,modifier: Modifier=Modif
     val context=LocalContext.current
     val link by rememberUpdatedState(onLink)
     val density=LocalDensity.current
+    val bodyStyle=MaterialTheme.typography.bodyLarge
+    val bodySize=with(density) {bodyStyle.fontSize.toPx()}
+    val bodyLineHeight=with(density) {bodyStyle.lineHeight.toPx()}.toInt()
     val foreground=MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor=MaterialTheme.colorScheme.primary.toArgb()
     val codeBackground=MaterialTheme.colorScheme.surfaceVariant.toArgb()
     val codeMargin=(8f*density.density).toInt()
-    val codeSize=(13f*density.density*density.fontScale).toInt()
+    val codeSize=with(density) {MaterialTheme.typography.bodyMedium.fontSize.toPx()}.toInt()
     val markwon=remember(context,foreground,codeBackground,codeMargin,codeSize) {
         Markwon.builder(context).usePlugin(object: AbstractMarkwonPlugin() {
             override fun configureTheme(builder: MarkwonTheme.Builder) {
@@ -118,12 +123,12 @@ fun MarkdownText(backing: String,onLink: (String)->Unit,modifier: Modifier=Modif
         }).build()
     }
     AndroidView(factory={MarkdownTextView(it)},modifier=modifier.fillMaxWidth().testTag("markdown_native"),update={view->
-        view.setTextSize(TypedValue.COMPLEX_UNIT_PX,13f*density.density*density.fontScale)
+        view.setTextSize(TypedValue.COMPLEX_UNIT_PX,bodySize)
         // Wrap long paths and code in the message width instead of widening the transcript.
         view.setHorizontallyScrolling(false)
-        view.breakStrategy=Layout.BREAK_STRATEGY_HIGH_QUALITY
+        view.breakStrategy=LineBreaker.BREAK_STRATEGY_HIGH_QUALITY
         view.hyphenationFrequency=Layout.HYPHENATION_FREQUENCY_NONE
-        view.setLineSpacing(2f*density.density*density.fontScale,1f)
+        TextViewCompat.setLineHeight(view,bodyLineHeight)
         view.setTextColor(foreground);view.setLinkTextColor(linkColor)
         if(view.backing!=backing || view.renderer!==markwon) {view.backing=backing;view.renderer=markwon;markwon.setMarkdown(view,backing)}
     },onRelease={it.text="";it.backing="";it.renderer=null})

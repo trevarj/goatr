@@ -28,13 +28,13 @@ private fun removalReason(reason:WorktreeRemoveReason?):String=when(reason){
 }
 
 @Composable
-internal fun WorktreeRemovalDialog(scope:WorktreeRemovalState,model:GoatrViewModel){
+internal fun WorktreeRemovalDialog(scope:WorktreeRemovalState,model:GoatrViewModel,connectionStatus:String,compactConnectionStatus:String){
     val preview=scope.context?.preview
     val action=scope.submittedAction?.let {id->model.focusedAction?.takeIf {it.metadata.actionId==id} ?: model.actions[scope.key.host].orEmpty().firstOrNull {it.metadata.actionId==id}}
     AlertDialog(
         onDismissRequest=model::closeWorktreeRemoval,
-        title={UiText(if(scope.submittedAction==null)"Remove worktree" else "Worktree removal")},
-        text={Column(Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){
+        title={GoatrTitleBar(if(scope.submittedAction==null)"Remove linked checkout" else "Checkout removal status",connectionStatus,scope.loading,compactStatus=compactConnectionStatus)},
+        text={Column(Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)){
             when{
                 scope.loading->UiText("Checking the original linked checkout…")
                 scope.error->UiText("Preview unavailable. Check desktop occupancy and refresh worktrees.")

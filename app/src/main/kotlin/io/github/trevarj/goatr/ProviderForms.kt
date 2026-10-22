@@ -74,7 +74,7 @@ internal fun Heading(label: String) { UiText(label,style=MaterialTheme.typograph
 @Composable
 private fun NativeFormSection(content: @Composable ColumnScope.()->Unit) {
     Surface(Modifier.fillMaxWidth(),shape=MaterialTheme.shapes.medium,color=MaterialTheme.colorScheme.surface,border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant)) {
-        Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(10.dp),content=content)
+        Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp),content=content)
     }
 }
 
@@ -91,8 +91,8 @@ fun ProviderForm(
         catch (_: Exception) { memory.validation="Check required values, offered choices, exact numeric bounds and field formats." }
     }
     GroupedSurface(Modifier.semantics {isTraversalGroup=true}.testTag("form_${request.kind}")) {
-    Column(Modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-        GoatrSection("Native request", "Use only the choices and scope supplied by the desktop provider.")
+    Column(Modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(16.dp)) {
+        GoatrSection(when(request.kind) {PresentationKind.OmpSelect->"Native choice";PresentationKind.OmpEditor->"Native editor";PresentationKind.CodexApproval->"Native approval";PresentationKind.CodexQuestions->"Native questions";PresentationKind.CodexForm->"Native form";PresentationKind.CodexUrl->"Native link request";PresentationKind.DesktopOnly->"Desktop-only request"}, "Use only the choices and scope supplied by the desktop provider.")
         if (!enabled) UiText(disabledReason ?: "Writes disabled until authoritative snapshot and receipt recovery.",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
         memory.validation?.let { UiText(it,color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodyMedium,modifier=Modifier.fillMaxWidth().semantics {liveRegion=LiveRegionMode.Assertive}.testTag("form_validation")) }
         when (p) {

@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,6 +17,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.material3.Text as UiText
@@ -23,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInWindow
@@ -35,6 +39,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -53,11 +58,14 @@ import kotlinx.serialization.encodeToString
 fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
     val connection by model.connection.state.collectAsStateWithLifecycle()
     val store by model.store.state.collectAsStateWithLifecycle()
-    model.artifacts?.let{ArtifactBrowser(it,model)}
-    model.agentSessionCreation?.let {AgentSessionCreationSheet(it,connection,model)}
-    model.agentTerminalCreation?.let {AgentTerminalCreationDialog(it,model)}
-    if(model.attachmentVisible)model.attachmentTransfer?.let {AttachmentTransferSheet(it,model)}
-    model.attachmentRecovery?.let {AttachmentRecoverySheet(it,model)}
+    model.artifacts?.let{ArtifactBrowser(it,model,connectionLabel(it.host,connection,model.connectingHosts[it.host]==true),compactConnectionLabel(it.host,connection,model.connectingHosts[it.host]==true))}
+    model.agentSessionCreation?.let {shown->AgentSessionCreationSheet(shown,connection,model,store.hosts.firstOrNull {it.hostId==shown.key.host}?.name ?: "Paired desktop")}
+    model.agentTerminalCreation?.let {shown->
+        val agentSummary=connection.sessions[shown.key.host]?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==shown.key.target}==true}?.state?.summary
+        AgentTerminalCreationDialog(shown,model,store.hosts.firstOrNull {it.hostId==shown.key.host}?.name ?: "Paired desktop",conversationTitle(agentSummary),connectionLabel(shown.key.host,connection,model.connectingHosts[shown.key.host]==true),compactConnectionLabel(shown.key.host,connection,model.connectingHosts[shown.key.host]==true))
+    }
+    if(model.attachmentVisible)model.attachmentTransfer?.let {AttachmentTransferSheet(it,model,connectionLabel(it.original.key.host,connection,model.connectingHosts[it.original.key.host]==true),compactConnectionLabel(it.original.key.host,connection,model.connectingHosts[it.original.key.host]==true))}
+    model.attachmentRecovery?.let {AttachmentRecoverySheet(it,model,connectionLabel(it.record.host,connection,model.connectingHosts[it.record.host]==true),compactConnectionLabel(it.record.host,connection,model.connectingHosts[it.record.host]==true))}
     val selected=model.selection
     val context=LocalContext.current
     val notificationPermission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {model.notificationPermissionResult()}
@@ -78,29 +86,58 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
     val inlineSkillsPrivate=selected?.let {key->model.suggestedSkills(key,model.composers[key].orEmpty())?.catalogue!=null}==true
     SideEffect {privateWindow(model.attentionInbox!=null || model.artifacts!=null || model.agentTerminalCreation!=null || model.agentSessionCreation!=null || model.attachmentVisible || model.attachmentRecovery!=null || model.shell!=null || model.screen==Screen.Pairing && model.preview==null || model.screen==Screen.Conversation && (hasSecret || model.terminal!=null || model.worktrees!=null || model.changes!=null || inlineSkillsPrivate))}
     DisposableEffect(Unit) {onDispose {privateWindow(false)}}
-    BackHandler(model.screen!=Screen.Sessions || model.host!=null) { model.sessions() }
+    val backScreen=model.screen
+    val backHost=model.host
+    fun contextBack() {
+        when {
+            backScreen==Screen.Pairing->model.connections()
+            backScreen==Screen.Settings && backHost!=null->model.settings()
+            backScreen==Screen.Terminals->backHost?.let {model.sessions(it)} ?: model.sessions()
+            else->model.sessions()
+        }
+    }
+    BackHandler(model.screen!=Screen.Sessions || model.host!=null) {contextBack()}
     Scaffold(
         modifier=Modifier.fillMaxSize().semantics {testTagsAsResourceId=true},
         contentWindowInsets=WindowInsets.safeDrawing,
+        topBar={
+            val headerHost=when(model.screen) {Screen.Conversation->selected?.host;Screen.Sessions,Screen.Settings,Screen.Terminals->model.host;else->null}
+            val headerStatus=headerHost?.let {connectionLabel(it,connection,model.connectingHosts[it]==true)} ?: "${store.hosts.count {it.hostId in connection.hello}} connected"
+            val headerCompactStatus=headerHost?.let {compactConnectionLabel(it,connection,model.connectingHosts[it]==true)} ?: store.hosts.count {it.hostId in connection.hello}.let {if(it==0)"Offline" else "$it online"}
+            val headerLoading=headerHost?.let {model.connectingHosts[it]==true || inventoryRefreshing(it,connection)} ?: store.hosts.any {model.connectingHosts[it.hostId]==true || inventoryRefreshing(it.hostId,connection)}
+            Surface {Column(Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
+            GoatrTitleBar(
+                title=if(headerHost!=null && (model.screen==Screen.Sessions || model.screen==Screen.Settings)) (store.hosts.firstOrNull {it.hostId==headerHost}?.name ?: "Desktop")+" · "+(if(model.screen==Screen.Settings)"Settings" else "Sessions") else if(model.screen==Screen.Conversation) conversationTitle(reducer?.state?.summary) else when(model.screen) {Screen.Sessions->"goatr";Screen.Connections->"Hosts";Screen.Pairing->"Pair a desktop";Screen.Settings->"Settings";Screen.Terminals->"Terminals";else->"goatr"},
+                status=headerStatus,
+                loading=headerLoading,
+                compactStatus=headerCompactStatus,
+                navigationIcon={
+                    if(model.screen==Screen.Conversation || model.screen==Screen.Pairing || model.screen==Screen.Terminals || model.host!=null && (model.screen==Screen.Sessions || model.screen==Screen.Settings)) {
+                        val backTag=when(model.screen) {Screen.Pairing->"pair_cancel";Screen.Settings->"settings_overview";Screen.Terminals->"terminal_back_host";Screen.Conversation->"nav_sessions";else->"host_back_sessions"}
+                        val backLabel=when(model.screen) {Screen.Pairing->"Back and clear invitation";Screen.Settings->"All settings";Screen.Terminals->"Back to host sessions";else->"Back to sessions"}
+                        IconButton(onClick={contextBack()},modifier=Modifier.size(48.dp).testTag(backTag)) {GoatrIcon(MaterialGlyph.Back,backLabel)}
+                    }
+                },
+                actions={
+                    var menu by remember {mutableStateOf(false)}
+                    Box {IconButton(onClick={menu=true},modifier=Modifier.size(48.dp).testTag("navigation_menu")) {GoatrIcon(MaterialGlyph.Menu,"Navigation menu")}
+                        DropdownMenu(expanded=menu,onDismissRequest={menu=false}) {
+                            DropdownMenuItem(text={UiText("Sessions")},onClick={menu=false;model.sessions()})
+                            DropdownMenuItem(text={UiText("Hosts")},leadingIcon={GoatrIcon(MaterialGlyph.Desktop,null)},modifier=Modifier.testTag(if(model.screen==Screen.Conversation) "nav_hosts" else "navigation_hosts_menu"),onClick={menu=false;model.connections()})
+                            DropdownMenuItem(text={UiText("Settings")},leadingIcon={GoatrIcon(MaterialGlyph.Settings,null)},modifier=Modifier.testTag(if(model.screen==Screen.Conversation) "nav_settings" else "navigation_settings_menu"),onClick={menu=false;model.settings()})
+                            model.host?.let {host->DropdownMenuItem(text={UiText("Host settings")},modifier=Modifier.testTag("settings"),onClick={menu=false;model.settings(host)})}
+                        }
+                    }
+                },
+            )
+            }}
+        },
         // Conversation is a detail destination: its composer docks to the IME, not a navigation bar.
         bottomBar={ if(model.screen!=Screen.Conversation) TopLevelNav(model.screen, { model.sessions() }, model::connections, { model.settings() }) },
     ) {padding->
-        BoxWithConstraints(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding().padding(horizontal=if(model.screen==Screen.Conversation) 10.dp else 12.dp)) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding().padding(horizontal=if(model.screen==Screen.Conversation) 10.dp else 16.dp)) {
             val wide=maxWidth>=840.dp
             Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth().heightIn(min=56.dp),horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                if(model.screen==Screen.Conversation) IconButton(onClick={model.sessions()},modifier=Modifier.size(48.dp).testTag("nav_sessions")) {GoatrIcon(MaterialGlyph.Back,"Back to sessions")}
-                UiText(if(model.screen==Screen.Conversation) conversationTitle(reducer?.state?.summary) else when(model.screen) { Screen.Sessions -> "Sessions"; Screen.Connections -> "Hosts"; Screen.Pairing -> "Pair a desktop"; Screen.Settings -> "Settings"; Screen.Terminals -> "Terminals"; else -> "Goatr" },style=MaterialTheme.typography.titleLarge,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f).semantics {heading()})
-                var menu by remember {mutableStateOf(false)}
-                Box {IconButton(onClick={menu=true},modifier=Modifier.size(48.dp).testTag("navigation_menu")) {GoatrIcon(MaterialGlyph.Menu,"Navigation menu")}
-                    DropdownMenu(expanded=menu,onDismissRequest={menu=false}) {
-                        DropdownMenuItem(text={UiText("Sessions")},onClick={menu=false;model.sessions()})
-                        DropdownMenuItem(text={UiText("Hosts")},leadingIcon={GoatrIcon(MaterialGlyph.Desktop,null)},modifier=Modifier.testTag(if(model.screen==Screen.Conversation) "nav_hosts" else "navigation_hosts_menu"),onClick={menu=false;model.connections()})
-                        DropdownMenuItem(text={UiText("Settings")},leadingIcon={GoatrIcon(MaterialGlyph.Settings,null)},modifier=Modifier.testTag(if(model.screen==Screen.Conversation) "nav_settings" else "navigation_settings_menu"),onClick={menu=false;model.settings()})
-                        model.host?.let {host->DropdownMenuItem(text={UiText("Host settings")},modifier=Modifier.testTag("settings"),onClick={menu=false;model.settings(host)})}
-                    }
-                }
-            }
             model.notice?.let {Surface(color=MaterialTheme.colorScheme.errorContainer,shape=MaterialTheme.shapes.small,modifier=Modifier.fillMaxWidth()) {
                 UiText(it,color=MaterialTheme.colorScheme.onErrorContainer,style=MaterialTheme.typography.bodySmall,modifier=Modifier.heightIn(max=96.dp).verticalScroll(rememberScrollState()).padding(6.dp).semantics {liveRegion=LiveRegionMode.Assertive}.testTag("operation_notice"))
             }}
@@ -110,16 +147,20 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
             when(model.screen) {
                 Screen.Connections -> HostsScreen(store,connection,model)
                 Screen.Pairing -> PairingScreen(model)
-                Screen.Sessions -> if(model.host==null) SessionsConsole(store,connection,model) {host->
-                    pendingCreationHost=host
-                    model.sessions(host)
-                } else HostSessionsScreen(model.host!!,store,connection,model,pendingCreationHost==model.host) { pendingCreationHost=null }
+                // ponytail: local search/disclosures live only with this route/host; no navigation cache.
+                Screen.Sessions -> key(model.host) {
+                    if(model.host==null) SessionsConsole(store,connection,model) {host->
+                        pendingCreationHost=host
+                        model.sessions(host)
+                    } else HostSessionsScreen(model.host!!,store,connection,model,pendingCreationHost==model.host) { pendingCreationHost=null }
+                }
                 Screen.Terminals -> model.host?.let {ShellTerminalsScreen(it,store,connection,model)}
                 Screen.Conversation -> selected?.let {key->
                     Row(Modifier.fillMaxSize(),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                         if(wide) Column(Modifier.width(280.dp).fillMaxHeight().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                            var browserQuery by remember(key.host) {mutableStateOf("")}
                             Heading("Conversations")
-                            connection.inventory[key.host]?.let {SessionBrowser(it,connection.inventoryReady[key.host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==key.host}?.name) {target->model.open(key.host,target)}}
+                            connection.inventory[key.host]?.let {SessionBrowser(key.host,it,connection.inventoryReady[key.host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==key.host}?.name,browserQuery,{browserQuery=it}) {target->model.open(key.host,target)}}
                         }
                         Box(Modifier.weight(1f)) {ConversationScreen(key,store,connection,model)}
                     }
@@ -172,12 +213,20 @@ private fun unboundStateLabel(state: UnboundState): String = when(state) {
     UnboundState.Ambiguous -> "Needs desktop review"
     UnboundState.Unavailable -> "Unavailable"
 }
-private fun connectionLabel(host: String,view: ConnectionView,connecting: Boolean=false): String = when {
+internal fun connectionLabel(host: String,view: ConnectionView,connecting: Boolean=false): String = when {
     connecting -> "Connecting"
     host !in view.hello -> "Offline"
     view.selectedPath[host]=="direct" -> "Connected directly"
     view.selectedPath[host]=="relay" -> "Connected through relay"
     else -> "Connected"
+}
+internal fun compactConnectionLabel(host:String,view:ConnectionView,connecting:Boolean=false):String=when {
+    connecting -> "Linking"
+    host !in view.hello -> "Offline"
+    view.selectedPath[host]=="direct" -> "Direct"
+    view.selectedPath[host]=="relay" -> "Relay"
+    view.inventoryReady[host]!=true -> "Sync"
+    else -> "Online"
 }
 private fun inventoryRefreshing(host: String,view: ConnectionView): Boolean =
     host in view.hello && view.inventoryReady[host]!=true
@@ -217,7 +266,7 @@ private fun helloNativeReadStage(phase: OwnedReadPhase): String = when(phase) {
 @Composable
 private fun HostsScreen(store: StoreView,connection: ConnectionView,model: GoatrViewModel) {
     var confirmInstallation by remember {mutableStateOf(false)}
-    LazyColumn(verticalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.testTag("connections_list")) {
+    LazyColumn(verticalArrangement=Arrangement.spacedBy(16.dp),contentPadding=PaddingValues(bottom=16.dp),modifier=Modifier.fillMaxSize().testTag("connections_list")) {
         if(store.hosts.isEmpty()) item {
             EmptyState("No paired desktops","Run goatr pair in an explicitly requested desktop terminal, then scan or paste its invitation.") {
                 IconAction(MaterialGlyph.Scan,"Pair a desktop","pair_begin",enabled=!model.busy,onClick=model::beginPairing)
@@ -227,7 +276,9 @@ private fun HostsScreen(store: StoreView,connection: ConnectionView,model: Goatr
         items(store.hosts,key={it.hostId}) {host->
             val online=host.hostId in connection.hello
             GroupedSurface(modifier=Modifier.testTag("host_${host.hostId}")) {
-                CompactRow(host.name,"Paired desktop",status={Column(horizontalAlignment=androidx.compose.ui.Alignment.End) {StatusPill(connectionLabel(host.hostId,connection,model.connectingHosts[host.hostId]==true),if(online) StatusEmphasis.Positive else StatusEmphasis.Attention);RefreshHint(inventoryRefreshing(host.hostId,connection))}})
+                UiText(host.name,style=MaterialTheme.typography.titleMedium,maxLines=2,overflow=TextOverflow.Ellipsis)
+                StatusPill(connectionLabel(host.hostId,connection,model.connectingHosts[host.hostId]==true),if(online) StatusEmphasis.Positive else StatusEmphasis.Attention)
+                RefreshHint(inventoryRefreshing(host.hostId,connection))
                 if(!online) connection.connectionFailures[host.hostId]?.let {failure->
                     UiText(connectionFailureCopy(failure),style=MaterialTheme.typography.bodySmall)
                     var details by remember(host.hostId,failure) {mutableStateOf(false)}
@@ -241,17 +292,18 @@ private fun HostsScreen(store: StoreView,connection: ConnectionView,model: Goatr
                         }
                     }
                 }
-                if(!online) IconAction(MaterialGlyph.Refresh,"Reconnect","host_reconnect",enabled=!model.busy && model.foreground) { model.reconnect(host.hostId) }
-                else IconAction(MaterialGlyph.Chat,"View sessions","host_sessions",enabled=!model.busy) { model.sessions(host.hostId) }
-                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    if(online) TextButton(onClick={model.reconnect(host.hostId)},enabled=!model.busy && model.foreground,modifier=Modifier.heightIn(min=48.dp).testTag("host_reconnect")) {IconLabel(MaterialGlyph.Refresh,"Refresh connection")}
-                    IconAction(MaterialGlyph.Terminal,"Terminals","host_terminals_${host.hostId}",enabled=!model.busy) {model.terminals(host.hostId)}
-                    TextButton(onClick={model.settings(host.hostId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("host_settings")) {IconLabel(MaterialGlyph.Settings,"Host details")}
+                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    if(!online) FilledTonalIconButton(onClick={model.reconnect(host.hostId)},enabled=!model.busy && model.foreground,modifier=Modifier.size(48.dp).testTag("host_reconnect")) {GoatrIcon(MaterialGlyph.Refresh,"Reconnect")}
+                    else FilledTonalIconButton(onClick={model.sessions(host.hostId)},enabled=!model.busy,modifier=Modifier.size(48.dp).testTag("host_sessions")) {GoatrIcon(MaterialGlyph.Chat,"View sessions")}
+                    if(online) IconButton(onClick={model.reconnect(host.hostId)},enabled=!model.busy && model.foreground,modifier=Modifier.size(48.dp).testTag("host_reconnect")) {GoatrIcon(MaterialGlyph.Refresh,"Refresh connection")}
+                    else Spacer(Modifier.size(48.dp))
+                    IconButton(onClick={model.terminals(host.hostId)},enabled=!model.busy,modifier=Modifier.size(48.dp).testTag("host_terminals_${host.hostId}")) {GoatrIcon(MaterialGlyph.Terminal,"Terminals")}
+                    IconButton(onClick={model.settings(host.hostId)},enabled=!model.busy,modifier=Modifier.size(48.dp).testTag("host_settings")) {GoatrIcon(MaterialGlyph.Settings,"Host details")}
                 }
             }
         }
         if(store.hosts.isNotEmpty()) item {
-            TextButton(onClick=model::beginPairing,enabled=!model.busy,modifier=Modifier.testTag("pair_begin")) {IconLabel(MaterialGlyph.Scan,"Add desktop")}
+            TextButton(onClick=model::beginPairing,enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("pair_begin")) {IconLabel(MaterialGlyph.Scan,"Add desktop")}
         }
         items(store.keyDeletion,key={it.hostId}) {obligation->
             val installation=obligation.hostId==SessionStore.INSTALLATION_DELETION_SCOPE
@@ -270,22 +322,21 @@ private fun HostsScreen(store: StoreView,connection: ConnectionView,model: Goatr
 
 @Composable
 private fun PairingScreen(model: GoatrViewModel) {
-    Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom=16.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
         val preview=model.preview
-        GoatrSection("Pair a desktop","Pairing grants this phone access to supported same-user sessions on the selected host.")
+        UiText("Pairing grants this phone access to supported same-user sessions on the selected host.",style=MaterialTheme.typography.bodyMedium)
         if(preview==null) GroupedSurface { PairScanner(model.foreground,model::acceptInvitation) }
         else {
             GroupedSurface {
                 GoatrSection("Confirm ${preview.name.value}","Review the full trust pin before pairing this host.")
-                SelectionContainer {UiText("Fingerprint ${preview.fingerprint}")}
+                SelectionContainer {UiText("Fingerprint ${preview.fingerprint}",style=MaterialTheme.typography.bodyMedium,fontFamily=FontFamily.Monospace)}
                 UiText(preview.authority,modifier=Modifier.testTag("pair_authority"))
                 UiText(preview.relayDisclosure)
-                UiText("Invitation display expiry ${deadline(preview.expiresAt)}; host monotonic expiry is authoritative.",style=MaterialTheme.typography.bodySmall)
+                UiText("Invitation expiry shown: ${deadline(preview.expiresAt)}. The desktop checks expiry when you confirm.",style=MaterialTheme.typography.bodySmall)
                 Action("Confirm host-wide pairing","pair_confirm",enabled=model.foreground && !model.busy,onClick=model::confirmPairing)
                 TextButton(onClick=model::retryPairing,enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("pair_retry")) {UiText("Use another invitation")}
             }
         }
-        TextButton(onClick=model::connections,enabled=true,modifier=Modifier.heightIn(min=48.dp).testTag("pair_cancel")) {IconLabel(MaterialGlyph.Back,"Back and clear invitation")}
     }
 }
 
@@ -334,21 +385,26 @@ fun InventoryRows(inventory: HostSnapshotResult,ready: Boolean,onOpen: (Target)-
 
 @Composable
 fun SessionBrowser(
+    host: String,
     inventory: HostSnapshotResult,
     ready: Boolean,
     preferences: SessionListPreferences,
     hostName: String?,
+    query: String,
+    onQueryChange: (String)->Unit,
     onOpen: (Target) -> Unit,
 ) {
-    var query by remember {mutableStateOf("")}
-    OutlinedTextField(query,{query=it},label={UiText("Find a conversation")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("session_search"))
+    OutlinedTextField(query,onQueryChange,label={UiText("Find a conversation")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("session_search"))
     Box(Modifier.fillMaxWidth().heightIn(min=24.dp)) {
-        UiText(if(ready) "Live desktop sessions" else "Last observed sessions · reconnect to control",style=MaterialTheme.typography.bodySmall)
+        UiText(if(ready) "Current session list" else "Last observed session list",style=MaterialTheme.typography.bodySmall,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
     }
     val rows=inventory.sessions.filter {it.title.contains(query,ignoreCase=true)}
     var previousStatus: SessionStatus? = null
     rows.forEach {summary->
-        if(preferences.groupByStatus && previousStatus!=summary.status) GoatrSection(sessionGroupLabel(summary.status))
+        key(host,Target(summary.sessionId,summary.generation)) {
+        AnimatedVisibility(visible=preferences.groupByStatus && previousStatus!=summary.status) {
+            UiText(sessionGroupLabel(summary.status),style=MaterialTheme.typography.titleMedium,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(vertical=4.dp).semantics {heading()})
+        }
         SessionPresentationRow(
             summary=summary,
             inventory=inventory,
@@ -358,20 +414,22 @@ fun SessionBrowser(
             rowTag="session_${summary.sessionId.value}_${summary.generation.value}",
             onOpen=onOpen,
         )
+        }
         previousStatus=summary.status
     }
     if(inventory.unbound.isNotEmpty()) {
         Heading("Desktop setup required")
-        UiText("${inventory.unbound.size} desktop ${if(inventory.unbound.size==1) "row needs" else "rows need"} setup before it can be opened from this phone.",style=MaterialTheme.typography.bodySmall)
-        inventory.unbound.forEach { UnboundSessionRow(it) }
+        UiText("${inventory.unbound.size} desktop ${if(inventory.unbound.size==1) "row needs" else "rows need"} setup before it can be opened from this phone.",style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)
+        inventory.unbound.forEach {row->key(host,row.rowId) {UnboundSessionRow(row)}}
     }
     if(rows.isEmpty() && (query.isNotEmpty() || inventory.unbound.isEmpty())) UiText(
         when {
             query.isNotEmpty() -> "No matching conversations."
-            !ready -> "Desktop inventory is synchronizing. Refresh after desktop report/control setup; no phone Target is available yet."
+            !ready -> "Session list unavailable yet."
             query.isEmpty() -> "No supported conversations are currently bound. Complete desktop report/control setup, then refresh."
             else -> "No matching conversations."
         },
+        style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis,
     )
 }
 
@@ -401,22 +459,36 @@ private fun UnboundSessionRow(row: UnboundRow) {
     val provider=providerLabel(row.provider)
     val title=if(row.title.equals(provider,ignoreCase=true)) provider else row.title
     val subtitle=if(title==provider) unboundStateLabel(row.state) else "$provider · ${unboundStateLabel(row.state)}"
-    CompactRow(title,subtitle,status={StatusPill("Setup",StatusEmphasis.Muted)},modifier=Modifier.testTag("unbound_${row.rowId.value}"))
     var details by remember(row.rowId) {mutableStateOf(false)}
-    DetailDisclosure(details,{details=!details},"unbound_details_${row.rowId.value}")
-    if(details) UiText(row.reason,style=MaterialTheme.typography.bodySmall)
+    CompactRow(title,subtitle,status={
+        Row(verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            StatusPill("Setup",StatusEmphasis.Muted)
+            IconButton(onClick={details=!details},modifier=Modifier.size(48.dp).testTag("unbound_details_${row.rowId.value}")) {GoatrIcon(MaterialGlyph.Visibility,if(details) "Hide setup details" else "Show setup details")}
+        }
+    },modifier=Modifier.testTag("unbound_${row.rowId.value}"))
+    if(details) {
+        UiText(title,style=MaterialTheme.typography.bodySmall)
+        UiText(row.reason,style=MaterialTheme.typography.bodySmall)
+    }
 }
 
 /** The landing console groups exact native Targets by paired host without selecting one. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: GoatrViewModel,onNewSession: (String)->Unit) {
+    val focusManager=LocalFocusManager.current
+    val keyboard=LocalSoftwareKeyboardController.current
     var filter by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var providerFilter by remember { mutableStateOf<Provider?>(null) }
     var statusFilter by remember { mutableStateOf<SessionStatus?>(null) }
     var filtersOpen by remember { mutableStateOf(false) }
     var expandedOtherHosts by remember { mutableStateOf(emptySet<String>()) }
+    val pairedHostIds=remember(store.hosts) {store.hosts.map {it.hostId}.toSet()}
+    LaunchedEffect(pairedHostIds) {
+        if(filter!=null && filter !in pairedHostIds) {filter=null;query=""}
+        expandedOtherHosts=expandedOtherHosts.intersect(pairedHostIds)
+    }
     val activeFilters=listOfNotNull(filter?.let {host->store.hosts.firstOrNull {it.hostId==host}?.name ?: "Selected host"},providerFilter?.let(::providerLabel),statusFilter?.let(::sessionGroupLabel))
     val narrowed=query.isNotEmpty() || providerFilter!=null || statusFilter!=null
     fun matches(summary:SessionSummary):Boolean=summary.title.contains(query,ignoreCase=true) && (providerFilter==null || summary.provider==providerFilter) && (statusFilter==null || summary.status==statusFilter)
@@ -424,28 +496,27 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
     val hosts=store.hosts.filter { filter==null || it.hostId==filter }
     val creationHosts=hosts.filter {paired->(connection.inventory[paired.hostId] ?: store.inventory.firstOrNull {it.hostId==paired.hostId}?.inventory) != null}
     LaunchedEffect(choosingCreationHost,creationHosts.map {it.hostId}) {if(choosingCreationHost && creationHosts.isEmpty()) choosingCreationHost=false}
-    // The persistent extended FAB needs a scroll-only exclusion zone. Scaffold already
-    // consumes the navigation inset; this reserves the FAB, its margin, and a clear gap.
-    val sessionsFabClearance=112.dp
     Box(Modifier.fillMaxSize()) {
-    Column(Modifier.fillMaxSize(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-        GoatrSection("Your sessions", "Pick up a conversation from any paired desktop.")
+    Column(Modifier.fillMaxSize(),verticalArrangement=Arrangement.spacedBy(12.dp)) {
         if(store.hosts.isNotEmpty()) {
             SessionDirectoryMode(model.sessionListPreferences.directoryView) {mode->
                 model.sessionListPreferences=model.sessionListPreferences.copy(directoryView=mode)
             }
             Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(query,{query=it},label={UiText("Find sessions")},singleLine=true,modifier=Modifier.weight(1f).testTag("session_search"))
-                IconButton(onClick={filtersOpen=true},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("session_filters_open")) {
+                OutlinedTextField(query,{query=it},label={UiText("Find sessions")},singleLine=true,keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search),keyboardActions=KeyboardActions(onSearch={focusManager.clearFocus();keyboard?.hide()}),modifier=Modifier.weight(1f).testTag("session_search"))
+                IconButton(onClick={focusManager.clearFocus();keyboard?.hide();filtersOpen=true},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("session_filters_open")) {
                     BadgedBox(badge={if(activeFilters.isNotEmpty()) Badge {UiText(activeFilters.size.toString())}}) {
                         GoatrIcon(MaterialGlyph.Filter,if(activeFilters.isEmpty()) "Filters" else "Filters, ${activeFilters.size} active")
                     }
                 }
+                FilledTonalIconButton(onClick={
+                    if(creationHosts.size==1) onNewSession(creationHosts.single().hostId) else choosingCreationHost=true
+                },enabled=creationHosts.isNotEmpty()&&!model.busy,modifier=Modifier.size(48.dp).testTag("new_session")) {GoatrIcon(MaterialGlyph.Add,"New session")}
             }
             if(activeFilters.isNotEmpty()) UiText(activeFilters.joinToString(" · "),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.testTag("session_filters_summary"))
 
         }
-        LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("sessions_console"),verticalArrangement=Arrangement.spacedBy(6.dp),contentPadding=PaddingValues(bottom=if(creationHosts.isEmpty()) 16.dp else sessionsFabClearance)) {
+        LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("sessions_console"),verticalArrangement=Arrangement.spacedBy(8.dp),contentPadding=PaddingValues(bottom=16.dp)) {
             if(store.hosts.isEmpty()) item {
                 EmptyState("Pair a desktop to begin","Goatr can show and control supported sessions only after you explicitly pair this phone with a same-user desktop.") {
                     IconAction(MaterialGlyph.Scan,"Scan or paste pairing invitation","pair_begin",enabled=!model.busy,onClick=model::beginPairing)
@@ -462,35 +533,39 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                 val rows=inventory?.sessions.orEmpty().filter(::matches)
                 val hasRecordedSessions=inventory?.sessions?.isNotEmpty()==true || retainedRows.isNotEmpty()
                 item(key="host_${paired.hostId}") {
-                    Column(Modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                        GoatrSection(paired.name, connectionLabel(paired.hostId,connection,model.connectingHosts[paired.hostId]==true))
-                        FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                            IconAction(MaterialGlyph.Notification,"Unread activity","console_attention_inbox_${paired.hostId}",enabled=!model.busy&&model.foreground) {model.openConsoleAttentionInbox(paired.hostId)}
-                            if(!online) IconAction(MaterialGlyph.Refresh,"Reconnect","host_reconnect_${paired.hostId}",enabled=!model.busy && model.foreground) {model.reconnect(paired.hostId)}
-
-                        }
-                        if(!online) {
-                            connection.connectionFailures[paired.hostId]?.let {failure->UiText(connectionFailureCopy(failure),style=MaterialTheme.typography.bodySmall)}
-                            TextButton(onClick={model.settings(paired.hostId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("host_settings_${paired.hostId}")) {IconLabel(MaterialGlyph.Settings,"Host details")}
-                        }
+                    SessionsHostCard(paired.name,connectionLabel(paired.hostId,connection,model.connectingHosts[paired.hostId]==true),online,inventoryRefreshing(paired.hostId,connection),if(online) "" else connection.connectionFailures[paired.hostId]?.let(::connectionFailureCopy).orEmpty()) {
+                        IconButton(onClick={model.openConsoleAttentionInbox(paired.hostId)},enabled=!model.busy&&model.foreground,modifier=Modifier.size(48.dp).testTag("console_attention_inbox_${paired.hostId}")) {GoatrIcon(MaterialGlyph.Notification,"Unread activity")}
+                        IconButton(onClick={model.reconnect(paired.hostId)},enabled=!online && !model.busy && model.foreground,modifier=Modifier.size(48.dp).testTag("host_reconnect_${paired.hostId}")) {GoatrIcon(MaterialGlyph.Refresh,"Reconnect")}
+                        IconButton(onClick={model.settings(paired.hostId)},enabled=!model.busy,modifier=Modifier.size(48.dp).testTag("host_settings_${paired.hostId}")) {GoatrIcon(MaterialGlyph.Settings,"Host details")}
                     }
                 }
                 if(inventory==null) item(key="host_missing_${paired.hostId}") {
                     GroupedSurface {
-                        UiText("No retained session inventory.",style=MaterialTheme.typography.titleSmall)
-                        UiText("Reconnect this host to read supported desktop sessions.",style=MaterialTheme.typography.bodySmall)
+                        UiText(when {
+                            online->"Waiting for sessions"
+                            model.connectingHosts[paired.hostId]==true->"Connecting to desktop"
+                            else->"Session list unavailable"
+                        },style=MaterialTheme.typography.titleSmall,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
+                        UiText(when {
+                            online->"Connected. The session list is not available yet."
+                            model.connectingHosts[paired.hostId]==true->"Connecting to this desktop. The session list is not available yet."
+                            else->"Reconnect to this desktop to request its current session list."
+                        },style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)
                     }
                 } else {
                     if(model.sessionListPreferences.directoryView==SessionDirectoryView.Workspaces) {
                         val directory=projectSessionDirectory(paired.hostId,inventory,ready,rows,narrowed)
                         directory.workspaces.filter {it.agents.isNotEmpty()}.forEach {group->
-                            item(key=group.key.lazyKey) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}
+                            item(key=group.key.lazyKey) {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}}
                         }
                         if(directory.standalone.isNotEmpty()) item(key="standalone_heading_${paired.hostId}") {
-                            GoatrSection(if(ready) "Available agents" else "Last observed agents", "Workspace association unavailable")
+                            Column(Modifier.padding(vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                                UiText(if(ready) "Agents" else "Last observed agents",style=MaterialTheme.typography.titleMedium,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.semantics {heading()})
+                                UiText("Workspace association unavailable",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
+                            }
                         }
                         directory.standalone.forEach {summary->item(key="session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}") {
-                            DirectoryAgentRow(summary,paired.name,null,model.sessionListPreferences,!ready,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)})
+                            Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {DirectoryAgentRow(summary,paired.name,null,model.sessionListPreferences,!ready,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)})}
                         }}
                         // These may contain shells or unbound panes; absence of a bound agent is not emptiness.
                         val other=directory.workspaces.filter {it.agents.isEmpty()}
@@ -502,7 +577,7 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                                 }
                             }
                             if(expanded) other.forEach {group->
-                                item(key=group.key.lazyKey) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}
+                                item(key=group.key.lazyKey) {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}}
                             }
                         }
                     } else {
@@ -514,52 +589,50 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                         var previousStatus: SessionStatus? = null
                         recent.forEach {summary->
                             if(model.sessionListPreferences.groupByStatus && previousStatus!=summary.status) {
-                                item(key="status_${paired.hostId}_${summary.status.name}_${summary.sessionId.value}_${summary.generation.value}") {GoatrSection(sessionGroupLabel(summary.status))}
+                                item(key="status_${paired.hostId}_${summary.status.name}_${summary.sessionId.value}_${summary.generation.value}") {UiText(sessionGroupLabel(summary.status),style=MaterialTheme.typography.titleMedium,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(vertical=4.dp).semantics {heading()})}
                             }
-                            item(key="recent_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}") {
+                            item(key="session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}") {
                                 val cached=cachedByTarget[Target(summary.sessionId,summary.generation)]
                                 val workspace=if(cached==null) workspaceByTarget[Target(summary.sessionId,summary.generation)] else null
-                                DirectoryAgentRow(summary,paired.name,workspace,model.sessionListPreferences,!ready || cached!=null,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)},cached?.partial)
+                                Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {DirectoryAgentRow(summary,paired.name,workspace,model.sessionListPreferences,!ready || cached!=null,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)},cached?.partial)}
                             }
                             previousStatus=summary.status
                         }
                     }
-                    inventory.unbound.forEach { row -> item(key="unbound_${paired.hostId}_${row.rowId.value}") { UnboundSessionRow(row) } }
+                    inventory.unbound.forEach { row -> item(key="unbound_${paired.hostId}_${row.rowId.value}") {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {UnboundSessionRow(row)}} }
 
                 }
-                if(rows.isEmpty() && cachedRows.isEmpty() && hasRecordedSessions && narrowed) item(key="filtered_empty_${paired.hostId}") {UiText("No sessions match these filters on this host.",style=MaterialTheme.typography.bodySmall)}
-                else if(inventory!=null && !hasRecordedSessions && inventory.unbound.isEmpty()) item(key="empty_${paired.hostId}") {UiText("No supported phone conversations are bound on this host.",style=MaterialTheme.typography.bodySmall)}
+                if(rows.isEmpty() && cachedRows.isEmpty() && hasRecordedSessions && narrowed) item(key="filtered_empty_${paired.hostId}") {UiText("No sessions match these filters on this host.",style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)}
+                else if(inventory!=null && !hasRecordedSessions && inventory.unbound.isEmpty()) item(key="empty_${paired.hostId}") {UiText("No conversations in this session list.",style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)}
                 // Unbound setup rows stay separate; no provider or session status is inferred for them.
                 if((model.sessionListPreferences.directoryView==SessionDirectoryView.Workspaces || inventory==null) && cachedRows.isNotEmpty()) {
-                    item(key="cached_heading_${paired.hostId}") {GoatrSection("Retained conversations", "Stale cache · workspace association unavailable")}
+                    item(key="cached_heading_${paired.hostId}") {Column(Modifier.padding(vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                        UiText("Retained conversations",style=MaterialTheme.typography.titleMedium,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.semantics {heading()})
+                        UiText("Stale cache · workspace association unavailable",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    }}
                     val retained=if(model.sessionListPreferences.directoryView==SessionDirectoryView.RecentAgents) {
                         val byTarget=cachedRows.associateBy {Target(it.summary.sessionId,it.summary.generation)}
                         orderRecentlyOpened(paired.hostId,cachedRows.map {it.summary},model.recentlyOpenedSessions).map {byTarget.getValue(Target(it.sessionId,it.generation))}
                     } else cachedRows
-                    retained.forEach {cached->item(key="cached_${paired.hostId}_${cached.summary.sessionId.value}_${cached.summary.generation.value}") {
-                        DirectoryAgentRow(cached.summary,paired.name,null,model.sessionListPreferences,true,"session_${paired.hostId}_${cached.summary.sessionId.value}_${cached.summary.generation.value}",{target->model.open(paired.hostId,target)},cached.partial)
+                    retained.forEach {cached->item(key="session_${paired.hostId}_${cached.summary.sessionId.value}_${cached.summary.generation.value}") {
+                        Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {DirectoryAgentRow(cached.summary,paired.name,null,model.sessionListPreferences,true,"session_${paired.hostId}_${cached.summary.sessionId.value}_${cached.summary.generation.value}",{target->model.open(paired.hostId,target)},cached.partial)}
                     }}
                 }
                 item(key="host_actions_${paired.hostId}") { FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                     IconAction(MaterialGlyph.Terminal,"Terminals","host_terminals_${paired.hostId}",enabled=!model.busy) {model.terminals(paired.hostId)}
                     IconAction(MaterialGlyph.Desktop,"View host","host_sessions_${paired.hostId}",enabled=!model.busy) {model.sessions(paired.hostId)}
-                    if(online) TextButton(onClick={model.settings(paired.hostId)},modifier=Modifier.heightIn(min=48.dp).testTag("host_settings_${paired.hostId}")) {IconLabel(MaterialGlyph.Settings,"Host settings")}
                 } }
             }
             if(store.hosts.isNotEmpty()) item("add_host") { TextButton(onClick=model::beginPairing,enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("pair_begin")) {IconLabel(MaterialGlyph.Scan,"Add desktop") } }
         }
     }
-    if(creationHosts.isNotEmpty()) PrimaryActionFab(MaterialGlyph.Add,"New session","new_session",enabled=!model.busy,onClick={
-        if(creationHosts.size==1) onNewSession(creationHosts.single().hostId) else choosingCreationHost=true
-    },modifier=Modifier.align(androidx.compose.ui.Alignment.BottomEnd).padding(16.dp))
     if(filtersOpen) ModalBottomSheet(onDismissRequest={filtersOpen=false},sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth().semantics {testTagsAsResourceId=true}.navigationBarsPadding().imePadding().padding(horizontal=16.dp).testTag("session_filters_sheet"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                UiText("Filters",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).semantics {heading()})
-                TextButton(onClick={filter=null;providerFilter=null;statusFilter=null},enabled=activeFilters.isNotEmpty(),modifier=Modifier.heightIn(min=48.dp).testTag("session_filters_clear")) {UiText("Clear all")}
-                IconButton(onClick={filtersOpen=false},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("session_filters_close")) {GoatrIcon(MaterialGlyph.Close,"Close filters")}
-            }
+            GoatrTitleBar("Filters","${store.hosts.count {it.hostId in connection.hello}} connected",false,compactStatus=store.hosts.count {it.hostId in connection.hello}.let {if(it==0)"Offline" else "$it online"},actions={
+                IconButton(onClick={filtersOpen=false},modifier=Modifier.size(48.dp).testTag("session_filters_close")) {GoatrIcon(MaterialGlyph.Close,"Close filters")}
+            })
             Column(Modifier.weight(1f,fill=false).verticalScroll(rememberScrollState()).padding(bottom=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick={filter=null;providerFilter=null;statusFilter=null},enabled=activeFilters.isNotEmpty(),modifier=Modifier.heightIn(min=48.dp).testTag("session_filters_clear")) {UiText("Clear all")}
                 GoatrSection("Desktop")
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                     FilterChip(selected=filter==null,onClick={filter=null},label={UiText("All hosts")},modifier=Modifier.heightIn(min=48.dp).testTag("host_filter_all"))
@@ -580,9 +653,13 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
         }
     }
     if(choosingCreationHost) ModalBottomSheet(onDismissRequest={choosingCreationHost=false},containerColor=MaterialTheme.colorScheme.surface) {
-        Column(Modifier.fillMaxWidth().semantics {testTagsAsResourceId=true}.navigationBarsPadding().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            GoatrSection("Choose a desktop","Start a new session only on the desktop you select.")
+        Column(Modifier.fillMaxWidth().fillMaxHeight(.8f).semantics {testTagsAsResourceId=true}.navigationBarsPadding().imePadding().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            GoatrTitleBar("Choose a desktop","${store.hosts.count {it.hostId in connection.hello}} connected",false,compactStatus=store.hosts.count {it.hostId in connection.hello}.let {if(it==0)"Offline" else "$it online"},actions={
+                IconButton(onClick={choosingCreationHost=false},modifier=Modifier.size(48.dp).testTag("landing_new_session_close")) {GoatrIcon(MaterialGlyph.Close,"Close desktop chooser")}
+            })
+            UiText("Start a new session only on the desktop you select.",style=MaterialTheme.typography.bodySmall)
             val currentCreationHosts=creationHosts
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             if(currentCreationHosts.isEmpty()) UiText("Session inventory is no longer available for this selection.",style=MaterialTheme.typography.bodySmall)
             currentCreationHosts.forEach {paired->
                 IconAction(MaterialGlyph.Add,paired.name,"landing_new_session_host_${paired.hostId}",enabled=!model.busy) {
@@ -591,7 +668,7 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                     if(stillEligible) onNewSession(paired.hostId)
                 }
             }
-            TextButton(onClick={choosingCreationHost=false},modifier=Modifier.heightIn(min=48.dp).align(androidx.compose.ui.Alignment.End).testTag("landing_new_session_close")) {IconLabel(MaterialGlyph.Close,"Close")}
+            }
         }
     }
     }
@@ -605,6 +682,7 @@ private fun HostSessionsScreen(host: String,store: StoreView,connection: Connect
     val currentCreation=model.creationActions[host]
     val olderFocused=currentCreation!=null && focused?.metadata?.actionId!=currentCreation
     var topology by remember(host) {mutableStateOf(false)}
+    var browserQuery by remember(host) {mutableStateOf("")}
     var createSheet by remember(host) {mutableStateOf(false)}
     LaunchedEffect(openCreation,inventory) {
         if(openCreation && inventory!=null) {
@@ -614,18 +692,11 @@ private fun HostSessionsScreen(host: String,store: StoreView,connection: Connect
     }
     val ongoing=creationOngoing(host,inventory,model,focused)
     Box(Modifier.fillMaxSize()) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom=80.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-            GoatrSection(store.hosts.firstOrNull {it.hostId==host}?.name ?: "Host sessions",modifier=Modifier.weight(1f))
-            Column(horizontalAlignment=androidx.compose.ui.Alignment.End) {
-                StatusPill(connectionLabel(host,connection,model.connectingHosts[host]==true),if(host in connection.hello) StatusEmphasis.Positive else StatusEmphasis.Attention)
-                RefreshHint(inventoryRefreshing(host,connection))
-            }
-        }
-        FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            IconAction(MaterialGlyph.Refresh,"Refresh sessions","inventory_refresh",enabled=!model.busy && host in connection.hello,onClick=model::refresh)
-            IconAction(MaterialGlyph.Terminal,"Terminals","host_terminals_$host",enabled=!model.busy) {model.terminals(host)}
-            IconAction(MaterialGlyph.Notification,"Unread activity","attention_inbox_$host",enabled=!model.busy && model.foreground) {model.openAttentionInbox(host)}
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom=112.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
+        SessionsHostCard(null,connectionLabel(host,connection,model.connectingHosts[host]==true),host in connection.hello,inventoryRefreshing(host,connection),if(host in connection.hello) "" else connection.connectionFailures[host]?.let(::connectionFailureCopy).orEmpty()) {
+            IconButton(onClick=model::refresh,enabled=!model.busy && host in connection.hello,modifier=Modifier.size(48.dp).testTag("inventory_refresh")) {GoatrIcon(MaterialGlyph.Refresh,"Refresh sessions")}
+            IconButton(onClick={model.terminals(host)},enabled=!model.busy,modifier=Modifier.size(48.dp).testTag("host_terminals_$host")) {GoatrIcon(MaterialGlyph.Terminal,"Terminals")}
+            IconButton(onClick={model.openAttentionInbox(host)},enabled=!model.busy && model.foreground,modifier=Modifier.size(48.dp).testTag("attention_inbox_$host")) {GoatrIcon(MaterialGlyph.Notification,"Unread activity")}
         }
         if(inventory!=null && ongoing) UiText("A creation action is already reserved/running or awaiting inspection. Refresh its receipt below; never duplicate it after rotation or the 120-second response.")
         focused?.let { action->ReceiptPanel(host,action,model,onSeparateCreation=if(olderFocused) null else ({model.prepareSeparateCreation(host,action.metadata.actionId)})) }
@@ -634,16 +705,18 @@ private fun HostSessionsScreen(host: String,store: StoreView,connection: Connect
             Action("Inspect current creation","current_creation_inspect_${current.value}",enabled=!model.busy) {model.inspect(host,current)}
         }
         if(inventory==null) UiText("No cached inventory. Reconnect to read this host.") else {
-            SessionBrowser(inventory,connection.inventoryReady[host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==host}?.name) {model.open(host,it)}
+            SessionBrowser(host,inventory,connection.inventoryReady[host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==host}?.name,browserQuery,{browserQuery=it}) {model.open(host,it)}
             TextButton(onClick={topology=!topology},modifier=Modifier.testTag("topology_details")) {UiText(if(topology) "Hide desktop details" else "Desktop details")}
             if(topology) {
                 UiText("Desktop focus never selects a phone conversation.",style=MaterialTheme.typography.bodySmall)
                 InventoryRows(inventory,connection.inventoryReady[host]==true) {model.open(host,it)}
             }
         }
-        store.cached.filter {it.hostId==host}.forEach {cache->
-            Heading("Offline cached conversation ${cache.summary.title}");UiText("Stale${if(cache.partial) " · partial" else ""}")
-            Action("Read stale cache","cached_session") {model.open(host,Target(cache.summary.sessionId,cache.summary.generation))}
+        val displayedTargets=inventory?.sessions.orEmpty().map {Target(it.sessionId,it.generation)}.toSet()
+        store.cached.filter {it.hostId==host && Target(it.summary.sessionId,it.summary.generation) !in displayedTargets}.forEach {cache->
+            key(host,Target(cache.summary.sessionId,cache.summary.generation)) {
+                DirectoryAgentRow(cache.summary,store.hosts.firstOrNull {it.hostId==host}?.name,null,model.sessionListPreferences,true,"cached_${host}_${cache.summary.sessionId.value}_${cache.summary.generation.value}",{target->model.open(host,target)},cache.partial)
+            }
         }
         model.actions[host].orEmpty().filter {it.metadata.method==ActionMethod.SessionCreate && it.metadata.actionId!=focused?.metadata?.actionId}.forEach {ReceiptPanel(host,it,model)}
         ActionPaging(model,collapsed=true)
@@ -665,25 +738,25 @@ private fun AttentionInboxDialog(shown:AttentionInboxState,store:StoreView,conne
     Dialog(onDismissRequest=model::closeAttentionInbox) {
         Surface(Modifier.fillMaxWidth().heightIn(max=600.dp).testTag("attention_inbox").semantics {testTagsAsResourceId=true},shape=MaterialTheme.shapes.extraLarge) {
             Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                    GoatrIcon(MaterialGlyph.Notification,null)
-                    UiText("Unread activity",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).padding(start=8.dp).semantics {heading()})
-                    IconAction(MaterialGlyph.Close,"Close unread activity","attention_inbox_close",onClick=model::closeAttentionInbox)
-                }
-                UiText(store.hosts.firstOrNull {it.hostId==shown.host}?.name ?: "Paired desktop",style=MaterialTheme.typography.labelLarge,maxLines=2,overflow=TextOverflow.Ellipsis)
-                UiText("Up to 100 newest unread entries retained on this phone. Opening checks the original session; older sessions may show read-only history.",style=MaterialTheme.typography.bodySmall)
-                TextButton(onClick={model.refreshAttentionInbox(shown)},enabled=!shown.loading,modifier=Modifier.heightIn(min=48.dp).testTag("attention_inbox_refresh")) {IconLabel(MaterialGlyph.Refresh,"Refresh retained list")}
-                when {
-                    shown.loading->Row(Modifier.heightIn(min=48.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {CircularProgressIndicator(Modifier.size(20.dp));UiText("Reading retained activity…",style=MaterialTheme.typography.bodyMedium)}
-                    shown.error->UiText("Unread activity could not be read. Refresh to try again.",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.error)
-                    shown.entries.isEmpty()->UiText("No unread activity is retained on this phone.",style=MaterialTheme.typography.bodyMedium)
-                    else->LazyColumn(Modifier.fillMaxWidth().heightIn(max=360.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                        items(shown.entries,key={it.event.eventId.value}) {entry->
+                GoatrTitleBar("Unread activity",connectionLabel(shown.host,connection,model.connectingHosts[shown.host]==true),shown.loading,compactStatus=compactConnectionLabel(shown.host,connection,model.connectingHosts[shown.host]==true),actions={
+                    IconButton(onClick=model::closeAttentionInbox,modifier=Modifier.size(48.dp).testTag("attention_inbox_close")) {GoatrIcon(MaterialGlyph.Close,"Close unread activity")}
+                })
+                LazyColumn(Modifier.fillMaxWidth().weight(1f,fill=false).testTag("attention_inbox_list"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    item {
+                        UiText(store.hosts.firstOrNull {it.hostId==shown.host}?.name ?: "Paired desktop",style=MaterialTheme.typography.labelLarge,maxLines=2,overflow=TextOverflow.Ellipsis)
+                        UiText("Up to 100 newest unread entries retained on this phone. Opening checks the original session; older sessions may show read-only history.",style=MaterialTheme.typography.bodySmall)
+                    }
+                    item {TextButton(onClick={model.refreshAttentionInbox(shown)},enabled=!shown.loading,modifier=Modifier.heightIn(min=48.dp).testTag("attention_inbox_refresh")) {IconLabel(MaterialGlyph.Refresh,"Refresh retained list")}}
+                    when {
+                        shown.loading->item {Row(Modifier.heightIn(min=48.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {UiText("Reading retained activity…",style=MaterialTheme.typography.bodyMedium)}}
+                        shown.error->item {UiText("Unread activity could not be read. Refresh to try again.",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.error)}
+                        shown.entries.isEmpty()->item {UiText("No unread activity is retained on this phone.",style=MaterialTheme.typography.bodyMedium)}
+                        else->items(shown.entries,key={it.event.eventId.value}) {entry->
                             val event=entry.event
                             val summary=connection.sessions[shown.host]?.firstOrNull {it.state?.summary?.let {s->s.sessionId==event.sessionId && s.generation==event.generation}==true}?.state?.summary
                                 ?: store.cached.firstOrNull {it.hostId==shown.host && it.summary.sessionId==event.sessionId && it.summary.generation==event.generation}?.summary
                             OutlinedCard(onClick={model.openAttentionInboxEntry(shown,entry)},enabled=!model.busy,modifier=Modifier.fillMaxWidth().heightIn(min=64.dp)) {
-                                Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                                Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                                     UiText(if(event.category==AttentionCategory.Attention) "Needs attention" else "Work completed",style=MaterialTheme.typography.labelLarge)
                                     UiText(conversationTitle(summary),style=MaterialTheme.typography.bodyMedium,maxLines=2,overflow=TextOverflow.Ellipsis)
                                     UiText(java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT,java.text.DateFormat.SHORT).format(java.util.Date(event.createdAt.value)),style=MaterialTheme.typography.labelSmall)
@@ -705,7 +778,7 @@ private fun SeparateCreationConfirmation(host: String,action: LocalAction,model:
     val scroll=rememberScrollState()
     Dialog(onDismissRequest={model.dismissSeparateCreation(action.metadata.actionId)}) {
         Surface(Modifier.fillMaxWidth().heightIn(max=560.dp).testTag("separate_creation_$actionId").semantics {testTagsAsResourceId=true},shape=MaterialTheme.shapes.extraLarge,color=MaterialTheme.colorScheme.surface) {
-            Column(Modifier.padding(24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
                 Column(Modifier.heightIn(max=320.dp).verticalScroll(scroll),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                     UiText("Start a separate new session?",style=MaterialTheme.typography.titleLarge)
                     UiText("Prior action $actionId remains inspectable. This creates a new action; it does not retry or retarget the prior action.",style=MaterialTheme.typography.bodySmall)
@@ -716,7 +789,7 @@ private fun SeparateCreationConfirmation(host: String,action: LocalAction,model:
                     else resources.forEach {UiText(it,style=MaterialTheme.typography.bodySmall)}
                 }
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick={model.dismissSeparateCreation(action.metadata.actionId)},enabled=!model.busy) {IconLabel(MaterialGlyph.Close,"Cancel")}
+                    TextButton(onClick={model.dismissSeparateCreation(action.metadata.actionId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)) {IconLabel(MaterialGlyph.Close,"Cancel")}
                     IconAction(MaterialGlyph.Add,"Start separate new session","separate_creation_confirm_$actionId",enabled=!model.busy) {if(worktreeScope==null) model.confirmSeparateCreation(host,action.metadata.actionId,onConfirmed) else model.confirmSeparateWorktree(worktreeScope,action.metadata.actionId,onConfirmed)}
                 }
             }
@@ -747,7 +820,7 @@ private fun creationOngoing(host: String,inventory: HostSnapshotResult?,model: G
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WorktreeCreationSheet(key: ConversationKey, inventory: HostSnapshotResult, summary: SessionSummary, listing: WorktreesSnapshot, model: GoatrViewModel, onDismiss: () -> Unit) {
+private fun WorktreeCreationSheet(key: ConversationKey, inventory: HostSnapshotResult, summary: SessionSummary, listing: WorktreesSnapshot, connection: ConnectionView, model: GoatrViewModel, onDismiss: () -> Unit) {
     val scope=listing.creationScope
     val requestScope=remember(key,listing.source,listing.ticket) {WorktreeCreationRequestScope(key,listing.source,listing.ticket)}
     LaunchedEffect(requestScope) {model.loadWorktreeCreation(requestScope)}
@@ -760,17 +833,16 @@ private fun WorktreeCreationSheet(key: ConversationKey, inventory: HostSnapshotR
     var base by remember(key,listing.source,listing.ticket) {mutableStateOf("")}
     val server=inventory.servers.singleOrNull {it.serverId==summary.serverId}
     val selectedProject=inventory.projects.singleOrNull {it.projectId==project && it.available}
-    val connection=model.connection.state.value
     val sourceCurrent=model.foreground && model.selection==key && model.screen==Screen.Conversation && connection.sources[key.host]?.get(key.target)==listing.source && connection.mutationReady[key.host]==true && connection.inventoryReady[key.host]==true
     val validCheckout=runCatching {if(existing) CreationCheckout.Existing(branch.trim()).validate() else CreationCheckout.New(branch.trim().takeIf {it.isNotEmpty()},base.trim().takeIf {it.isNotEmpty()}).validate()}.isSuccess
     val providerReady=server?.let {if(provider==Provider.Omp) it.canCreate.omp else it.canCreate.codex}==true
     val available=scope?.canCreate==true && selectedProject!=null && summary.capabilities.worktreeCreate && sourceCurrent && providerReady && name.isNotBlank() && runCatching {Label(name)}.isSuccess && validCheckout && !model.busy && model.worktreeCreationAllowed(requestScope)
     ModalBottomSheet(onDismissRequest=onDismiss,sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
-        Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(16.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-            Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                UiText("Start in worktree",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).semantics {heading()})
-                TextButton(onClick=onDismiss,modifier=Modifier.testTag("worktree_create_close")) {IconLabel(MaterialGlyph.Close,"Close")}
-            }
+        Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding().imePadding().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            GoatrTitleBar("Start in worktree",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),listing.loading,compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true),actions={
+                IconButton(onClick=onDismiss,modifier=Modifier.size(48.dp).testTag("worktree_create_close")) {GoatrIcon(MaterialGlyph.Close,"Close checkout creation")}
+            })
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)) {
             UiText(selectedProject?.label?.value ?: "No authorized project is available for this source.",style=MaterialTheme.typography.bodyMedium,modifier=Modifier.testTag("worktree_create_project"))
             if(creationGate?.loaded!=true) UiText("Checking retained creation actions…",style=MaterialTheme.typography.bodySmall)
             creationGate?.prior?.let {action->
@@ -790,6 +862,7 @@ private fun WorktreeCreationSheet(key: ConversationKey, inventory: HostSnapshotR
             OutlinedTextField(branch,{branch=it},label={UiText(if(existing) "Existing branch" else "New branch (generated if blank)")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("worktree_create_branch"))
             if(!existing) OutlinedTextField(base,{base=it},label={UiText("Base (HEAD if blank)")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("worktree_create_base"))
             if(!sourceCurrent) UiText("Refresh this conversation before creating a checkout.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall)
+            }
             IconAction(MaterialGlyph.Add,"Create checkout and session","worktree_create_submit",enabled=available,modifier=Modifier.fillMaxWidth()) {
                 val selected=project ?: return@IconAction
                 model.createInWorktree(key,listing.source,listing.ticket,selected,provider,name,existing,branch,base)
@@ -809,15 +882,14 @@ private fun HostCreationSheet(host: String,inventory: HostSnapshotResult,connect
     var creationMemory by remember(host) {mutableStateOf<FormMemory?>(null)}
     LaunchedEffect(host) {creationMemory=model.creationForms.getOrPut(host) {FormMemory()}}
     ModalBottomSheet(onDismissRequest=onDismiss,sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
-        BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max=640.dp).semantics {testTagsAsResourceId=true}.navigationBarsPadding().imePadding()) {
+        Box(Modifier.fillMaxWidth().heightIn(max=640.dp).semantics {testTagsAsResourceId=true}.navigationBarsPadding().imePadding()) {
             Column(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-                Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                    UiText("New session",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).semantics {heading()})
-                    TextButton(onClick=onDismiss,modifier=Modifier.testTag("new_session_close")) {IconLabel(MaterialGlyph.Close,"Close")}
-                }
+                GoatrTitleBar("New session",connectionLabel(host,connection,model.connectingHosts[host]==true),inventoryRefreshing(host,connection),compactStatus=compactConnectionLabel(host,connection,model.connectingHosts[host]==true),actions={
+                    IconButton(onClick=onDismiss,modifier=Modifier.size(48.dp).testTag("new_session_close")) {GoatrIcon(MaterialGlyph.Close,"Close new session")}
+                })
                 creationMemory?.let {memory->Box(Modifier.weight(1f).fillMaxWidth()) {
                     val creationGate=creationReadinessReason(connection.hello[host],model.busy,connection.inventoryReady[host]==true,connection.mutationReady[host]==true,ongoing)
-                    CreateSession(inventory,connection.hello[host],connection.inventoryReady[host]==true && connection.mutationReady[host]==true && !model.busy && !ongoing,memory,creationGate?.message,creationGate?.tag) {server,project,provider,name->
+                    CreateSession(inventory,connection.hello[host],connection.inventoryReady[host]==true && connection.mutationReady[host]==true && !model.busy && !ongoing,memory,{},creationGate?.message,creationGate?.tag) {server,project,provider,name->
                         onDismiss()
                         model.create(server,project,provider,name)
                     }
@@ -828,7 +900,7 @@ private fun HostCreationSheet(host: String,inventory: HostSnapshotResult,connect
 }
 
 @Composable
-fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boolean,memory: FormMemory,gateMessage: String? = null,gateTag: String? = null,pinnedProvider:Provider?=null,requireProjectSelection:Boolean=false,onCreate: (Uuid,Uuid,Provider,String)->Unit) {
+fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boolean,memory: FormMemory,contentBeforeFields:@Composable ()->Unit,gateMessage: String? = null,gateTag: String? = null,pinnedProvider:Provider?=null,requireProjectSelection:Boolean=false,onCreate: (Uuid,Uuid,Provider,String)->Unit) {
     var server by remember(inventory.servers) {mutableStateOf(memory.text["server"]?.let(::Uuid) ?: inventory.servers.firstOrNull()?.serverId)}
     var project by remember(inventory.projects) {mutableStateOf(memory.text["project"]?.let(::Uuid) ?: if(requireProjectSelection)null else inventory.projects.firstOrNull {it.available}?.projectId)}
     var provider by remember {mutableStateOf(pinnedProvider ?: memory.text["provider"]?.let(Provider::valueOf) ?: Provider.Omp)}
@@ -859,7 +931,8 @@ fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boo
     }
     val details=listOfNotNull(selectedServer?.reason,selectedBackend?.reason,selectedProject?.reason).distinct()
     Column(Modifier.fillMaxSize(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)) {
+            contentBeforeFields()
             UiText("Start a session without changing what is open on your desktop.",style=MaterialTheme.typography.bodySmall)
             val serverItems=inventory.servers.map {candidate->
                 val sameName=inventory.servers.filter {it.name==candidate.name}
@@ -891,7 +964,7 @@ fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boo
             }
         }
         Surface(color=MaterialTheme.colorScheme.surface,tonalElevation=3.dp,modifier=Modifier.fillMaxWidth()) {
-            Column(Modifier.fillMaxWidth().padding(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.fillMaxWidth().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 when {
                     submitted -> UiText("Creation submitted once. Inspect and refresh its receipt; do not create another session for this operation.",style=MaterialTheme.typography.bodySmall)
                     !available -> Box(if(gateTag==null) Modifier else Modifier.testTag(gateTag)) {UiText(conditions.firstOrNull() ?: "Creation is unavailable until the selected desktop setup is ready.",color=if(gateTag!=null || (name.isEmpty() && conditions.size==1 && conditions.first()=="Name your session to continue.") || conditions.firstOrNull()=="Wait for the phone to finish synchronizing or its current operation.") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("create_blocking_reason"))}
@@ -988,32 +1061,35 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     val stopAllowed=ready && summary?.capabilities?.cancel==true && (summary.provider==Provider.Omp && summary.capabilities.cancelMode==CancelMode.CurrentWork || summary.provider==Provider.Codex && summary.capabilities.cancelMode==CancelMode.NativeTurn && reducer?.state?.nativeTurnId!=null)
     var switcher by remember {mutableStateOf(false)}
     var snippets by remember(key) {mutableStateOf(false)}
+    var moreTools by remember(key,source) {mutableStateOf(false)}
     LaunchedEffect(key,source,model.foreground,reducer?.pending?.map {it.requestKey},summary?.status) {if(source!=null && model.foreground) try {model.viewed(key)} catch(cancel: CancellationException) {throw cancel} catch(_: Exception) {}}
     if(switcher) ModalBottomSheet(onDismissRequest={switcher=false},containerColor=MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(.8f).semantics {testTagsAsResourceId=true}.padding(16.dp).testTag("switcher_scope_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                UiText("Switch conversation",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f))
-                TextButton(onClick={switcher=false},modifier=Modifier.heightIn(min=48.dp).testTag("switcher_close")) {IconLabel(MaterialGlyph.Close,"Close")}
-            }
+            GoatrTitleBar("Switch conversation",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),inventoryRefreshing(key.host,connection),compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true),actions={
+                IconButton(onClick={switcher=false},modifier=Modifier.size(48.dp).testTag("switcher_close")) {GoatrIcon(MaterialGlyph.Close,"Close")}
+            })
             // The dismiss action stays reachable while long inventories scroll independently.
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                inventory?.let {SessionBrowser(it,connection.inventoryReady[key.host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==key.host}?.name) {target->switcher=false;model.open(key.host,target)}} ?: UiText("Inventory unavailable")
+                var browserQuery by remember(key.host) {mutableStateOf("")}
+                inventory?.let {SessionBrowser(key.host,it,connection.inventoryReady[key.host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==key.host}?.name,browserQuery,{browserQuery=it}) {target->switcher=false;model.open(key.host,target)}} ?: UiText("Inventory unavailable")
             }
         }
     }
-    model.skills?.takeIf {it.key==key && it.source==source && (it.generation==summary?.skillsGeneration||it.loading&&summary?.provider==Provider.Omp) && summary?.capabilities?.skillsRead==true && ready && model.foreground}?.let { SkillsPicker(it,model) }
-    model.skillsDocument?.takeIf{it.snapshot.key==key&&it.snapshot.source==source&&it.snapshot.generation==summary?.skillsGeneration&&summary?.capabilities?.skillsRead==true&&ready&&model.foreground}?.let{SkillsDocument(it,model)}
-    if(snippets) ComposerSnippetPicker(key,store.snippets.filter {it.hostId==key.host},model,model.composers[key].orEmpty().isEmpty()) {snippets=false}
+    model.skills?.takeIf {it.key==key && it.source==source && (it.generation==summary?.skillsGeneration||it.loading&&summary?.provider==Provider.Omp) && summary?.capabilities?.skillsRead==true && ready && model.foreground}?.let { SkillsPicker(it,model,connectionLabel(it.key.host,connection,model.connectingHosts[it.key.host]==true),compactConnectionLabel(it.key.host,connection,model.connectingHosts[it.key.host]==true)) }
+    model.skillsDocument?.takeIf{it.snapshot.key==key&&it.snapshot.source==source&&it.snapshot.generation==summary?.skillsGeneration&&summary?.capabilities?.skillsRead==true&&ready&&model.foreground}?.let{SkillsDocument(it,model,connectionLabel(it.snapshot.key.host,connection,model.connectingHosts[it.snapshot.key.host]==true),compactConnectionLabel(it.snapshot.key.host,connection,model.connectingHosts[it.snapshot.key.host]==true))}
+    if(snippets) ComposerSnippetPicker(key,store.snippets.filter {it.hostId==key.host},model,model.composers[key].orEmpty().isEmpty(),connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true)) {snippets=false}
     val pending=reducer?.pending.orEmpty()
     val history=reducer?.history ?: cache?.history.orEmpty()
     val routineToolIds=history.filter {isRoutineToolRecord(it,reducer?.state?.activity?.toolRecordId)}.map {it.id}.toSet()
     // Older browsing opens the routine records so native backscroll remains inspectable.
     var routineToolsExpanded by remember(key,source,reducer?.browsingOlder) {mutableStateOf(reducer?.browsingOlder==true)}
     val focusedAction=model.focusedAction?.takeIf {(it.metadata.target==key.target || it.metadata.sourceTarget==key.target)}
+    // One constant activity-tail item follows all raw history slots, including folded zero-height records.
+    val activityTailIndex=history.size+if(focusedAction!=null) 2 else 1
     val latestTailIndex=when {
-        history.isNotEmpty() -> history.size + if(focusedAction!=null) 1 else 0
-        focusedAction!=null -> 1
-        else -> 0
+        history.isNotEmpty()->history.size+if(focusedAction!=null) 1 else 0
+        focusedAction!=null->1
+        else->0
     }
     val transcript=rememberLazyListState()
     val scope=rememberCoroutineScope()
@@ -1040,10 +1116,9 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
         Dialog(onDismissRequest={selectedRequest=null},properties=DialogProperties(usePlatformDefaultWidth=false)) {
             Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(),color=MaterialTheme.colorScheme.surface) {
                 Column(Modifier.padding(16.dp)) {
-                    Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                        UiText("Needs your answer",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).semantics {heading()})
-                        TextButton(onClick={selectedRequest=null},modifier=Modifier.heightIn(min=48.dp).testTag("request_close")) {IconLabel(MaterialGlyph.Close,"Close")}
-                    }
+                    GoatrTitleBar("Needs your answer",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),false,compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true),actions={
+                        IconButton(onClick={selectedRequest=null},modifier=Modifier.size(48.dp).testTag("request_close")) {GoatrIcon(MaterialGlyph.Close,"Close")}
+                    })
                     Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).semantics {paneTitle="Native request answer"}.testTag("request_editor_${active.requestKey.value}")) {
                         UiText("Closing keeps the native request open.",style=MaterialTheme.typography.bodySmall)
                         memory?.let {form->ProviderForm(active,form,ready && summary?.capabilities?.respond==true,"Reconnect and refresh this request before answering.",{content,loaded->ContentView(content,key,source,model,onLoaded=loaded)},{url->model.forms.values.forEach(FormMemory::clearSecrets);openHttpUrl(model.getApplication(),url)}) {answer->model.respond(active,answer)}}
@@ -1056,16 +1131,18 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     model.terminal?.takeIf {it.key==key && it.source==source}?.let {terminal->
         Dialog(onDismissRequest=model::closeTerminal,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
             Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("terminal_dialog"),color=MaterialTheme.colorScheme.surface) {
-                Column(Modifier.padding(16.dp).testTag("terminal_target_${key.target.sessionId.value}_${key.target.generation.value}")) {
-                    Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                        UiText("Terminal snapshot",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).semantics {heading()})
-                        TextButton(onClick=model::closeTerminal,modifier=Modifier.heightIn(min=48.dp).testTag("terminal_close")) {IconLabel(MaterialGlyph.Close,"Close")}
-                    }
-                    when {
-                        terminal.loading -> UiText("Loading terminal snapshot",modifier=Modifier.testTag("terminal_loading"))
-                        terminal.error -> UiText("Terminal snapshot is unavailable",modifier=Modifier.testTag("terminal_error"))
-                        terminal.text.isNullOrEmpty() -> UiText("Terminal is empty",modifier=Modifier.testTag("terminal_empty"))
-                        else -> UiText(terminal.text,style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,modifier=Modifier.weight(1f).verticalScroll(rememberScrollState()).testTag("terminal_output"))
+                Column(Modifier.fillMaxSize().padding(16.dp).testTag("terminal_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    GoatrTitleBar("Terminal snapshot",connectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),terminal.loading,compactStatus=compactConnectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),actions={
+                        IconButton(onClick=model::closeTerminal,modifier=Modifier.size(48.dp).testTag("terminal_close")) {GoatrIcon(MaterialGlyph.Close,"Close terminal snapshot")}
+                    })
+                    UiText("Snapshot · refresh to update",style=MaterialTheme.typography.labelMedium)
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        when {
+                            terminal.loading -> UiText("Loading terminal snapshot",modifier=Modifier.testTag("terminal_loading"))
+                            terminal.error -> UiText("Terminal snapshot is unavailable",modifier=Modifier.testTag("terminal_error"))
+                            terminal.text.isNullOrEmpty() -> UiText("No text in this snapshot",modifier=Modifier.testTag("terminal_empty"))
+                            else -> UiText(terminal.text,style=MaterialTheme.typography.bodyMedium,fontFamily=FontFamily.Monospace,modifier=Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("terminal_output"))
+                        }
                     }
                     if(terminal.truncated) UiText("Snapshot truncated to 16 KiB",style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("terminal_truncated"))
                     TextButton(onClick=model::refreshTerminal,enabled=!terminal.loading,modifier=Modifier.heightIn(min=48.dp).testTag("terminal_refresh")) {IconLabel(MaterialGlyph.Refresh,"Refresh")}
@@ -1077,22 +1154,27 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
         var createCheckout by remember(key,source,worktrees.ticket) { mutableStateOf(false) }
         Dialog(onDismissRequest=model::closeWorktrees,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
             Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("worktrees_dialog"),color=MaterialTheme.colorScheme.surface) {
-                Column(Modifier.padding(16.dp).testTag("worktrees_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-                    Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                        UiText("Worktrees",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).semantics {heading()})
-                        TextButton(onClick=model::closeWorktrees,modifier=Modifier.heightIn(min=48.dp).testTag("worktrees_close")) {IconLabel(MaterialGlyph.Close,"Close")}
-                    }
+                Column(Modifier.fillMaxSize().padding(16.dp).testTag("worktrees_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    GoatrTitleBar("Worktrees",connectionLabel(worktrees.key.host,connection,model.connectingHosts[worktrees.key.host]==true),worktrees.loading,compactStatus=compactConnectionLabel(worktrees.key.host,connection,model.connectingHosts[worktrees.key.host]==true),actions={
+                        IconButton(onClick=model::closeWorktrees,modifier=Modifier.size(48.dp).testTag("worktrees_close")) {GoatrIcon(MaterialGlyph.Close,"Close worktrees")}
+                    })
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
                     when {
                         worktrees.loading -> UiText("Loading worktrees",modifier=Modifier.testTag("worktrees_loading"))
                         worktrees.error -> UiText("Worktrees are unavailable",modifier=Modifier.testTag("worktrees_error"))
                         worktrees.worktrees.isNullOrEmpty() -> UiText("No worktrees are available",modifier=Modifier.testTag("worktrees_empty"))
-                        else -> LazyColumn(Modifier.weight(1f).testTag("worktrees_list"),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                        else -> LazyColumn(Modifier.fillMaxSize().testTag("worktrees_list"),verticalArrangement=Arrangement.spacedBy(16.dp)) {
                             items(worktrees.worktrees,key={it.path}) { entry ->
                                 GroupedSurface(Modifier.testTag("worktrees_entry")) {
-                                    UiText(entry.label,style=MaterialTheme.typography.titleMedium)
-                                    UiText(entry.path,style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,softWrap=true)
+                                    var details by remember(key,source,worktrees.ticket,entry.path) {mutableStateOf(false)}
+                                    UiText(entry.label,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
                                     entry.branch?.let {UiText("Branch: $it",style=MaterialTheme.typography.bodySmall)}
-                                    entry.head?.let {UiText("Head: $it",style=MaterialTheme.typography.bodySmall)}
+                                    DetailDisclosure(details,{details=!details},"worktree_details")
+                                    if(details) {
+                                        UiText(entry.label,style=MaterialTheme.typography.bodyMedium)
+                                        UiText(entry.path,style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,softWrap=true)
+                                        entry.head?.let {UiText("Head: $it",style=MaterialTheme.typography.bodySmall)}
+                                    }
                                     val flags=buildList {
                                         if(entry.isBare) add("bare")
                                         if(entry.isDetached) add("detached")
@@ -1106,18 +1188,19 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                             }
                         }
                     }
-                    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    }
+                    FlowRow(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                         TextButton(onClick=model::refreshWorktrees,enabled=!worktrees.loading,modifier=Modifier.heightIn(min=48.dp).testTag("worktrees_refresh")) {IconLabel(MaterialGlyph.Refresh,"Refresh")}
                         IconAction(MaterialGlyph.Add,"Start session in checkout","worktrees_create",enabled=ready && !worktrees.loading && !worktrees.error && worktrees.creationScope?.canCreate==true && summary?.capabilities?.worktreeCreate==true) { createCheckout=true }
                     }
                 }
             }
         }
-        model.worktreeRemoval?.takeIf {it.key==key && it.source==source && it.ticket==worktrees.ticket}?.let {WorktreeRemovalDialog(it,model)}
+        model.worktreeRemoval?.takeIf {it.key==key && it.source==source && it.ticket==worktrees.ticket}?.let {WorktreeRemovalDialog(it,model,connectionLabel(it.key.host,connection,model.connectingHosts[it.key.host]==true),compactConnectionLabel(it.key.host,connection,model.connectingHosts[it.key.host]==true))}
         if(createCheckout) {
             val inventory=connection.inventory[key.host]
             val summary=connection.sessions[key.host]?.firstOrNull {it.state?.summary?.let {state->Target(state.sessionId,state.generation)==key.target}==true}?.state?.summary
-            if(inventory==null || summary==null) createCheckout=false else WorktreeCreationSheet(key,inventory,summary,worktrees,model) {createCheckout=false}
+            if(inventory==null || summary==null) createCheckout=false else WorktreeCreationSheet(key,inventory,summary,worktrees,connection,model) {createCheckout=false}
         }
     }
     model.changes?.takeIf {it.key==key && it.source==source}?.let {changes->
@@ -1126,16 +1209,16 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
         val closeChangesDialog = { pendingChangesReference=null;changesReferenceError=null;model.closeChanges() }
         Dialog(onDismissRequest=closeChangesDialog,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
             Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("changes_dialog"),color=MaterialTheme.colorScheme.surface) {
-                Column(Modifier.padding(16.dp).testTag("changes_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-                    Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                        UiText("Changes",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).semantics {heading()})
-                        TextButton(onClick=closeChangesDialog,modifier=Modifier.heightIn(min=48.dp).testTag("changes_close")) {IconLabel(MaterialGlyph.Close,"Close")}
-                    }
+                Column(Modifier.fillMaxSize().padding(16.dp).testTag("changes_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    GoatrTitleBar("Changes",connectionLabel(changes.key.host,connection,model.connectingHosts[changes.key.host]==true),changes.loading,compactStatus=compactConnectionLabel(changes.key.host,connection,model.connectingHosts[changes.key.host]==true),actions={
+                        IconButton(onClick=closeChangesDialog,modifier=Modifier.size(48.dp).testTag("changes_close")) {GoatrIcon(MaterialGlyph.Close,"Close changes")}
+                    })
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
                     when {
                         changes.loading -> UiText("Loading changes",modifier=Modifier.testTag("changes_loading"))
                         changes.error -> UiText("Changes are unavailable",modifier=Modifier.testTag("changes_error"))
                         changes.changes == null -> UiText("No changes are available",modifier=Modifier.testTag("changes_empty"))
-                        else -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).testTag("changes_body"),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                        else -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("changes_body"),verticalArrangement=Arrangement.spacedBy(16.dp)) {
                             val value=changes.changes.changes
                             val revision=buildList { if(value.detached) add("Detached HEAD"); value.branch?.let { add("Branch: $it") }; value.head?.let { add("Head: $it") } }
                             if(revision.isNotEmpty()) UiText(revision.joinToString(" · "),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1162,26 +1245,36 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                             changesReferenceError?.let {UiText(it,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error,modifier=Modifier.testTag("changes_reference_error"))}
                             if(value.entries.isEmpty()) UiText("Working tree is clean",modifier=Modifier.testTag("changes_empty"))
                             value.entries.forEach { entry ->
+                                androidx.compose.runtime.key(entry.path) {
                                 GroupedSurface(Modifier.testTag("changes_entry")) {
+                                    var fileDetails by remember(key,source,changes.ticket,entry.path) {mutableStateOf(false)}
                                     when(entry) {
                                         is ChangeEntry.Tracked -> {
-                                            UiText(entry.path,style=MaterialTheme.typography.titleSmall,fontFamily=FontFamily.Monospace,softWrap=true)
-                                            entry.originalPath?.let {UiText("From: $it",style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,softWrap=true)}
+                                            UiText(entry.path,style=MaterialTheme.typography.titleSmall,fontFamily=FontFamily.Monospace,maxLines=2,overflow=TextOverflow.Ellipsis)
+                                            DetailDisclosure(fileDetails,{fileDetails=!fileDetails},"changes_file_details")
+                                            if(fileDetails) {
+                                                UiText(entry.path,style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,softWrap=true)
+                                                entry.originalPath?.let {UiText("From: $it",style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,softWrap=true)}
+                                            }
                                             UiText("Staged: ${changeStateLabel(entry.index)} · Unstaged: ${changeStateLabel(entry.worktree)}",style=MaterialTheme.typography.bodySmall)
                                             val flags=buildList { if(entry.stagedBinary) add("staged binary marker"); if(entry.unstagedBinary) add("unstaged binary marker"); entry.submodule?.let { if(it.commitChanged) add("submodule commit changed"); if(it.trackedDirty) add("submodule tracked dirty"); if(it.untrackedDirty) add("submodule untracked dirty") } }
                                             if(flags.isNotEmpty()) UiText(flags.joinToString(" · "),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
                                             TextButton(onClick={pendingChangesReference=ChangesReferenceSelection.File(entry.path);changesReferenceError=null},modifier=Modifier.heightIn(min=48.dp).testTag("changes_reference_file")) {IconLabel(MaterialGlyph.Add,"Add file reference")}
                                         }
                                         is ChangeEntry.Untracked -> {
-                                            UiText(entry.path,style=MaterialTheme.typography.titleSmall,fontFamily=FontFamily.Monospace,softWrap=true)
+                                            UiText(entry.path,style=MaterialTheme.typography.titleSmall,fontFamily=FontFamily.Monospace,maxLines=2,overflow=TextOverflow.Ellipsis)
                                             UiText("Untracked",style=MaterialTheme.typography.bodySmall)
+                                            DetailDisclosure(fileDetails,{fileDetails=!fileDetails},"changes_file_details")
+                                            if(fileDetails) UiText(entry.path,style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,softWrap=true)
                                             TextButton(onClick={pendingChangesReference=ChangesReferenceSelection.File(entry.path);changesReferenceError=null},modifier=Modifier.heightIn(min=48.dp).testTag("changes_reference_file")) {IconLabel(MaterialGlyph.Add,"Add file reference")}
                                         }
                                     }
                                 }
+                                }
                             }
                             ChangesPatchReferenceSections(value.stagedPatch,value.unstagedPatch,value.entries.mapTo(mutableSetOf()) {it.path}) { selection->pendingChangesReference=selection;changesReferenceError=null }
                         }
+                    }
                     }
                     TextButton(onClick=model::refreshChanges,enabled=!changes.loading,modifier=Modifier.heightIn(min=48.dp).testTag("changes_refresh")) {IconLabel(MaterialGlyph.Refresh,"Refresh")}
                 }
@@ -1196,7 +1289,7 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
             AlertDialog(
                 onDismissRequest={pendingChangesReference=null},
                 title={UiText("Add snapshot reference?")},
-                text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                text={Column(Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                     UiText("This adds plain text to the current conversation draft. It does not upload, open, share, or send anything.")
                     UiText("Draft text",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
                     UiText(reference.draftText,style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,softWrap=true)
@@ -1222,8 +1315,8 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     aliasScope?.takeIf {aliasAvailable && model.agentAliasScope===it}?.let {scope ->
         AlertDialog(
             onDismissRequest={model.closeAgentAlias();aliasScope=null;aliasName=""},
-            title={UiText("Agent alias")},
-            text={Column(Modifier.imePadding(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            title={GoatrTitleBar("Agent alias",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),false,compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true))},
+            text={Column(Modifier.imePadding().heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)) {
                 UiText("Rename this desktop agent’s alias. Its conversation and workspace stay the same.")
                 OutlinedTextField(aliasName,{aliasName=it},label={UiText("Agent alias")},supportingText={UiText("Start with a lowercase letter; use up to 32 lowercase letters, numbers, _ or -.")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("agent_alias_name"))
             }},
@@ -1245,15 +1338,76 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     val validWorkspaceLabel=runCatching { Label(workspaceLabel) }.isSuccess
     if(renameWorkspace && workspaceRenameAvailable) AlertDialog(
         onDismissRequest={ renameWorkspace=false; workspaceLabel="" },
-        title={ UiText("Rename workspace") },
-        text={ Column(Modifier.imePadding(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+        title={GoatrTitleBar("Rename workspace",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),false,compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true))},
+        text={ Column(Modifier.imePadding().heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)) {
             UiText("This changes the current native workspace label, not the conversation title.")
             OutlinedTextField(workspaceLabel,{workspaceLabel=it},label={UiText("Workspace label")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("workspace_rename_label"))
         } },
-        confirmButton={ TextButton(enabled=validWorkspaceLabel,onClick={model.renameWorkspace(key,workspaceLabel);renameWorkspace=false;workspaceLabel=""},modifier=Modifier.testTag("workspace_rename_save")) { IconLabel(MaterialGlyph.Edit,"Save") } },
-        dismissButton={ TextButton(onClick={renameWorkspace=false;workspaceLabel=""},modifier=Modifier.testTag("workspace_rename_cancel")) { IconLabel(MaterialGlyph.Close,"Cancel") } },
+        confirmButton={ TextButton(enabled=validWorkspaceLabel,onClick={model.renameWorkspace(key,workspaceLabel);renameWorkspace=false;workspaceLabel=""},modifier=Modifier.heightIn(min=48.dp).testTag("workspace_rename_save")) { IconLabel(MaterialGlyph.Edit,"Save") } },
+        dismissButton={ TextButton(onClick={renameWorkspace=false;workspaceLabel=""},modifier=Modifier.heightIn(min=48.dp).testTag("workspace_rename_cancel")) { IconLabel(MaterialGlyph.Close,"Cancel") } },
         modifier=Modifier.testTag("workspace_rename_dialog"),
     )
+
+    if(moreTools) ModalBottomSheet(onDismissRequest={moreTools=false},containerColor=MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(.8f).padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            GoatrTitleBar("Conversation tools",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),false,compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true),actions={
+                IconButton(onClick={moreTools=false},modifier=Modifier.size(48.dp).testTag("conversation_more_close")) {GoatrIcon(MaterialGlyph.Close,"Close conversation tools")}
+            })
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                GoatrSection("History")
+                if(reducer?.browsingOlder==true) {
+                    ComposerControlAction(MaterialGlyph.Refresh,"Return to latest history","conversation_refresh",!model.busy&&key.host in connection.hello,"Finish connecting or the current operation before refreshing") {moreTools=false;model.refresh()}
+                    if(model.busy || key.host !in connection.hello) UiText("Finish connecting or the current operation before refreshing",style=MaterialTheme.typography.bodySmall)
+                }
+                if(reducer!=null && !reducer.browsingOlder) {
+                    val historyAvailable=!model.busy&&source!=null&&reducer.state?.summary?.capabilities?.history==true
+                    ComposerControlAction(MaterialGlyph.Back,"Browse native history","history_browse",historyAvailable,"History is unavailable") {moreTools=false;model.older()}
+                    if(!historyAvailable) UiText("History is unavailable",style=MaterialTheme.typography.bodySmall)
+                }
+                reducer?.nextCursor?.let {cursor->
+                    ComposerControlAction(MaterialGlyph.Back,"Load older native history","history_older",!model.busy&&source!=null,"Older history is unavailable") {moreTools=false;model.older(cursor)}
+                    if(model.busy || source==null) UiText("Older history is unavailable",style=MaterialTheme.typography.bodySmall)
+                }
+                val skillsAvailable=ready && source!=null && summary?.capabilities?.skillsRead==true && summary.skillsGeneration!=null
+                ComposerControlAction(MaterialGlyph.Menu,"Skills","composer_skills",skillsAvailable,"Skills are not available for this session.") {moreTools=false;model.openSkills(key)}
+                if(!skillsAvailable) UiText("Skills are not available for this session.",style=MaterialTheme.typography.bodySmall)
+                if(model.attachmentTransfer!=null) TextButton(onClick={moreTools=false;model.showAttachments()},modifier=Modifier.heightIn(min=48.dp).testTag("attachment_progress")) {AttachmentIconLabel(R.drawable.ic_material_attach_file,"Upload progress")}
+                val retainedAttachments=store.attachments.filter {it.host==key.host&&it.target==key.target}
+                var attachmentsExpanded by remember(key,source) {mutableStateOf(false)}
+                TextButton(onClick={attachmentsExpanded=!attachmentsExpanded},modifier=Modifier.heightIn(min=48.dp).testTag("retained_attachments_disclosure")) {IconLabel(MaterialGlyph.ExpandMore,(if(attachmentsExpanded)"Hide attachments" else "Attachments")+" (${retainedAttachments.size} retained)")}
+                if(attachmentsExpanded)retainedAttachments.forEach {record->
+                    TextButton(onClick={moreTools=false;model.showAttachmentRecovery(record)},modifier=Modifier.heightIn(min=48.dp).testTag("attachment_recovery_${record.uploadId.value}")) {AttachmentIconLabel(R.drawable.ic_material_description,"Retained upload")}
+                    TextButton(onClick={moreTools=false;model.openRetainedAttachment(record)},enabled=ready&&summary?.capabilities?.attachments==true,modifier=Modifier.heightIn(min=48.dp).testTag("attachment_inspect_original")) {AttachmentIconLabel(R.drawable.ic_material_attach_file,"Inspect for this conversation")}
+                    if(!(ready&&summary?.capabilities?.attachments==true)) UiText("Attachment inspection is unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
+                }
+                if(summary?.capabilities?.artifacts==true) {
+                    val filesAvailable=ready&&source!=null&&!model.busy
+                    ComposerControlAction(MaterialGlyph.Folder,"Files","conversation_files",filesAvailable,"Files are unavailable for this current session.") {moreTools=false;model.beginArtifacts(key.host,ArtifactSource.Session(key.target))}
+                    if(!filesAvailable) UiText("Files are unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
+                }
+                val terminalAvailable=ready&&source!=null&&summary?.capabilities?.terminalRead==true
+                ComposerControlAction(MaterialGlyph.Terminal,"Terminal","terminal_open",terminalAvailable,"Terminal text is unavailable for this current native session.") {moreTools=false;model.openTerminal(key)}
+                if(!terminalAvailable) UiText("Terminal text is unavailable for this current native session.",style=MaterialTheme.typography.bodySmall)
+                val worktreesAvailable=ready&&source!=null&&summary?.capabilities?.worktreesRead==true
+                ComposerControlAction(MaterialGlyph.Desktop,"Worktrees","worktrees_open",worktreesAvailable,"Worktrees are unavailable for this current session.") {moreTools=false;model.openWorktrees(key)}
+                if(!worktreesAvailable) UiText("Worktrees are unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
+                val changesAvailable=ready&&source!=null&&summary?.capabilities?.changesRead==true
+                ComposerControlAction(MaterialGlyph.Terminal,"Changes","changes_open",changesAvailable,"Changes are unavailable for this current session.") {moreTools=false;model.openChanges(key)}
+                if(!changesAvailable) UiText("Changes are unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
+                val creationAvailable=ready&&source!=null&&!model.busy
+                ComposerControlAction(MaterialGlyph.Add,"New session","agent_new_session",creationAvailable,"Creation is unavailable for this current session.") {moreTools=false;model.beginAgentSession(key)}
+                if(!creationAvailable) UiText("Creation is unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
+                val terminalCreationAvailable=ready&&source!=null&&summary?.capabilities?.terminalCreate==true&&!model.busy
+                ComposerControlAction(MaterialGlyph.Terminal,"New terminal in agent process directory","agent_terminal_new",terminalCreationAvailable,"Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.") {moreTools=false;model.beginAgentTerminal(key)}
+                if(!terminalCreationAvailable) UiText("Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.",style=MaterialTheme.typography.bodySmall)
+                val renameAvailable=aliasAvailable&&!model.busy
+                ComposerControlAction(MaterialGlyph.Edit,"Agent alias","agent_alias_open",renameAvailable,"Agent alias is unavailable for this original native session.") {moreTools=false;source?.let {aliasScope=model.beginAgentAlias(key,it);aliasName=""}}
+                if(!renameAvailable) UiText("Agent alias is unavailable for this original native session.",style=MaterialTheme.typography.bodySmall)
+                ComposerControlAction(MaterialGlyph.Edit,"Rename workspace","workspace_rename_open",workspaceRenameAvailable,"Workspace rename is unavailable for this current native session.") {moreTools=false;workspaceLabel=currentWorkspaceLabel.orEmpty();renameWorkspace=true}
+                if(!workspaceRenameAvailable) UiText("Workspace rename is unavailable for this current native session.",style=MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact=maxHeight<480.dp || LocalDensity.current.fontScale>=1.5f
@@ -1265,6 +1419,7 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                 StatusPill(summary?.status?.let(::sessionStatusLabel) ?: "Unavailable",when(summary?.status) {SessionStatus.Attention->StatusEmphasis.Attention;SessionStatus.Working->StatusEmphasis.Positive;SessionStatus.Unknown,null->StatusEmphasis.Muted;SessionStatus.Idle->StatusEmphasis.Neutral})
             }
             RequestDock(pending) {selectedRequest=it}
+            if(reducer?.browsingOlder==true) UiText("Viewing older history. Newer messages may be outside this window.",style=MaterialTheme.typography.bodySmall)
             if(summary?.provider==Provider.Omp) UiText("All branches; desktop-selected branch unavailable",style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("omp_branches"))
         },history={
             Box(Modifier.fillMaxSize().testTag("conversation_target_${key.target.sessionId.value}_${key.target.generation.value}")) {
@@ -1279,10 +1434,7 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                     if(changed!=null) {UiText("Observed generation replacement. Selection was not retargeted.");Action("Explicitly open observed replacement","open_replacement") {model.open(key.host,Target(changed.sessionId,changed.generation))}}
                     if(summary?.historyCoverage?.sourceTruncated==true) UiText("Native history source truncated")
                     if(reducer?.partial==true || cache?.partial==true) UiText("Partial history; not a complete transcript")
-                    if(reducer?.browsingOlder==true) UiText("Viewing older history. Newer messages may be outside this window.")
                     if (reducer?.state?.summary?.capabilities?.history==true) UiText("Native backscroll keeps a local window of up to 1,000 completed records.")
-                    reducer?.state?.activity?.let {activity->Heading("Live · ${activity.state}");activity.text?.let {ContentView(it,key,source,model)}}
-                    ToolActivitySummary(routineToolIds.size,routineToolsExpanded) {routineToolsExpanded=!routineToolsExpanded}
                 }}
                 // Keep the current canonical receipt near the header. Completed native history
                 // remains the follow target instead of being covered by this status card.
@@ -1291,6 +1443,12 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                 // records occupy zero height without accumulating blank transcript gaps.
                 items(history,key={"history_${it.id.value}"},contentType={it.kind}) {record->
                     if(routineToolsExpanded || record.id !in routineToolIds) Column(Modifier.padding(bottom=6.dp).testTag("history_record_${record.id.value}")) {HistoryCard(record,key,source,model)}
+                }
+                item(key="conversation_activity_tail") {
+                    Column(Modifier.fillMaxWidth().heightIn(max=if(compact) 112.dp else 192.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                        reducer?.state?.activity?.let {activity->GoatrSection("Activity · ${activity.state}");activity.text?.let {ContentView(it,key,source,model)}}
+                        ToolActivitySummary(routineToolIds.size,routineToolsExpanded) {routineToolsExpanded=!routineToolsExpanded}
+                    }
                 }
                 items(model.actions[key.host].orEmpty().filter {it.metadata.target==key.target && it.metadata.actionId!=focusedAction?.metadata?.actionId},key={"receipt_${it.metadata.actionId.value}"}) {Column(Modifier.padding(bottom=6.dp)) {ReceiptPanel(key.host,it,model)}}
                 item {ActionPaging(model,collapsed=true)}
@@ -1305,27 +1463,15 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                     else -> "Stopping is unavailable for this current native state."
                 },
                 onStop=model::stop,
+                onMore={moreTools=true},
             ) {
                 ConversationControl(MaterialGlyph.Chat,"Switch conversation","switcher") {switcher=true}
                 ConversationControl(MaterialGlyph.Add,"Snippets","composer_snippets") {snippets=true}
-                ConversationControl(MaterialGlyph.Menu,"Skills","composer_skills",ready && source!=null && summary?.capabilities?.skillsRead==true && summary.skillsGeneration!=null,"Skills are not available for this session.") {model.openSkills(key)}
-                AttachmentPicker(enabled=ready && summary?.capabilities?.attachments==true && request==null,captureSourceTicket={model.startAttachmentPicker(key)},returnSourceTicket=model::returnAttachmentPicker,cancelSourceTicket=model::finishAttachmentPicker,isSourceTicketCurrent=model::attachmentAdmitted,onUpload=model::beginAttachmentUpload)
-                if(model.attachmentTransfer!=null) ConversationControl(R.drawable.ic_material_attach_file,"Upload progress","attachment_progress",onClick=model::showAttachments)
-                store.attachments.filter {it.host==key.host&&it.target==key.target}.forEach {record->
-                    ConversationControl(R.drawable.ic_material_description,"Retained upload","attachment_recovery_${record.uploadId.value}") {model.showAttachmentRecovery(record)}
-                    ConversationControl(R.drawable.ic_material_attach_file,"Inspect for this conversation","attachment_inspect_original",ready&&summary?.capabilities?.attachments==true) {model.openRetainedAttachment(record)}
-                }
-                if(summary?.capabilities?.artifacts==true) ConversationControl(MaterialGlyph.Folder,"Files","conversation_files",ready&&source!=null&&!model.busy) {model.beginArtifacts(key.host,ArtifactSource.Session(key.target))}
-                ConversationControl(MaterialGlyph.Terminal,"Terminal","terminal_open",ready&&source!=null&&summary?.capabilities?.terminalRead==true,"Terminal text is unavailable for this current native session.") {model.openTerminal(key)}
-                ConversationControl(MaterialGlyph.Desktop,"Worktrees","worktrees_open",ready&&source!=null&&summary?.capabilities?.worktreesRead==true,"Worktrees are unavailable for this current native session.") {model.openWorktrees(key)}
-                ConversationControl(MaterialGlyph.Terminal,"Changes","changes_open",ready&&source!=null&&summary?.capabilities?.changesRead==true,"Changes are unavailable for this current native session.") {model.openChanges(key)}
-                ConversationControl(MaterialGlyph.Add,"New session","agent_new_session",ready&&source!=null&&!model.busy) {model.beginAgentSession(key)}
-                ConversationControl(MaterialGlyph.Terminal,"New terminal in agent process directory","agent_terminal_new",ready&&source!=null&&summary?.capabilities?.terminalCreate==true&&!model.busy,"Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.") {model.beginAgentTerminal(key)}
-                ConversationControl(MaterialGlyph.Edit,"Agent alias","agent_alias_open",aliasAvailable&&!model.busy,"Agent alias is unavailable for this original native session.") {source?.let {aliasScope=model.beginAgentAlias(key,it);aliasName=""}}
-                ConversationControl(MaterialGlyph.Edit,"Rename workspace","workspace_rename_open",workspaceRenameAvailable,"Workspace rename is unavailable for this current native session.") {workspaceLabel=currentWorkspaceLabel.orEmpty();renameWorkspace=true}
-                ConversationControl(MaterialGlyph.Refresh,if(reducer?.browsingOlder==true) "Return to latest history" else "Refresh","conversation_refresh",!model.busy&&key.host in connection.hello,"Finish connecting or the current operation before refreshing",model::refresh)
-                if(reducer!=null && !reducer.browsingOlder) ConversationControl(MaterialGlyph.Back,"Browse native history","history_browse",!model.busy&&source!=null&&reducer.state?.summary?.capabilities?.history==true,"History is unavailable") {model.older()}
-                reducer?.nextCursor?.let {cursor->ConversationControl(MaterialGlyph.Back,"Load older native history","history_older",!model.busy&&source!=null,"Older history is unavailable") {model.older(cursor)}}
+                AttachmentPicker(enabled=ready && summary?.capabilities?.attachments==true && request==null,connectionStatus={ticket,compact->
+                    val originalHost=(ticket.originalScope as AttachmentConsentScope).key.host
+                    if(compact)compactConnectionLabel(originalHost,connection,model.connectingHosts[originalHost]==true) else connectionLabel(originalHost,connection,model.connectingHosts[originalHost]==true)
+                },captureSourceTicket={model.startAttachmentPicker(key)},returnSourceTicket=model::returnAttachmentPicker,cancelSourceTicket=model::finishAttachmentPicker,isSourceTicketCurrent=model::attachmentAdmitted,onUpload=model::beginAttachmentUpload)
+                if(reducer?.browsingOlder!=true) ConversationControl(MaterialGlyph.Refresh,"Refresh","conversation_refresh",!model.busy&&key.host in connection.hello,"Finish connecting or the current operation before refreshing",model::refresh)
             }
             val inlineReadiness=readiness?.takeIf {it.tag in listOf("conversation_gate_inventory","conversation_gate_receipt")}
             if(inlineReadiness!=null) {
@@ -1336,12 +1482,20 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
             }
             // Auxiliary notices scroll independently; neither the draft nor Send moves into that viewport.
             Column(Modifier.fillMaxWidth().heightIn(max=if(compact) 64.dp else 112.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(2.dp)) {
+                FlowRow(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                    focusedAction?.let {action->
+                        val status=when(action.receipt?.state) {ReceiptState.Reserved,ReceiptState.Dispatching->"Pending";ReceiptState.Dispatched->"Sent to desktop";ReceiptState.Succeeded->"Action accepted";ReceiptState.Failed->"Action failed";ReceiptState.Uncertain,null->"Outcome unknown"}
+                        TextButton(onClick={scope.launch {transcript.scrollToItem(1)}},modifier=Modifier.heightIn(min=48.dp).testTag("focused_action_status")) {UiText("$status · Inspect${if(action.authoritative) "" else " · Last observed"}",style=MaterialTheme.typography.labelMedium)}
+                    }
+                    if(reducer?.state?.activity!=null || routineToolIds.isNotEmpty()) TextButton(onClick={scope.launch {transcript.scrollToItem(activityTailIndex)}},modifier=Modifier.heightIn(min=48.dp).testTag("conversation_activity_jump")) {
+                        UiText(reducer?.state?.activity?.let {"Activity · ${it.state}"} ?: "${routineToolIds.size} completed tools",style=MaterialTheme.typography.labelMedium)
+                    }
+                }
                 if(!following && reducer?.browsingOlder!=true) {
                     val position=history.indexOfFirst {it.id==readTail}
                     val unread=if(position>=0) history.size-position-1 else 0
                     TextButton(onClick={following=true;scope.launch {if(history.isNotEmpty() || focusedAction!=null) transcript.scrollToItem(latestTailIndex)}},modifier=Modifier.testTag("jump_latest")) {UiText(if(unread>0) "$unread new messages · Latest" else "Jump to latest")}
                 }
-                if(summary?.capabilities?.terminalCreate!=true) UiText("Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.",style=MaterialTheme.typography.bodySmall)
                 val promptCapability=summary?.capabilities
                 val promptCapabilityUnavailable=promptCapability?.let { !it.prompt || it.promptMode!=PromptMode.SubmitOrSteer } ?: true
                 val promptGate=readiness ?: when {
@@ -1369,7 +1523,7 @@ private fun changeStateLabel(state: ChangeState): String = when(state) {
 /** Local text only. This picker never reads a provider response, form, receipt, or secret. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ComposerSnippetPicker(key: ConversationKey,snippets: List<ComposerSnippet>,model: GoatrViewModel,draftEmpty: Boolean,onDismiss: ()->Unit) {
+private fun ComposerSnippetPicker(key: ConversationKey,snippets: List<ComposerSnippet>,model: GoatrViewModel,draftEmpty: Boolean,connectionStatus:String,compactConnectionStatus:String,onDismiss: ()->Unit) {
     var editing by remember(key) {mutableStateOf(false)}
     var editingId by remember(key) {mutableStateOf<Uuid?>(null)}
     var title by remember(key) {mutableStateOf("")}
@@ -1397,10 +1551,9 @@ private fun ComposerSnippetPicker(key: ConversationKey,snippets: List<ComposerSn
     }
     ModalBottomSheet(onDismissRequest=onDismiss,sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(.8f).semantics {testTagsAsResourceId=true}.imePadding().padding(16.dp).testTag("snippet_scope_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-                UiText("Local snippets",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f).testTag(if(draftEmpty) "snippet_draft_empty" else "snippet_draft_present"))
-                TextButton(onClick=onDismiss,modifier=Modifier.heightIn(min=48.dp).testTag("snippet_close")) {IconLabel(MaterialGlyph.Close,"Close")}
-            }
+            GoatrTitleBar("Local snippets",connectionStatus,false,compactStatus=compactConnectionStatus,titleModifier=Modifier.testTag(if(draftEmpty) "snippet_draft_empty" else "snippet_draft_present"),actions={
+                IconButton(onClick=onDismiss,modifier=Modifier.size(48.dp).testTag("snippet_close")) {GoatrIcon(MaterialGlyph.Close,"Close")}
+            })
             if(editing) {
                 editingId?.let {currentEditingId->
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag("snippet_editor_${currentEditingId.value}"),verticalArrangement=Arrangement.spacedBy(12.dp)) {
@@ -1423,7 +1576,6 @@ private fun ComposerSnippetPicker(key: ConversationKey,snippets: List<ComposerSn
             } else {
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 UiText("Save stores only text you write on this phone. It remains local until deletion or Forget.",style=MaterialTheme.typography.bodySmall)
-                UiText("Provider Skills are unavailable.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                 IconAction(MaterialGlyph.Add,"New local snippet","snippet_new",modifier=Modifier.fillMaxWidth()) {beginEdit(null)}
                 if(snippets.isEmpty()) UiText("No local snippets saved for this desktop.",style=MaterialTheme.typography.bodyMedium)
                 snippets.forEach {snippet->
@@ -1431,7 +1583,7 @@ private fun ComposerSnippetPicker(key: ConversationKey,snippets: List<ComposerSn
                         UiText(snippet.title.ifEmpty {"Untitled snippet"},style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
                         UiText(snippet.body,style=MaterialTheme.typography.bodySmall,maxLines=2,overflow=TextOverflow.Ellipsis)
                         FlowRow(horizontalArrangement=Arrangement.spacedBy(4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                            TextButton(onClick={if(model.insertSnippet(key,snippet.id)) onDismiss()},modifier=Modifier.heightIn(min=48.dp).testTag("snippet_insert_${snippet.id.value}")) {IconLabel(MaterialGlyph.Send,"Insert")}
+                            TextButton(onClick={if(model.insertSnippet(key,snippet.id)) onDismiss()},modifier=Modifier.heightIn(min=48.dp).testTag("snippet_insert_${snippet.id.value}")) {IconLabel(MaterialGlyph.Add,"Insert")}
                             TextButton(onClick={beginEdit(snippet)},modifier=Modifier.heightIn(min=48.dp).testTag("snippet_edit_${snippet.id.value}")) {IconLabel(MaterialGlyph.Edit,"Edit")}
                             TextButton(onClick={deleting=snippet},modifier=Modifier.heightIn(min=48.dp).testTag("snippet_delete_${snippet.id.value}")) {IconLabel(MaterialGlyph.Delete,"Delete")}
                         }
@@ -1453,7 +1605,22 @@ fun RequestDock(pending: List<PendingRequest>,onSelect: (Uuid)->Unit) {
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal=12.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             UiText("${pending.size} need your answer",modifier=Modifier.testTag("request_count").semantics {liveRegion=LiveRegionMode.Polite},style=MaterialTheme.typography.labelLarge)
             pending.forEachIndexed {index,request->
-                TextButton(onClick={onSelect(request.requestKey)},modifier=Modifier.heightIn(min=48.dp).testTag("request_select_${request.requestKey.value}")) {UiText("Request ${index+1}")}
+                val kind=when(request.kind) {PresentationKind.OmpSelect->"Choice";PresentationKind.OmpEditor->"Text";PresentationKind.CodexApproval->"Approval";PresentationKind.CodexQuestions->"Questions";PresentationKind.CodexForm->"Form";PresentationKind.CodexUrl->"Link";PresentationKind.DesktopOnly->"Desktop only"}
+                val title=when(val presentation=request.presentation) {
+                    is PresentationOmpSelect->(presentation.title as? ContentText)?.text?.value
+                    is PresentationOmpEditor->(presentation.title as? ContentText)?.text?.value
+                    is PresentationCodexApproval->(presentation.title as? ContentText)?.text?.value
+                    is PresentationCodexQuestions->presentation.questions.firstOrNull()?.header
+                    is PresentationCodexForm->(presentation.title as? ContentText)?.text?.value
+                    is PresentationCodexUrl->(presentation.title as? ContentText)?.text?.value
+                    is PresentationDesktopOnly->(presentation.title as? ContentText)?.text?.value
+                }
+                TextButton(onClick={onSelect(request.requestKey)},modifier=Modifier.widthIn(max=240.dp).heightIn(min=48.dp).testTag("request_select_${request.requestKey.value}")) {
+                    Column {
+                        UiText("${index+1} · $kind",style=MaterialTheme.typography.labelLarge)
+                        title?.takeIf {it.isNotBlank()}?.let {UiText(it,style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)}
+                    }
+                }
             }
         }
     }
@@ -1515,7 +1682,7 @@ private fun ConversationPrimaryAction(sendEnabled: Boolean,onSend: ()->Unit) {
 
 /** One viewport budget bounds the disclosure and draft; neither region uses weighted height. */
 @Composable
-private fun ConversationDraftControls(text: String,onText: (String)->Unit,expiry: String?,compact: Boolean,maximumHeight: Dp,sendEnabled: Boolean,onSend: ()->Unit,focusSignal:Long=0L,onCursor:((Int,Int)->Unit)?=null) {
+internal fun ConversationDraftControls(text: String,onText: (String)->Unit,expiry: String?,compact: Boolean,maximumHeight: Dp,sendEnabled: Boolean,onSend: ()->Unit,focusSignal:Long=0L,onCursor:((Int,Int)->Unit)?=null) {
     val availableHeight=(maximumHeight-6.dp).coerceAtLeast(0.dp)
     val minimumDraftHeight=56.dp.coerceAtMost(availableHeight)
     val disclosureHeight=if(expiry!=null) 48.dp.coerceAtMost((availableHeight-minimumDraftHeight).coerceAtLeast(0.dp)) else 0.dp
@@ -1614,14 +1781,11 @@ private fun ActionPaging(model: GoatrViewModel,collapsed: Boolean=false) {
 @Composable
 private fun SettingsScreen(host: String?,store: StoreView,connection: ConnectionView,model: GoatrViewModel,onRepairNotifications: () -> Unit) {
     if(host!=null) {
-        Column(Modifier.fillMaxSize(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick={model.settings()},modifier=Modifier.heightIn(min=48.dp).testTag("settings_overview")) {IconLabel(MaterialGlyph.Back,"All settings")}
-            HostSettingsScreen(host,store,connection,model,showAppearance=false,onRepairNotifications=onRepairNotifications,modifier=Modifier.weight(1f))
-        }
+        key(host) {HostSettingsScreen(host,store,connection,model,showAppearance=false,onRepairNotifications=onRepairNotifications,modifier=Modifier.fillMaxSize())}
         return
     }
-    LazyColumn(Modifier.fillMaxSize().testTag("settings_overview_list"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-        item { GoatrSection("Settings","Appearance and session presentation are local to this phone. Desktop trust remains scoped to a paired desktop.") }
+    LazyColumn(Modifier.fillMaxSize().testTag("settings_overview_list"),verticalArrangement=Arrangement.spacedBy(16.dp),contentPadding=PaddingValues(bottom=16.dp)) {
+        item { UiText("Appearance and session presentation are local to this phone. Desktop trust remains scoped to a paired desktop.",style=MaterialTheme.typography.bodyMedium) }
         item {
             GroupedSurface {
                 GoatrSection("Appearance")
@@ -1680,20 +1844,39 @@ private fun SettingsScreen(host: String?,store: StoreView,connection: Connection
 
 @Composable
 private fun HostSettingsScreen(host: String,store: StoreView,connection: ConnectionView,model: GoatrViewModel,showAppearance: Boolean,onRepairNotifications: () -> Unit,modifier: Modifier = Modifier) {
-    var confirmForget by remember {mutableStateOf(false)}
-    var confirmUnpair by remember {mutableStateOf(false)}
-    var discard by remember {mutableStateOf<RecoveryDraft?>(null)}
-    LazyColumn(modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(6.dp)) {
-        item {
+    var confirmForget by remember(host) {mutableStateOf(false)}
+    var confirmUnpair by remember(host) {mutableStateOf(false)}
+    var discard by remember(host) {mutableStateOf<RecoveryDraft?>(null)}
+    val hostName=store.hosts.firstOrNull {it.hostId==host}?.name ?: "this desktop"
+    LazyColumn(modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(16.dp),contentPadding=PaddingValues(bottom=16.dp)) {
+        item(key="trust_$host") {
             GroupedSurface {
-            GoatrSection(store.hosts.firstOrNull {it.hostId==host}?.name ?: "Host", "Trust, recovery, and delivery are local to this paired desktop.")
-            if(showAppearance) FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {Appearance.entries.forEach {appearance->
-                FilterChip(selected=model.appearance==appearance,onClick={model.appearance=appearance},label={UiText(appearance.name)},modifier=Modifier.heightIn(min=48.dp).testTag("appearance_${appearance.name}"))
-            }}
-            UiText("Trusted pairing authorizes ALL supported same-user host sessions, including outside configured creation projects.")
-            UiText(connectionLabel(host,connection,model.connectingHosts[host]==true))
-            HostRoutesEditor(host,store,connection,model)
-            store.attachments.filter {it.host==host}.forEach {record->TextButton(onClick={model.showAttachmentRecovery(record)},modifier=Modifier.heightIn(min=48.dp)){AttachmentIconLabel(R.drawable.ic_material_attach_file,"Retained attachment · ${record.committedBytes} / ${record.size} bytes")}}
+                GoatrSection("Trust and identity",hostName)
+                if(showAppearance) FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {Appearance.entries.forEach {appearance->
+                    FilterChip(selected=model.appearance==appearance,onClick={model.appearance=appearance},label={UiText(appearance.name)},modifier=Modifier.heightIn(min=48.dp).testTag("appearance_${appearance.name}"))
+                }}
+                SelectionContainer {UiText("Pinned fingerprint $host",style=MaterialTheme.typography.bodyMedium,fontFamily=FontFamily.Monospace)}
+                UiText("Trusted pairing authorizes ALL supported same-user host sessions, including outside configured creation projects.")
+                if(host !in connection.hello) UiText("Disconnected: server authority and any unconfirmed self-unpair outcome are unknown. Explicit local Forget below does not confirm server revocation.")
+            }
+        }
+        item(key="connection_$host") {
+            GroupedSurface {
+                GoatrSection("Connection")
+                StatusPill(connectionLabel(host,connection,model.connectingHosts[host]==true),if(host in connection.hello) StatusEmphasis.Positive else StatusEmphasis.Attention)
+                RefreshHint(inventoryRefreshing(host,connection))
+                connection.hello[host]?.backends?.forEach {UiText("${it.provider}: ${it.availability}${it.reason?.let {r->" · $r"}.orEmpty()}",style=MaterialTheme.typography.bodySmall)}
+                connection.connectionFailures[host]?.let {failure->UiText(connectionFailureCopy(failure),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)}
+                var diagnostics by remember(host) {mutableStateOf(false)}
+                DetailDisclosure(diagnostics,{diagnostics=!diagnostics},"host_diagnostics")
+                if(diagnostics) {
+                    connection.hello[host]?.backends?.forEach {UiText("${it.provider} ${it.version}: ${it.availability}${it.reason?.let {r->" · $r"}.orEmpty()}",style=MaterialTheme.typography.bodySmall)}
+                    connection.connectionFailures[host]?.let {failure->UiText("Closed diagnostic: ${connectionFailureCopy(failure)} Stopped while ${connectionFailureStage(failure.phase)}.",style=MaterialTheme.typography.bodySmall)}
+                }
+            }
+        }
+        item(key="routes_$host") {HostRoutesEditor(host,store,connection,model)}
+        item(key="delivery_$host") {
             GroupedSurface {
                 GoatrSection("Background delivery","Choose persistent socket delivery or ntfy. A received probe and authenticated acknowledgement are required before ntfy can replace the verification socket.")
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)){
@@ -1704,8 +1887,8 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
                 if(model.pushMode(host)==DeliveryMode.Ntfy){
                     UiText("ntfy · ${model.pushLabel(host)}",style=MaterialTheme.typography.bodyMedium)
                     FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)){
-                        TextButton(onClick={model.selectNtfy(host,true)},enabled=model.ntfyAvailable()){IconLabel(MaterialGlyph.Refresh,"Repair ntfy registration")}
-                        TextButton(onClick={model.selectSocketDelivery(host)}){IconLabel(MaterialGlyph.Notification,"Use socket instead")}
+                        TextButton(onClick={model.selectNtfy(host,true)},enabled=model.ntfyAvailable(),modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Refresh,"Repair ntfy registration")}
+                        TextButton(onClick={model.selectSocketDelivery(host)},modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Notification,"Use socket instead")}
                     }
                 }
                 PresentationSwitchRow(
@@ -1730,22 +1913,15 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
                 }
                 UiText("ntfy hints contain no conversation text. Open a notification to authenticate and synchronize. Doze, notification permission, force-stop, desktop sleep and relay outages can delay delivery.",style=MaterialTheme.typography.bodySmall)
             }
-            SelectionContainer {UiText("Pinned fingerprint $host",style=MaterialTheme.typography.bodySmall)}
-            connection.hello[host]?.backends?.forEach {UiText("${it.provider} ${it.version}: ${it.availability}${it.reason?.let {r->" · $r"}.orEmpty()}")}
-            if(host !in connection.hello) UiText("Disconnected: server authority and any unconfirmed self-unpair outcome are unknown. Explicit local Forget below does not confirm server revocation.")
-            connection.connectionFailures[host]?.let {failure->
-                var diagnostics by remember(host,failure) {mutableStateOf(false)}
-                DetailDisclosure(diagnostics,{diagnostics=!diagnostics},"host_diagnostics")
-                if(diagnostics) UiText("Closed diagnostic: ${connectionFailureCopy(failure)} Stopped while ${connectionFailureStage(failure.phase)}.",style=MaterialTheme.typography.bodySmall)
-            }
-            UiText("Arbitrary device administration is desktop-local: goatr devices / goatr revoke DEVICE_ID.")
-            UiText("Local Forget deletes this host's local keys, cache, recovery, receipts and read state; it does not confirm server revocation. Backgrounding/Forget never kills desktop work.")
-            TextButton(onClick={confirmForget=true},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("host_forget")) {UiText("Forget locally (available offline)")}
-            OutlinedButton(onClick={confirmUnpair=true},enabled=!model.busy && host in connection.hello,modifier=Modifier.heightIn(min=48.dp).testTag("host_unpair")) {UiText("Self-unpair online")}
-            model.focusedAction?.let {ReceiptPanel(host,it,model)}
+        }
+        item(key="recovery_$host") {
+            GroupedSurface {
+                GoatrSection("Recovery","Retained copies are inspectable; no action is replayed automatically.")
+                store.attachments.filter {it.host==host}.forEach {record->TextButton(onClick={model.showAttachmentRecovery(record)},modifier=Modifier.heightIn(min=48.dp)){AttachmentIconLabel(R.drawable.ic_material_attach_file,"Retained attachment · ${record.committedBytes} / ${record.size} bytes")}}
+                model.focusedAction?.let {ReceiptPanel(host,it,model)}
             }
         }
-        items(store.recovery.filter {it.hostId==host},key={it.action.actionId.value}) {draft->
+        items(store.recovery.filter {it.hostId==host},key={"recovery_${it.action.actionId.value}"}) {draft->
             GroupedSurface {
                 GoatrSection("Retained ordinary recovery",draft.action.actionId.value)
                 UiText("Original Target ${draft.action.target} · deletion deadline ${deadline(draft.expiresAt)}")
@@ -1754,10 +1930,19 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
                 TextButton(onClick={discard=draft},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("recovery_discard")) {UiText("Discard this inspected copy")}
             }
         }
-        items(model.actions[host].orEmpty().filter {it.metadata.actionId!=model.focusedAction?.metadata?.actionId},key={it.metadata.actionId.value}) {ReceiptPanel(host,it,model)}
+        items(model.actions[host].orEmpty().filter {it.metadata.actionId!=model.focusedAction?.metadata?.actionId},key={"receipt_${it.metadata.actionId.value}"}) {ReceiptPanel(host,it,model)}
+        item(key="danger_$host") {
+            GroupedSurface {
+                GoatrSection("Danger zone")
+                UiText("Arbitrary device administration is desktop-local: goatr devices / goatr revoke DEVICE_ID.")
+                UiText("Local Forget deletes this host's local keys, cache, recovery, receipts and read state; it does not confirm server revocation. Backgrounding/Forget never kills desktop work.")
+                TextButton(onClick={confirmForget=true},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("host_forget")) {UiText("Forget locally (available offline)")}
+                OutlinedButton(onClick={confirmUnpair=true},enabled=!model.busy && host in connection.hello,modifier=Modifier.heightIn(min=48.dp).testTag("host_unpair")) {UiText("Self-unpair online")}
+            }
+        }
         item {ActionPaging(model)}
     }
-    if(confirmForget) AlertDialog(onDismissRequest={confirmForget=false},title={UiText("Forget this host locally?")},text={UiText("Delete actual local host keys and all private host state. Server authority remains until confirmed online self-unpair or desktop revoke. Desktop sessions keep running.")},confirmButton={Action("Confirm local Forget","forget_confirm") {confirmForget=false;model.forget(host)}},dismissButton={Action("Keep pairing","forget_cancel") {confirmForget=false}})
-    if(confirmUnpair) AlertDialog(onDismissRequest={confirmUnpair=false},title={UiText("Self-unpair this phone?")},text={UiText("Requires authoritative online confirmation. If the response fails, server authority is unknown; local Forget remains explicit, never automatic re-pair.")},confirmButton={Action("Confirm self-unpair","unpair_confirm") {confirmUnpair=false;model.unpair(host)}},dismissButton={Action("Keep pairing","unpair_cancel") {confirmUnpair=false}})
-    discard?.let {draft->AlertDialog(onDismissRequest={discard=null},title={UiText("Discard inspected recovery copy?")},text={UiText("Action ${draft.action.actionId.value}. This neither cancels desktop work nor sends any action.")},confirmButton={Action("Confirm discard","discard_confirm") {discard=null;model.discard(host,draft.action.actionId)}},dismissButton={Action("Keep copy","discard_cancel") {discard=null}})}
+    if(confirmForget) AlertDialog(onDismissRequest={confirmForget=false},title={UiText("Forget $hostName locally?")},text={UiText("Delete actual local host keys and all private host state. Server authority remains until confirmed online self-unpair or desktop revoke. Desktop sessions keep running.")},confirmButton={Action("Confirm local Forget","forget_confirm") {confirmForget=false;model.forget(host)}},dismissButton={Action("Keep pairing","forget_cancel") {confirmForget=false}})
+    if(confirmUnpair) AlertDialog(onDismissRequest={confirmUnpair=false},title={UiText("Self-unpair from $hostName?")},text={UiText("Requires authoritative online confirmation. If the response fails, server authority is unknown; local Forget remains explicit, never automatic re-pair.")},confirmButton={Action("Confirm self-unpair","unpair_confirm") {confirmUnpair=false;model.unpair(host)}},dismissButton={Action("Keep pairing","unpair_cancel") {confirmUnpair=false}})
+    discard?.let {draft->AlertDialog(onDismissRequest={discard=null},title={UiText("Discard inspected recovery for $hostName?")},text={UiText("Action ${draft.action.actionId.value}. This neither cancels desktop work nor sends any action.")},confirmButton={Action("Confirm discard","discard_confirm") {discard=null;model.discard(host,draft.action.actionId)}},dismissButton={Action("Keep copy","discard_cancel") {discard=null}})}
 }

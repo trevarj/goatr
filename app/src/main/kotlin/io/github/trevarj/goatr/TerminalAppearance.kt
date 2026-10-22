@@ -12,6 +12,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,13 +52,13 @@ internal fun rememberTerminalAppearanceState(): TerminalAppearanceState {
 
 @Composable
 internal fun TerminalAppearancePicker(state: TerminalAppearanceState) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("Terminal appearance", style = MaterialTheme.typography.titleSmall)
-        Text(
-            "Applies only to the secure terminal snapshot.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    var expanded by remember {mutableStateOf(false)}
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick={expanded=!expanded},modifier=Modifier.heightIn(min=48.dp).testTag("terminal_appearance_details")) {
+            IconLabel(MaterialGlyph.ExpandMore,"Snapshot appearance · ${state.value.label}")
+        }
+        if(expanded) {
+            Text("Applies only to the secure terminal snapshot.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TerminalAppearance.entries.forEach { appearance ->
                 FilterChip(
@@ -67,6 +68,7 @@ internal fun TerminalAppearancePicker(state: TerminalAppearanceState) {
                     modifier = Modifier.heightIn(min = 48.dp).testTag(appearance.testTag),
                 )
             }
+        }
         }
     }
 }
@@ -84,9 +86,9 @@ internal fun TerminalSnapshotText(text: String, appearance: TerminalAppearance) 
         Text(
             text = text,
             fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyMedium,
             softWrap = true,
-            modifier = Modifier.fillMaxWidth().padding(8.dp).testTag("shell_visible_text"),
+            modifier = Modifier.fillMaxWidth().padding(16.dp).testTag("shell_visible_text"),
         )
     }
 }
