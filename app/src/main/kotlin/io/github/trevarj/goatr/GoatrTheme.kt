@@ -38,9 +38,9 @@ private val DarkPalette = darkColorScheme(
     secondaryContainer=Color(0xFF204E47),onSecondaryContainer=Color(0xFFC1EDE4),
     tertiary=Color(0xFFB6C8E5),onTertiary=Color(0xFF203248),
     tertiaryContainer=Color(0xFF364960),onTertiaryContainer=Color(0xFFD6E3FF),
-    background=Color(0xFF121411),onBackground=Color(0xFFE3E3DD),
-    surface=Color(0xFF121411),onSurface=Color(0xFFE3E3DD),
-    surfaceVariant=Color(0xFF404943),onSurfaceVariant=Color(0xFFC0C9C1),
+    background=Color(0xFF111111),onBackground=Color(0xFFE3E3DD),
+    surface=Color(0xFF1A1A1A),onSurface=Color(0xFFE3E3DD),
+    surfaceVariant=Color(0xFF242424),onSurfaceVariant=Color(0xFFC0C9C1),
     outline=Color(0xFF8A938C),error=Color(0xFFFFB4AB),
 )
 
@@ -57,7 +57,7 @@ private val GoatrTypography=Typography().let {base->
         labelSmall=base.labelSmall.copy(fontWeight=FontWeight.SemiBold,fontSize=11.sp,lineHeight=16.sp),
     )
 }
-private val GoatrShapes=Shapes(small=RoundedCornerShape(8.dp),medium=RoundedCornerShape(16.dp),large=RoundedCornerShape(24.dp))
+private val GoatrShapes=Shapes(small=RoundedCornerShape(8.dp),medium=RoundedCornerShape(14.dp),large=RoundedCornerShape(24.dp))
 
 @Composable
 fun GoatrTheme(appearance: Appearance=Appearance.System,content: @Composable ()->Unit) {

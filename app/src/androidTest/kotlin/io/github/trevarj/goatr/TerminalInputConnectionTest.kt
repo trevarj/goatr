@@ -7,8 +7,8 @@ import android.view.View
 import android.view.Window
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
@@ -29,6 +29,29 @@ class TerminalInputConnectionTest {
     private fun receipt()=Receipt(actionId=Uuid.random(),method=ActionMethod.ShellInput,bootId=Uuid.random(),
         createdAt=Uint(1),updatedAt=Uint(1),state=ReceiptState.Dispatched,shellTarget=ShellTarget(Uuid.random(),Uuid.random()),
         result=ActionResultShellDispatch(ShellDispatchProgress(19,19,true)))
+
+    private fun awaitOwnedInputWindow(view:View):Pair<Window,View> {
+        val instrumentation=InstrumentationRegistry.getInstrumentation()
+        lateinit var activity:android.app.Activity;lateinit var window:Window;lateinit var root:View
+        ui.runOnIdle {
+            var context=view.context
+            while(context is android.content.ContextWrapper&&context !is android.app.Activity){val parent=context.baseContext;check(parent!==context);context=parent}
+            activity=context as android.app.Activity;window=activity.window;root=window.decorView.rootView
+        }
+        ui.waitUntil(10000) {
+            var admitted=false
+            instrumentation.runOnMainSync {
+                admitted=androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                    .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED).any {it===activity}&&
+                    activity.window===window&&window.decorView.rootView===root&&view.rootView===root&&view.isAttachedToWindow&&view.hasWindowFocus()
+            }
+            admitted
+        }
+        return window to root
+    }
+
+    private fun imeVisible(view:View)=androidx.core.view.ViewCompat.getRootWindowInsets(view)
+        ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime())==true
 
     @Test fun compositionCommitsOnceRealSdkPhasesStayKeysAndRetirementNeverCommits() {
         val instrumentation=InstrumentationRegistry.getInstrumentation()
@@ -312,4 +335,110 @@ class TerminalInputConnectionTest {
     @Test fun historyNativeDetachStopsConfirmedCleanup()=historyLifecycleLossStopsCleanup("detach")
     @Test fun historyNativeFocusLossStopsConfirmedCleanup()=historyLifecycleLossStopsCleanup("focus")
     @Test fun historyNativeWindowLossStopsConfirmedCleanup()=historyLifecycleLossStopsCleanup("window")
+    @Test fun clipboardExtractorAcceptsOneFullPlainItemAndRejectsEveryOtherRepresentation() {
+        fun plain(text:CharSequence?)=android.content.ClipData("owned test",arrayOf("text/plain"),android.content.ClipData.Item(text))
+        val valid=listOf("full\ntext\t😀","a".repeat(16384),"😀".repeat(4096))
+        valid.forEach {text->assertEquals(ShellInput.Text(text),extractShellClipboardText(plain(text)))}
+        val multiple=plain("first").also {it.addItem(android.content.ClipData.Item("second"))}
+        val uri=android.content.ClipData("owned test",arrayOf("text/plain"),android.content.ClipData.Item("text",null,null,android.net.Uri.parse("content://invalid.example/no-read")))
+        val intent=android.content.ClipData("owned test",arrayOf("text/plain"),android.content.ClipData.Item("text",null,android.content.Intent("owned.test.NEVER_EXECUTE"),null))
+        val html=android.content.ClipData("owned test",arrayOf("text/plain"),android.content.ClipData.Item("text","<b>text</b>"))
+        val invalid=listOf<android.content.ClipData?>(null,plain(null),multiple,uri,intent,html,
+            android.content.ClipData("owned test",arrayOf("text/plain","text/html"),android.content.ClipData.Item("text")),
+            android.content.ClipData("owned test",arrayOf("application/octet-stream"),android.content.ClipData.Item("text")))+
+            listOf("","\r","\u001b[31m","\u007f","\u0085","\ud800","\udc00","a".repeat(16385),"😀".repeat(4097),"界".repeat(5462)).map(::plain)
+        invalid.forEach {assertNull(extractShellClipboardText(it))}
+    }
+
+    @Test fun productionEditorFactoryReferenceSurvivesRecompositionAndLivePasteKeepsFocusIme() {
+        val instrumentation=InstrumentationRegistry.getInstrumentation();val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
+        val writes=mutableListOf<ShellInput>();var fresh=true;val editorScope=Any()
+        lateinit var reference:MutableState<DirectTerminalInputView?>;lateinit var owner:TerminalInputOwner
+        var compositions=0
+        ui.setContent {GoatrTheme {Column {
+            val currentOwner=remember {TerminalInputOwner(scope,{true},{fresh},{},{0},{input,_->writes.add(input);receipt()},{_,_->},{},{})}
+            owner=currentOwner
+            val currentReference=remember(editorScope){mutableStateOf<DirectTerminalInputView?>(null)}
+            reference=currentReference
+            val factoryPublished=currentReference.value!=null
+            SideEffect {compositions++}
+            ShellDirectEditor(currentReference,currentOwner,null,Modifier.height(72.dp))
+            ShellPasteButton(factoryPublished&&currentOwner.accepting()){currentReference.value?.pasteFromClipboard()}
+        }}}
+        ui.waitUntil(10000){reference.value!=null&&compositions>=2}
+        val view=checkNotNull(reference.value)
+        ui.runOnIdle {assertSame(view,reference.value);assertTrue(compositions>=2)}
+        val (window,root)=awaitOwnedInputWindow(view)
+        val clipboard=view.context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        try {
+            ui.runOnIdle {clipboard.setPrimaryClip(android.content.ClipData.newPlainText("owned test","full\ntext\t😀"))}
+            ui.onNodeWithTag("terminal_direct_input").performTouchInput {click()}
+            ui.waitUntil(10000){var visible=false;instrumentation.runOnMainSync {visible=view.isFocused&&imeVisible(view)};visible}
+            ui.onNodeWithTag("shell_input_paste").assertHasClickAction().assertHeightIsAtLeast(48.dp).performTouchInput {click()}
+            ui.waitUntil(10000){var complete=false;instrumentation.runOnMainSync {complete=writes.size==1&&owner.pendingEvents==0};complete}
+            ui.runOnIdle {
+                assertEquals(listOf(ShellInput.Text("full\ntext\t😀")),writes)
+                assertTrue(view.isFocused&&view.hasWindowFocus()&&view.isAttachedToWindow&&imeVisible(view))
+                assertSame(root,view.rootView);assertSame(root,window.decorView.rootView)
+                assertSame(view,reference.value)
+                assertTrue(view.editableText.isEmpty())
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("owned test","plain menu"))
+                assertTrue(view.onTextContextMenuItem(android.R.id.pasteAsPlainText))
+            }
+            ui.waitUntil(10000){var complete=false;instrumentation.runOnMainSync {complete=writes.size==2&&owner.pendingEvents==0};complete}
+            ui.runOnIdle {
+                assertEquals(ShellInput.Text("plain menu"),writes.last());assertTrue(view.editableText.isEmpty())
+                clipboard.setPrimaryClip(android.content.ClipData.newHtmlText("owned test","SDK must not coerce","<b>SDK must not coerce</b>"))
+                assertFalse(view.onTextContextMenuItem(android.R.id.paste))
+                assertFalse(view.onTextContextMenuItem(android.R.id.pasteAsPlainText))
+                assertTrue(view.editableText.isEmpty());assertEquals(2,writes.size);assertEquals(0,owner.pendingEvents)
+                fresh=false;view.bind(owner)
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("owned test","must remain outside the paused owner"))
+                assertFalse(view.pasteFromClipboard());assertFalse(view.onTextContextMenuItem(android.R.id.paste))
+                assertEquals(2,writes.size);assertEquals(0,owner.pendingEvents)
+                view.release();assertFalse(view.pasteFromClipboard());assertTrue(view.editableText.isEmpty())
+            }
+        }finally{instrumentation.runOnMainSync {
+            if(android.os.Build.VERSION.SDK_INT>=28)clipboard.clearPrimaryClip()
+            view.release();owner.retire(discard=true);scope.cancel()
+        }}
+    }
+    @Test fun productionWorkspaceStripFirstTouchSelectsExactGenerationWithTheImeAlreadyOpen() {
+        val server=Uuid.random();val firstTarget=Target(Uuid.random(),Uuid.random());val secondTarget=Target(Uuid.random(),Uuid.random())
+        val first=SessionSummary(firstTarget.sessionId,firstTarget.generation,server,Id("w"),Id("terminal-a"),Id("pane-a"),Provider.Omp,Id("a"),
+            "First agent",SessionStatus.Idle,SessionConnectivity.Ready,Capabilities(true,true,true,true,PromptMode.SubmitOrSteer,CancelMode.CurrentWork),
+            HistoryCoverage(HistoryScope.AllBranches,HistorySource.PersistedAndLive,false,false,false))
+        val second=first.copy(sessionId=secondTarget.sessionId,generation=secondTarget.generation,paneId=Id("pane-b"),terminalId=Id("terminal-b"),title="Second agent")
+        val graph=NativeHierarchy(server,Uuid.random(),NativeFreshness.Current,
+            workspaces=listOf(NativeWorkspace(Id("w"),Uint(1),Label("Workspace"),false,Id("t"),NativeAgentStatus.Idle)),
+            tabs=listOf(NativeTab(Id("t"),Id("w"),Uint(1),Label("Tab"),false,NativeAgentStatus.Idle)),
+            panes=listOf(first,second).map {NativePane(it.paneId,it.terminalId,it.workspaceId,Id("t"),focused=false,agentStatus=NativeAgentStatus.Idle,target=Target(it.sessionId,it.generation))})
+        val inventory=HostSnapshotResult(Uuid.random(),ZeroValue(),listOf(Server(server,Label("Server"),ServerConnectivity.Online,CanCreate(false,false))),
+            emptyList(),listOf(first,second),emptyList(),listOf(graph))
+        var selected by mutableStateOf(firstTarget);var selections=0
+        lateinit var editor:android.widget.EditText
+        ui.setContent {GoatrTheme {
+            val keyboard=androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+            Column {
+                AndroidView(factory={context->android.widget.EditText(context).also {editor=it;it.setText("Original local editor text")}},
+                    modifier=Modifier.fillMaxWidth().height(72.dp).testTag("strip-ime-editor"))
+                WorkspaceDirectoryStrip("display-host",inventory,true,selectedAgent=selected,tag="ime_strip",
+                    onAgent={target->keyboard?.hide();selected=target;selections++},
+                    onShell={fail("An agent Target must not become ShellTarget")})
+            }
+        }}
+        awaitOwnedInputWindow(editor)
+        val targetTag="ime_strip_agent_${secondTarget.sessionId.value}_${secondTarget.generation.value}"
+        ui.onNodeWithTag(targetTag).performScrollTo()
+        ui.onNodeWithTag("strip-ime-editor").performTouchInput {click()}
+        val instrumentation=InstrumentationRegistry.getInstrumentation()
+        ui.waitUntil(10000){var visible=false;instrumentation.runOnMainSync {visible=editor.isFocused&&imeVisible(editor)};visible}
+        assertEquals(0,selections)
+        ui.onNodeWithTag(targetTag).performTouchInput {click()}
+        ui.runOnIdle {
+            assertEquals(1,selections);assertEquals(secondTarget,selected)
+            assertEquals("Original local editor text",editor.text.toString())
+        }
+        ui.onNodeWithTag(targetTag).assertIsSelected()
+    }
 }

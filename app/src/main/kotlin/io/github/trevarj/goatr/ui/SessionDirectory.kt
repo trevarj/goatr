@@ -5,6 +5,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -17,6 +18,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.text.style.TextOverflow
@@ -36,6 +38,7 @@ internal data class WorkspaceDirectoryGroup(
     val serverName: String,
     val workspace: NativeWorkspace,
     val agents: List<SessionSummary>,
+    val shells: List<ShellSummary>,
 )
 internal data class SessionDirectoryProjection(
     val workspaces: List<WorkspaceDirectoryGroup>,
@@ -65,11 +68,19 @@ internal fun projectSessionDirectory(
                 pane.workspaceId==workspace.workspaceId && tab.workspaceId==workspace.workspaceId &&
                     summary.workspaceId==workspace.workspaceId && summary.paneId==pane.paneId && summary.terminalId==pane.terminalId
             }
-            WorkspaceDirectoryGroup(WorkspaceDirectoryKey(host,graph.serverId,graph.serverIncarnation,workspace.workspaceId),server.name.value,workspace,agents)
+            val shells=inventory.shells.filter {shell->
+                if(shell.serverId!=graph.serverId) return@filter false
+                val pane=graph.panes.singleOrNull {it.shellTarget==shell.target} ?: return@filter false
+                val tab=graph.tabs.singleOrNull {it.tabId==pane.tabId} ?: return@filter false
+                pane.workspaceId==workspace.workspaceId && tab.workspaceId==workspace.workspaceId &&
+                    shell.workspaceId==workspace.workspaceId && shell.tabId==tab.tabId &&
+                    shell.paneId==pane.paneId && shell.terminalId==pane.terminalId
+            }
+            WorkspaceDirectoryGroup(WorkspaceDirectoryKey(host,graph.serverId,graph.serverIncarnation,workspace.workspaceId),server.name.value,workspace,agents,shells)
         }
     }
     val mapped=groups.flatMap {it.agents}.map {Target(it.sessionId,it.generation)}.toSet()
-    return SessionDirectoryProjection(groups.filter {!narrowed || it.agents.isNotEmpty()},sessions.filter {Target(it.sessionId,it.generation) !in mapped})
+    return SessionDirectoryProjection(groups.filter {!narrowed || it.agents.isNotEmpty() || it.shells.isNotEmpty()},sessions.filter {Target(it.sessionId,it.generation) !in mapped})
 }
 
 /** One route-local accepted arrangement, never a native association or readiness gate. */
@@ -92,7 +103,7 @@ internal fun presentSessionDirectory(
     val accepted=previous?.inventory
     // ponytail: retain only an identical accepted display; any real graph/content change retires it.
     if(previous!=null && previous.host==host && accepted!=null && inventory!=null && accepted.servers==inventory.servers &&
-        accepted.hierarchy==inventory.hierarchy && accepted.sessions==inventory.sessions &&
+        accepted.hierarchy==inventory.hierarchy && accepted.sessions==inventory.sessions && accepted.shells==inventory.shells &&
         previous.sessions==sessions && previous.narrowed==narrowed) return previous
     val projected=projectSessionDirectory(host,inventory,ready,sessions,narrowed)
     return SessionDirectoryPresentation(host,if(ready) inventory else null,sessions,narrowed,
@@ -126,9 +137,10 @@ internal fun LazyListScope.workspaceDirectoryItems(
     otherExpanded: Boolean,
     onToggleOther: ()->Unit,
     onOpen: (Target)->Unit,
+    onOpenShell: (ShellTarget)->Unit,
 ) {
-    directory.workspaces.filter {it.agents.isNotEmpty()}.forEach {group->
-        item(key=group.key.lazyKey) {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {WorkspaceDirectoryCard(group,hostName,preferences,stale,onOpen)}}
+    directory.workspaces.filter {it.agents.isNotEmpty() || it.shells.isNotEmpty()}.forEach {group->
+        item(key=group.key.lazyKey) {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {WorkspaceDirectoryCard(group,hostName,preferences,stale,onOpen,onOpenShell)}}
     }
     if(directory.standalone.isNotEmpty()) item(key="standalone_heading_$host") {
         Column(Modifier.padding(vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
@@ -140,7 +152,7 @@ internal fun LazyListScope.workspaceDirectoryItems(
         Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {DirectoryAgentRow(summary,hostName,null,preferences,stale,"session_${host}_${summary.sessionId.value}_${summary.generation.value}",onOpen)}
     }}
     // Native workspaces with shells or unbound panes are not empty desktops.
-    val other=directory.workspaces.filter {it.agents.isEmpty()}
+    val other=directory.workspaces.filter {it.agents.isEmpty() && it.shells.isEmpty()}
     if(other.isNotEmpty()) {
         item(key="other_workspaces_$host") {
             TextButton(onClick=onToggleOther,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("other_workspaces_$host")) {
@@ -148,7 +160,7 @@ internal fun LazyListScope.workspaceDirectoryItems(
             }
         }
         if(otherExpanded) other.forEach {group->
-            item(key=group.key.lazyKey) {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {WorkspaceDirectoryCard(group,hostName,preferences,stale,onOpen)}}
+            item(key=group.key.lazyKey) {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {WorkspaceDirectoryCard(group,hostName,preferences,stale,onOpen,onOpenShell)}}
         }
     }
 }
@@ -179,6 +191,7 @@ internal fun WorkspaceDirectoryCard(
     preferences: SessionListPreferences,
     stale: Boolean,
     onOpen: (Target)->Unit,
+    onOpenShell: (ShellTarget)->Unit,
 ) {
     var agentsExpanded by rememberSaveable(group.key.lazyKey) {mutableStateOf(false)}
     var metadataExpanded by rememberSaveable(group.key.lazyKey) {mutableStateOf(false)}
@@ -186,11 +199,11 @@ internal fun WorkspaceDirectoryCard(
     val title=group.workspace.label?.value ?: "Workspace ${group.workspace.number.value} · label unavailable"
     OutlinedCard(Modifier.fillMaxWidth().testTag(tag),colors=CardDefaults.outlinedCardColors(containerColor=MaterialTheme.colorScheme.surface),border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant)) {
         Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-            Row(Modifier.weight(1f).testTag("${tag}_agents").combinedClickable(role=SemanticsRole.Button,onClickLabel=if(agentsExpanded) "Hide agents" else "Show agents",onClick={agentsExpanded=!agentsExpanded},onLongClickLabel="Workspace details",onLongClick={metadataExpanded=true}).semantics {stateDescription=if(agentsExpanded) "Agents expanded" else "Agents collapsed"}.heightIn(min=64.dp).padding(12.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.weight(1f).testTag("${tag}_agents").combinedClickable(role=SemanticsRole.Button,onClickLabel=if(agentsExpanded) "Hide terminals" else "Show terminals",onClick={agentsExpanded=!agentsExpanded},onLongClickLabel="Workspace details",onLongClick={metadataExpanded=true}).semantics {stateDescription=if(agentsExpanded) "Terminals expanded" else "Terminals collapsed"}.heightIn(min=64.dp).padding(12.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(3.dp)) {
                     UiText(title,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
                     UiText("$hostName · ${group.serverName}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis)
-                    UiText("${group.agents.size} ${if(group.agents.size==1) "agent" else "agents"}${if(stale) " · Stale" else ""}",style=MaterialTheme.typography.labelMedium,color=if(stale) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    UiText("${group.agents.size} agents · ${group.shells.size} shells${if(stale) " · Stale" else ""}",style=MaterialTheme.typography.labelMedium,color=if(stale) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,maxLines=1,overflow=TextOverflow.Ellipsis)
                 }
                 GoatrIcon(MaterialGlyph.ExpandMore,null,Modifier.rotate(if(agentsExpanded) 180f else 0f))
             }
@@ -204,11 +217,69 @@ internal fun WorkspaceDirectoryCard(
             UiText("Server ID: ${group.key.server.value}\nIncarnation: ${group.key.incarnation.value}\nWorkspace ID: ${group.key.workspace.value}",style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace)
         }
         if(agentsExpanded) Column(Modifier.padding(start=4.dp,end=4.dp,bottom=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            if(group.agents.isEmpty()) UiText("No supported bound agents in this workspace.",style=MaterialTheme.typography.bodySmall)
+            if(group.agents.isEmpty() && group.shells.isEmpty()) UiText("No supported bound terminals in this workspace.",style=MaterialTheme.typography.bodySmall)
             group.agents.forEach {summary->
                 key(summary.sessionId,summary.generation) {
                     DirectoryAgentRow(summary,hostName,title,preferences,stale,"session_${group.key.host}_${summary.sessionId.value}_${summary.generation.value}",onOpen)
                 }
+            }
+            group.shells.forEach {shell->key(shell.target) {
+                DirectoryShellRow(shell,stale,"shell_${group.key.host}_${shell.target.shellId.value}_${shell.target.generation.value}",onOpenShell)
+            }}
+        }
+    }
+}
+
+@Composable
+internal fun DirectoryShellRow(shell:ShellSummary,stale:Boolean,rowTag:String,onOpen:(ShellTarget)->Unit) {
+    val enabled=!stale && shell.connectivity==SessionConnectivity.Ready && shell.capabilities.read
+    OutlinedCard(onClick={onOpen(shell.target)},enabled=enabled,modifier=Modifier.fillMaxWidth().heightIn(min=64.dp).testTag(rowTag)) {
+        Row(Modifier.padding(12.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            GoatrIcon(MaterialGlyph.Terminal,"Shell terminal")
+            Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                UiText(shell.title.value,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
+                UiText(if(stale) "Stale · unavailable" else if(enabled) "Ready · shell" else "${shell.connectivity} · unavailable",style=MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+/** Exact native associations choose the strip; its buttons never confer source authority. */
+@Composable
+internal fun WorkspaceDirectoryStrip(
+    host:String,inventory:HostSnapshotResult?,ready:Boolean,
+    selectedAgent:Target?=null,selectedShell:ShellTarget?=null,tag:String,
+    onAgent:(Target)->Unit,onShell:(ShellTarget)->Unit,
+) {
+    val directory=remember(host,inventory,ready){projectSessionDirectory(host,inventory,ready,inventory?.sessions.orEmpty())}
+    val group=directory.workspaces.singleOrNull {workspace->
+        selectedAgent!=null && workspace.agents.any {Target(it.sessionId,it.generation)==selectedAgent} ||
+            selectedShell!=null && workspace.shells.any {it.target==selectedShell}
+    } ?: return
+    key(group.key) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).testTag(tag),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            group.agents.forEach {agent->
+                val target=Target(agent.sessionId,agent.generation)
+                val chosen=target==selectedAgent
+                FilterChip(selected=chosen,onClick={if(!chosen)onAgent(target)},
+                    enabled=ready && agent.connectivity==SessionConnectivity.Ready,
+                    leadingIcon={GoatrIcon(MaterialGlyph.Chat,providerLabel(agent.provider))},
+                    label={Column {
+                        UiText("${providerLabel(agent.provider)} · ${agent.title}",maxLines=1,overflow=TextOverflow.Ellipsis)
+                        UiText(sessionStatusLabel(agent.status),style=MaterialTheme.typography.labelSmall,maxLines=1)
+                    }},
+                    modifier=Modifier.heightIn(min=48.dp).widthIn(max=280.dp).testTag("${tag}_agent_${target.sessionId.value}_${target.generation.value}").semantics {selected=chosen})
+            }
+            group.shells.forEach {shell->
+                val chosen=shell.target==selectedShell
+                FilterChip(selected=chosen,onClick={if(!chosen)onShell(shell.target)},
+                    enabled=ready && shell.connectivity==SessionConnectivity.Ready && shell.capabilities.read,
+                    leadingIcon={GoatrIcon(MaterialGlyph.Terminal,"Shell terminal")},
+                    label={Column {
+                        UiText(shell.title.value,maxLines=1,overflow=TextOverflow.Ellipsis)
+                        UiText(shell.connectivity.name,style=MaterialTheme.typography.labelSmall,maxLines=1)
+                    }},
+                    modifier=Modifier.heightIn(min=48.dp).widthIn(max=280.dp).testTag("${tag}_shell_${shell.target.shellId.value}_${shell.target.generation.value}").semantics {selected=chosen})
             }
         }
     }
@@ -230,6 +301,7 @@ internal fun DirectoryAgentRow(
     val title=summary.title.takeIf {it.isNotBlank()} ?: "${providerLabel(summary.provider)} conversation"
     val subtitle=listOfNotNull(hostName.takeIf {preferences.showHostContext},workspace.takeIf {preferences.showWorkspaceContext},if(cachePartial!=null) "retained cache${if(cachePartial) " · partial" else ""}" else null).joinToString(" · ")
     val lastObserved=stale || cachePartial!=null || summary.connectivity!=SessionConnectivity.Ready
+    val openAllowed=cachePartial!=null || !stale&&summary.connectivity==SessionConnectivity.Ready
     val providerStatus=sessionStatusLabel(summary.status)
     val statusText=when {
         stale->"Stale · $providerStatus"
@@ -237,7 +309,7 @@ internal fun DirectoryAgentRow(
         summary.connectivity!=SessionConnectivity.Ready->"${summary.connectivity} · $providerStatus"
         else->providerStatus
     }
-    Surface(shape=MaterialTheme.shapes.medium,color=MaterialTheme.colorScheme.surface,border=BorderStroke(1.dp,MaterialTheme.colorScheme.outline.copy(alpha=0.25f)),modifier=Modifier.fillMaxWidth().testTag(rowTag).combinedClickable(onClickLabel="Open conversation",onClick={onOpen(target)},onLongClickLabel="Conversation details and actions",onLongClick={details=true})) {
+    Surface(shape=MaterialTheme.shapes.medium,color=MaterialTheme.colorScheme.surface,border=BorderStroke(1.dp,MaterialTheme.colorScheme.outline.copy(alpha=0.25f)),modifier=Modifier.fillMaxWidth().testTag(rowTag).combinedClickable(enabled=openAllowed,onClickLabel=if(cachePartial!=null) "Inspect retained conversation" else "Open conversation",onClick={onOpen(target)},onLongClickLabel="Conversation details and actions",onLongClick={details=true})) {
         BoxWithConstraints(Modifier.fillMaxWidth().padding(12.dp)) {
             val stacked=maxWidth<320.dp || LocalDensity.current.fontScale>=1.3f
             Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(4.dp)) {
@@ -278,7 +350,7 @@ internal fun DirectoryAgentRow(
             UiText("Session ID: ${target.sessionId.value}\nGeneration: ${target.generation.value}",fontFamily=FontFamily.Monospace,style=MaterialTheme.typography.bodySmall)
             summary.reason?.let {UiText(it)}
         }},
-        confirmButton={TextButton(onClick={details=false;onOpen(target)},modifier=Modifier.heightIn(min=48.dp).testTag("${rowTag}_open")) {UiText("Open conversation")}},
+        confirmButton={TextButton(onClick={details=false;onOpen(target)},enabled=openAllowed,modifier=Modifier.heightIn(min=48.dp).testTag("${rowTag}_open")) {UiText(if(cachePartial!=null) "Inspect retained conversation" else "Open conversation")}},
         dismissButton={TextButton(onClick={details=false},modifier=Modifier.heightIn(min=48.dp)) {UiText("Close")}},
         modifier=Modifier.testTag("${rowTag}_dialog"),
     )

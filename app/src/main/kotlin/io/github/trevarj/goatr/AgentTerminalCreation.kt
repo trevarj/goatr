@@ -47,7 +47,7 @@ internal class TerminalCreationState(val host:String,val server:Uuid,val workspa
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                     for(project in projects)FilterChip(selected=shown.project==project.projectId,
                         onClick={model.selectTerminalProject(shown,project.projectId)},enabled=!shown.pending,
-                        label={UiText(project.label.value)})
+                        label={UiText(project.label.value)},modifier=Modifier.heightIn(min=48.dp).testTag("terminal_project_${project.projectId.value}"))
                 }
                 shown.directories?.takeIf {shown.project!=null}?.let {browser->
                     CreationDirectoriesChooser(browser,projects.singleOrNull {it.projectId==shown.project}?.label?.value ?: "Selected project")

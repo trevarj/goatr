@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.TextLayoutResult
@@ -479,5 +480,160 @@ class ConversationContentTest {
         ui.runOnIdle {assertFalse(reader.toolsExpanded);older=false}
         ui.runOnIdle {older=true}
         ui.onNodeWithTag("older_reader-0").assertExists()
+    }
+    private fun inkBounds(image:ImageBitmap,background:Color):android.graphics.Rect {
+        val pixels=image.toPixelMap();val base=background.luminance()
+        var left=image.width;var top=image.height;var right=0;var bottom=0
+        for(y in 0 until pixels.height)for(x in 0 until pixels.width) {
+            if(kotlin.math.abs(pixels[x,y].luminance()-base)>.15f) {
+                left=minOf(left,x);top=minOf(top,y);right=maxOf(right,x+1);bottom=maxOf(bottom,y+1)
+            }
+        }
+        assertTrue("The actual rendered widget must contain readable ink",right>left&&bottom>top)
+        return android.graphics.Rect(left,top,right,bottom)
+    }
+
+    @Test fun terminalCanvasFontScaleChangesActualGlyphPixelsWithoutChangingGridOrLocalZoom() {
+        val attributes=GridAttributes(false,false,false,false,false,GridUnderline.None)
+        val begin=GridBegin(GridMode.Replace,Uint(0),Uint(1),Uint(1),null,false,false,Uint(1),false)
+        val cells=listOf(GridCell("X",Uint(1),GridColor.Default,GridColor.Default,attributes))
+        val grid=TerminalGrid(begin,cells,false);var scale by mutableStateOf(1f)
+        ui.setContent {GoatrTheme(Appearance.Dark) {
+            val density=LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density,scale)) {
+                TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.width(240.dp).height(96.dp),motionEnabled=false)
+            }
+        }}
+        val canvas=ui.onNodeWithTag("terminal_grid")
+        val normal=canvas.captureToImage();val smallInk=inkBounds(normal,Color(0xff111111))
+        ui.runOnIdle {scale=2f}
+        val large=canvas.captureToImage();val largeInk=inkBounds(large,Color(0xff111111))
+        assertEquals(normal.width,large.width);assertEquals(normal.height,large.height)
+        assertTrue(largeInk.width()>smallInk.width()*1.5f);assertTrue(largeInk.height()>smallInk.height()*1.5f)
+        canvas.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"100 percent zoom, view origin"))
+        assertSame(begin,grid.begin);assertSame(cells,grid.cells)
+        assertEquals(1L,grid.begin.columns.value);assertEquals(1L,grid.begin.rows.value)
+    }
+
+    @Test fun nativeEditorDrawsReadableThemedGlyphsAndScalesMaterialSpRatherThanFixedPixels() {
+        var appearance by mutableStateOf(Appearance.Dark);var scale by mutableStateOf(1f)
+        lateinit var reference:MutableState<DirectTerminalInputView?>
+        ui.setContent {GoatrTheme(appearance) {
+            val density=LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density,scale)) {
+                val currentReference=remember{mutableStateOf<DirectTerminalInputView?>(null)}
+                reference=currentReference
+                ShellDirectEditor(currentReference,null,null,Modifier.width(320.dp).height(96.dp))
+            }
+        }}
+        fun drawn():ImageBitmap {
+            lateinit var bitmap:android.graphics.Bitmap
+            ui.runOnIdle {
+                val view=checkNotNull(reference.value)
+                bitmap=android.graphics.Bitmap.createBitmap(view.width,view.height,android.graphics.Bitmap.Config.ARGB_8888)
+                view.draw(android.graphics.Canvas(bitmap))
+            }
+            return bitmap.asImageBitmap()
+        }
+        for(mode in listOf(Appearance.Dark,Appearance.Light)) {
+            ui.runOnIdle {appearance=mode;scale=1f}
+            val normal=drawn();val normalPixels=normal.toPixelMap();val background=normalPixels[0,0]
+            val small=inkBounds(normal,background)
+            var contrast=1.0
+            val base=background.luminance().toDouble()
+            for(y in 0 until normalPixels.height)for(x in 0 until normalPixels.width) {
+                val ink=normalPixels[x,y].luminance().toDouble()
+                contrast=maxOf(contrast,(maxOf(base,ink)+.05)/(minOf(base,ink)+.05))
+            }
+            assertTrue("Actual native text must contrast with its drawn background",contrast>=4.5)
+            ui.runOnIdle {scale=2f}
+            val large=drawn();val largeInk=inkBounds(large,large.toPixelMap()[0,0])
+            assertTrue(largeInk.height()>small.height()*1.5f)
+            assertEquals(normal.width,large.width);assertEquals(normal.height,large.height)
+        }
+    }
+
+    @Test fun actualShellRailWinsAtEightyAndNinetySixDpWithScaledButtonsAndRetainedEditor() {
+        val begin=GridBegin(GridMode.Replace,Uint(0),Uint(1),Uint(1),null,false,false,Uint(1),false)
+        val grid=TerminalGrid(begin,listOf(GridCell("X",Uint(1),GridColor.Default,GridColor.Default,GridAttributes(false,false,false,false,false,GridUnderline.None))),false)
+        var height by mutableStateOf(360.dp);var scale by mutableStateOf(1f)
+        var controlBegun by mutableStateOf(false);var showLower by mutableStateOf(true)
+        val history=ShellHistoryState()
+        var pastes=0;var begins=0;var releases=0;var resizes=0
+        val keys=mutableListOf<ShellKeyName>()
+        lateinit var reference:MutableState<DirectTerminalInputView?>
+        ui.setContent {GoatrTheme {
+            val density=LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density,scale)) {
+                val currentReference=remember{mutableStateOf<DirectTerminalInputView?>(null)}
+                reference=currentReference
+                ShellTerminalFrame(Modifier.width(320.dp).height(height).testTag("bounded_shell_frame"),
+                    grid={TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.fillMaxSize(),motionEnabled=false)},
+                    rail={ShellEssentialRail(input=true,direct=true,pasteAllowed=true,controlBegun=controlBegun,
+                        controlAllowed=true,resizeAllowed=true,history=history,historyAllowed=false,
+                        onPaste={pastes++},onMode={fail("Layout never changes input mode")},
+                        onBegin={begins++},onRelease={releases++},onResize={resizes++},onScroll={fail("Unqualified history cannot move")})},
+                    lower={if(showLower)androidx.compose.material3.Surface(tonalElevation=3.dp) {
+                        Column(Modifier.fillMaxWidth().verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(horizontal=8.dp,vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                            ShellDirectEditor(currentReference,null,null)
+                            TerminalKeyBar(TerminalModifierState(),true,{_,_->fail("No implicit modifier change")},
+                                {_,_,_->fail("No implicit modifier tap")},{keys.add(it)})
+                        }
+                    }})
+            }
+        }}
+        ui.waitUntil(10000){reference.value!=null}
+        val original=checkNotNull(reference.value)
+        fun assertWholeControl(tag:String,activate:Boolean) {
+            val control=ui.onNodeWithTag(tag)
+            if(tag!="shell_input_paste")control.performScrollTo()
+            val whole=control.getUnclippedBoundsInRoot()
+            val frame=ui.onNodeWithTag("bounded_shell_frame").getUnclippedBoundsInRoot()
+            val rail=ui.onNodeWithTag("shell_essential_rail").getUnclippedBoundsInRoot()
+            assertTrue(whole.left>=frame.left&&whole.right<=frame.right)
+            assertTrue(whole.top>=frame.top&&whole.bottom<=frame.bottom)
+            assertTrue(whole.top>=rail.top&&whole.bottom<=rail.bottom)
+            control.assertHeightIsAtLeast(48.dp).assertWidthIsAtLeast(48.dp).assertIsDisplayed()
+            if(activate)control.performTouchInput {click()}
+        }
+        for(fontScale in listOf(1f,2f))for(viewport in listOf(80.dp,96.dp,360.dp))for(begun in listOf(false,true)) {
+            val before=listOf(pastes,begins,releases,resizes)
+            ui.runOnIdle {scale=fontScale;height=viewport;controlBegun=begun}
+            val frame=ui.onNodeWithTag("bounded_shell_frame").getUnclippedBoundsInRoot()
+            val canvas=ui.onNodeWithTag("shell_grid_region").getUnclippedBoundsInRoot()
+            val rail=ui.onNodeWithTag("shell_essential_rail").getUnclippedBoundsInRoot()
+            val lower=ui.onNodeWithTag("shell_input_lower").getUnclippedBoundsInRoot()
+            val remaining=(frame.bottom-frame.top).value-(rail.bottom-rail.top).value
+            val lowerHeight=(lower.bottom-lower.top).value
+            assertTrue(lowerHeight<=remaining/2+.5f)
+            assertEquals(remaining-lowerHeight,(canvas.bottom-canvas.top).value,.5f)
+            assertEquals(frame.top.value,canvas.top.value,.5f)
+            assertEquals(canvas.bottom.value,rail.top.value,.5f)
+            assertEquals(rail.bottom.value,lower.top.value,.5f)
+            assertEquals(frame.bottom.value,lower.bottom.value,.5f)
+            ui.runOnIdle {
+                assertSame(original,reference.value);assertTrue(original.isAttachedToWindow)
+                assertTrue(keys.isEmpty());assertEquals(before,listOf(pastes,begins,releases,resizes))
+            }
+            assertWholeControl("shell_input_paste",true)
+            assertWholeControl("shell_input_live",false);assertWholeControl("shell_input_draft",false)
+            if(begun) {
+                assertWholeControl("shell_release_control",true);assertWholeControl("shell_resize",true)
+                assertEquals(before[2]+1,releases);assertEquals(before[3]+1,resizes)
+            }else {
+                assertWholeControl("shell_begin_control",true);assertEquals(before[1]+1,begins)
+            }
+            for(tag in listOf("shell_history_older","shell_history_newer","shell_history_bottom")) {
+                assertWholeControl(tag,false);ui.onNodeWithTag(tag).assertIsNotEnabled()
+            }
+            assertEquals(before[0]+1,pastes);assertSame(begin,grid.begin)
+        }
+        ui.runOnIdle {height=360.dp;showLower=false}
+        val frame=ui.onNodeWithTag("bounded_shell_frame").getUnclippedBoundsInRoot()
+        val rail=ui.onNodeWithTag("shell_essential_rail").getUnclippedBoundsInRoot()
+        val canvas=ui.onNodeWithTag("shell_grid_region").getUnclippedBoundsInRoot()
+        assertEquals(0f,ui.onNodeWithTag("shell_input_lower").getUnclippedBoundsInRoot().let {(it.bottom-it.top).value},.5f)
+        assertEquals((frame.bottom-frame.top).value-(rail.bottom-rail.top).value,(canvas.bottom-canvas.top).value,.5f)
+        ui.runOnIdle {assertNull(reference.value)}
     }
 }

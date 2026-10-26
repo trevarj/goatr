@@ -375,4 +375,43 @@ class TerminalInputOwnerTest {
             assertEquals(listOf(ShellInput.Text("fresh explicit gesture")),written);assertEquals(0,stops)
         }finally{exposed.retire()}
     }
+    @Test fun draftPasteReplacesOnlyItsSelectionAndPreservesQueuedRecoveryFacts() {
+        val value=androidx.compose.ui.text.input.TextFieldValue("before old after",androidx.compose.ui.text.TextRange(10,7))
+        val modifiers=TerminalModifierState(ctrl=TerminalModifierMode.Locked)
+        val original=ShellInputDraft(value,revision=7,keyCharacter="q",modifiers=modifiers,queuedRevision=6)
+        val paste=ShellInput.Text("界\n😀\t")
+        val next=checkNotNull(original.withPastedText(paste,0))
+        assertEquals("before 界\n😀\t after",next.value.text)
+        assertEquals(androidx.compose.ui.text.TextRange(7+paste.text.length),next.value.selection)
+        assertEquals(8L,next.revision);assertEquals(6L,next.queuedRevision)
+        assertEquals(modifiers,next.modifiers);assertEquals("q",next.keyCharacter);assertFalse(next.direct)
+        assertEquals(value,original.value);assertEquals(7L,original.revision)
+    }
+
+    @Test fun draftPasteRejectsTheEntireItemAtCombinedQueueAndRecoveryBounds() {
+        val original=ShellInputDraft(androidx.compose.ui.text.input.TextFieldValue("a".repeat(49149)),revision=4,queuedRevision=3)
+        val text=ShellInput.Text("界")
+        assertEquals(49152,utf8Size(checkNotNull(original.withPastedText(text,0)).value.text))
+        assertNull(original.withPastedText(text,1))
+        assertEquals(49149,original.value.text.length);assertEquals(4L,original.revision);assertEquals(3L,original.queuedRevision)
+        val offline=ShellInputDraft(androidx.compose.ui.text.input.TextFieldValue("a".repeat(65533)))
+        assertEquals(65536,utf8Size(checkNotNull(offline.withPastedText(text,null)).value.text))
+        assertNull(offline.copy(value=androidx.compose.ui.text.input.TextFieldValue("a".repeat(65534))).withPastedText(text,null))
+    }
+
+    @Test fun draftPasteCannotChangeLiveModeOrAdmitInvalidFullText() {
+        val draft=ShellInputDraft(androidx.compose.ui.text.input.TextFieldValue("keep"),revision=9,queuedRevision=8)
+        assertNull(draft.copy(direct=true).withPastedText(ShellInput.Text("valid"),0))
+        listOf("", "\r", "\u001b", "\u0085", "\ud800", "a".repeat(16385), "😀".repeat(4097)).forEach {text->
+            assertNull(draft.withPastedText(ShellInput.Text(text),null))
+            assertEquals("keep",draft.value.text);assertEquals(9L,draft.revision);assertEquals(8L,draft.queuedRevision)
+        }
+    }
+    @Test fun draftPasteRefusesAnInsertionThatWouldSplitAnExistingUnicodeScalar() {
+        val original=ShellInputDraft(androidx.compose.ui.text.input.TextFieldValue("😀",androidx.compose.ui.text.TextRange(1)),revision=3)
+        assertNull(original.withPastedText(ShellInput.Text("x"),null))
+        assertEquals("😀",original.value.text);assertEquals(3L,original.revision)
+        val whole=original.copy(value=original.value.copy(selection=androidx.compose.ui.text.TextRange(0,2)))
+        assertEquals("x",checkNotNull(whole.withPastedText(ShellInput.Text("x"),null)).value.text)
+    }
 }

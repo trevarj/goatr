@@ -22,7 +22,18 @@ data class SkillsDocumentState(val snapshot:SkillsSnapshot,val entry:SkillEntry,
 data class ChangesSnapshot(val key: ConversationKey,val source: Uuid,val ticket: Long,val changes: ChangesReadResult?,val loading: Boolean,val error: Boolean)
 data class ShellSelection(val host:String,val target:ShellTarget)
 data class ShellSnapshot(val selection:ShellSelection,val source:Uuid,val ticket:Long,val summary:ShellSummary,val grid:TerminalGrid?,val loading:Boolean,val error:Boolean,val controlBegun:Boolean=false,val incarnation:Uuid?=null,val originalHello:HelloResult?=null,val history:ShellHistoryState=ShellHistoryState())
-data class ShellInputDraft(val value:androidx.compose.ui.text.input.TextFieldValue=androidx.compose.ui.text.input.TextFieldValue(),val revision:Long=0,val direct:Boolean=false,val keyCharacter:String="",val modifiers:TerminalModifierState=TerminalModifierState(),val queuedRevision:Long?=null)
+data class ShellInputDraft(val value:androidx.compose.ui.text.input.TextFieldValue=androidx.compose.ui.text.input.TextFieldValue(),val revision:Long=0,val direct:Boolean=false,val keyCharacter:String="",val modifiers:TerminalModifierState=TerminalModifierState(),val queuedRevision:Long?=null) {
+    internal fun withPastedText(input:ShellInput.Text,pendingTextBytes:Int?):ShellInputDraft? {
+        if(direct||runCatching {input.validate()}.isFailure)return null
+        val start=value.selection.min;val end=value.selection.max
+        val text=buildString(value.text.length-(end-start)+input.text.length) {
+            append(value.text,0,start);append(input.text);append(value.text,end,value.text.length)
+        }
+        val budget=if(pendingTextBytes==null)65536 else 49152-pendingTextBytes
+        if(!validUnicode(text)||utf8Size(text)>budget)return null
+        return copy(value=androidx.compose.ui.text.input.TextFieldValue(text,androidx.compose.ui.text.TextRange(start+input.text.length)),revision=revision+1)
+    }
+}
 data class ShellInputGate(val scope:ShellControlScope,val loaded:Boolean,val prior:LocalAction?,val pending:Boolean,val observation:ShellInputObservation?=null)
 data class ShellControlScope(val selection:ShellSelection,val source:Uuid,val ticket:Long)
 private data class ShellSubmittedInput(val selection:ShellSelection,val revision:Long?,val text:String) {
@@ -2034,6 +2045,19 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun terminals(host:String) {navigate(Screen.Terminals,host)}
+    fun selectShell(host:String,target:ShellTarget) {
+        val view=connection.state.value
+        val inventory=view.inventory[host] ?: return
+        val summary=inventory.shells.singleOrNull {it.target==target} ?: return
+        if(!foreground||busy||host !in view.hello||view.inventoryReady[host]!=true||
+            summary.connectivity!=SessionConnectivity.Ready||!summary.capabilities.read||
+            inventory.servers.singleOrNull {it.serverId==summary.serverId}?.connectivity!=ServerConnectivity.Online||
+            inventory.hierarchy.singleOrNull {it.serverId==summary.serverId}?.freshness!=NativeFreshness.Current)return
+        if(screen==Screen.Terminals&&shell?.selection==ShellSelection(host,target))return
+        // Reuse navigation retirement; neither selection nor the strip starts native control.
+        terminals(host)
+        openShell(host,target)
+    }
     private fun shellRetained(snapshot:ShellSnapshot):Boolean {
         val view=connection.state.value;val inventory=view.inventory[snapshot.selection.host] ?: return false
         val graph=inventory.hierarchy.singleOrNull {it.serverId==snapshot.summary.serverId} ?: return false
@@ -2165,6 +2189,24 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val size=utf8Size(value.text);val pending=terminalOwner(scope)?.pendingTextBytes ?: 0
         if(size>65536||terminalOwner(scope)!=null&&size+pending>49152){notice="Draft/recovery limit reached. Active input reserves16KiB for one refused commit inside64KiB.";return}
         val old=shellDraft(scope.selection);shellInputDrafts[scope.selection]=old.copy(value=value,revision=old.revision+1)
+    }
+    internal fun shellDraftPasteAllowed(scope:ShellControlScope)=
+        runCatching {requireShellDraftScope(scope)}.isSuccess&&!shellDraft(scope.selection).direct
+    internal fun refuseShellPaste(scope:ShellControlScope) {
+        if(runCatching {requireShellDraftScope(scope)}.isSuccess)notice=SHELL_PASTE_REFUSAL
+    }
+    internal fun pasteShellDraft(scope:ShellControlScope,revision:Long,input:ShellInput.Text):Boolean {
+        if(!shellDraftPasteAllowed(scope))return false
+        val old=shellDraft(scope.selection)
+        if(old.revision!=revision||scope.selection !in shellInputDrafts&&shellInputDrafts.size>=16) {
+            refuseShellPaste(scope);return false
+        }
+        val next=old.withPastedText(input,terminalOwner(scope)?.pendingTextBytes)
+        if(next==null){refuseShellPaste(scope);return false}
+        // No suspension or dispatch: preserve the original scope, newer revisions and queue facts.
+        if(!shellDraftPasteAllowed(scope)||shellDraft(scope.selection)!=old)return false
+        shellInputDrafts[scope.selection]=next
+        return true
     }
     fun requestClearShellDrafts(selectedHost:String) {
         if(foreground&&screen==Screen.Terminals&&host==selectedHost&&store.state.value.hosts.any {it.hostId==selectedHost})clearShellDraftHost=selectedHost

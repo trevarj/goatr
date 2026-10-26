@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.*
 import androidx.compose.ui.semantics.*
 
@@ -218,7 +219,7 @@ private fun rememberTerminalMotion():Boolean {
 @Composable
 internal fun TerminalGridCanvas(grid:TerminalGrid,appearance:TerminalAppearance,modifier:Modifier=Modifier,motionEnabled:Boolean=rememberTerminalMotion()){
     val dark=when(appearance){TerminalAppearance.Light->false;TerminalAppearance.Dark->true;TerminalAppearance.FollowApp->MaterialTheme.colorScheme.surface.toArgb().let {android.graphics.Color.red(it)+android.graphics.Color.green(it)+android.graphics.Color.blue(it)<384}}
-    val defaultBackground=if(dark)Color(0xff111513)else Color(0xfff7f7f2)
+    val defaultBackground=if(dark)Color(0xff111111)else Color(0xfff7f7f2)
     val defaultForeground=if(dark)Color(0xffe3e5de)else Color(0xff1b1c19)
     val paint=remember {Paint(Paint.ANTI_ALIAS_FLAG)}
     val underlinePath=remember {android.graphics.Path()}
@@ -227,6 +228,7 @@ internal fun TerminalGridCanvas(grid:TerminalGrid,appearance:TerminalAppearance,
     var pan by remember {mutableStateOf(Offset.Zero)}
     var canvasSize by remember {mutableStateOf(IntSize.Zero)}
     val density=LocalDensity.current.density
+    val baseTextPixels=with(LocalDensity.current){14.sp.toPx()}
     val localActions=remember(density) {listOf(
         CustomAccessibilityAction("Zoom in locally"){zoom=(zoom*1.25f).coerceIn(.5f,4f);true},
         CustomAccessibilityAction("Zoom out locally"){zoom=(zoom/1.25f).coerceIn(.5f,4f);true},
@@ -237,8 +239,8 @@ internal fun TerminalGridCanvas(grid:TerminalGrid,appearance:TerminalAppearance,
         CustomAccessibilityAction("Reset local view"){zoom=1f;pan=Offset.Zero;true}
     )}
 
-    val metrics=remember(zoom,density){
-        paint.textSize=14*density*zoom;paint.typeface=faces[0]
+    val metrics=remember(zoom,baseTextPixels){
+        paint.textSize=baseTextPixels*zoom;paint.typeface=faces[0]
         val font=paint.fontMetrics
         TerminalGridMetrics(paint.measureText("M"),font.descent-font.ascent,-font.ascent,paint.textSize)
     }

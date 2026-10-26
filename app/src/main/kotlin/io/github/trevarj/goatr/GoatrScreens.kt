@@ -69,6 +69,7 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
     model.attachmentRecovery?.let {AttachmentRecoverySheet(it,model,connectionLabel(it.record.host,connection,model.connectingHosts[it.record.host]==true),compactConnectionLabel(it.record.host,connection,model.connectingHosts[it.record.host]==true))}
     val selected=model.selection
     val context=LocalContext.current
+    val keyboard=LocalSoftwareKeyboardController.current
     val notificationPermission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {model.notificationPermissionResult()}
     LaunchedEffect(model.notificationPermissionRequest,model.notificationPermissionLaunch) {
         if(model.notificationPermissionRequest>0&&model.beginNotificationPermissionRequest(model.notificationPermissionRequest)) {
@@ -121,6 +122,13 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
                 },
                 actions={NavigationMenu(model)},
             )
+            if(model.screen==Screen.Conversation) selected?.let {current->
+                WorkspaceDirectoryStrip(current.host,connection.inventory[current.host],
+                    connection.inventoryReady[current.host]==true && current.host in connection.hello,
+                    selectedAgent=current.target,tag="workspace_strip_chat",
+                    onAgent={target->keyboard?.hide();model.open(current.host,target)},
+                    onShell={target->keyboard?.hide();model.selectShell(current.host,target)})
+            }
             }}
         },
     ) {padding->
@@ -149,7 +157,7 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
                         if(wide) Column(Modifier.width(280.dp).fillMaxHeight().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                             var browserQuery by remember(key.host) {mutableStateOf("")}
                             Heading("Conversations")
-                            connection.inventory[key.host]?.let {SessionBrowser(key.host,it,connection.inventoryReady[key.host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==key.host}?.name,browserQuery,{browserQuery=it}) {target->model.open(key.host,target)}}
+                            connection.inventory[key.host]?.let {SessionBrowser(key.host,it,connection.inventoryReady[key.host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==key.host}?.name,browserQuery,{browserQuery=it},onOpenShell={target->keyboard?.hide();model.selectShell(key.host,target)}) {target->keyboard?.hide();model.open(key.host,target)}}
                         }
                         Box(Modifier.weight(1f)) {ConversationScreen(key,store,connection,model)}
                     }
@@ -381,15 +389,17 @@ fun SessionBrowser(
     hostName: String?,
     query: String,
     onQueryChange: (String)->Unit,
+    onOpenShell: (ShellTarget)->Unit,
     onOpen: (Target) -> Unit,
 ) {
-    OutlinedTextField(query,onQueryChange,label={UiText("Find a conversation")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("session_search"))
+    OutlinedTextField(query,onQueryChange,label={UiText("Find a conversation or shell")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("session_search"))
     Box(Modifier.fillMaxWidth().heightIn(min=24.dp)) {
         UiText(if(ready) "Current session list" else "Last observed session list",style=MaterialTheme.typography.bodySmall,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
     }
-    val rows=inventory.sessions.filter {it.title.contains(query,ignoreCase=true)}
+    val rows=remember(inventory.sessions,query){inventory.sessions.filter {it.title.contains(query,ignoreCase=true)}}
+    val directory=remember(host,inventory,ready,rows,query){projectSessionDirectory(host,inventory,ready,rows,narrowed=query.isNotEmpty())}
     var previousStatus: SessionStatus? = null
-    rows.forEach {summary->
+    @Composable fun agents(entries:List<SessionSummary>) {entries.forEach {summary->
         key(host,Target(summary.sessionId,summary.generation)) {
         AnimatedVisibility(visible=preferences.groupByStatus && previousStatus!=summary.status) {
             UiText(sessionGroupLabel(summary.status),style=MaterialTheme.typography.titleMedium,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(vertical=4.dp).semantics {heading()})
@@ -405,13 +415,22 @@ fun SessionBrowser(
         )
         }
         previousStatus=summary.status
+    }}
+    directory.workspaces.forEach {group->
+        val shells=group.shells.filter {it.title.value.contains(query,ignoreCase=true)}
+        if(group.agents.isNotEmpty() || shells.isNotEmpty()) {
+            GoatrSection(group.workspace.label?.value ?: "Workspace ${group.workspace.number.value}","${group.serverName} · ${group.agents.size} agents · ${shells.size} shells")
+            agents(group.agents)
+            shells.forEach {shell->DirectoryShellRow(shell,!ready,"shell_${host}_${shell.target.shellId.value}_${shell.target.generation.value}",onOpenShell)}
+        }
     }
+    agents(directory.standalone)
     if(inventory.unbound.isNotEmpty()) {
         Heading("Desktop setup required")
         UiText("${inventory.unbound.size} desktop ${if(inventory.unbound.size==1) "row needs" else "rows need"} setup before it can be opened from this phone.",style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)
         inventory.unbound.forEach {row->key(host,row.rowId) {UnboundSessionRow(row)}}
     }
-    if(rows.isEmpty() && (query.isNotEmpty() || inventory.unbound.isEmpty())) UiText(
+    if(rows.isEmpty() && directory.workspaces.none {group->group.shells.any {it.title.value.contains(query,ignoreCase=true)}} && (query.isNotEmpty() || inventory.unbound.isEmpty())) UiText(
         when {
             query.isNotEmpty() -> "No matching conversations."
             !ready -> "Session list unavailable yet."
@@ -486,7 +505,10 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
     val directories=hosts.associate {paired->
         paired.hostId to key(paired.hostId) {
             val inventory=connection.inventory[paired.hostId] ?: store.inventory.firstOrNull {it.hostId==paired.hostId}?.inventory
-            rememberSessionDirectory(paired,connection.hello[paired.hostId],inventory,connection.inventoryReady[paired.hostId]==true,inventory?.sessions.orEmpty().filter(::matches),narrowed)
+            val visibleInventory=remember(inventory,query,providerFilter,statusFilter) {
+                inventory?.let {source->source.copy(shells=source.shells.filter {providerFilter==null&&statusFilter==null&&it.title.value.contains(query,ignoreCase=true)})}
+            }
+            rememberSessionDirectory(paired,connection.hello[paired.hostId],visibleInventory,connection.inventoryReady[paired.hostId]==true,inventory?.sessions.orEmpty().filter(::matches),narrowed)
         }
     }
     val creationHosts=hosts.filter {paired->(connection.inventory[paired.hostId] ?: store.inventory.firstOrNull {it.hostId==paired.hostId}?.inventory) != null}
@@ -552,7 +574,8 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                         val expanded=paired.hostId in expandedOtherHosts
                         workspaceDirectoryItems(directories.getValue(paired.hostId),paired.hostId,paired.name,model.sessionListPreferences,!ready,expanded,
                             {expandedOtherHosts=if(expanded) expandedOtherHosts-paired.hostId else expandedOtherHosts+paired.hostId},
-                            {target->model.open(paired.hostId,target)})
+                            {target->keyboard?.hide();model.open(paired.hostId,target)},
+                            {target->keyboard?.hide();model.selectShell(paired.hostId,target)})
                     } else {
                         val workspaceByTarget=projectSessionDirectory(paired.hostId,inventory,ready,rows).workspaces.flatMap {group->
                             group.agents.map {Target(it.sessionId,it.generation) to group.workspace.label?.value}
@@ -582,7 +605,7 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
 
                 }
                 if(rows.isEmpty() && cachedRows.isEmpty() && hasRecordedSessions && narrowed) item(key="filtered_empty_${paired.hostId}") {UiText("No sessions match these filters on this host.",style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)}
-                else if(inventory!=null && !hasRecordedSessions && inventory.unbound.isEmpty()) item(key="empty_${paired.hostId}") {UiText("No conversations in this session list.",style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)}
+                else if(inventory!=null && !hasRecordedSessions && inventory.shells.isEmpty() && inventory.unbound.isEmpty()) item(key="empty_${paired.hostId}") {UiText("No conversations or shell terminals in this session list.",style=MaterialTheme.typography.bodySmall,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)}
                 // Unbound setup rows stay separate; no provider or session status is inferred for them.
                 if((model.sessionListPreferences.directoryView==SessionDirectoryView.Workspaces || inventory==null) && cachedRows.isNotEmpty()) {
                     item(key="cached_heading_${paired.hostId}") {Column(Modifier.padding(vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
@@ -684,7 +707,7 @@ private fun HostSessionsScreen(host: String,store: StoreView,connection: Connect
             Action("Inspect current creation","current_creation_inspect_${current.value}",enabled=!model.busy) {model.inspect(host,current)}
         }
         if(inventory==null) UiText("No cached inventory. Reconnect to read this host.") else {
-            SessionBrowser(host,inventory,connection.inventoryReady[host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==host}?.name,browserQuery,{browserQuery=it}) {model.open(host,it)}
+            SessionBrowser(host,inventory,connection.inventoryReady[host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==host}?.name,browserQuery,{browserQuery=it},onOpenShell={model.selectShell(host,it)}) {model.open(host,it)}
             TextButton(onClick={topology=!topology},modifier=Modifier.testTag("topology_details")) {UiText(if(topology) "Hide desktop details" else "Desktop details")}
             if(topology) {
                 UiText("Desktop focus never selects a phone conversation.",style=MaterialTheme.typography.bodySmall)
@@ -1003,6 +1026,7 @@ internal fun PromptActionPreparation(text:String,images:List<ComposerImageInput>
 @Composable
 private fun ConversationScreen(key: ConversationKey,store: StoreView,connection: ConnectionView,model: GoatrViewModel) {
     val reducer=connection.sessions[key.host]?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==key.target}==true}
+    val keyboard=LocalSoftwareKeyboardController.current
     val cache=store.cached.firstOrNull {it.hostId==key.host && Target(it.summary.sessionId,it.summary.generation)==key.target}
     val summary=reducer?.state?.summary ?: cache?.summary
     val source=connection.sources[key.host]?.get(key.target)
@@ -1035,7 +1059,7 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
             // The dismiss action stays reachable while long inventories scroll independently.
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 var browserQuery by remember(key.host) {mutableStateOf("")}
-                inventory?.let {SessionBrowser(key.host,it,connection.inventoryReady[key.host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==key.host}?.name,browserQuery,{browserQuery=it}) {target->switcher=false;model.open(key.host,target)}} ?: UiText("Inventory unavailable")
+                inventory?.let {SessionBrowser(key.host,it,connection.inventoryReady[key.host]==true,model.sessionListPreferences,store.hosts.firstOrNull {paired->paired.hostId==key.host}?.name,browserQuery,{browserQuery=it},onOpenShell={target->switcher=false;keyboard?.hide();model.selectShell(key.host,target)}) {target->switcher=false;keyboard?.hide();model.open(key.host,target)}} ?: UiText("Inventory unavailable")
             }
         }
     }
@@ -1110,9 +1134,18 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
         Dialog(onDismissRequest=model::closeTerminal,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
             Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("terminal_dialog"),color=MaterialTheme.colorScheme.surface) {
                 Column(Modifier.fillMaxSize().padding(16.dp).testTag("terminal_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                    GoatrTitleBar("Live terminal",connectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),terminal.loading,compactStatus=compactConnectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),actions={
+                    GoatrTitleBar("Read-only agent terminal",connectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),terminal.loading,compactStatus=compactConnectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),actions={
                         IconButton(onClick=model::closeTerminal,modifier=Modifier.size(48.dp).testTag("terminal_close")) {GoatrIcon(MaterialGlyph.Close,"Close terminal viewer")}
                     })
+                    WorkspaceDirectoryStrip(key.host,inventory,connection.inventoryReady[key.host]==true && key.host in connection.hello,
+                        selectedAgent=key.target,tag="workspace_strip_agent_terminal",
+                        onAgent={target->keyboard?.hide();model.open(key.host,target)},
+                        onShell={target->keyboard?.hide();model.selectShell(key.host,target)})
+                    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected=false,onClick=model::closeTerminal,label={UiText("Chat")},modifier=Modifier.heightIn(min=48.dp).testTag("terminal_chat"))
+                        FilterChip(selected=true,onClick={model.openTerminal(key)},enabled=false,label={UiText("Terminal · read-only")},modifier=Modifier.heightIn(min=48.dp).testTag("terminal_selected"))
+                    }
+                    UiText("${summary?.provider?.let(::providerLabel) ?: "Agent"} · ${summary?.title.orEmpty()}",style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
                     UiText("Live grid · pan and pinch locally",style=MaterialTheme.typography.labelMedium)
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         when {
@@ -1349,9 +1382,6 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                 val filesAvailable=ready&&source!=null&&!model.busy&&summary?.capabilities?.artifacts==true
                 ComposerControlAction(MaterialGlyph.Folder,"Files","conversation_files",filesAvailable,PROJECT_FILE_READ_REQUIREMENT) {moreTools=false;model.beginArtifacts(key.host,ArtifactSource.Session(key.target))}
                 if(!filesAvailable) UiText(PROJECT_FILE_READ_REQUIREMENT,style=MaterialTheme.typography.bodySmall)
-                val terminalAvailable=ready&&source!=null&&model.readOnlyAgentTerminal(key)
-                ComposerControlAction(MaterialGlyph.Terminal,"Terminal","terminal_open",terminalAvailable,"Terminal text is unavailable for this current native session.") {moreTools=false;model.openTerminal(key)}
-                if(!terminalAvailable) UiText("Terminal text is unavailable for this current native session.",style=MaterialTheme.typography.bodySmall)
                 val worktreesAvailable=ready&&source!=null&&summary?.capabilities?.worktreesRead==true
                 ComposerControlAction(MaterialGlyph.Desktop,"Worktrees","worktrees_open",worktreesAvailable,PROJECT_GIT_READ_REQUIREMENT) {moreTools=false;model.openWorktrees(key)}
                 if(!worktreesAvailable) UiText(PROJECT_GIT_READ_REQUIREMENT,style=MaterialTheme.typography.bodySmall)
@@ -1497,6 +1527,9 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                 onStop=model::stop,
                 onMore={moreTools=true},
             ) {
+                FilterChip(selected=true,onClick=model::closeTerminal,label={UiText("Chat")},modifier=Modifier.heightIn(min=48.dp).testTag("conversation_chat"))
+                FilterChip(selected=false,onClick={keyboard?.hide();model.openTerminal(key)},enabled=ready && source!=null && model.readOnlyAgentTerminal(key),
+                    label={UiText("Terminal")},leadingIcon={GoatrIcon(MaterialGlyph.Terminal,null)},modifier=Modifier.heightIn(min=48.dp).testTag("terminal_open"))
                 ConversationControl(MaterialGlyph.Chat,"Switch conversation","switcher") {switcher=true}
                 ConversationControl(MaterialGlyph.Add,"Snippets","composer_snippets") {snippets=true}
                 ConversationControl(MaterialGlyph.Settings,"Native controls","session_controls",ready&&summary?.capabilities?.controls==true,"Native controls need the original channel and explicit local provider grant.") {model.openSessionControls(key)}

@@ -149,15 +149,14 @@ class NativeInventoryTest {
             val cached=CachedInventory(host,current,savedAt)
             val directory=rememberSessionDirectory(HostMetadata(host,"Desktop",pairedDevice),liveHello,cached.inventory,ready,current.sessions)
             LazyColumn(Modifier.fillMaxSize()) {
-                workspaceDirectoryItems(directory,host,"Desktop",SessionListPreferences(),!ready,false,{}, {opened=it;openCount++})
+                workspaceDirectoryItems(directory,host,"Desktop",SessionListPreferences(),!ready,false,{}, {opened=it;openCount++},{fail("This inventory has no bound ShellTarget")})
             }
         }}
         val originalRow="session_${host}_${originalTarget.sessionId.value}_${originalTarget.generation.value}"
         ui.onNodeWithTag(originalRow).assertDoesNotExist()
-        ui.onNodeWithTag("${originalGroup.key.tag}_agents").assertHasClickAction().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button)).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Agents collapsed"))
+        ui.onNodeWithTag("${originalGroup.key.tag}_agents").assertHasClickAction().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button))
         ui.onNodeWithTag("${originalGroup.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details collapsed"))
         ui.onNodeWithTag("${originalGroup.key.tag}_agents").performScrollTo().performClick()
-        ui.onNodeWithTag("${originalGroup.key.tag}_agents").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Agents expanded"))
         ui.onNodeWithTag("${originalGroup.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details collapsed"))
         ui.onNodeWithTag("${originalGroup.key.tag}_details").performScrollTo().performClick()
         ui.onNodeWithTag("${originalGroup.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details expanded"))
@@ -194,7 +193,7 @@ class NativeInventoryTest {
         }
         ui.onNodeWithTag(originalRow).assertExists()
         ui.onNodeWithContentDescription("Hide workspace details").assertExists()
-        ui.onNodeWithTag("${originalGroup.key.tag}_agents").assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button)).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Agents expanded"))
+        ui.onNodeWithTag("${originalGroup.key.tag}_agents").assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button))
         ui.onNodeWithTag("${originalGroup.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details expanded"))
         assertEquals(0,openCount)
         ui.onNodeWithTag(originalRow).performScrollTo().performClick()
@@ -223,7 +222,6 @@ class NativeInventoryTest {
             ui.onNodeWithTag(row).assertDoesNotExist()
             ui.onNodeWithContentDescription("Hide workspace details").assertDoesNotExist()
             ui.onNodeWithContentDescription("Show workspace details").assertExists()
-            ui.onNodeWithTag("${group.key.tag}_agents").assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button)).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Agents collapsed"))
             ui.onNodeWithTag("${group.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details collapsed"))
             assertEquals(1,openCount)
             if(replacement!="workspace") {
@@ -325,6 +323,10 @@ class NativeInventoryTest {
         ui.onNode(hasText(original.title) and hasAnyAncestor(hasTestTag("responsive_row_dialog")),useUnmergedTree=true).assertExists()
         ui.onNodeWithText(original.reason!!).performScrollTo().assertIsDisplayed()
         assertEquals(0,openCount)
+        ui.onNodeWithTag("responsive_row_open").assertIsNotEnabled()
+        ui.onNodeWithTag("responsive_row_open").performTouchInput {click()}
+        assertEquals(0,openCount)
+        ui.runOnIdle {shown=original}
         ui.onNodeWithTag("responsive_row_open").assertIsDisplayed().performClick()
         assertEquals(Target(original.sessionId,original.generation),opened)
         assertEquals(1,openCount)
@@ -335,6 +337,19 @@ class NativeInventoryTest {
         val summary=SessionSummary(target.sessionId,target.generation,server,Id("workspace"),Id("terminal-agent"),Id("pane-agent"),Provider.Omp,Id("native-conversation"),"Provider conversation",SessionStatus.Working,SessionConnectivity.Ready,Capabilities(true,true,true,true,PromptMode.SubmitOrSteer,CancelMode.CurrentWork),HistoryCoverage(HistoryScope.AllBranches,HistorySource.PersistedAndLive,false,false,false))
         val graph=NativeHierarchy(server,Uuid.random(),NativeFreshness.Current,workspaces=listOf(NativeWorkspace(Id("workspace"),Uint(7),Label("Native workspace"),true,Id("tab"),NativeAgentStatus.Done)),tabs=listOf(NativeTab(Id("tab"),Id("workspace"),Uint(3),Label("Native tab"),true,NativeAgentStatus.Blocked)),panes=listOf(NativePane(Id("pane-shell"),Id("terminal-shell"),Id("workspace"),Id("tab"),label=Label("Shell only"),agent=Label("bash"),focused=true,agentStatus=NativeAgentStatus.Idle),NativePane(Id("pane-agent"),Id("terminal-agent"),Id("workspace"),Id("tab"),label=Label("Native pane label"),title=Label("Native pane display"),agent=Label("omp"),focused=false,agentStatus=NativeAgentStatus.Done,target=target)))
         return HostSnapshotResult(Uuid.random(),ZeroValue(),listOf(Server(server,Label("Named server"),ServerConnectivity.Online,CanCreate(false,false))),emptyList(),listOf(summary),emptyList(),listOf(graph)).also {it.validate()}
+    }
+
+    private fun mixedInventory():HostSnapshotResult {
+        val base=inventory();val graph=base.hierarchy.single()
+        val mixed=ShellSummary(ShellTarget(Uuid.random(),Uuid.random()),graph.serverId,Id("workspace"),Id("tab"),Id("pane-shell"),Id("terminal-shell"),
+            Label("Ordinary shell"),SessionConnectivity.Ready,ShellCapabilities(true,false,true,false,grid=true))
+        val solo=mixed.copy(target=ShellTarget(Uuid.random(),Uuid.random()),workspaceId=Id("shell-only-workspace"),tabId=Id("shell-only-tab"),
+            paneId=Id("shell-only-pane"),terminalId=Id("shell-only-terminal"),title=Label("Shell-only workspace terminal"))
+        return base.copy(shells=listOf(mixed,solo),hierarchy=listOf(graph.copy(
+            workspaces=graph.workspaces+NativeWorkspace(solo.workspaceId,Uint(8),Label("Shell-only workspace"),false,solo.tabId,NativeAgentStatus.Idle),
+            tabs=graph.tabs+NativeTab(solo.tabId,solo.workspaceId,Uint(4),Label("Shell tab"),false,NativeAgentStatus.Idle),
+            panes=graph.panes.map {if(it.paneId==mixed.paneId)it.copy(agent=null,shellTarget=mixed.target)else it}+
+                NativePane(solo.paneId,solo.terminalId,solo.workspaceId,solo.tabId,focused=false,agentStatus=NativeAgentStatus.Idle,shellTarget=solo.target)))).also {it.validate()}
     }
     @Test fun actualHierarchyKeepsNativeFocusDecorationsSeparateAndStaleAssociationsReadOnly() {
         var current by mutableStateOf(inventory())
@@ -388,7 +403,7 @@ class NativeInventoryTest {
                         SessionsHostCard(if(consoleCard)hostTitle else null,connectionLabel(host,hostView),online,online && hostView.inventoryReady[host]!=true,if(online) "" else hostFailure,modifier=Modifier.testTag("browser_host_card")) {
                             repeat(3) {index->androidx.compose.material3.IconButton(onClick={hostClicks++},modifier=Modifier.size(48.dp).testTag("browser_host_action_$index")) {GoatrIcon(MaterialGlyph.Settings,"Existing host action $index")}}
                         }
-                        SessionBrowser(host,snapshot,ready,SessionListPreferences(),"Same visible desktop",query,{query=it}) {opened=it;openedHost=host;openCount++}
+                        SessionBrowser(host,snapshot,ready,SessionListPreferences(),"Same visible desktop",query,{query=it},{fail("This inventory has no bound ShellTarget")}) {opened=it;openedHost=host;openCount++}
                         androidx.compose.material3.Text("After browser",modifier=Modifier.testTag("browser_after"))
                     }
                 }
@@ -510,7 +525,7 @@ class NativeInventoryTest {
         var selected: Target?=null
         ui.setContent {GoatrTheme {Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             var query by remember {mutableStateOf("")}
-            SessionBrowser("original-host",snapshot,true,SessionListPreferences(),null,query,{query=it}) {selected=it}
+            SessionBrowser("original-host",snapshot,true,SessionListPreferences(),null,query,{query=it},{fail("Setup-only panes never grant ShellTarget")}) {selected=it}
         }}}
         for(row in listOf(omp,codex)) {
             ui.onNodeWithTag("unbound_${row.rowId.value}").performScrollTo().assertExists()
@@ -550,5 +565,60 @@ class NativeInventoryTest {
         val actual=Protocol.strictJson.decodeFromString(Receipt.serializer(),displayed)
         assertEquals(receipt,actual)
         assertEquals(progress.resources,actual.creation!!.resources)
+    }
+    @Test fun productionMixedDirectoryOpensShellOnlyRowsButNeverStaleOrChangedShellPresentation() {
+        val original=mixedInventory();val host="display-host"
+        var snapshot by mutableStateOf(original);var ready by mutableStateOf(true)
+        val device=Uuid.random()
+        val hello=HelloResult(EndpointId("523c7996bad77424e96786cf7a7205115337a5b4565cd25506a0f297b191a5ea"),Uuid.random(),Uuid.random(),ProtocolVersion(),emptyList())
+        var opened:ShellTarget?=null;var opens=0
+        ui.setContent {GoatrTheme {
+            val directory=rememberSessionDirectory(HostMetadata(host,"Desktop",device),hello,snapshot,ready,snapshot.sessions)
+            LazyColumn(Modifier.fillMaxSize()) {
+                workspaceDirectoryItems(directory,host,"Desktop",SessionListPreferences(),!ready,false,
+                    {fail("Both workspaces have actual terminals")},{fail("Shell selection must not become an agent Target")},{opened=it;opens++})
+            }
+        }}
+        val groups=projectSessionDirectory(host,original,true,original.sessions).workspaces
+        groups.forEach {ui.onNodeWithTag("${it.key.tag}_agents").performScrollTo().performClick()}
+        val shell=original.shells.last();val tag="shell_${host}_${shell.target.shellId.value}_${shell.target.generation.value}"
+        ui.onNodeWithTag(tag).performScrollTo().assertIsEnabled().assertHeightIsAtLeast(48.dp).performTouchInput {click()}
+        assertEquals(shell.target,opened);assertEquals(1,opens)
+        ui.runOnIdle {ready=false}
+        ui.onNodeWithTag(tag).performScrollTo().assertIsNotEnabled().performTouchInput {click()}
+        assertEquals(1,opens)
+        ui.runOnIdle {snapshot=snapshot.copy(shells=snapshot.shells.map {if(it.target==shell.target)it.copy(title=Label("Changed while pending"))else it})}
+        ui.onNodeWithTag(tag).assertDoesNotExist()
+        groups.forEach {ui.onNodeWithTag(it.key.tag).assertDoesNotExist()}
+        assertEquals(shell.target,opened);assertEquals(1,opens)
+    }
+
+    @Test fun productionWorkspaceStripSeparatesTypesSelectionAndExactReplacementGenerations() {
+        val original=mixedInventory();val agent=original.sessions.single().let {Target(it.sessionId,it.generation)}
+        val shell=original.shells.first()
+        var snapshot by mutableStateOf(original)
+        var selectedAgent by mutableStateOf<Target?>(agent);var selectedShell by mutableStateOf<ShellTarget?>(null)
+        var agentOpens=0;var shellOpens=0
+        ui.setContent {GoatrTheme {
+            val density=LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density,2f)) {
+                WorkspaceDirectoryStrip("host",snapshot,true,selectedAgent,selectedShell,"mixed_strip",
+                    {selectedAgent=it;selectedShell=null;agentOpens++},{selectedShell=it;selectedAgent=null;shellOpens++})
+            }
+        }}
+        val agentTag="mixed_strip_agent_${agent.sessionId.value}_${agent.generation.value}"
+        val shellTag="mixed_strip_shell_${shell.target.shellId.value}_${shell.target.generation.value}"
+        ui.onNodeWithTag(agentTag).assertIsSelected().assertHeightIsAtLeast(48.dp)
+        ui.onNodeWithTag(shellTag).performScrollTo().assertIsNotSelected().assertHeightIsAtLeast(48.dp).performTouchInput {click()}
+        ui.onNodeWithTag(shellTag).assertIsSelected()
+        assertEquals(shell.target,selectedShell);assertEquals(1,shellOpens);assertEquals(0,agentOpens)
+        ui.onNodeWithTag(agentTag).performScrollTo().performTouchInput {click()}
+        assertEquals(agent,selectedAgent);assertEquals(1,agentOpens)
+        val replacement=shell.target.copy(generation=Uuid.random())
+        ui.runOnIdle {snapshot=original.copy(shells=original.shells.map {if(it.target==shell.target)it.copy(target=replacement)else it},
+            hierarchy=original.hierarchy.map {graph->graph.copy(panes=graph.panes.map {if(it.shellTarget==shell.target)it.copy(shellTarget=replacement)else it})})}
+        ui.onNodeWithTag(shellTag).assertDoesNotExist()
+        ui.onNodeWithTag("mixed_strip_shell_${replacement.shellId.value}_${replacement.generation.value}").performScrollTo().performTouchInput {click()}
+        assertEquals(replacement,selectedShell);assertEquals(2,shellOpens);assertEquals(1,agentOpens)
     }
 }

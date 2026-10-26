@@ -3,12 +3,17 @@ package io.github.trevarj.goatr
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.material3.Text as UiText
 import androidx.compose.runtime.*
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -336,6 +341,30 @@ internal class TerminalCommittedContext {
     }
 }
 
+internal const val SHELL_PASTE_REFUSAL="Paste requires one nonempty plain-text item within the terminal’s text limits. Nothing was pasted."
+
+/** Called only by an explicit Paste gesture. Never ask Android to coerce or resolve an item. */
+internal fun extractShellClipboardText(clip:android.content.ClipData?):ShellInput.Text? {
+    if(clip==null||clip.itemCount!=1||clip.description.mimeTypeCount!=1||
+        clip.description.getMimeType(0)!=android.content.ClipDescription.MIMETYPE_TEXT_PLAIN)return null
+    val item=clip.getItemAt(0)
+    if(item.uri!=null||item.intent!=null||item.htmlText!=null)return null
+    val direct=item.text ?: return null
+    if(direct.isEmpty()||direct.length>16384)return null
+    val input=ShellInput.Text(direct.toString())
+    return try {input.validate();input}catch(_:Exception){null}
+}
+private fun readShellClipboard(context:android.content.Context):ShellInput.Text? = try {
+    extractShellClipboardText((context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)?.primaryClip)
+}catch(_:Exception){null}
+
+/** Input focus stays with the exact native editor; accessibility click/focus remain available. */
+@Composable
+internal fun ShellPasteButton(enabled:Boolean,onPaste:()->Unit) {
+    TextButton(onClick=onPaste,enabled=enabled,
+        modifier=Modifier.heightIn(min=48.dp).focusProperties {canFocus=false}.testTag("shell_input_paste")) {UiText("Paste")}
+}
+
 /** Standard Android editor surface; it retains only transient composition, never terminal output.
  * SDK commits and hardware events enter the same bounded original-lease owner exactly once. */
 internal class DirectTerminalInputView(context:android.content.Context):android.widget.EditText(context) {
@@ -344,6 +373,7 @@ internal class DirectTerminalInputView(context:android.content.Context):android.
     private val committed get()=owner?.committedContext
     private var cursorFrame:GridBegin?=null
     private class HeldKey(var key:ShellKey,val downTime:Long)
+    private var cursorColor:Int?=null
     private val pressed=mutableMapOf<Long,HeldKey>()
     private val deadKeys=mutableMapOf<Long,Long>()
     private var accent=0
@@ -370,6 +400,30 @@ internal class DirectTerminalInputView(context:android.content.Context):android.
         hint=if(allowed)"Direct terminal input · tap for keyboard" else "Direct terminal input paused · new input unavailable"
         contentDescription=if(allowed)"Direct terminal input" else "Direct terminal input paused · new input unavailable"
     }
+    fun applyAppearance(foreground:Int,hintColor:Int,selection:Int,background:Int,textPixels:Float) {
+        if(currentTextColor!=foreground)setTextColor(foreground)
+        if(hintTextColors.defaultColor!=hintColor)setHintTextColor(hintColor)
+        if(highlightColor!=selection)highlightColor=selection
+        if((this.background as? android.graphics.drawable.ColorDrawable)?.color!=background)setBackgroundColor(background)
+        if(textSize!=textPixels)setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX,textPixels)
+        if(android.os.Build.VERSION.SDK_INT>=29&&cursorColor!=foreground) {
+            textCursorDrawable=textCursorDrawable?.mutate()?.also {it.setTint(foreground)}
+            textSelectHandle?.mutate()?.setTint(foreground)
+            textSelectHandleLeft?.mutate()?.setTint(foreground)
+            textSelectHandleRight?.mutate()?.setTint(foreground)
+            cursorColor=foreground
+        }
+    }
+    fun pasteFromClipboard():Boolean {
+        if(!active())return false
+        val original=owner ?: return false
+        val input=readShellClipboard(context)
+        if(input==null){error=SHELL_PASTE_REFUSAL;return false}
+        if(!active()||owner!==original)return false
+        val accepted=original.offer(input)
+        if(!accepted)error="Terminal input is unavailable. Nothing was pasted."
+        return accepted
+    }
     fun observeCursor(frame:GridBegin?) {
         val prior=cursorFrame
         if(frame?.cursor==null||!frame.cursor.visible||prior!=null&&(prior.cursor!=frame.cursor
@@ -392,7 +446,10 @@ internal class DirectTerminalInputView(context:android.content.Context):android.
     }
     override fun onDetachedFromWindow(){release();super.onDetachedFromWindow()}
     override fun onCheckIsTextEditor()=active()
-    override fun onTextContextMenuItem(id:Int)=active()&&super.onTextContextMenuItem(id)
+    override fun onTextContextMenuItem(id:Int)=when(id) {
+        android.R.id.paste,android.R.id.pasteAsPlainText->pasteFromClipboard()
+        else->active()&&super.onTextContextMenuItem(id)
+    }
     override fun onCreateInputConnection(outAttrs:android.view.inputmethod.EditorInfo):android.view.inputmethod.InputConnection? {
         if(!active())return null
         editor?.retire();editor=null
@@ -629,7 +686,7 @@ internal fun ShellTerminalsScreen(host:String,store:StoreView,view:ConnectionVie
             ShellCreatedAction(host,action,inventory,ready,host in view.hello,model)
         }
     }
-    model.shell?.takeIf {it.selection.host==host}?.let {snapshot->ShellViewer(snapshot,hostName,inventory,model,terminalAppearance.value,connectionLabel(snapshot.selection.host,view,model.connectingHosts[snapshot.selection.host]==true),compactConnectionLabel(snapshot.selection.host,view,model.connectingHosts[snapshot.selection.host]==true))}
+    model.shell?.takeIf {it.selection.host==host}?.let {snapshot->ShellViewer(snapshot,hostName,inventory,ready,model,terminalAppearance.value,connectionLabel(snapshot.selection.host,view,model.connectingHosts[snapshot.selection.host]==true),compactConnectionLabel(snapshot.selection.host,view,model.connectingHosts[snapshot.selection.host]==true))}
     if(model.clearShellDraftHost==host) AlertDialog(
         onDismissRequest=model::cancelClearShellDrafts,title={UiText("Clear local terminal drafts?")},
         text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){UiText(hostName);UiText("Remove all local terminal text, cursor positions, key characters and modes for this desktop, including offline and older terminal generations. Pending inputs and receipts are retained; no terminal operation is sent.")}},
@@ -662,7 +719,7 @@ private fun ShellCreatedAction(host:String,action:LocalAction,inventory:HostSnap
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSnapshotResult?,model:GoatrViewModel,terminalAppearance:TerminalAppearance,connectionStatus:String,compactConnectionStatus:String) {
+private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSnapshotResult?,directoryReady:Boolean,model:GoatrViewModel,terminalAppearance:TerminalAppearance,connectionStatus:String,compactConnectionStatus:String) {
     val keyboard=LocalSoftwareKeyboardController.current
     LaunchedEffect(snapshot.selection,snapshot.ticket) {keyboard?.hide()}
     val scope=ShellControlScope(snapshot.selection,snapshot.source,snapshot.ticket)
@@ -670,60 +727,51 @@ private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSna
     var resizeConfirm by remember(scope){mutableStateOf(false)}
     var columns by remember(scope){mutableStateOf("")}
     var rows by remember(scope){mutableStateOf("")}
+    var details by remember(scope){mutableStateOf(false)}
     Dialog(onDismissRequest=model::closeShell,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
-        Surface(Modifier.fillMaxSize().safeDrawingPadding()) {
-            Scaffold(
-                contentWindowInsets=WindowInsets(0,0,0,0),
-                topBar={GoatrTitleBar(snapshot.summary.title.value,connectionStatus,snapshot.loading,compactStatus=compactConnectionStatus,navigationIcon={
-                    IconButton(onClick=model::closeShell,modifier=Modifier.size(48.dp).testTag("shell_viewer_back")){GoatrIcon(MaterialGlyph.Back,"Back to terminals")}
-                })},
-                bottomBar={if(snapshot.summary.capabilities.input) ShellInputPanel(snapshot,model)},
-                floatingActionButton={if(snapshot.summary.capabilities.create) PrimaryActionFab(MaterialGlyph.Add,"New terminal here","terminal_create_here",
-                    enabled=model.foreground&&!model.busy&&model.shellControlAllowed(scope),
-                    onClick={model.beginTerminalCreation(snapshot.selection.host,snapshot.summary.serverId,snapshot.summary.workspaceId,ArtifactSource.Shell(snapshot.selection.target))})},
-            ) {padding->
-                LazyColumn(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).padding(horizontal=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp),contentPadding=PaddingValues(bottom=112.dp)) {
-                    item {Column {UiText(hostName,style=MaterialTheme.typography.bodySmall);UiText(shellWorkspace(inventory,snapshot.summary),style=MaterialTheme.typography.bodySmall)}}
-                    item {UiText(STOCK_CLOSE_LIMITATION,style=MaterialTheme.typography.bodySmall)}
-                    item {
-                        if(!snapshot.controlBegun)Button(onClick={beginConfirm=true},enabled=model.shellControlAllowed(scope),modifier=Modifier.heightIn(min=48.dp).testTag("shell_begin_control")){UiText("Begin control")}
-                        else Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){
-                            TextButton(onClick={model.releaseShellControl(scope)},modifier=Modifier.heightIn(min=48.dp)){UiText("Release control")}
-                            OutlinedButton(onClick={resizeConfirm=true},enabled=!model.busy&&model.shellControlAllowed(scope)&&snapshot.grid!=null&&snapshot.grid.begin.popupBlocked==false,modifier=Modifier.heightIn(min=48.dp).testTag("shell_resize")){UiText("Resize…")}
-                        }
-                    }
-                    model.actions[snapshot.selection.host].orEmpty().lastOrNull {it.metadata.method==ActionMethod.ShellResize&&it.metadata.shellTarget==snapshot.selection.target}?.let {action->item{ReceiptPanel(snapshot.selection.host,action,model)}}
-                    item {
-                        val history=snapshot.history;val metrics=history.metrics
-                        val enabled=!model.busy&&model.shellHistoryAllowed(scope)
-                        Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                            UiText(when(history.mode){ShellHistoryMode.Live->if(metrics==null)"History unavailable · Live input unchanged" else "Live · confirmed bottom"
-                                ShellHistoryMode.Browsing->"History · Live input paused";ShellHistoryMode.Pending->"History movement pending · input paused";ShellHistoryMode.Uncertain->"History outcome uncertain · input paused"},style=MaterialTheme.typography.labelMedium,modifier=Modifier.testTag("shell_history_mode"))
-                            metrics?.let {UiText("Confirmed ${it.offsetFromBottom.value} / ${it.maxOffsetFromBottom.value} rows from bottom · viewport ${it.viewportRows.value}",style=MaterialTheme.typography.bodySmall)}
-                            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick={metrics?.let {model.scrollShell(scope,(it.offsetFromBottom.value+it.viewportRows.value).coerceAtMost(it.maxOffsetFromBottom.value))}},enabled=enabled&&metrics!=null&&metrics.offsetFromBottom.value<metrics.maxOffsetFromBottom.value,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_older")){UiText("Older")}
-                                TextButton(onClick={metrics?.let {model.scrollShell(scope,(it.offsetFromBottom.value-it.viewportRows.value).coerceAtLeast(0))}},enabled=enabled&&metrics!=null&&metrics.offsetFromBottom.value>0,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_newer")){UiText("Newer")}
-                                TextButton(onClick={model.scrollShell(scope,0)},enabled=enabled,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_bottom")){UiText("Bottom")}
-                            }
-                            UiText("History is the shared native viewport, not a private phone history. Live resumes only after an explicit bottom receipt and a current committed bottom grid; neither alone resumes typing.",style=MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                    model.actions[snapshot.selection.host].orEmpty().lastOrNull {it.metadata.actionId==snapshot.history.action&&it.metadata.method==ActionMethod.ShellScroll&&it.metadata.shellTarget==snapshot.selection.target}?.let {action->item{ReceiptPanel(snapshot.selection.host,action,model)}}
-                    item {
-                        UiText("Live grid · pan and pinch locally",style=MaterialTheme.typography.labelMedium)
-                        Box(Modifier.fillMaxWidth().height(360.dp)) {
-                            when {
-                                !snapshot.controlBegun->UiText("Begin control explicitly to open the native frontend. Merely opening this panel sends nothing.")
-                                snapshot.error->UiText("Control lease is unavailable. Release it before a fresh explicit Begin; no native action is replayed.",color=MaterialTheme.colorScheme.error)
-                                snapshot.grid==null->UiText("Waiting for current source and a complete native grid · no input is enabled",style=MaterialTheme.typography.bodySmall)
-                                else->TerminalGridCanvas(snapshot.grid,terminalAppearance,Modifier.fillMaxSize())
-                            }
-                        }
-                    }
+        // This dialog has its own inset tree. Consume safe drawing/IME once, not again in the dock.
+        Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("shell_viewer")) {
+            Scaffold(contentWindowInsets=WindowInsets(0,0,0,0),topBar={
+                Column {
+                    GoatrTitleBar(snapshot.summary.title.value,connectionStatus,snapshot.loading,compactStatus=compactConnectionStatus,navigationIcon={
+                        IconButton(onClick=model::closeShell,modifier=Modifier.size(48.dp).testTag("shell_viewer_back")){GoatrIcon(MaterialGlyph.Back,"Back to terminals")}
+                    },actions={
+                        IconButton(onClick={keyboard?.hide()},modifier=Modifier.size(48.dp).testTag("shell_keyboard_dismiss")){GoatrIcon(MaterialGlyph.ExpandMore,"Hide keyboard")}
+                        IconButton(onClick={details=true},modifier=Modifier.size(48.dp).testTag("shell_viewer_details")){GoatrIcon(MaterialGlyph.Visibility,"Terminal details, receipts and input recovery")}
+                    })
+                    WorkspaceDirectoryStrip(snapshot.selection.host,inventory,directoryReady&&model.foreground,
+                        selectedShell=snapshot.selection.target,tag="workspace_strip_shell",
+                        onAgent={target->keyboard?.hide();model.open(snapshot.selection.host,target)},
+                        onShell={target->keyboard?.hide();model.selectShell(snapshot.selection.host,target)})
                 }
+            }) {padding->
+                ShellInputPanel(snapshot,model,Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding),{beginConfirm=true},{resizeConfirm=true},grid={
+                    when {
+                        !snapshot.controlBegun->UiText("Begin control explicitly to open the native frontend. Merely opening this panel sends nothing.",modifier=Modifier.padding(12.dp))
+                        snapshot.error->UiText("Control lease is unavailable. Release it before a fresh explicit Begin; no native action is replayed.",color=MaterialTheme.colorScheme.error,modifier=Modifier.padding(12.dp))
+                        snapshot.grid==null->UiText("Waiting for current source and a complete native grid · no input is enabled",style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(12.dp))
+                        else->TerminalGridCanvas(snapshot.grid,terminalAppearance,Modifier.fillMaxSize())
+                    }
+                })
             }
         }
     }
+    if(details)AlertDialog(onDismissRequest={details=false},title={UiText("Terminal details")},
+        text={Column(Modifier.fillMaxWidth().heightIn(max=480.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            UiText("$hostName · ${shellWorkspace(inventory,snapshot.summary)}")
+            UiText("Shell ${snapshot.selection.target.shellId.value}\nGeneration ${snapshot.selection.target.generation.value}\nTab ${snapshot.summary.tabId.value} · pane ${snapshot.summary.paneId.value}",style=MaterialTheme.typography.bodySmall)
+            UiText(STOCK_CLOSE_LIMITATION,style=MaterialTheme.typography.bodySmall)
+            UiText("Pan, pinch, font scaling, rotation and the keyboard change only this local view. Native geometry changes only through explicit shared Resize.",style=MaterialTheme.typography.bodySmall)
+            UiText("History is the shared native viewport, not private phone history. Live resumes only after an explicit bottom receipt and a current committed bottom grid; neither alone resumes typing.",style=MaterialTheme.typography.bodySmall)
+            snapshot.history.metrics?.let {UiText("Confirmed ${it.offsetFromBottom.value} / ${it.maxOffsetFromBottom.value} rows from bottom · viewport ${it.viewportRows.value}",style=MaterialTheme.typography.bodySmall)}
+            model.actions[snapshot.selection.host].orEmpty().lastOrNull {it.metadata.method==ActionMethod.ShellResize&&it.metadata.shellTarget==snapshot.selection.target}?.let {ReceiptPanel(snapshot.selection.host,it,model)}
+            model.actions[snapshot.selection.host].orEmpty().lastOrNull {it.metadata.actionId==snapshot.history.action&&it.metadata.method==ActionMethod.ShellScroll&&it.metadata.shellTarget==snapshot.selection.target}?.let {ReceiptPanel(snapshot.selection.host,it,model)}
+            if(snapshot.summary.capabilities.create)TextButton(onClick={details=false;model.beginTerminalCreation(snapshot.selection.host,snapshot.summary.serverId,snapshot.summary.workspaceId,ArtifactSource.Shell(snapshot.selection.target))},
+                enabled=model.foreground&&!model.busy&&model.shellControlAllowed(scope),modifier=Modifier.heightIn(min=48.dp).testTag("terminal_create_here")) {IconLabel(MaterialGlyph.Add,"New terminal here")}
+            if(snapshot.summary.capabilities.input)ShellInputDiagnostics(snapshot,model)
+        }},
+        confirmButton={TextButton(onClick={details=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Close details")}},
+        properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn))
     if(beginConfirm)AlertDialog(onDismissRequest={beginConfirm=false},title={UiText("Begin native control?")},
         text={UiText(NATIVE_CONTROL_DISCLOSURE)},
         confirmButton={TextButton(onClick={beginConfirm=false;model.beginShellControl(scope)},enabled=model.shellControlAllowed(scope),modifier=Modifier.heightIn(min=48.dp)){UiText("Begin control")}},
@@ -739,82 +787,174 @@ private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSna
         dismissButton={TextButton(onClick={resizeConfirm=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn))
 }
 
-/** Direct commits and staged drafts share one original-lease writer; insertion never submits. */
+/** The native host owns factory/update/release callbacks; its reference belongs to the caller's scope. */
 @Composable
-private fun ShellInputPanel(snapshot:ShellSnapshot,model:GoatrViewModel) {
+internal fun ShellDirectEditor(reference:MutableState<DirectTerminalInputView?>,owner:TerminalInputOwner?,frame:GridBegin?,modifier:Modifier=Modifier) {
+    val colors=MaterialTheme.colorScheme
+    val bodySize=MaterialTheme.typography.bodyMedium.fontSize
+    val editorPixels=with(LocalDensity.current){bodySize.toPx()}
+    AndroidView(factory={context->DirectTerminalInputView(context).also {reference.value=it}},
+        update={it.bind(owner);it.observeCursor(frame)
+            it.applyAppearance(colors.onSurface.toArgb(),colors.onSurfaceVariant.toArgb(),colors.primary.copy(alpha=.35f).toArgb(),colors.surfaceVariant.toArgb(),editorPixels)},
+        onReset=null,onRelease={view->if(reference.value===view)reference.value=null;view.release()},
+        modifier=modifier.fillMaxWidth().heightIn(min=56.dp,max=112.dp).testTag("terminal_direct_input"))
+}
+
+/** Actual padded controls, shared by the live panel and bounded-layout regressions. */
+@Composable
+internal fun ShellEssentialRail(
+    input:Boolean,direct:Boolean,pasteAllowed:Boolean,controlBegun:Boolean,controlAllowed:Boolean,resizeAllowed:Boolean,
+    history:ShellHistoryState,historyAllowed:Boolean,
+    onPaste:()->Unit,onMode:(Boolean)->Unit,onBegin:()->Unit,onRelease:()->Unit,onResize:()->Unit,onScroll:(Long)->Unit,
+) {
+    Surface(tonalElevation=3.dp,shape=androidx.compose.foundation.shape.RoundedCornerShape(topStart=24.dp,topEnd=24.dp)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=4.dp),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
+            if(input)ShellPasteButton(pasteAllowed,onPaste)
+            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
+                if(input) {
+                    FilterChip(selected=direct,onClick={onMode(true)},label={UiText("Live")},modifier=Modifier.heightIn(min=48.dp).testTag("shell_input_live"))
+                    FilterChip(selected=!direct,onClick={onMode(false)},label={UiText("Draft")},modifier=Modifier.heightIn(min=48.dp).testTag("shell_input_draft"))
+                }
+                if(!controlBegun)Button(onClick=onBegin,enabled=controlAllowed,modifier=Modifier.heightIn(min=48.dp).testTag("shell_begin_control")){UiText("Begin control")}
+                else {
+                    TextButton(onClick=onRelease,modifier=Modifier.heightIn(min=48.dp).testTag("shell_release_control")){UiText("Release")}
+                    OutlinedButton(onClick=onResize,enabled=resizeAllowed,modifier=Modifier.heightIn(min=48.dp).testTag("shell_resize")){UiText("Resize…")}
+                }
+                val metrics=history.metrics
+                UiText(when(history.mode) {
+                    ShellHistoryMode.Live->if(metrics==null)"Live · history unavailable" else "Live · confirmed bottom"
+                    ShellHistoryMode.Browsing->"History · input paused"
+                    ShellHistoryMode.Pending->"History pending · input paused"
+                    ShellHistoryMode.Uncertain->"History uncertain · input paused"
+                },style=MaterialTheme.typography.labelMedium,modifier=Modifier.testTag("shell_history_mode"))
+                TextButton(onClick={metrics?.let {onScroll((it.offsetFromBottom.value+it.viewportRows.value).coerceAtMost(it.maxOffsetFromBottom.value))}},enabled=historyAllowed&&metrics!=null&&metrics.offsetFromBottom.value<metrics.maxOffsetFromBottom.value,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_older")){UiText("Older")}
+                TextButton(onClick={metrics?.let {onScroll((it.offsetFromBottom.value-it.viewportRows.value).coerceAtLeast(0))}},enabled=historyAllowed&&metrics!=null&&metrics.offsetFromBottom.value>0,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_newer")){UiText("Newer")}
+                TextButton(onClick={onScroll(0)},enabled=historyAllowed,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_bottom")){UiText("Bottom")}
+            }
+        }
+    }
+}
+
+/** Measure real essential controls first. The retained lower region gets at most half the remainder. */
+@Composable
+internal fun ShellTerminalFrame(modifier:Modifier=Modifier,grid:@Composable ()->Unit,rail:@Composable ()->Unit,lower:@Composable ()->Unit) {
+    androidx.compose.ui.layout.Layout(content={
+        Box(Modifier.fillMaxWidth().testTag("shell_grid_region")) {grid()}
+        Box(Modifier.fillMaxWidth().testTag("shell_essential_rail")) {rail()}
+        Box(Modifier.fillMaxWidth().testTag("shell_input_lower")) {lower()}
+    },modifier=modifier) {children,constraints->
+        val width=constraints.maxWidth;val height=constraints.maxHeight
+        fun bounded(maximum:Int)=constraints.copy(minWidth=width,maxWidth=width,minHeight=0,maxHeight=maximum.coerceAtLeast(0))
+        val essential=children[1].measure(bounded(height))
+        val remaining=(height-essential.height).coerceAtLeast(0)
+        val editor=children[2].measure(bounded(remaining/2))
+        val gridHeight=remaining-editor.height
+        val canvas=children[0].measure(bounded(gridHeight).copy(minHeight=gridHeight))
+        layout(width,height) {
+            canvas.placeRelative(0,0)
+            essential.placeRelative(0,gridHeight)
+            editor.placeRelative(0,gridHeight+essential.height)
+        }
+    }
+}
+
+/** Live commits and staged drafts share the original-lease writer; Paste never submits a draft. */
+@Composable
+private fun ShellInputPanel(snapshot:ShellSnapshot,model:GoatrViewModel,modifier:Modifier,onBegin:()->Unit,onResize:()->Unit,grid:@Composable ()->Unit) {
     val scope=ShellControlScope(snapshot.selection,snapshot.source,snapshot.ticket)
     val draft=model.shellDraft(snapshot.selection)
     val gate=model.shellInputGate?.takeIf {it.scope==scope}
     val owner=model.terminalOwner(scope)
     val enabled=model.shellInputAllowed(scope)
-    LaunchedEffect(scope,snapshot.controlBegun,snapshot.grid,snapshot.history.mode,gate?.loaded,gate?.pending,gate?.observation){model.prepareTerminalInput(scope)}
-    Surface(tonalElevation=3.dp) {
-        Column(Modifier.fillMaxWidth().imePadding().padding(horizontal=16.dp,vertical=8.dp).heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            gate?.prior?.let {action->
-                val receipt=action.receipt;val observation=gate.observation
-                val label=when {
-                    observation==null->"Current status needs checking · last receipt retained"
-                    observation.unknown->"Current host status unknown · never repeat the old action"
-                    action.authoritative&&receipt?.shellDispatched()==true->"Native socket frame dispatched · not PTY acknowledgement"
-                    action.authoritative&&receipt?.state==ReceiptState.Succeeded->"Historical bound-input acceptance"
-                    action.authoritative&&receipt?.state==ReceiptState.Failed->"Input refused before effect"
-                    receipt?.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching)->"Input pending"
-                    else->"Input outcome uncertain · inspect before a fresh gesture"
-                }
-                UiText(label,style=MaterialTheme.typography.labelMedium,modifier=Modifier.testTag("shell_input_outcome"))
-                LaunchedEffect(scope,action,observation){withFrameNanos {};model.shellInputDisplayed(scope,action)}
-                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick={model.inspect(snapshot.selection.host,action.metadata.actionId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)){UiText("Check receipt")}
-                    if(observation?.unknown==true||receipt?.state==ReceiptState.Uncertain)TextButton(onClick={model.requestSeparateShellInput(scope,action.metadata.actionId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)){UiText("Separate action…")}
-                }
-                (receipt?.result as? ActionResultShellDispatch)?.progress?.let {
-                    UiText("Socket frame ${it.socketBytesWritten ?: "unknown"} / ${it.frameBytes ?: "unknown"} bytes · complete ${it.frameComplete ?: "unknown"}",style=MaterialTheme.typography.labelSmall)
-                }
-                (receipt?.result as? ActionResultShellInput)?.progress?.let {
-                    UiText("Historical facts only: ${it.writtenBytes ?: "unknown"} / ${it.encodedBytes ?: "unknown"} bytes · flush ${it.flushCompleted ?: "unknown"}",style=MaterialTheme.typography.labelSmall)
-                }
-            }
-            if(model.terminalInputPause!=null)UiText("Input is paused. Known-unsent text stays in this original target’s draft; possibly entered text is retained separately below. Unsent key gestures are discarded, never automatically replayed. Begin fresh control and inspect uncertain receipts.",style=MaterialTheme.typography.bodySmall)
-            if(!snapshot.controlBegun)UiText("Drafts stay local. Begin control explicitly before any direct input or Send.",style=MaterialTheme.typography.bodySmall)
-            if(snapshot.grid?.begin?.popupBlocked==true)UiText("Native popup needs desktop attention. No terminal input is forwarded.",style=MaterialTheme.typography.bodySmall)
-            if(snapshot.history.mode!=ShellHistoryMode.Live)UiText("History pauses new input without releasing this control owner. Known-unsent text is retained in the original draft; unsent keys are dropped. Return explicitly to confirmed bottom to resume.",style=MaterialTheme.typography.bodySmall)
-            else if(owner!=null&&!enabled&&model.terminalInputPause==null&&snapshot.grid?.begin?.popupBlocked!=true)
-                UiText("Input is disabled until this same original source/view is current. Already queued input stays local and bounded; no new input is admitted.",style=MaterialTheme.typography.bodySmall)
-            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected=draft.direct,onClick={model.shellInputMode(scope,true)},label={UiText("Direct")})
-                FilterChip(selected=!draft.direct,onClick={model.shellInputMode(scope,false)},label={UiText("Draft")})
-                TextButton(onClick={model.clearShellDraft(scope)},modifier=Modifier.heightIn(min=48.dp)){UiText("Clear draft")}
-            }
-            if(draft.direct) {
-                UiText("Committed IME and hardware keys go directly to this original terminal. Composition sends nothing.",style=MaterialTheme.typography.labelSmall)
-                AndroidView(factory={context->DirectTerminalInputView(context)},update={it.bind(owner);it.observeCursor(snapshot.grid?.begin)},onReset=null,onRelease={it.release()},
-                    modifier=Modifier.fillMaxWidth().heightIn(min=56.dp).testTag("terminal_direct_input"))
-            }else{
-                UiText("Staged multiline text · Send adds no Enter · at most16KiB per explicit Send",style=MaterialTheme.typography.labelSmall)
-                Row(verticalAlignment=Alignment.Bottom,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value=draft.value,onValueChange={model.editShellDraft(scope,it)},modifier=Modifier.weight(1f).heightIn(min=56.dp,max=144.dp).testTag("shell_input_text"),
-                        placeholder={UiText("Unsent terminal draft")},maxLines=5)
-                    IconButton(onClick={model.sendShellText(scope)},enabled=model.shellDraftSendAllowed(scope),modifier=Modifier.size(48.dp).testTag("shell_input_send")){GoatrIcon(MaterialGlyph.Send,"Send exact terminal draft")}
-                }
-            }
-            TerminalKeyBar(draft.modifiers,enabled,{modifier,lock->model.shellInputModifier(scope,modifier,lock)},
-                {modifier,at,window->model.shellInputModifierTap(scope,modifier,at,window)},{key->model.sendShellKey(scope,key)})
-            Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value=draft.keyCharacter,onValueChange={model.shellKeyCharacter(scope,it)},label={UiText("One character chord")},singleLine=true,modifier=Modifier.weight(1f))
-                IconButton(onClick={model.sendShellCharacter(scope)},enabled=enabled&&draft.keyCharacter.isNotEmpty(),modifier=Modifier.size(48.dp)){GoatrIcon(MaterialGlyph.Send,"Send character key with modifiers")}
-            }
-            UiText("Modifiers apply to explicit key/chord buttons; IME text is TextCommit. Input uses an ordered128-event owner, with48KiB ordinary draft/queue plus16KiB reserved recovery inside64KiB.",style=MaterialTheme.typography.labelSmall)
-            owner?.takeIf {it.pendingEvents>0}?.let {UiText("${it.pendingEvents} pending events · no automatic reconnect requeue",style=MaterialTheme.typography.labelSmall)}
-            model.attemptedShellText(snapshot.selection)?.let {(action,text)->
-                OutlinedTextField(value=text,onValueChange={},readOnly=true,label={UiText("Attempted text · may already have entered")},maxLines=3,modifier=Modifier.fillMaxWidth().heightIn(max=112.dp))
-                TextButton(onClick={model.forgetAttemptedShellText(scope,action)},enabled=(owner?.pendingEvents ?: 0)==0&&gate?.prior?.receipt?.state !in listOf(ReceiptState.Reserved,ReceiptState.Dispatching),modifier=Modifier.heightIn(min=48.dp)){UiText("Forget attempted text locally · retain receipt")}
-            }
-            if(gate?.loaded!=true)UiText("Checking original target and retained receipts…",style=MaterialTheme.typography.labelSmall)
-        }
+    val context=LocalContext.current
+    val directView=remember(scope){mutableStateOf<DirectTerminalInputView?>(null)}
+    LaunchedEffect(scope,snapshot.controlBegun,snapshot.grid,snapshot.history.mode,gate?.loaded,gate?.pending,gate?.observation) {
+        if(snapshot.summary.capabilities.input)model.prepareTerminalInput(scope)
     }
+    ShellTerminalFrame(modifier,grid=grid,rail={
+        ShellEssentialRail(input=snapshot.summary.capabilities.input,direct=draft.direct,
+            pasteAllowed=if(draft.direct)owner?.accepting()==true else model.shellDraftPasteAllowed(scope),
+            controlBegun=snapshot.controlBegun,controlAllowed=model.shellControlAllowed(scope),
+            resizeAllowed=!model.busy&&model.shellControlAllowed(scope)&&snapshot.grid!=null&&snapshot.grid.begin.popupBlocked==false,
+            history=snapshot.history,historyAllowed=!model.busy&&model.shellHistoryAllowed(scope),
+            onPaste={
+                if(draft.direct)directView.value?.pasteFromClipboard()
+                else if(model.shellDraftPasteAllowed(scope)) {
+                    val revision=model.shellDraft(scope.selection).revision
+                    val input=readShellClipboard(context)
+                    if(input==null)model.refuseShellPaste(scope)else model.pasteShellDraft(scope,revision,input)
+                }
+            },
+            onMode={model.shellInputMode(scope,it)},onBegin=onBegin,
+            onRelease={model.releaseShellControl(scope)},onResize=onResize,onScroll={model.scrollShell(scope,it)})
+    },lower={
+        if(snapshot.summary.capabilities.input)Surface(tonalElevation=3.dp) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal=8.dp,vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                // History can recover text/change Draft mode, not detach the retained cleanup owner.
+                val retainEditor=directView.value!=null&&owner?.historyBlocked==true&&owner.retained()
+                if(draft.direct||retainEditor)key(scope) {ShellDirectEditor(directView,owner,snapshot.grid?.begin)}
+                if(!draft.direct)Row(verticalAlignment=Alignment.Bottom,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value=draft.value,onValueChange={model.editShellDraft(scope,it)},modifier=Modifier.weight(1f).heightIn(min=56.dp,max=112.dp).testTag("shell_input_text"),
+                        placeholder={UiText("Unsent terminal draft")},maxLines=3)
+                    IconButton(onClick={model.sendShellText(scope)},enabled=model.shellDraftSendAllowed(scope),modifier=Modifier.size(48.dp).testTag("shell_input_send")){GoatrIcon(MaterialGlyph.Send,"Send exact terminal draft · no Enter")}
+                }
+                TerminalKeyBar(draft.modifiers,enabled,{key,lock->model.shellInputModifier(scope,key,lock)},
+                    {key,at,window->model.shellInputModifierTap(scope,key,at,window)},{key->model.sendShellKey(scope,key)})
+            }
+        }
+    })
     model.separateShellInput?.takeIf {it.first==scope}?.let {(_,action)->AlertDialog(
         onDismissRequest=model::cancelSeparateShellInput,title={UiText("Allow a fresh input action?")},
         text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){UiText(snapshot.summary.title.value);UiText("Prior action ${action.value}");UiText("Prior input may already have entered. This allows fresh gestures only, never replay or automatic restoration of attempted text.")}},
         confirmButton={TextButton(onClick=model::confirmSeparateShellInput,enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)){UiText("Allow separate action")}},
         dismissButton={TextButton(onClick=model::cancelSeparateShellInput,modifier=Modifier.heightIn(min=48.dp)){UiText("Keep prior action")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn))}
+}
+
+@Composable
+private fun ShellInputDiagnostics(snapshot:ShellSnapshot,model:GoatrViewModel) {
+    val scope=ShellControlScope(snapshot.selection,snapshot.source,snapshot.ticket)
+    val draft=model.shellDraft(snapshot.selection)
+    val gate=model.shellInputGate?.takeIf {it.scope==scope}
+    val owner=model.terminalOwner(scope)
+    val enabled=model.shellInputAllowed(scope)
+    gate?.prior?.let {action->
+        val receipt=action.receipt;val observation=gate.observation
+        val label=when {
+            observation==null->"Current status needs checking · last receipt retained"
+            observation.unknown->"Current host status unknown · never repeat the old action"
+            action.authoritative&&receipt?.shellDispatched()==true->"Native socket frame dispatched · not PTY acknowledgement"
+            action.authoritative&&receipt?.state==ReceiptState.Succeeded->"Historical bound-input acceptance"
+            action.authoritative&&receipt?.state==ReceiptState.Failed->"Input refused before effect"
+            receipt?.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching)->"Input pending"
+            else->"Input outcome uncertain · inspect before a fresh gesture"
+        }
+        UiText(label,style=MaterialTheme.typography.labelMedium,modifier=Modifier.testTag("shell_input_outcome"))
+        LaunchedEffect(scope,action,observation){withFrameNanos {};model.shellInputDisplayed(scope,action)}
+        ReceiptPanel(snapshot.selection.host,action,model)
+        TextButton(onClick={model.inspect(snapshot.selection.host,action.metadata.actionId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)){UiText("Check receipt")}
+        if(observation?.unknown==true||receipt?.state==ReceiptState.Uncertain)TextButton(onClick={model.requestSeparateShellInput(scope,action.metadata.actionId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)){UiText("Separate action…")}
+        (receipt?.result as? ActionResultShellDispatch)?.progress?.let {
+            UiText("Socket frame ${it.socketBytesWritten ?: "unknown"} / ${it.frameBytes ?: "unknown"} bytes · complete ${it.frameComplete ?: "unknown"}",style=MaterialTheme.typography.labelSmall)
+        }
+        (receipt?.result as? ActionResultShellInput)?.progress?.let {
+            UiText("Historical facts only: ${it.writtenBytes ?: "unknown"} / ${it.encodedBytes ?: "unknown"} bytes · flush ${it.flushCompleted ?: "unknown"}",style=MaterialTheme.typography.labelSmall)
+        }
+    }
+    if(model.terminalInputPause!=null)UiText("Input is paused. Known-unsent text stays in this original target’s draft; possibly entered text is retained separately. Unsent key gestures are discarded, never automatically replayed. Begin fresh control and inspect uncertain receipts.",style=MaterialTheme.typography.bodySmall)
+    if(!snapshot.controlBegun)UiText("Drafts stay local. Begin control explicitly before any Live input or Send.",style=MaterialTheme.typography.bodySmall)
+    if(snapshot.grid?.begin?.popupBlocked==true)UiText("Native popup needs desktop attention. No terminal input is forwarded.",style=MaterialTheme.typography.bodySmall)
+    if(snapshot.history.mode!=ShellHistoryMode.Live)UiText("History pauses new input without releasing this control owner. Return explicitly to confirmed bottom to resume.",style=MaterialTheme.typography.bodySmall)
+    else if(owner!=null&&!enabled&&model.terminalInputPause==null&&snapshot.grid?.begin?.popupBlocked!=true)UiText("Input is disabled until this same original source/view is current. Already queued input stays local and bounded; no new input is admitted.",style=MaterialTheme.typography.bodySmall)
+    TextButton(onClick={model.clearShellDraft(scope)},modifier=Modifier.heightIn(min=48.dp).testTag("shell_clear_draft")){UiText("Clear this original draft")}
+    Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(value=draft.keyCharacter,onValueChange={model.shellKeyCharacter(scope,it)},label={UiText("One character chord")},singleLine=true,modifier=Modifier.weight(1f))
+        IconButton(onClick={model.sendShellCharacter(scope)},enabled=enabled&&draft.keyCharacter.isNotEmpty(),modifier=Modifier.size(48.dp)){GoatrIcon(MaterialGlyph.Send,"Send character key with modifiers")}
+    }
+    UiText("Live commits IME/hardware input to this original terminal; composition sends nothing. Draft Send adds no Enter. Modifiers apply to explicit key/chord buttons, not IME Text. Input uses the ordered128-event owner, with48KiB draft/queue plus16KiB recovery inside64KiB.",style=MaterialTheme.typography.labelSmall)
+    owner?.takeIf {it.pendingEvents>0}?.let {UiText("${it.pendingEvents} pending events · no automatic reconnect requeue",style=MaterialTheme.typography.labelSmall)}
+    model.attemptedShellText(snapshot.selection)?.let {(action,text)->
+        OutlinedTextField(value=text,onValueChange={},readOnly=true,label={UiText("Attempted text · may already have entered")},maxLines=3,modifier=Modifier.fillMaxWidth().heightIn(max=112.dp))
+        TextButton(onClick={model.forgetAttemptedShellText(scope,action)},enabled=(owner?.pendingEvents ?: 0)==0&&gate?.prior?.receipt?.state !in listOf(ReceiptState.Reserved,ReceiptState.Dispatching),modifier=Modifier.heightIn(min=48.dp)){UiText("Forget attempted text locally · retain receipt")}
+    }
+    if(gate?.loaded!=true)UiText("Checking original target and retained receipts…",style=MaterialTheme.typography.labelSmall)
 }

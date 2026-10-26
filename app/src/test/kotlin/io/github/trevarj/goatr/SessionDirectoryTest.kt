@@ -18,6 +18,20 @@ class SessionDirectoryTest {
         return HostSnapshotResult(Uuid.random(),ZeroValue(),listOf(Server(server,Label("Server"),ServerConnectivity.Online,CanCreate(false,false))),emptyList(),listOf(summary),emptyList(),listOf(graph))
     }
 
+    private fun mixedFixture():HostSnapshotResult {
+        val base=fixture();val graph=base.hierarchy.single();val agent=base.sessions.single()
+        // Deliberate UUID overlap is not permission to coerce ShellTarget into Target.
+        val mixed=ShellSummary(ShellTarget(agent.sessionId,agent.generation),graph.serverId,agent.workspaceId,Id("tab"),
+            Id("shell-pane"),Id("shell-terminal"),Label("Shell"),SessionConnectivity.Ready,ShellCapabilities(true,false,true,false,grid=true))
+        val solo=mixed.copy(target=ShellTarget(Uuid.random(),Uuid.random()),workspaceId=Id("shell-only"),tabId=Id("shell-only-tab"),
+            paneId=Id("shell-only-pane"),terminalId=Id("shell-only-terminal"),title=Label("Only shell"))
+        val panes=listOf(mixed,solo).map {NativePane(it.paneId,it.terminalId,it.workspaceId,it.tabId,
+            title=it.title,focused=false,agentStatus=NativeAgentStatus.Idle,shellTarget=it.target)}
+        return base.copy(shells=listOf(mixed,solo),hierarchy=listOf(graph.copy(
+            workspaces=graph.workspaces+NativeWorkspace(solo.workspaceId,Uint(2),Label("Shell only"),false,solo.tabId,NativeAgentStatus.Idle),
+            tabs=graph.tabs+NativeTab(solo.tabId,solo.workspaceId,Uint(2),Label("Shell"),false,NativeAgentStatus.Idle),panes=graph.panes+panes)))
+    }
+
     @Test fun exactNativeChainGroupsAgentsWithoutChangingTheirTarget() {
         val inventory=fixture()
         val row=inventory.sessions.single()
@@ -101,6 +115,61 @@ class SessionDirectoryTest {
         assertEquals(1,projectSessionDirectory("host",inventory,true,emptyList()).workspaces.size)
         assertTrue(projectSessionDirectory("host",inventory,true,emptyList(),narrowed=true).workspaces.isEmpty())
         assertEquals(inventory.sessions,projectSessionDirectory("host",inventory,true,inventory.sessions,narrowed=true).workspaces.single().agents)
+    }
+
+    @Test fun mixedAndShellOnlyWorkspacesKeepDistinctTargetsAndExactNativeChains() {
+        val inventory=mixedFixture()
+        val directory=projectSessionDirectory("host",inventory,true,inventory.sessions)
+        assertEquals(2,directory.workspaces.size)
+        val mixed=directory.workspaces.single {it.workspace.workspaceId==inventory.sessions.single().workspaceId}
+        assertEquals(inventory.sessions,mixed.agents)
+        assertEquals(listOf(inventory.shells.first()),mixed.shells)
+        val solo=directory.workspaces.single {it.workspace.workspaceId==Id("shell-only")}
+        assertTrue(solo.agents.isEmpty());assertEquals(listOf(inventory.shells.last()),solo.shells)
+        assertTrue(directory.standalone.isEmpty())
+        val narrowed=projectSessionDirectory("host",inventory,true,emptyList(),narrowed=true)
+        assertEquals(inventory.shells.toSet(),narrowed.workspaces.flatMap {it.shells}.toSet())
+    }
+
+    @Test fun shellLabelsNeverRepairMissingAmbiguousGenerationOrPaneAssociations() {
+        val inventory=mixedFixture();val graph=inventory.hierarchy.single()
+        val shell=inventory.shells.first();val pane=graph.panes.single {it.shellTarget==shell.target}
+        val changes=listOf(
+            graph.copy(panes=graph.panes-pane),
+            graph.copy(panes=graph.panes+pane.copy(paneId=Id("alias"))),
+            graph.copy(panes=graph.panes.map {if(it==pane)it.copy(shellTarget=shell.target.copy(generation=Uuid.random()))else it}),
+            graph.copy(panes=graph.panes.map {if(it==pane)it.copy(terminalId=Id("wrong"))else it}),
+            graph.copy(panes=graph.panes.map {if(it==pane)it.copy(tabId=Id("missing-tab"))else it}),
+            graph.copy(tabs=graph.tabs.map {if(it.tabId==shell.tabId)it.copy(workspaceId=Id("wrong-workspace"))else it}),
+            graph.copy(freshness=NativeFreshness.Stale),
+        )
+        changes.forEach {changed->
+            val directory=projectSessionDirectory("host",inventory.copy(hierarchy=listOf(changed)),true,inventory.sessions)
+            assertTrue(directory.workspaces.none {shell in it.shells})
+        }
+        assertTrue(projectSessionDirectory("host",inventory,false,inventory.sessions).workspaces.isEmpty())
+        assertTrue(projectSessionDirectory("host",inventory.copy(hierarchy=listOf(graph,graph)),true,inventory.sessions).workspaces.isEmpty())
+    }
+
+    @Test fun shellOnlyChangesRetireAcceptedDisplayBeforeReplacementBecomesReady() {
+        val original=mixedFixture()
+        val accepted=presentSessionDirectory(null,"host",original,true,original.sessions)
+        assertSame(accepted,presentSessionDirectory(accepted,"host",original.copy(subscription=Uuid.random()),false,original.sessions))
+        val shell=original.shells.last()
+        val changes=listOf(
+            emptyList(),
+            listOf(shell.copy(title=Label("Changed shell only"))),
+            listOf(shell.copy(target=shell.target.copy(generation=Uuid.random()))),
+            listOf(shell.copy(connectivity=SessionConnectivity.Offline,capabilities=ShellCapabilities(false,false,false,false))),
+            listOf(shell.copy(paneId=Id("replacement-pane"))),
+        )
+        changes.forEach {changed->
+            val next=original.copy(shells=listOf(original.shells.first())+changed)
+            val pending=presentSessionDirectory(accepted,"host",next,false,next.sessions)
+            assertNull(pending.inventory);assertTrue(pending.directory.workspaces.isEmpty())
+            val ready=presentSessionDirectory(accepted,"host",next,true,next.sessions)
+            assertEquals(projectSessionDirectory("host",next,true,next.sessions),ready.directory)
+        }
     }
 
     @Test fun recentOrderingUsesOnlyExactHostAndGenerationAndKeepsRemainderStable() {
