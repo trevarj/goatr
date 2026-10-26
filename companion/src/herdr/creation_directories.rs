@@ -63,16 +63,24 @@ pub(crate) struct OriginalSource {
     pub(crate) incarnation:Uuid,
     socket_path:PathBuf,
     evidence:ServerEvidence,
+    executable: Arc<InstalledExecutablePin>,
     invalidation:Arc<AtomicU64>,
 }
 impl OriginalSource {
     fn capture(source:Source)->Self {
-        Self{server_id:source.server_id,incarnation:source.incarnation,socket_path:source.socket_path,
-            evidence:source.evidence,invalidation:source.invalidation}
+        Self {
+            server_id: source.server_id,
+            incarnation: source.incarnation,
+            socket_path: source.socket_path,
+            evidence: source.evidence,
+            executable: source.executable,
+            invalidation: source.invalidation,
+        }
     }
     fn matches(&self,current:&Source)->bool {
         self.server_id==current.server_id&&self.incarnation==current.incarnation
             &&self.socket_path==current.socket_path&&self.evidence==current.evidence
+            && self.executable.same_identity(&current.executable)
             &&Arc::ptr_eq(&self.invalidation,&current.invalidation)
     }
 }
@@ -528,7 +536,19 @@ mod tests {
                 peer:proof.peer_id().clone(),peer_epoch:proof.epoch(),connection,
                 physical:OriginalSource{server_id:Uuid::random(),incarnation:Uuid::random(),socket_path:self.path.join("native.sock"),
                     evidence:ServerEvidence{linux_boot_id:process.linux_boot_id.clone(),pid:process.pid,pid_start_ticks:process.start_ticks,
-                        socket_device:socket.dev(),socket_inode:socket.ino()},invalidation:Arc::new(AtomicU64::new(0))},
+                        socket_device:socket.dev(),socket_inode:socket.ino()},invalidation:Arc::new(AtomicU64::new(0)),
+                    executable: InstalledExecutablePin::capture(
+                        &fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+                        &ServerEvidence {
+                            linux_boot_id: process.linux_boot_id.clone(),
+                            pid: process.pid,
+                            pid_start_ticks: process.start_ticks,
+                            socket_device: socket.dev(),
+                            socket_inode: socket.ino(),
+                        },
+                    )
+                    .unwrap(),
+                },
                 server_process:process,project:Uuid::random(),origin:None,root:self.root.clone(),expires,
             })
         }
@@ -558,6 +578,43 @@ mod tests {
     fn params(context:&DirectoryContext)->CreationDirectoriesParams {
         CreationDirectoriesParams{server_id:context.physical.server_id.clone(),project_id:context.project.clone(),
             source:context.origin.as_ref().map(|origin|origin.source.clone()),parent:None,cursor:None,limit:Some(Uint(1))}
+    }
+    #[test]
+    fn delayed_creation_original_source_retains_the_configured_executable_pin() {
+        let fixture = Fixture::new();
+        let (peer, _) = peers();
+        let context = fixture.context(&peer, Uuid::random(), Instant::now() + LEASE);
+        let physical = &context.physical;
+        let snapshot: Snapshot = serde_json::from_value(json!({"version":"0.9.1","protocol":22,
+            "workspaces":[],"tabs":[],"panes":[],"agents":[]})).unwrap();
+        let source = Source {
+            server_id: physical.server_id.clone(),
+            incarnation: physical.incarnation.clone(),
+            socket_path: physical.socket_path.clone(),
+            evidence: physical.evidence.clone(),
+            executable: physical.executable.clone(),
+            snapshot: Arc::new(snapshot),
+            revision: 0,
+            invalidation: physical.invalidation.clone(),
+        };
+        source.recheck().unwrap();
+        let retained = OriginalSource::capture(source.clone());
+        assert!(retained.matches(&source));
+        let configured = fixture.path.join("configured-herdr");
+        std::os::unix::fs::symlink(&source.executable.canonical_path, &configured).unwrap();
+        let mut replacement = source.clone();
+        replacement.executable =
+            InstalledExecutablePin::capture(&configured, &source.evidence).unwrap();
+        assert!(
+            !retained.matches(&replacement),
+            "a delayed chooser must not drop its original executable pin"
+        );
+        let mut refreshed = source.clone();
+        refreshed.revision = 1;
+        assert!(
+            retained.matches(&refreshed),
+            "inventory revision is not physical replacement"
+        );
     }
     #[test]
     fn directory_pages_bind_real_names_to_peer_connection_project_parent_source_and_absolute_expiry() {

@@ -42,6 +42,8 @@ pub mod artifacts;
 pub(crate) mod creation_directories;
 pub(crate) use creation_directories::CreationSelection;
 pub(crate) mod skills;
+#[cfg(test)]
+pub(crate) mod stock_compat_tests;
 pub use shells::ShellProof;
 use shells::{NativeShellInfo, ShellBinding};
 pub use worktree_creation::ExecutionCheckout;
@@ -1295,21 +1297,6 @@ impl CodexInvalidationReporter {
             Self::emit(&mut state, phase, guard, code, io, errno, None);
         }
     }
-    /// One closed result from the explicitly selected, pre-launch-pinned terminal read.
-    /// It shares the original latch and cannot displace an earlier diagnostic failure.
-    fn startup_terminal(
-        &self,
-        guard: &'static str,
-        code: ErrorCode,
-        io: &'static str,
-        errno: i32,
-    ) {
-        let Ok(mut state) = self.0.lock() else { return };
-        if state.original.is_none() && !state.prebinding_reported {
-            state.prebinding_reported = true;
-            Self::emit(&mut state, "herdr", guard, code, io, errno, None);
-        }
-    }
     /// The transport diagnostic is separately pinned to the first authenticated Codex
     /// create connection, before topology can install its resulting target.
     pub(crate) fn arm_transport(&self, connection: &Uuid) {
@@ -1565,17 +1552,6 @@ impl PaneReadIdentity {
         }
         Ok(())
     }
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct PaneReadBoundResult {
-    pub pane_id: Id,
-    pub terminal_id: Id,
-    pub workspace_id: Id,
-    pub tab_id: Id,
-    pub read_identity: PaneReadIdentity,
-    pub text: String,
-    pub truncated: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2049,6 +2025,92 @@ pub fn process_evidence(pid: u32) -> io::Result<ProcessEvidence> {
         namespaces: before,
     })
 }
+
+/// Host-local admission proof. The held descriptor prevents inode reuse; the
+/// configured pathname remains part of the pin so profile-link retargets fail closed.
+#[derive(Debug)]
+pub(crate) struct InstalledExecutablePin {
+    configured_path: PathBuf,
+    canonical_path: PathBuf,
+    object: (u64, u64),
+    proc_exe: PathBuf,
+    process: ProcessEvidence,
+    _file: File,
+}
+impl InstalledExecutablePin {
+    fn capture(configured: &Path, evidence: &ServerEvidence) -> io::Result<Arc<Self>> {
+        let process = process_evidence(evidence.pid)?;
+        config::executable(configured)?;
+        let canonical_path = fs::canonicalize(configured)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(configured)?;
+        let metadata = file.metadata()?;
+        let pin = Arc::new(Self {
+            configured_path: configured.to_owned(),
+            canonical_path,
+            object: (metadata.dev(), metadata.ino()),
+            proc_exe: PathBuf::from(format!("/proc/{}/exe", evidence.pid)),
+            process,
+            _file: file,
+        });
+        pin.recheck_after(&pin.process, evidence)?;
+        Ok(pin)
+    }
+    fn same_identity(&self, current: &Self) -> bool {
+        self.configured_path == current.configured_path
+            && self.canonical_path == current.canonical_path
+            && self.object == current.object
+            && self.process == current.process
+    }
+    fn recheck_configured(&self) -> io::Result<()> {
+        config::executable(&self.configured_path)?;
+        let canonical = fs::canonicalize(&self.configured_path)?;
+        let configured = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(&self.configured_path)?;
+        let metadata = configured.metadata()?;
+        let target = fs::metadata(&self.canonical_path)?;
+        if canonical != self.canonical_path
+            || (metadata.dev(), metadata.ino()) != self.object
+            || (target.dev(), target.ino()) != self.object
+            || fs::canonicalize(&self.configured_path)? != self.canonical_path
+        {
+            return Err(invalid("configured Herdr executable changed"));
+        }
+        Ok(())
+    }
+    fn recheck_after(&self, before: &ProcessEvidence, evidence: &ServerEvidence) -> io::Result<()> {
+        if before != &self.process
+            || before.pid != evidence.pid
+            || before.linux_boot_id != evidence.linux_boot_id
+            || before.start_ticks != evidence.pid_start_ticks
+        {
+            return Err(invalid("Herdr executable process epoch changed"));
+        }
+        let peer = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(&self.proc_exe)?;
+        let metadata = peer.metadata()?;
+        if (metadata.dev(), metadata.ino()) != self.object {
+            return Err(invalid(
+                "Herdr peer is not the configured installed executable",
+            ));
+        }
+        self.recheck_configured()?;
+        let current = fs::metadata(&self.proc_exe)?;
+        if (current.dev(), current.ino()) != self.object || process_evidence(before.pid)? != *before {
+            return Err(invalid("Herdr process changed during executable proof"));
+        }
+        Ok(())
+    }
+    fn recheck(&self, evidence: &ServerEvidence) -> io::Result<()> {
+        self.recheck_after(&process_evidence(evidence.pid)?, evidence)
+    }
+}
 /// Join an actual kernel/proc-evidenced candidate in the reporter's native namespace,
 /// or in an independently attested caller-visible reporting namespace. No name/cwd match.
 pub fn reported_pid_matches(
@@ -2154,6 +2216,7 @@ pub struct Client {
     path: PathBuf,
     reader: BufReader<UnixStream>,
     pub evidence: ServerEvidence,
+    executable: Option<Arc<InstalledExecutablePin>>,
 }
 impl Client {
     pub async fn connect(path: &Path) -> io::Result<Self> {
@@ -2181,14 +2244,39 @@ impl Client {
                 socket_device: before.0,
                 socket_inode: before.1,
             },
+            executable: None,
         })
     }
+    pub(crate) fn qualify_executable(mut self, configured: &Path) -> io::Result<Self> {
+        self.executable = Some(InstalledExecutablePin::capture(configured, &self.evidence)?);
+        Ok(self)
+    }
+    /// Keep the pre-request owner's pin; never adopt an executable observed after a reply.
+    fn retain_executable(mut self, pin: Arc<InstalledExecutablePin>) -> io::Result<Self> {
+        self.executable = Some(pin);
+        self.recheck()?;
+        Ok(self)
+    }
+    pub(crate) async fn connect_source(source: &Source) -> io::Result<Self> {
+        let client = Self::connect(&source.socket_path).await?;
+        if client.evidence != source.evidence {
+            return Err(invalid("Herdr source process/socket epoch changed"));
+        }
+        client.retain_executable(source.executable.clone())
+    }
     pub fn recheck(&self) -> io::Result<()> {
-        let process = process_evidence(self.evidence.pid)?;
-        if process.linux_boot_id != self.evidence.linux_boot_id
-            || process.start_ticks != self.evidence.pid_start_ticks
-            || socket_identity(&self.path)?
-                != (self.evidence.socket_device, self.evidence.socket_inode)
+        if let Some(pin) = &self.executable {
+            pin.recheck(&self.evidence)?;
+        } else {
+            let process = process_evidence(self.evidence.pid)?;
+            if process.linux_boot_id != self.evidence.linux_boot_id
+                || process.start_ticks != self.evidence.pid_start_ticks
+            {
+                return Err(invalid("Herdr process/socket epoch changed"));
+            }
+        }
+        if socket_identity(&self.path)?
+            != (self.evidence.socket_device, self.evidence.socket_inode)
         {
             return Err(invalid("Herdr process/socket epoch changed"));
         }
@@ -2238,11 +2326,14 @@ impl Client {
         let result = tokio::time::timeout(READ_TIMEOUT, async {
             let id = self.send(method, params).await?;
             let bytes = read_line(&mut self.reader).await?;
-            let value = response(&bytes, &id, discriminant)?;
-            if self.recheck().is_err() {
-                return Err(ApiError::Changed(value));
+            // Even a correlated native rejection is definitive only while its original peer survives.
+            let response = response(&bytes, &id, discriminant);
+            match (response, self.recheck()) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Ok(value), Err(_)) => Err(ApiError::Changed(value)),
+                (Err(_), Err(error)) => Err(ApiError::Unavailable(error)),
+                (Err(error), Ok(())) => Err(error),
             }
-            Ok(value)
         })
         .await;
         match result {
@@ -2282,44 +2373,6 @@ impl Client {
         )?;
         snapshot.validate()?;
         Ok((evidence, snapshot))
-    }
-    pub async fn read_bound(
-        self,
-        pane: &Id,
-        terminal: &Id,
-        identity: &PaneReadIdentity,
-    ) -> io::Result<PaneReadBoundResult> {
-        let mut result = self
-            .request(
-                "pane.read_bound",
-                json!({
-                    "pane_id": pane,
-                    "expected_terminal_id": terminal,
-                    "expected_read_identity": {
-                        "herdr_incarnation": identity.herdr_incarnation,
-                        "runtime_epoch": identity.runtime_epoch,
-                        "binding_epoch": identity.binding_epoch,
-                    },
-                }),
-                "pane_read_bound",
-            )
-            .await
-            .map_err(api_io)?;
-        let read: PaneReadBoundResult = serde_json::from_value(
-            result
-                .get_mut("read")
-                .ok_or_else(|| invalid("bounded pane read absent"))?
-                .take(),
-        )?;
-        read.read_identity.validate()?;
-        if read.pane_id != *pane
-            || read.terminal_id != *terminal
-            || &read.read_identity != identity
-            || read.text.len() > 16 * 1024
-        {
-            return Err(invalid("bounded pane read identity/text mismatch"));
-        }
-        Ok(read)
     }
     pub async fn agent_rename(self,pane:&Id,name:&AgentName)->Result<Agent,ApiError> {
         let mut result=self.request("agent.rename",json!({"target":pane,"name":name.0}),"agent_info").await?;
@@ -2390,13 +2443,14 @@ const EVENTS: &[&str] = &[
     "layout.updated",
 ];
 struct Subscription {
-    reader: BufReader<UnixStream>,
+    client: Client,
     id: String,
-    evidence: ServerEvidence,
 }
 impl Subscription {
-    async fn connect(path: &Path, panes: &[Id]) -> io::Result<Self> {
-        let mut client = Client::connect(path).await?;
+    async fn connect(mut client: Client, panes: &[Id]) -> io::Result<Self> {
+        if client.executable.is_none() {
+            return Err(invalid("subscription requires a qualified executable"));
+        }
         let mut subscriptions: Vec<Value> =
             EVENTS.iter().map(|event| json!({"type":event})).collect();
         subscriptions.extend(
@@ -2410,17 +2464,15 @@ impl Subscription {
         )
         .await??;
         let bytes = tokio::time::timeout(READ_TIMEOUT, read_line(&mut client.reader)).await??;
-        response(&bytes, &id, "subscription_started").map_err(api_io)?;
+        let response = response(&bytes, &id, "subscription_started");
         client.recheck()?;
-        Ok(Self {
-            reader: client.reader,
-            id,
-            evidence: client.evidence,
-        })
+        response.map_err(api_io)?;
+        Ok(Self { client, id })
     }
     async fn event(&mut self) -> io::Result<()> {
-        let value = parse_raw_json(&read_line(&mut self.reader).await?)
-            .map_err(|_| invalid("invalid event JSON"))?;
+        let bytes = read_line(&mut self.client.reader).await?;
+        self.client.recheck()?;
+        let value = parse_raw_json(&bytes).map_err(|_| invalid("invalid event JSON"))?;
         if value.get("error").is_some() {
             return Err(invalid("Herdr events lost/server unavailable"));
         }
@@ -2565,6 +2617,7 @@ pub struct Source {
     pub incarnation: Uuid,
     pub socket_path: PathBuf,
     pub evidence: ServerEvidence,
+    executable: Arc<InstalledExecutablePin>,
     pub snapshot: Arc<Snapshot>,
     revision: u64,
     invalidation: Arc<AtomicU64>,
@@ -2572,7 +2625,12 @@ pub struct Source {
 impl Source {
     /// Exact source owner, independent of a merely advanced inventory revision.
     pub(crate) fn same_physical_identity(&self,current:&Source)->bool {
-        self.server_id==current.server_id&&self.incarnation==current.incarnation&&self.socket_path==current.socket_path&&self.evidence==current.evidence&&Arc::ptr_eq(&self.invalidation,&current.invalidation)
+        self.server_id == current.server_id
+            && self.incarnation == current.incarnation
+            && self.socket_path == current.socket_path
+            && self.evidence == current.evidence
+            && self.executable.same_identity(&current.executable)
+            && Arc::ptr_eq(&self.invalidation, &current.invalidation)
     }
     pub fn recheck(&self) -> io::Result<()> {
         if self.recheck_readiness()? {
@@ -2614,11 +2672,9 @@ impl Source {
     }
     /// Physical identity alone is not topology authority: an old revision still fails recheck.
     pub(crate) fn recheck_identity(&self) -> io::Result<()> {
-        let p = process_evidence(self.evidence.pid)?;
-        if p.linux_boot_id != self.evidence.linux_boot_id
-            || p.start_ticks != self.evidence.pid_start_ticks
-            || socket_identity(&self.socket_path)?
-                != (self.evidence.socket_device, self.evidence.socket_inode)
+        self.executable.recheck(&self.evidence)?;
+        if socket_identity(&self.socket_path)?
+            != (self.evidence.socket_device, self.evidence.socket_inode)
         {
             return Err(invalid("Herdr source epoch changed"));
         }
@@ -2626,22 +2682,6 @@ impl Source {
     }
 }
 
-/// Private, immutable provenance retained before the original native launch. This is
-/// intentionally not a Goatr model or wire payload: it exists only for the selected
-/// owned diagnostic's one post-settlement native terminal read.
-#[derive(Serialize)]
-struct CodexStartupTerminalPin {
-    action: Uuid,
-    server_id: Uuid,
-    source_incarnation: Uuid,
-    source_evidence: ServerEvidence,
-    socket_path: PathBuf,
-    workspace_id: Id,
-    tab_id: Id,
-    pane_id: Id,
-    terminal_id: Id,
-    read_identity: PaneReadIdentity,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellDialect {
     Bash,
@@ -3788,7 +3828,10 @@ impl Topology {
         let current = self
             .source(&params.server_id)
             .map_err(|code| (code, "topology_source", "none"))?;
-        if current.incarnation != source.incarnation || current.evidence != source.evidence {
+        if current.incarnation != source.incarnation
+            || current.evidence != source.evidence
+            || !current.executable.same_identity(&source.executable)
+        {
             return Err((ErrorCode::StaleSession, "topology_source_changed", "none"));
         }
         self.config
@@ -3984,7 +4027,7 @@ impl Topology {
         // A later accepted pane makes earlier candidate rejections irrelevant.
         let mut rejected = None;
         for pane in source.snapshot.panes.iter().take(8) {
-            let client = match Client::connect(&source.socket_path).await {
+            let client = match Client::connect_source(&source).await {
                 Ok(client) => client,
                 Err(error) => {
                     rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::Connect, &error));
@@ -4091,7 +4134,9 @@ impl Topology {
             Some(CreationRootGuard::ServerId)
         } else if current.incarnation != original.incarnation {
             Some(CreationRootGuard::Incarnation)
-        } else if current.evidence != original.evidence {
+        } else if current.evidence != original.evidence
+            || !current.executable.same_identity(&original.executable)
+        {
             Some(CreationRootGuard::Evidence)
         } else if current.socket_path != original.socket_path {
             Some(CreationRootGuard::SocketPath)
@@ -4341,7 +4386,7 @@ impl Topology {
                 return Err(code);
             }
         };
-        let client = match Client::connect(&source.socket_path).await {
+        let client = match Client::connect_source(&source).await {
             Ok(client) => client,
             Err(error) => {
                 let io = codex_invalidation_io(&error).0;
@@ -4500,7 +4545,7 @@ impl Topology {
                         }
                         let client = match tokio::time::timeout_at(
                             deadline,
-                            Client::connect(&refreshed.socket_path),
+                            Client::connect_source(&refreshed),
                         )
                         .await
                         {
@@ -4833,7 +4878,7 @@ impl Topology {
             parent_inode: artifact.dir_object.1,
             focused_workspace_id: focus.clone(),
         };
-        let client = match Client::connect(&source.socket_path).await {
+        let client = match Client::connect_source(&source).await {
             Ok(client) => client,
             Err(error) => {
                 let io = codex_invalidation_io(&error).0;
@@ -5330,7 +5375,7 @@ impl Topology {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(final_deadline());
                 }
-                let client = tokio::time::timeout_at(deadline, Client::connect(&refreshed.socket_path))
+                let client = tokio::time::timeout_at(deadline, Client::connect_source(&refreshed))
                     .await.map_err(|_| final_deadline())?
                     .map_err(|error| final_io("final_connect", error))?;
                 if tokio::time::Instant::now() >= deadline {
@@ -5519,7 +5564,7 @@ impl Topology {
         self.validate_topology_stage(&source, params, None)?;
         let project = selection.directory(params)?;
         let placement=selection.workspace().cloned();
-        let client = Client::connect(&source.socket_path).await.map_err(policy)?;
+        let client = Client::connect_source(&source).await.map_err(policy)?;
         if client.evidence != source.evidence {
             return Err(ErrorCode::StaleSession);
         }
@@ -5659,7 +5704,7 @@ impl Topology {
         provider: Provider,
         selection:&CreationSelection,
     ) -> io::Result<()> {
-        let client = match Client::connect(&source.socket_path).await {
+        let client = match Client::connect_source(source).await {
             Ok(client) => client,
             Err(error) => {
                 self.report_codex_shell_probe_error(
@@ -5782,79 +5827,6 @@ impl Topology {
         self.launch_once_reported(security, auth, action, (params,selection), args, None)
             .await
     }
-    fn codex_startup_terminal_reporter(&self) -> Result<Option<CodexInvalidationReporter>, ErrorCode> {
-        if std::env::var_os("GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE").as_deref()
-            != Some(std::ffi::OsStr::new("1"))
-        {
-            return Ok(None);
-        }
-        self.codex_invalidation_reporter
-            .lock()
-            .ok()
-            .and_then(|reporter| reporter.clone())
-            .map(Some)
-            .ok_or(ErrorCode::NotReady)
-    }
-    fn retain_codex_startup_terminal_pin(
-        &self,
-        action: &Uuid,
-        source: &Source,
-        resources: &CreationResources,
-    ) -> io::Result<CodexStartupTerminalPin> {
-        let workspace = resources
-            .workspace_id
-            .clone()
-            .ok_or_else(|| invalid("startup terminal workspace absent"))?;
-        let pane = resources
-            .pane_id
-            .clone()
-            .ok_or_else(|| invalid("startup terminal pane absent"))?;
-        let terminal = resources
-            .terminal_id
-            .clone()
-            .ok_or_else(|| invalid("startup terminal terminal absent"))?;
-        let pane_snapshot = source
-            .snapshot
-            .panes
-            .iter()
-            .find(|candidate| candidate.pane_id == pane)
-            .ok_or_else(|| invalid("startup terminal pane unavailable"))?;
-        let read_identity = pane_snapshot
-            .read_identity
-            .clone()
-            .ok_or_else(|| invalid("startup terminal read identity absent"))?;
-        read_identity.validate()?;
-        if pane_snapshot.workspace_id != workspace || pane_snapshot.terminal_id != terminal {
-            return Err(invalid("startup terminal resource routing changed"));
-        }
-        let pin = CodexStartupTerminalPin {
-            action: action.clone(),
-            server_id: source.server_id.clone(),
-            source_incarnation: source.incarnation.clone(),
-            source_evidence: source.evidence.clone(),
-            socket_path: source.socket_path.clone(),
-            workspace_id: workspace,
-            tab_id: pane_snapshot.tab_id.clone(),
-            pane_id: pane,
-            terminal_id: terminal,
-            read_identity,
-        };
-        pairing::private_dir(&self.config.runtime_dir, false)?;
-        let path = self
-            .config
-            .runtime_dir
-            .join(format!("codex-startup-terminal-{}.json", action.0));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)?;
-        serde_json::to_writer(&file, &pin)?;
-        file.sync_all()?;
-        pairing::private_file(&path)?;
-        Ok(pin)
-    }
     pub(crate) async fn launch_once_reported(
         &self,
         security: &Security,
@@ -5937,7 +5909,7 @@ impl Topology {
                 return Err(ErrorCode::NotReady);
             }
         };
-        let process_client = match Client::connect(&source.socket_path).await {
+        let process_client = match Client::connect_source(&source).await {
             Ok(client) => client,
             Err(error) => {
                 let io = codex_invalidation_io(&error).0;
@@ -5978,7 +5950,7 @@ impl Topology {
             if let Some(reporter) = &reporter { reporter.report_launch_preflight(guard, code, io); }
             return Err(code);
         }
-        let client = match Client::connect(&source.socket_path).await {
+        let client = match Client::connect_source(&source).await {
             Ok(client) => client,
             Err(error) => {
                 let io = codex_invalidation_io(&error).0;
@@ -6004,15 +5976,6 @@ impl Topology {
         metadata.socket_epoch = Some(source.incarnation.clone());
         let effect_metadata = metadata.clone();
         let prior = resources.clone();
-        if params.provider == Provider::Codex
-            && let Some(capture) = self.codex_startup_terminal_reporter()?
-            && let Err(error) = self.retain_codex_startup_terminal_pin(action, &source, &resources)
-        {
-            let (io, errno) = codex_invalidation_io(&error);
-            let code = policy(error);
-            capture.startup_terminal("startup_terminal_pin", code, io, errno);
-            return Err(code);
-        }
         let kind = match params.provider {
             Provider::Omp => "omp",
             Provider::Codex => "codex",
@@ -6624,15 +6587,17 @@ impl Topology {
         self.state.topology_offline(server, reason)?;
         self.publish()
     }
+    /// Publish only the executable pin that qualified the observation before its native requests.
     async fn apply_snapshot(
         &self,
         server: &Uuid,
-        evidence: ServerEvidence,
+        authority: (ServerEvidence, Arc<InstalledExecutablePin>),
         snapshot: Snapshot,
         revision: u64,
         invalidation: Arc<AtomicU64>,
         event_dirty: bool,
     ) -> SecurityResult<(u64, bool)> {
+        let (evidence, executable) = authority;
         let _update = self.updates.lock().await;
         if invalidation.load(Ordering::Acquire) != revision {
             return Err(ErrorCode::NotReady);
@@ -6655,6 +6620,28 @@ impl Topology {
                 .slot
                 .clone()
         };
+        let original = self
+            .inner
+            .lock()
+            .expect("topology mutex")
+            .servers
+            .get(server)
+            .and_then(|record| record.source.as_ref())
+            .filter(|source| source.evidence == evidence)
+            .map(|source| source.executable.clone());
+        let executable = match original {
+            Some(pin) => {
+                if !pin.same_identity(&executable) {
+                    return Err(ErrorCode::NotReady);
+                }
+                pin
+            }
+            None => executable,
+        };
+        if executable.configured_path != self.config.executables.herdr {
+            return Err(ErrorCode::NotReady);
+        }
+        executable.recheck(&evidence).map_err(policy)?;
         let proof = evidence.clone();
         let identity = self
             .storage
@@ -6674,6 +6661,7 @@ impl Topology {
                 && Arc::ptr_eq(&current.invalidation, &invalidation)
                 && current.evidence == evidence
                 && current.incarnation == identity.incarnation
+                && current.executable.same_identity(&executable)
                 && current.revision == revision
             {
                 if !event_dirty
@@ -6694,6 +6682,7 @@ impl Topology {
             revision += 1;
             self.state.topology_synchronizing(server)?;
         }
+        executable.recheck(&evidence).map_err(policy)?;
         {
             let mut inner = self.inner.lock().expect("topology mutex");
             if invalidation.load(Ordering::Acquire) != revision {
@@ -6705,6 +6694,7 @@ impl Topology {
                 incarnation: identity.incarnation,
                 socket_path: record.path.clone(),
                 evidence,
+                executable,
                 snapshot: Arc::new(snapshot),
                 revision,
                 invalidation,
@@ -6899,7 +6889,33 @@ impl Topology {
             if *stop.borrow() {
                 break Ok(());
             }
-            match discover(&self.config).await {
+            let discovered = match discover(&self.config).await {
+                Err(error) if error.kind() == io::ErrorKind::OutOfMemory => break Err(error),
+                result => result,
+            };
+            self.reconcile_discovery(&mut jobs, &stop, discovered)
+                .await?;
+            tokio::select! { _ = stop.changed() => {}, _ = tokio::time::sleep(Duration::from_secs(5)) => {} }
+        };
+        self.terminal_stopping.store(true,Ordering::Release);
+        // A permit covers precommit registration AND the actual job. Late SQLite callbacks
+        // cannot escape shutdown merely because their original transport waiter disappeared.
+        let _all_terminal_jobs=self.terminal_slots.clone().acquire_many_owned(shells::CREATION_JOBS).await.map_err(|_|limit())?;
+        {let mut terminal_jobs=self.terminal_jobs.lock().expect("terminal creation jobs");while terminal_jobs.try_join_next().is_some(){}}
+        for (_, (job, _)) in jobs {
+            job.abort();
+            let _ = job.await;
+        }
+        result
+    }
+    /// Reconcile one discovery outcome with the actual follower owners and published availability.
+    async fn reconcile_discovery(
+        self: &Arc<Self>,
+        jobs: &mut HashMap<Uuid, (tokio::task::JoinHandle<()>, watch::Sender<()>)>,
+        stop: &watch::Receiver<bool>,
+        discovered: io::Result<Vec<DiscoveredSlot>>,
+    ) -> io::Result<()> {
+        match discovered {
                 Ok(slots) => {
                     let wanted: HashSet<_> = slots
                         .iter()
@@ -6986,7 +7002,7 @@ impl Topology {
                             ),
                         );
                     }
-                    for (id, (job, _)) in &jobs {
+                    for (id, (job, _)) in jobs.iter() {
                         if !present.contains(id) {
                             job.abort();
                             let _ = self
@@ -7006,7 +7022,7 @@ impl Topology {
                         .cloned()
                         .collect();
                     if error.kind() == io::ErrorKind::OutOfMemory {
-                        break Err(error);
+                        return Err(error);
                     }
                     for (_, (job, _)) in jobs.drain() {
                         job.abort();
@@ -7018,19 +7034,8 @@ impl Topology {
                             .await;
                     }
                 }
-            }
-            tokio::select! { _ = stop.changed() => {}, _ = tokio::time::sleep(Duration::from_secs(5)) => {} }
-        };
-        self.terminal_stopping.store(true,Ordering::Release);
-        // A permit covers precommit registration AND the actual job. Late SQLite callbacks
-        // cannot escape shutdown merely because their original transport waiter disappeared.
-        let _all_terminal_jobs=self.terminal_slots.clone().acquire_many_owned(shells::CREATION_JOBS).await.map_err(|_|limit())?;
-        {let mut terminal_jobs=self.terminal_jobs.lock().expect("terminal creation jobs");while terminal_jobs.try_join_next().is_some(){}}
-        for (_, (job, _)) in jobs {
-            job.abort();
-            let _ = job.await;
         }
-        result
+        Ok(())
     }
     async fn follow(
         &self,
@@ -7062,10 +7067,28 @@ impl Topology {
         let codex_reporter = self.codex_invalidation_reporter.clone();
         let mut pane_ids = Vec::new();
         let mut event_dirty = true;
+        let mut executable: Option<Arc<InstalledExecutablePin>> = None;
         loop {
-            let mut subscription =
-                Subscription::connect(path, &pane_ids)
-                    .await
+            let client = Client::connect(path).await.and_then(|client| {
+                let original = executable.clone().or_else(|| {
+                    self.inner
+                        .lock()
+                        .expect("topology mutex")
+                        .servers
+                        .get(server)
+                        .and_then(|record| record.source.as_ref())
+                        .filter(|source| source.evidence == client.evidence)
+                        .map(|source| source.executable.clone())
+                });
+                match original {
+                    Some(pin) => client.retain_executable(pin),
+                    None => client.qualify_executable(&self.config.executables.herdr),
+                }
+            });
+            let mut subscription = match client {
+                Ok(client) => Subscription::connect(client, &pane_ids).await,
+                Err(error) => Err(error),
+            }
                     .inspect_err(|error| {
                         if let Ok(current) = codex_reporter.lock()
                             && let Some(reporter) = current.as_ref()
@@ -7079,7 +7102,14 @@ impl Topology {
                         }
                         self.report_omp_recovery_io(server, "subscription_connect", error)
                     })?;
-            let evidence = subscription.evidence.clone();
+            let evidence = subscription.client.evidence.clone();
+            let pin = subscription
+                .client
+                .executable
+                .as_ref()
+                .expect("qualified subscription")
+                .clone();
+            executable = Some(pin.clone());
             let (dirty, mut dirty_rx) = watch::channel(0u64);
             let counter = invalidation.clone();
             let state = self.state.clone();
@@ -7160,6 +7190,7 @@ impl Topology {
                 refresh.borrow_and_update();
                 let client = Client::connect(path)
                     .await
+                    .and_then(|client| client.retain_executable(pin.clone()))
                     .inspect_err(|error| {
                         if let Ok(current) = codex_reporter.lock()
                             && let Some(reporter) = current.as_ref()
@@ -7220,7 +7251,7 @@ impl Topology {
                 let (applied_revision, _) = match self
                     .apply_snapshot(
                         server,
-                        evidence.clone(),
+                        (evidence.clone(), pin.clone()),
                         snapshot,
                         revision,
                         invalidation.clone(),
@@ -7398,7 +7429,7 @@ mod tests {
         assert_eq!(reporter.0.lock().unwrap().lines,1,"detail must not create another terminal line or dedupe key");
     }
 
-    async fn native_once_authorized()->(iroh::Endpoint,iroh::Endpoint,Arc<Security>,Arc<Authorized>) {
+    pub(super) async fn native_once_authorized()->(iroh::Endpoint,iroh::Endpoint,Arc<Security>,Arc<Authorized>) {
         let host=crate::endpoint_builder(iroh::SecretKey::from_bytes(&[31;32]))
             .relay_mode(iroh::RelayMode::Disabled).clear_address_lookup().bind().await.unwrap();
         let phone=crate::endpoint_builder(iroh::SecretKey::from_bytes(&[32;32]))
@@ -7442,29 +7473,22 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let socket = root.join("h.sock");
     let wrapper = root.join("omp");
-    let herdr = root.join("herdr");
+    let herdr = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     let interpreter = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|p| p.join("bash"))
         .find(|p| p.is_file())
         .expect("owned GNU Bash fixture is required");
     fs::write(&wrapper, format!("#!{}\nexit 99\n", interpreter.display())).unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
-    let listing = json!({"sessions":[{"name":"owned","default":false,"running":true,"socket_path":socket,"session_dir":root}]});
-    fs::write(
-        &herdr,
-        format!(
-            "#!{}\nprintf '%s\\n' '{}'\n",
-            interpreter.display(),
-            listing
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
     let registry = root.join("r");
     fs::create_dir(&registry).unwrap();
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
     let project = Uuid::random();
-    let config=Config::parse(&format!("version=1\nruntime_dir={root:?}\nruntime_dir_agent={root:?}\nallow_scoped_shell_probe=true\nomp_registry_dir={registry:?}\nomp_session_roots=[{root:?}]\n[executables]\nherdr={herdr:?}\nomp={wrapper:?}\n[[projects]]\nid={:?}\nlabel=\"owned\"\npath={root:?}\n",project.0)).unwrap();
+    let config = Config::parse(&format!(
+        "version=1\nruntime_dir={root:?}\nruntime_dir_agent={root:?}\nherdr_sockets=[{socket:?}]\nallow_scoped_shell_probe=true\nomp_registry_dir={registry:?}\nomp_session_roots=[{root:?}]\n[executables]\nherdr={herdr:?}\nomp={wrapper:?}\n[[projects]]\nid={:?}\nlabel=\"owned\"\npath={root:?}\n",
+        project.0
+    ))
+    .unwrap();
     fn shell(executable: &std::path::Path, root: &std::path::Path) -> tokio::process::Child {
         tokio::process::Command::new(executable)
             .args(["--noprofile", "--norc", "-i"])
@@ -7541,7 +7565,7 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
     let (stop, rx) = watch::channel(false);
     let relay_job = tokio::spawn(relay.run(stop.subscribe()));
     owner.omp_availability(None).unwrap();
-    let job = tokio::spawn(owner.clone().run(rx));
+    let job = tokio::spawn(stock_compat_tests::run_source(owner.clone(), rx));
     let server = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let request = Uuid::random();
@@ -8390,10 +8414,11 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
             "agents":[{"pane_id":"pane","terminal_id":"terminal","workspace_id":"workspace","tab_id":"tab","agent":"omp","agent_session":{"source":"test","agent":"omp","kind":"path","value":"/native.jsonl"},"interactive_ready":true}]
         })).unwrap();
         let invalidation = Arc::new(AtomicU64::new(0));
+        let executable = InstalledExecutablePin::capture(&executable, &evidence).unwrap();
         owner
             .apply_snapshot(
                 &server,
-                evidence.clone(),
+                (evidence.clone(), executable.clone()),
                 snapshot.clone(),
                 0,
                 invalidation.clone(),
@@ -8516,7 +8541,7 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
         let (revision, replaced) = owner
             .apply_snapshot(
                 &server,
-                evidence.clone(),
+                (evidence.clone(), executable.clone()),
                 snapshot.clone(),
                 1,
                 invalidation.clone(),
@@ -8554,7 +8579,7 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
             owner
                 .apply_snapshot(
                     &server,
-                    evidence.clone(),
+                    (evidence.clone(), executable.clone()),
                     snapshot.clone(),
                     revision,
                     invalidation.clone(),
@@ -8570,7 +8595,7 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
         owner
             .apply_snapshot(
                 &server,
-                evidence.clone(),
+                (evidence.clone(), executable.clone()),
                 snapshot.clone(),
                 send_window_revision,
                 invalidation.clone(),
@@ -8592,7 +8617,7 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
         owner
             .apply_snapshot(
                 &server,
-                evidence.clone(),
+                (evidence.clone(), executable.clone()),
                 snapshot.clone(),
                 send_window_revision,
                 invalidation.clone(),
@@ -8644,6 +8669,7 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
             let owner = owner.clone();
             let server = server.clone();
             let evidence = evidence.clone();
+            let executable = executable.clone();
             let invalidation = invalidation.clone();
             tokio::spawn(async move {
                 DrainTask {
@@ -8655,7 +8681,7 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
                 owner
                     .apply_snapshot(
                         &server,
-                        evidence,
+                        (evidence, executable),
                         changed_panes,
                         pane_revision + 1,
                         invalidation,
@@ -9127,8 +9153,24 @@ mod probe_tests {
             let fixture = CoarseRecoveryFixture::new(true, false, Some(waiting)).await;
             let path = fixture.root.0.join("h.sock");
             let evidence = Client::connect(&path).await.unwrap().evidence;
+            let executable = InstalledExecutablePin::capture(
+                &fixture.owner.config.executables.herdr,
+                &evidence,
+            )
+            .unwrap();
             let original_owner = Arc::new(AtomicU64::new(0));
-            fixture.owner.apply_snapshot(&fixture.server,evidence.clone(),fixture.snapshot.clone(),0,original_owner.clone(),true).await.unwrap();
+            fixture
+                .owner
+                .apply_snapshot(
+                    &fixture.server,
+                    (evidence.clone(), executable.clone()),
+                    fixture.snapshot.clone(),
+                    0,
+                    original_owner.clone(),
+                    true,
+                )
+                .await
+                .unwrap();
             let original = fixture.owner.source(&fixture.server).unwrap();
             let probe = {
                 let owner = fixture.owner.clone(); let server = fixture.server.clone(); let revision = original_owner.clone();
@@ -9136,7 +9178,18 @@ mod probe_tests {
             };
             tokio::time::timeout(Duration::from_secs(5), fixture.probe_started.notified()).await.unwrap();
             let replacement_owner = if new_recovery_owner { Arc::new(AtomicU64::new(0)) } else { original_owner.clone() };
-            fixture.owner.apply_snapshot(&fixture.server,evidence,fixture.snapshot.clone(),0,replacement_owner.clone(),true).await.unwrap();
+            fixture
+                .owner
+                .apply_snapshot(
+                    &fixture.server,
+                    (evidence, executable),
+                    fixture.snapshot.clone(),
+                    0,
+                    replacement_owner.clone(),
+                    true,
+                )
+                .await
+                .unwrap();
             assert!(original.recheck().is_ok(), "physical/revision check alone must not admit the stale completion");
             release.send(()).unwrap();
             tokio::time::timeout(Duration::from_secs(5), probe).await.unwrap().unwrap();
@@ -9189,11 +9242,12 @@ mod probe_tests {
             "agents":[]
         })).unwrap();
         let invalidation = Arc::new(AtomicU64::new(0));
+        let executable = InstalledExecutablePin::capture(&executable, &evidence).unwrap();
         snapshot.validate().unwrap();
         owner
             .apply_snapshot(
                 &server,
-                evidence.clone(),
+                (evidence.clone(), executable.clone()),
                 snapshot.clone(),
                 0,
                 invalidation.clone(),
@@ -9226,7 +9280,7 @@ mod probe_tests {
         owner
             .apply_snapshot(
                 &server,
-                evidence.clone(),
+                (evidence.clone(), executable.clone()),
                 unrelated,
                 revision,
                 invalidation.clone(),
@@ -9265,7 +9319,7 @@ mod probe_tests {
             owner
                 .apply_snapshot(
                     &server,
-                    evidence.clone(),
+                    (evidence.clone(), executable.clone()),
                     changed,
                     revision,
                     invalidation.clone(),
@@ -9284,7 +9338,7 @@ mod probe_tests {
         owner
             .apply_snapshot(
                 &server,
-                evidence,
+                (evidence, executable),
                 snapshot,
                 revision,
                 invalidation.clone(),
@@ -9807,7 +9861,7 @@ impl Topology {
 impl Topology {
     pub(crate) async fn agent_alias_once(&self,security:&Security,auth:&Authorized,action:&Uuid,params:&AgentRenameParams)->SecurityResult<()> {
         let (source,context)=self.agent_alias_context(&params.target).await?;
-        let client=Client::connect(&source.socket_path).await.map_err(policy)?;
+        let client = Client::connect_source(&source).await.map_err(policy)?;
         if client.evidence!=source.evidence {return Err(ErrorCode::StaleSession)}
         self.validate_agent_alias_context(&params.target,&source,&context,false)?;
         let fd=client.fence_socket().map_err(policy)?;
@@ -9837,7 +9891,7 @@ impl Topology {
     }
     pub(crate) async fn workspace_rename_once(&self,security:&Security,auth:&Authorized,action:&Uuid,params:&WorkspaceRenameParams)->SecurityResult<()> {
         let (source,context)=self.workspace_rename_context(&params.target).await?;
-        let client=Client::connect(&source.socket_path).await.map_err(policy)?;
+        let client = Client::connect_source(&source).await.map_err(policy)?;
         if client.evidence!=source.evidence{return Err(ErrorCode::StaleSession)}
         let fd=client.fence_socket().map_err(policy)?;
         let admission_source=source.clone();let admission_context=context.clone();

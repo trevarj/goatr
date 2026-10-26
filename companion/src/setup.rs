@@ -799,6 +799,7 @@ pub async fn run(sub: &ArgMatches, path: &Path) -> io::Result<()> {
             Ok(slots) => {
                 for slot in slots {
                     if let Ok(client) = crate::herdr::Client::connect(&slot.socket_path).await
+                        && let Ok(client) = client.qualify_executable(&c.executables.herdr)
                         && let Ok((_, snapshot)) = client.snapshot().await
                     {
                         for pane in snapshot.panes {

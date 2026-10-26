@@ -1587,7 +1587,9 @@ async fn dispatch(
                         }else{
                             let provider=target_provider(&security.state,target)?;
                             let context=match provider {Provider::Omp=>omp.as_ref().ok_or(ErrorCode::NotReady)?.attachment_context(target)?,Provider::Codex=>codex.as_ref().ok_or(ErrorCode::NotReady)?.attachment_context(target)?};
-                            let client=crate::herdr::Client::connect(&context.source.socket_path).await.map_err(|_|ErrorCode::NotReady)?;
+                            let client = crate::herdr::Client::connect_source(&context.source)
+                                .await
+                                .map_err(|_| ErrorCode::NotReady)?;
                             if client.evidence!=context.source.evidence{return Err(ErrorCode::StaleSession)}context.recheck()?;
                             let fd=client.fence_socket().map_err(|_|ErrorCode::NotReady)?;
                             let original=context.clone();let effect_body=body.clone();let peer=auth.proof.peer_id().clone();let action=r.id.clone();

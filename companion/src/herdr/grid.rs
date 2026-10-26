@@ -377,7 +377,17 @@ async fn queue_fixture_on(state:Arc<State>,server:Uuid,existing:Option<Arc<Topol
         "tabs":[{"tab_id":"t","workspace_id":"w","number":1,"label":"fixture","focused":true,"agent_status":"idle"}],
         "panes":[{"pane_id":"p","terminal_id":"n","workspace_id":"w","tab_id":"t","focused":true,"agent_status":"idle"}],"agents":[],
         "layouts":[{"workspace_id":"w","tab_id":"t","area":{"x":0,"y":0,"width":1,"height":1},"focused_pane_id":"p","panes":[{"pane_id":"p","rect":{"x":0,"y":0,"width":1,"height":1}}]}]})).unwrap();
-    let source=Source{server_id:server.clone(),incarnation:Uuid::random(),socket_path:path.clone(),evidence,snapshot:Arc::new(snapshot),revision:0,invalidation:Arc::new(AtomicU64::new(0))};
+    let executable = InstalledExecutablePin::capture(&exe, &evidence).unwrap();
+    let source = Source {
+        server_id: server.clone(),
+        incarnation: Uuid::random(),
+        socket_path: path.clone(),
+        evidence,
+        executable,
+        snapshot: Arc::new(snapshot),
+        revision: 0,
+        invalidation: Arc::new(AtomicU64::new(0)),
+    };
     topology.inner.lock().unwrap().servers.insert(server.clone(),ServerRecord{slot:"fixture".into(),name:Label("Grid fixture".into()),path,server_id:server.clone(),source:Some(source.clone()),reason:None,coarse_shell:None});
     topology.update_shells(&source).await.unwrap();
     topology.publish().unwrap();

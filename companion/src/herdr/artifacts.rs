@@ -87,7 +87,7 @@ impl Topology {
         self.with_shell_project_source(target,&epoch,&physical,&mut ||Ok(()))?;
         let info=tokio::time::timeout_at(tokio::time::Instant::from_std(deadline),async {
             physical.recheck().map_err(policy)?;
-            let client=Client::connect(&physical.socket_path).await.map_err(policy)?;
+            let client = Client::connect_source(&physical).await.map_err(policy)?;
             if client.evidence!=physical.evidence {return Err(ErrorCode::StaleSession);}
             let info=client.process_info(&pane).await.map_err(policy)?;
             physical.recheck().map_err(policy)?;Ok(info)

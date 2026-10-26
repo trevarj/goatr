@@ -6,7 +6,7 @@ use super::{
 use clap::{Arg, ArgAction, ArgGroup, Command, value_parser};
 use goatr::{
     config::{CodexOwner, Config, ConfiguredProject},
-    herdr::{self, Client, PaneReadIdentity, ProcessEvidence, Snapshot},
+    herdr::{self, Client, ProcessEvidence, Snapshot},
     pairing::{self, PairInvite, hex, private_dir, private_file, random32, uid},
     protocol::*,
     storage::{CreationStageRecord, ServerEvidence},
@@ -1015,7 +1015,6 @@ impl Desktop {
 /// for identity review; desktop resources are never rolled back or lifetime-coupled.
 struct ServeLaunch<'a> {
     diagnostic_capture: bool,
-    codex_startup_terminal_capture: bool,
     herdr_report_capture: Option<&'a herdr_report_capture::Capture>,
     preserve_xdg_config_home: bool,
     retain_process: bool,
@@ -1032,7 +1031,6 @@ struct Companion {
     omp_capture_budget: Option<herdr_report_capture::Budget>,
     codex_cleanup_signal: CleanupSignal,
     codex_cleanup_active: bool,
-    codex_startup_terminal: Option<CodexStartupTerminalResult>,
     codex_startup_journal: Option<CodexStartupJournalContext>,
     codex_startup_journal_admission: Option<CodexStartupJournalAdmission>,
     retain_process: bool,
@@ -1064,13 +1062,6 @@ struct CodexDrainSummary {
     journal_availability: &'static str,
     journal_reason: Option<&'static str>,
     journal_accepted: bool,
-}
-#[derive(Clone, Copy)]
-struct CodexStartupTerminalResult {
-    guard: &'static str,
-    code: &'static str,
-    io: &'static str,
-    errno: i32,
 }
 #[derive(Clone, Copy)]
 struct CodexStartupJournalPins {
@@ -1120,27 +1111,6 @@ impl CodexDrainProgress {
     fn snapshot(&self) -> CodexDrainSummary {
         // Recover the retained observations after poison rather than inventing zero counts.
         *self.0.lock().unwrap_or_else(|error| error.into_inner())
-    }
-    fn emit_startup_terminal_after_drain(&self, result: CodexStartupTerminalResult) {
-        let summary = self.snapshot();
-        if summary.accepted >= 8 || summary.output_failed {
-            return;
-        }
-        if writeln!(
-            std::io::stdout().lock(),
-            "{}",
-            json!({"gate":"owned-codex-invalidation-capture","phase":"terminal_visible_signature","guard":result.guard,"code":result.code,"io":result.io,"errno":result.errno,"report":Value::Null}),
-        )
-        .is_ok()
-        {
-            self.update(|summary| summary.accepted += 1);
-        } else {
-            self.update(|summary| {
-                summary.rejected = summary.rejected.saturating_add(1);
-                summary.output_failed = true;
-                summary.completed = false;
-            });
-        }
     }
     fn journal_unavailable(&self, reason: &'static str) {
         self.update(|summary| {
@@ -1545,11 +1515,6 @@ async fn retained_codex_startup_journal(
     Ok(matching.remove(0))
 }
 impl Companion {
-    fn retain_codex_startup_terminal(&mut self, result: CodexStartupTerminalResult) {
-        if self.codex_startup_terminal.is_none() {
-            self.codex_startup_terminal = Some(result);
-        }
-    }
     fn pin_codex_startup_journal(&mut self, action: &Uuid) {
         if self.codex_startup_journal_admission.is_some() {
             return;
@@ -1575,11 +1540,12 @@ impl Companion {
     fn retain_codex_startup_journal(
         &mut self,
         receipt: &Receipt,
-        context: &CodexStartupTerminalContext<'_>,
+        config: &Config,
+        server: &Uuid,
         source: ServerEvidence,
         settlement_cutoff: u64,
     ) {
-        if self.codex_startup_journal.is_none() && context.config.codex_owners.len() == 1 {
+        if self.codex_startup_journal.is_none() && config.codex_owners.len() == 1 {
             let Some(admission) = self.codex_startup_journal_admission.as_ref() else {
                 return;
             };
@@ -1592,8 +1558,8 @@ impl Companion {
             self.codex_startup_journal = Some(CodexStartupJournalContext {
                 receipt: receipt.clone(),
                 settlement_cutoff,
-                owner: context.config.codex_owners[0].clone(),
-                server: context.server.clone(),
+                owner: config.codex_owners[0].clone(),
+                server: server.clone(),
                 source,
                 state_root: pins.state_root,
                 database: pins.database,
@@ -1723,9 +1689,6 @@ impl Companion {
                 .snapshot()
                 .emit(cleanup_context, self.codex_cleanup_signal, "joined");
             return Err(failure("owned Codex diagnostic stderr drain panicked"));
-        }
-        if let Some(result) = self.codex_startup_terminal.take() {
-            progress.emit_startup_terminal_after_drain(result);
         }
         if let Some(context) = self.codex_startup_journal.take() {
             match retained_codex_startup_journal(
@@ -7314,18 +7277,10 @@ fn owned_hello_capture_requested() -> bool {
 pub(super) fn owned_omp_capture_conflicts() -> bool {
     selected_omp_capture_mode() == OwnedOmpCaptureMode::Conflict
 }
-#[derive(Clone, Copy)]
-enum OwnedHerdrReportMode {
-    OmpReceiver,
-    CodexStartupTerminal,
-}
-fn owned_herdr_report_binary(
-    capture: Option<OwnedHerdrReportMode>,
-    workspace: &Path,
-) -> io::Result<Option<PathBuf>> {
+fn owned_herdr_report_binary(capture: bool, workspace: &Path) -> io::Result<Option<PathBuf>> {
     let binary = std::env::var_os("GOATR_OWNED_HERDR_REPORT_BIN");
     let expected = std::env::var("GOATR_OWNED_HERDR_REPORT_SHA256").ok();
-    if capture.is_none() {
+    if !capture {
         if binary.is_some() || expected.is_some() {
             return Err(failure(
                 "private Herdr report binary is only valid with an owned diagnostic capture",
@@ -7391,7 +7346,7 @@ fn require_shared_backends(args: &clap::ArgMatches) -> io::Result<()> {
 }
 fn project_read_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     if !args.get_flag("project-read-only"){return Ok(());}
-    if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE","GOATR_OWNED_OMP_CREATION_CAPTURE",
+    if ["GOATR_OWNED_CODEX_DIAGNOSTIC", "GOATR_OWNED_OMP_CREATION_CAPTURE",
         "GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
         "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
         "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"]
@@ -7416,7 +7371,7 @@ fn terminal_frozen_selection(args:&clap::ArgMatches)->io::Result<bool> {
 fn terminal_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     if !args.get_flag("terminal-only"){return Ok(());}
     terminal_frozen_selection(args)?;
-    if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE",
+    if ["GOATR_OWNED_CODEX_DIAGNOSTIC",
         "GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE",
         "GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE","GOATR_OWNED_OMP_PRODUCER_METADATA_READER",
         "GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
@@ -7430,7 +7385,7 @@ fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     let Some(mode)=args.get_one::<String>("background") else{return Ok(())};
     require_shared_backends(args).map_err(|_|failure("background requires exactly one OMP and one Codex backend"))?;
     if args.get_one::<u32>("api")!=Some(&34){return Err(failure("background requires the selected original API34 owned emulator; never a paired physical phone"));}
-    if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE","GOATR_OWNED_OMP_CREATION_CAPTURE",
+    if ["GOATR_OWNED_CODEX_DIAGNOSTIC", "GOATR_OWNED_OMP_CREATION_CAPTURE",
         "GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
         "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
         "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"]
@@ -7448,48 +7403,202 @@ fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
 fn arguments_base() -> Command {
     Command::new("smoke")
         .arg(Arg::new("background").long("background").value_parser(["persistent","ntfy"])
-            .requires_all(["backend","goatr","config","workspace-root","evidence-dir","consent-owned-providers","automate-native-inputs",
-                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-goatr-sha256","expected-companion-lock-sha256","serial","emulator-owner"])
-            .conflicts_with_all(["admission-only","shared-agent-only","terminal-only","project-read-only","grid","grid-lease","ui","camera","ime","setup","prepare-emulator","paging-proof",
-                "codex-invalidation-diagnostic","codex-startup-terminal-capture","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
-                "development-continuity","development-owner-feedback","development-android-only","keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid"])
+            .requires_all([
+                "backend",
+                "goatr",
+                "config",
+                "workspace-root",
+                "evidence-dir",
+                "consent-owned-providers",
+                "automate-native-inputs",
+                "apk",
+                "test-apk",
+                "expected-apk-sha256",
+                "expected-test-apk-sha256",
+                "expected-goatr-sha256",
+                "expected-companion-lock-sha256",
+                "serial",
+                "emulator-owner",
+            ])
+            .conflicts_with_all([
+                "admission-only",
+                "shared-agent-only",
+                "terminal-only",
+                "project-read-only",
+                "grid",
+                "grid-lease",
+                "ui",
+                "camera",
+                "ime",
+                "setup",
+                "prepare-emulator",
+                "paging-proof",
+                "codex-invalidation-diagnostic",
+                "omp-creation-diagnostic",
+                "physical-hello-capture",
+                "physical-relay-ephemeral",
+                "development-continuity",
+                "development-owner-feedback",
+                "development-android-only",
+                "keep-foreground-for-feedback",
+                "defer-retention-crossing",
+                "admin-socket",
+                "disposable-uid",
+            ])
             .help("Finite owned-emulator persistent or official ntfy registration/probe/ACK/native attention/dedup/tap gate for BOTH original providers; retains native resources, no fault stop or replay"))
         .arg(Arg::new("expected-ntfy-apk-sha256").long("expected-ntfy-apk-sha256").requires("background"))
         .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("background"))
         .arg(Arg::new("terminal-only").long("terminal-only").action(ArgAction::SetTrue)
-            .requires_all(["goatr","config","workspace-root","evidence-dir","consent-owned-providers","automate-native-inputs"])
-            .conflicts_with_all(["backend","admission-only","shared-agent-only","grid","grid-lease","ui",
-                "camera","ime","setup","prepare-emulator","paging-proof","codex-invalidation-diagnostic",
-                "codex-startup-terminal-capture","omp-creation-diagnostic","physical-hello-capture",
-                "physical-relay-ephemeral","development-continuity","development-owner-feedback",
-                "development-android-only","keep-foreground-for-feedback","defer-retention-crossing",
-                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","serial",
-                "emulator-owner","admin-socket","disposable-uid","api"])
+            .requires_all([
+                "goatr",
+                "config",
+                "workspace-root",
+                "evidence-dir",
+                "consent-owned-providers",
+                "automate-native-inputs",
+            ])
+            .conflicts_with_all([
+                "backend",
+                "admission-only",
+                "shared-agent-only",
+                "grid",
+                "grid-lease",
+                "ui",
+                "camera",
+                "ime",
+                "setup",
+                "prepare-emulator",
+                "paging-proof",
+                "codex-invalidation-diagnostic",
+                "omp-creation-diagnostic",
+                "physical-hello-capture",
+                "physical-relay-ephemeral",
+                "development-continuity",
+                "development-owner-feedback",
+                "development-android-only",
+                "keep-foreground-for-feedback",
+                "defer-retention-crossing",
+                "apk",
+                "test-apk",
+                "expected-apk-sha256",
+                "expected-test-apk-sha256",
+                "serial",
+                "emulator-owner",
+                "admin-socket",
+                "disposable-uid",
+                "api",
+            ])
             .help("Finite stock cells/resize/release, Goatr text/key frame handoff and configured-project terminal creation; one guarded native printf fixture, no providers; originals retained"))
         .arg(Arg::new("shared-agent-only").long("shared-agent-only").action(ArgAction::SetTrue)
-            .requires_all(["backend","goatr","config","workspace-root","consent-owned-providers","automate-native-inputs"])
-            .conflicts_with_all(["admission-only","grid","ui","camera","ime","setup","prepare-emulator",
-                "paging-proof","codex-invalidation-diagnostic","codex-startup-terminal-capture",
-                "omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
-                "development-continuity","development-owner-feedback","development-android-only",
-                "keep-foreground-for-feedback","defer-retention-crossing","apk","test-apk","serial",
-                "emulator-owner","admin-socket","disposable-uid"])
+            .requires_all([
+                "backend",
+                "goatr",
+                "config",
+                "workspace-root",
+                "consent-owned-providers",
+                "automate-native-inputs",
+            ])
+            .conflicts_with_all([
+                "admission-only",
+                "grid",
+                "ui",
+                "camera",
+                "ime",
+                "setup",
+                "prepare-emulator",
+                "paging-proof",
+                "codex-invalidation-diagnostic",
+                "omp-creation-diagnostic",
+                "physical-hello-capture",
+                "physical-relay-ephemeral",
+                "development-continuity",
+                "development-owner-feedback",
+                "development-android-only",
+                "keep-foreground-for-feedback",
+                "defer-retention-crossing",
+                "apk",
+                "test-apk",
+                "serial",
+                "emulator-owner",
+                "admin-socket",
+                "disposable-uid",
+            ])
             .help("Finite fresh BOTH-provider shared conversation/requests/Stop/reconnect/native-history gate; retains all native resources"))
         .arg(Arg::new("admission-only").long("admission-only").action(ArgAction::SetTrue)
-            .requires_all(["backend","goatr","config","workspace-root","consent-owned-providers"])
-            .conflicts_with_all(["grid","ui","camera","ime","setup","prepare-emulator","paging-proof",
-                "codex-invalidation-diagnostic","codex-startup-terminal-capture","omp-creation-diagnostic",
-                "physical-hello-capture","physical-relay-ephemeral","development-continuity",
-                "development-owner-feedback","development-android-only","keep-foreground-for-feedback",
-                "defer-retention-crossing","automate-native-inputs","apk","test-apk","serial",
-                "emulator-owner","admin-socket","disposable-uid"])
+            .requires_all([
+                "backend",
+                "goatr",
+                "config",
+                "workspace-root",
+                "consent-owned-providers",
+            ])
+            .conflicts_with_all([
+                "grid",
+                "ui",
+                "camera",
+                "ime",
+                "setup",
+                "prepare-emulator",
+                "paging-proof",
+                "codex-invalidation-diagnostic",
+                "omp-creation-diagnostic",
+                "physical-hello-capture",
+                "physical-relay-ephemeral",
+                "development-continuity",
+                "development-owner-feedback",
+                "development-android-only",
+                "keep-foreground-for-feedback",
+                "defer-retention-crossing",
+                "automate-native-inputs",
+                "apk",
+                "test-apk",
+                "serial",
+                "emulator-owner",
+                "admin-socket",
+                "disposable-uid",
+            ])
             .help("Finite owned Hello/current-source/creation eligibility only; no provider creation or input; resources retained"))
         .arg(Arg::new("project-read-only").long("project-read-only").action(ArgAction::SetTrue)
-            .requires_all(["backend","goatr","config","workspace-root","evidence-dir","consent-owned-providers"])
-            .conflicts_with_all(["admission-only","shared-agent-only","terminal-only","grid","grid-lease","ui","camera","ime","setup","prepare-emulator","paging-proof",
-                "codex-invalidation-diagnostic","codex-startup-terminal-capture","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
-                "development-continuity","development-owner-feedback","development-android-only","keep-foreground-for-feedback","defer-retention-crossing","automate-native-inputs",
-                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","serial","emulator-owner","admin-socket","disposable-uid","api"])
+            .requires_all([
+                "backend",
+                "goatr",
+                "config",
+                "workspace-root",
+                "evidence-dir",
+                "consent-owned-providers",
+            ])
+            .conflicts_with_all([
+                "admission-only",
+                "shared-agent-only",
+                "terminal-only",
+                "grid",
+                "grid-lease",
+                "ui",
+                "camera",
+                "ime",
+                "setup",
+                "prepare-emulator",
+                "paging-proof",
+                "codex-invalidation-diagnostic",
+                "omp-creation-diagnostic",
+                "physical-hello-capture",
+                "physical-relay-ephemeral",
+                "development-continuity",
+                "development-owner-feedback",
+                "development-android-only",
+                "keep-foreground-for-feedback",
+                "defer-retention-crossing",
+                "automate-native-inputs",
+                "apk",
+                "test-apk",
+                "expected-apk-sha256",
+                "expected-test-apk-sha256",
+                "serial",
+                "emulator-owner",
+                "admin-socket",
+                "disposable-uid",
+                "api",
+            ])
             .help("Finite BOTH-provider/read-only Files/Git fixture gate after ordinary admission; existing qualified signed public seed only, no input or new commits; originals retained"))
         .arg(Arg::new("project-read-seed-pack").long("project-read-seed-pack").value_parser(value_parser!(PathBuf))
             .requires_all(["project-read-only","project-read-seed-pack-sha256","project-read-seed-commit","project-read-seed-tree","project-read-seed-signature-sha256"]))
@@ -7517,13 +7626,42 @@ fn arguments_base() -> Command {
         )
         .group(ArgGroup::new("android-artifact-mode").args(["development-continuity","background"]))
         .arg(Arg::new("grid").long("grid").action(ArgAction::SetTrue)
-            .requires_all(["grid-lease","backend","goatr","config","workspace-root","evidence-dir",
-                "expected-goatr-sha256","expected-companion-lock-sha256","consent-owned-providers","automate-native-inputs"])
-            .conflicts_with_all(["ui","camera","ime","setup","prepare-emulator","paging-proof",
-                "codex-invalidation-diagnostic","codex-startup-terminal-capture","omp-creation-diagnostic",
-                "physical-hello-capture","physical-relay-ephemeral","development-continuity","development-owner-feedback",
-                "development-android-only","keep-foreground-for-feedback","defer-retention-crossing",
-                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","serial","emulator-owner","admin-socket"])
+            .requires_all([
+                "grid-lease",
+                "backend",
+                "goatr",
+                "config",
+                "workspace-root",
+                "evidence-dir",
+                "expected-goatr-sha256",
+                "expected-companion-lock-sha256",
+                "consent-owned-providers",
+                "automate-native-inputs",
+            ])
+            .conflicts_with_all([
+                "ui",
+                "camera",
+                "ime",
+                "setup",
+                "prepare-emulator",
+                "paging-proof",
+                "codex-invalidation-diagnostic",
+                "omp-creation-diagnostic",
+                "physical-hello-capture",
+                "physical-relay-ephemeral",
+                "development-continuity",
+                "development-owner-feedback",
+                "development-android-only",
+                "keep-foreground-for-feedback",
+                "defer-retention-crossing",
+                "apk",
+                "test-apk",
+                "expected-apk-sha256",
+                "expected-test-apk-sha256",
+                "serial",
+                "emulator-owner",
+                "admin-socket",
+            ])
             .help("Qualified fresh native-to-framed-grid witness only; retains supervisor/resources, never phone or cleanup authority"))
         .arg(Arg::new("grid-lease").long("grid-lease").value_parser(value_parser!(PathBuf)).requires("grid"))
         .arg(
@@ -7566,13 +7704,6 @@ fn arguments_base() -> Command {
                     "keep-foreground-for-feedback",
                 ])
                 .help("Fresh Codex pre-input invalidation diagnostic only; not Android or paging acceptance"),
-        )
-        .arg(
-            Arg::new("codex-startup-terminal-capture")
-                .long("codex-startup-terminal-capture")
-                .action(ArgAction::SetTrue)
-                .requires_all(["codex-invalidation-diagnostic", "consent-owned-providers"])
-                .help("One bounded post-settlement owned Codex terminal read; diagnostic only"),
         )
         .arg(
             Arg::new("omp-creation-diagnostic")
@@ -8153,22 +8284,6 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
             | "physical_state"
             | "topology_source"
             | "terminal_absent"
-            | "startup_terminal_pin"
-            | "startup_terminal_read"
-            | "startup_terminal_empty"
-            | "startup_terminal_truncated"
-            | "startup_terminal_unclassified"
-            | "startup_terminal_multiple"
-            | "startup_terminal_account_transport"
-            | "startup_terminal_account_decode"
-            | "startup_terminal_account_server"
-            | "startup_terminal_account_bootstrap_unknown"
-            | "startup_terminal_models_bootstrap"
-            | "startup_terminal_requirements_bootstrap"
-            | "startup_terminal_thread_lookup"
-            | "startup_terminal_event_stream_closed"
-            | "startup_terminal_configuration_load"
-            | "startup_terminal_configuration_toml"
             | "native_report_changed"
             | "effective_topology_loss"
             | "effective_topology_revalidation"
@@ -9129,7 +9244,7 @@ fn start_serve(
     socket: &Path,
     listener: Option<&std::net::TcpListener>,
 ) -> io::Result<Companion> {
-    start_serve_with_codex_capture(binary, config, root, socket, listener, false, false, None)
+    start_serve_with_codex_capture(binary, config, root, socket, listener, false, None)
 }
 fn start_serve_with_codex_capture(
     binary: &Path,
@@ -9138,7 +9253,6 @@ fn start_serve_with_codex_capture(
     socket: &Path,
     listener: Option<&std::net::TcpListener>,
     diagnostic_capture: bool,
-    codex_startup_terminal_capture: bool,
     herdr_report_capture: Option<&herdr_report_capture::Capture>,
 ) -> io::Result<Companion> {
     start_serve_with_capture(
@@ -9149,7 +9263,6 @@ fn start_serve_with_codex_capture(
         listener,
         ServeLaunch {
             diagnostic_capture,
-            codex_startup_terminal_capture,
             herdr_report_capture,
             preserve_xdg_config_home: false,
             retain_process: false,
@@ -9170,11 +9283,6 @@ fn start_serve_with_capture(
     let codex_capture = launch.diagnostic_capture
         || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").as_deref()
             == Some(std::ffi::OsStr::new("1"));
-    if launch.codex_startup_terminal_capture && (!codex_capture || listener.is_none()) {
-        return Err(failure(
-            "Codex startup terminal capture requires the validated owned Codex relay",
-        ));
-    }
     let omp_creation_capture = owned_omp_creation_capture_requested();
     let omp_offline_capture = owned_omp_offline_capture_requested();
     let omp_backend_capture = owned_omp_backend_capture_requested();
@@ -9241,7 +9349,6 @@ fn start_serve_with_capture(
             Stdio::null()
         });
     c.env_remove("GOATR_OWNED_CODEX_DIAGNOSTIC");
-    c.env_remove("GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE");
     c.env_remove("GOATR_OWNED_OMP_CREATION_CAPTURE");
     c.env_remove("GOATR_OWNED_OMP_OFFLINE_CAPTURE");
     c.env_remove("GOATR_OWNED_OMP_BACKEND_CAPTURE");
@@ -9251,9 +9358,6 @@ fn start_serve_with_capture(
     c.env_remove("GOATR_OWNED_OMP_PRODUCER_HOOK_SHA256");
     if codex_capture {
         c.env("GOATR_OWNED_CODEX_DIAGNOSTIC", "1");
-        if launch.codex_startup_terminal_capture {
-            c.env("GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE", "1");
-        }
     } else if omp_capture {
         if omp_creation_capture {
             c.env("GOATR_OWNED_OMP_CREATION_CAPTURE", "1");
@@ -9344,7 +9448,6 @@ fn start_serve_with_capture(
         omp_capture_budget: omp_budget,
         codex_cleanup_signal: CleanupSignal::default(),
         codex_cleanup_active: false,
-        codex_startup_terminal: None,
         codex_startup_journal: None,
         codex_startup_journal_admission: None,
         retain_process,
@@ -9486,7 +9589,6 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
         Some(&listener),
         ServeLaunch {
             diagnostic_capture: false,
-            codex_startup_terminal_capture: false,
             herdr_report_capture: None,
             // This controller observes the existing paired desktop configuration.
             preserve_xdg_config_home: true,
@@ -9630,285 +9732,6 @@ pub(super) fn write_feedback_presentation(
     )
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodexStartupTerminalPin {
-    action: Uuid,
-    server_id: Uuid,
-    source_incarnation: Uuid,
-    source_evidence: ServerEvidence,
-    socket_path: PathBuf,
-    workspace_id: Id,
-    tab_id: Id,
-    pane_id: Id,
-    terminal_id: Id,
-    read_identity: PaneReadIdentity,
-}
-struct CodexStartupTerminalContext<'a> {
-    config: &'a Config,
-    socket: &'a Path,
-    server: &'a Uuid,
-    provider: Provider,
-    desktop: &'a ProcessEvidence,
-}
-
-// Immutable private records retain their complete object stamp across the native read.
-type StartupTerminalFileStamp = (u64, u64, u64, i64, i64, i64, i64, u32, u32, u32, u64);
-fn startup_terminal_file_stamp(metadata: &fs::Metadata) -> io::Result<StartupTerminalFileStamp> {
-    if !metadata.is_file()
-        || metadata.uid() != uid()
-        || metadata.mode() & 0o7777 != 0o600
-        || metadata.nlink() != 1
-    {
-        return Err(failure("terminal capture private record metadata rejected"));
-    }
-    Ok((metadata.dev(), metadata.ino(), metadata.len(), metadata.mtime(),
-        metadata.mtime_nsec(), metadata.ctime(), metadata.ctime_nsec(),
-        metadata.mode(), metadata.uid(), metadata.gid(), metadata.nlink()))
-}
-fn read_codex_startup_terminal_pin(
-    runtime_dir: &Path,
-    action: &Uuid,
-) -> io::Result<(PathBuf, File, StartupTerminalFileStamp, CodexStartupTerminalPin)> {
-    const PIN_MAX: u64 = 4096;
-    pairing::private_dir(runtime_dir, false)?;
-    let path = runtime_dir.join(format!("codex-startup-terminal-{}.json", action.0));
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(&path)?;
-    let held = startup_terminal_file_stamp(&file.metadata()?)?;
-    if held.2 == 0 || held.2 > PIN_MAX
-        || startup_terminal_file_stamp(&fs::symlink_metadata(&path)?)? != held
-    {
-        return Err(failure("terminal capture pin size or path rejected"));
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(held.2).map_err(io::Error::other)?);
-    (&mut file).take(PIN_MAX + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 != held.2
-        || startup_terminal_file_stamp(&file.metadata()?)? != held
-        || startup_terminal_file_stamp(&fs::symlink_metadata(&path)?)? != held
-    {
-        return Err(failure("terminal capture pin changed during bounded read"));
-    }
-    let pin = serde_json::from_slice(&bytes)?;
-    Ok((path, file, held, pin))
-}
-fn recheck_startup_terminal_desktop(
-    pin: &CodexStartupTerminalPin,
-    context: &CodexStartupTerminalContext<'_>,
-) -> io::Result<()> {
-    let evidence = &pin.source_evidence;
-    if evidence.pid != context.desktop.pid
-        || evidence.pid_start_ticks != context.desktop.start_ticks
-        || evidence.linux_boot_id != context.desktop.linux_boot_id
-        || herdr::process_evidence(context.desktop.pid)? != *context.desktop
-    {
-        return Err(failure("terminal capture original desktop identity changed"));
-    }
-    let socket = fs::symlink_metadata(context.socket)?;
-    if !socket.file_type().is_socket()
-        || socket.uid() != uid()
-        || socket.mode() & 0o7777 != 0o600
-        || (socket.dev(), socket.ino()) != (evidence.socket_device, evidence.socket_inode)
-    {
-        return Err(failure("terminal capture original desktop socket changed"));
-    }
-    Ok(())
-}
-
-fn codex_startup_terminal_classifier(text: &str, truncated: bool) -> &'static str {
-    if truncated {
-        return "startup_terminal_truncated";
-    }
-    let compact = text
-        .split_whitespace()
-        .collect::<String>();
-    if compact.is_empty() {
-        return "startup_terminal_empty";
-    }
-    let account_context = "account/readfailedduringTUIbootstrap:";
-    let mut families = Vec::new();
-    let mut account = None;
-    let mut remaining = compact.as_str();
-    while let Some(index) = remaining.find(account_context) {
-        let tail = &remaining[index + account_context.len()..];
-        let current = if tail.starts_with("account/readtransporterror:") {
-            "startup_terminal_account_transport"
-        } else if tail.starts_with("account/readresponsedecodeerror:") {
-            "startup_terminal_account_decode"
-        } else if tail.starts_with("account/readfailed:") {
-            "startup_terminal_account_server"
-        } else {
-            "startup_terminal_account_bootstrap_unknown"
-        };
-        if account.is_some_and(|prior| prior != current) {
-            return "startup_terminal_multiple";
-        }
-        account = Some(current);
-        remaining = tail;
-    }
-    if let Some(account) = account {
-        families.push(account);
-    }
-    if compact.contains("model/listfailedduringTUIbootstrap:") {
-        families.push("startup_terminal_models_bootstrap");
-    }
-    if compact.contains("configRequirements/readfailedduringTUIbootstrap:") {
-        families.push("startup_terminal_requirements_bootstrap");
-    }
-    if compact.contains("thread/readfailedduringTUIsessionlookup") {
-        families.push("startup_terminal_thread_lookup");
-    }
-    if compact.contains("terminalinputstreamclosedduringstartup") {
-        families.push("startup_terminal_event_stream_closed");
-    }
-    if compact.contains("Errorloadingconfiguration:") {
-        families.push("startup_terminal_configuration_load");
-    }
-    if compact.contains("Errorloadingconfig.toml:") {
-        families.push("startup_terminal_configuration_toml");
-    }
-    match families.as_slice() {
-        [] => "startup_terminal_unclassified",
-        [guard] => guard,
-        _ => "startup_terminal_multiple",
-    }
-}
-
-async fn capture_codex_startup_terminal(
-    runtime_dir: &Path,
-    receipt: &Receipt,
-    context: &CodexStartupTerminalContext<'_>,
-) -> CodexStartupTerminalResult {
-    let result = async {
-        let (pin_path, pin_file, pin_object, pin) =
-            read_codex_startup_terminal_pin(runtime_dir, &receipt.action_id)?;
-        let resources = receipt
-            .creation
-            .as_ref()
-            .filter(|creation| creation.provider == context.provider && creation.server_id == *context.server)
-            .map(|creation| &creation.resources)
-            .ok_or_else(|| failure("terminal capture receipt resources absent"))?;
-        let binding = resources
-            .binding_id
-            .as_ref()
-            .ok_or_else(|| failure("terminal capture binding absent"))?;
-        let native = resources
-            .native_id
-            .as_ref()
-            .ok_or_else(|| failure("terminal capture native id absent"))?;
-        if context.config.codex_owners.len() != 1 {
-            return Err(failure("terminal capture owner scope rejected"));
-        }
-        let owner = &context.config.codex_owners[0];
-        let manifest_path = goatr::codex_relay::manifest_path(&owner.bindings_dir, binding);
-        let manifest_before = startup_terminal_file_stamp(&fs::symlink_metadata(&manifest_path)?)?;
-        let manifest = goatr::codex_relay::Manifest::load(&manifest_path)?;
-        let manifest_after = startup_terminal_file_stamp(&fs::symlink_metadata(&manifest_path)?)?;
-        if manifest_before != manifest_after
-            || manifest.owner_id != owner.id
-            || manifest.upstream_host != owner.socket_host
-            || manifest.upstream_agent != owner.socket_agent
-            || manifest.binding_id != *binding
-            || manifest.expected_thread_id != *native
-            || manifest.herdr.server_id != *context.server
-            || manifest.herdr.server_id != pin.server_id
-            || manifest.herdr.incarnation != pin.source_incarnation
-            || manifest.herdr.workspace_id != pin.workspace_id
-            || manifest.herdr.pane_id != pin.pane_id
-            || manifest.herdr.terminal_id != pin.terminal_id
-            || manifest.herdr.socket_path != pin.socket_path
-            || manifest.herdr.socket_path != context.socket
-            || manifest.herdr.evidence != pin.source_evidence
-        {
-            return Err(failure("terminal capture manifest provenance rejected"));
-        }
-        if pin.action != receipt.action_id
-            || resources.workspace_id.as_ref() != Some(&pin.workspace_id)
-            || resources.pane_id.as_ref() != Some(&pin.pane_id)
-            || resources.terminal_id.as_ref() != Some(&pin.terminal_id)
-        {
-            return Err(failure("terminal capture retained provenance rejected"));
-        }
-        recheck_startup_terminal_desktop(&pin, context)?;
-        let snapshot_client = Client::connect(&pin.socket_path).await?;
-        if snapshot_client.evidence != pin.source_evidence {
-            return Err(failure("terminal capture original socket evidence changed"));
-        }
-        let (evidence, snapshot) = snapshot_client.snapshot().await?;
-        if evidence != pin.source_evidence {
-            return Err(failure("terminal capture snapshot evidence changed"));
-        }
-        let pane = snapshot
-            .panes
-            .iter()
-            .find(|pane| pane.pane_id == pin.pane_id)
-            .ok_or_else(|| failure("terminal capture pane absent"))?;
-        let identity = pane
-            .read_identity
-            .clone()
-            .ok_or_else(|| failure("terminal capture read identity absent"))?;
-        if pane.workspace_id != pin.workspace_id
-            || pane.tab_id != pin.tab_id
-            || pane.terminal_id != pin.terminal_id
-            || identity.herdr_incarnation != pin.read_identity.herdr_incarnation
-            || identity.runtime_epoch != pin.read_identity.runtime_epoch
-        {
-            return Err(failure("terminal capture replacement rejected"));
-        }
-        // A fresh binding epoch cannot adopt a different agent on the pinned runtime.
-        if pane.agent.as_deref().is_some_and(|agent| agent != "codex")
-            || pane.agent_session.as_ref().is_some_and(|session| {
-                session.source != "herdr:codex" || session.agent != "codex"
-                    || session.kind != "id" || session.value != native.0
-            })
-        {
-            return Err(failure("terminal capture conflicting native binding"));
-        }
-        let read_client = Client::connect(&pin.socket_path).await?;
-        if read_client.evidence != pin.source_evidence {
-            return Err(failure("terminal capture read socket evidence changed"));
-        }
-        let read = read_client
-            .read_bound(&pin.pane_id, &pin.terminal_id, &identity)
-            .await?;
-        if read.workspace_id != pin.workspace_id || read.tab_id != pin.tab_id {
-            return Err(failure("terminal capture read routing changed"));
-        }
-        manifest.validate()?;
-        recheck_startup_terminal_desktop(&pin, context)?;
-        if startup_terminal_file_stamp(&pin_file.metadata()?)? != pin_object
-            || startup_terminal_file_stamp(&fs::symlink_metadata(&pin_path)?)? != pin_object
-            || startup_terminal_file_stamp(&fs::symlink_metadata(&manifest_path)?)? != manifest_before
-        {
-            return Err(failure("terminal capture post-read provenance changed"));
-        }
-        Ok::<_, io::Error>(codex_startup_terminal_classifier(&read.text, read.truncated))
-    }
-    .await;
-    match result {
-        Ok(guard) => CodexStartupTerminalResult {
-            guard,
-            code: "none",
-            io: "none",
-            errno: 0,
-        },
-        Err(error) => {
-            let io = OmpObserverFailure::io_kind(error.kind());
-            let errno = error
-                .raw_os_error()
-                .filter(|value| (-4095..=4095).contains(value))
-                .unwrap_or(0);
-            CodexStartupTerminalResult {
-                guard: "startup_terminal_read",
-                code: "none",
-                io,
-                errno,
-            }
-        }
-    }
-}
 
 async fn create(
     phone: &mut Phone,
@@ -10081,7 +9904,7 @@ async fn create_session_presented(
     evidence: &Path,
     run: &Uuid,
     feedback_presentation: bool,
-    mut startup_terminal_capture: Option<(&mut Companion, &CodexStartupTerminalContext<'_>, bool)>,
+    mut startup_journal: Option<&mut Companion>,
     admitted: Option<&AdmittedSource>,
 ) -> io::Result<(Option<SessionSummary>, Receipt, Option<FeedbackPresentation>)> {
     if let Some(admitted)=admitted {
@@ -10166,7 +9989,7 @@ async fn create_session_presented(
             "original owned server/provider creation prerequisites did not become available; no create submitted",
         ));
     }
-    if let Some((companion, _, _)) = startup_terminal_capture.as_mut() {
+    if let Some(companion) = startup_journal.as_mut() {
         companion.pin_codex_startup_journal(&id);
     }
     if let Some(admitted)=admitted {admitted.recheck()?;}
@@ -10191,21 +10014,11 @@ async fn create_session_presented(
         r
     };
     // Freeze the causal window before any fallible capture or filesystem work.
-    let settlement_cutoff = startup_terminal_capture.as_ref().map(|_| pairing::now_ms());
-    let selected_terminal_capture = startup_terminal_capture
-        .as_ref()
-        .is_some_and(|(_, _, enabled)| *enabled);
-    if let Some((companion, context, terminal_enabled)) = startup_terminal_capture {
-        if let Some(cutoff) = settlement_cutoff {
-            companion.retain_codex_startup_journal(&receipt, context, before_source, cutoff);
-        }
-        if terminal_enabled {
-            let result = capture_codex_startup_terminal(&config.runtime_dir, &receipt, context).await;
-            companion.retain_codex_startup_terminal(result);
-        }
-    }
-    if selected_terminal_capture && receipt.state != ReceiptState::Succeeded {
-        return Ok((None, receipt, None));
+    let settlement_cutoff = startup_journal.as_ref().map(|_| pairing::now_ms());
+    if let Some(companion) = startup_journal
+        && let Some(cutoff) = settlement_cutoff
+    {
+        companion.retain_codex_startup_journal(&receipt, config, server, before_source, cutoff);
     }
     let (_, after) = surface(socket).await?;
     let focus_changed = focus(&before) != focus(&after);
@@ -13193,7 +13006,6 @@ async fn checkpoint_held(
     let codex_capture = args.get_flag("codex-invalidation-diagnostic")
         || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").as_deref()
             == Some(std::ffi::OsStr::new("1"));
-    let codex_startup_terminal_capture = args.get_flag("codex-startup-terminal-capture");
     if omp_capture && codex_capture {
         return Err(failure(
             "owned OMP and Codex diagnostic captures are mutually exclusive",
@@ -13204,16 +13016,7 @@ async fn checkpoint_held(
             "owned OMP report capture requires the selected OMP provider",
         ));
     }
-    let private_herdr = owned_herdr_report_binary(
-        if omp_receiver_capture {
-            Some(OwnedHerdrReportMode::OmpReceiver)
-        } else if codex_startup_terminal_capture {
-            Some(OwnedHerdrReportMode::CodexStartupTerminal)
-        } else {
-            None
-        },
-        &workspace,
-    )?;
+    let private_herdr = owned_herdr_report_binary(omp_receiver_capture, &workspace)?;
     let project_fixture=if project_read_only {Some(ProjectReadFixture::prepare(args,&root,&binary,&run)?)}else{None};
     let mut config = deployment.clone();
     config.runtime_dir = root.join("runtime");
@@ -13441,7 +13244,6 @@ async fn checkpoint_held(
             listener.as_deref(),
             ServeLaunch {
                 diagnostic_capture: false,
-                codex_startup_terminal_capture: false,
                 herdr_report_capture: None,
                 preserve_xdg_config_home: false,
                 retain_process,
@@ -13458,7 +13260,6 @@ async fn checkpoint_held(
             &socket,
             listener.as_deref(),
             args.get_flag("codex-invalidation-diagnostic"),
-            codex_startup_terminal_capture,
             herdr_report_capture.as_ref(),
         )?
     };
@@ -13630,13 +13431,6 @@ async fn checkpoint_held(
         if p == Provider::Codex && args.get_flag("codex-invalidation-diagnostic") {
             // Preserve the original helper result while the selected capture reaches EOF.
             let result: io::Result<()> = async {
-        let startup_terminal = CodexStartupTerminalContext {
-            config: &config,
-            socket: &herdr_socket,
-            server: &server,
-            provider: p,
-            desktop: &desktop.process,
-        };
         let (session, receipt, _) = create_session_presented(
             &mut phone,
             &config,
@@ -13646,7 +13440,7 @@ async fn checkpoint_held(
             evidence,
             &run,
             false,
-            Some((&mut serve, &startup_terminal, codex_startup_terminal_capture)),
+            Some(&mut serve),
             None,
         )
         .await?;
@@ -14446,6 +14240,13 @@ pub async fn run() -> io::Result<bool> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn unavailable_codex_terminal_capture_is_not_a_smoke_option() {
+        let error = feedback_arguments(arguments_base())
+            .try_get_matches_from(["smoke", "--codex-startup-terminal-capture"])
+            .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
     fn background_args(mode:&str)->Vec<String> {
         let mut args=vec!["smoke".into(),format!("--background={mode}"),"--backend=omp".into(),"--backend=codex".into(),
             "--goatr=/nix/store/example/bin/goatr".into(),"--config=/private/config.toml".into(),"--workspace-root=/workspace".into(),
@@ -14466,9 +14267,39 @@ mod tests {
                 let reduced=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();
                 assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err());
             }
-            for conflict in ["--review-fixture","--transport=direct","--transport=relay","--owned-mcp-stdio","--admission-only","--shared-agent-only","--terminal-only","--project-read-only","--grid","--ui","--camera","--ime","--setup","--prepare-emulator","--paging-proof","--physical-hello-capture","--physical-relay-ephemeral","--codex-invalidation-diagnostic","--codex-startup-terminal-capture","--omp-creation-diagnostic","--development-continuity","--development-owner-feedback","--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing"] {
-                let mut mixed=args.clone();mixed.push(conflict.into());
-                assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).is_err());
+            for conflict in [
+                "--review-fixture",
+                "--transport=direct",
+                "--transport=relay",
+                "--owned-mcp-stdio",
+                "--admission-only",
+                "--shared-agent-only",
+                "--terminal-only",
+                "--project-read-only",
+                "--grid",
+                "--ui",
+                "--camera",
+                "--ime",
+                "--setup",
+                "--prepare-emulator",
+                "--paging-proof",
+                "--physical-hello-capture",
+                "--physical-relay-ephemeral",
+                "--codex-invalidation-diagnostic",
+                "--omp-creation-diagnostic",
+                "--development-continuity",
+                "--development-owner-feedback",
+                "--development-android-only",
+                "--keep-foreground-for-feedback",
+                "--defer-retention-crossing",
+            ] {
+                let mut mixed = args.clone();
+                mixed.push(conflict.into());
+                assert!(
+                    feedback_arguments(arguments_base())
+                        .try_get_matches_from(mixed)
+                        .is_err()
+                );
             }
             for backends in [vec!["--backend=omp"],vec!["--backend=codex"],vec!["--backend=omp","--backend=omp"]] {
                 let mut invalid=args.iter().filter(|arg|!arg.starts_with("--backend=")).cloned().collect::<Vec<_>>();
@@ -14549,11 +14380,34 @@ mod tests {
             assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");
         }
         for backend in ["omp","codex"]{let mut conflict=args.clone();conflict.extend(["--backend",backend]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflict).is_err());}
-        for mode in ["--admission-only","--shared-agent-only","--grid","--ui","--camera","--ime","--setup",
-            "--prepare-emulator","--paging-proof","--codex-invalidation-diagnostic","--codex-startup-terminal-capture",
-            "--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral","--development-continuity",
-            "--development-owner-feedback","--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing"] {
-            let mut conflict=args.clone();conflict.push(mode);assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflict).is_err(),"{mode}");
+        for mode in [
+            "--admission-only",
+            "--shared-agent-only",
+            "--grid",
+            "--ui",
+            "--camera",
+            "--ime",
+            "--setup",
+            "--prepare-emulator",
+            "--paging-proof",
+            "--codex-invalidation-diagnostic",
+            "--omp-creation-diagnostic",
+            "--physical-hello-capture",
+            "--physical-relay-ephemeral",
+            "--development-continuity",
+            "--development-owner-feedback",
+            "--development-android-only",
+            "--keep-foreground-for-feedback",
+            "--defer-retention-crossing",
+        ] {
+            let mut conflict = args.clone();
+            conflict.push(mode);
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(conflict)
+                    .is_err(),
+                "{mode}"
+            );
         }
         let mut api=args.clone();api.extend(["--api","35"]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(api).is_err());
         for flag in ["--expected-goatr-sha256","--expected-companion-lock-sha256"] {
@@ -14791,13 +14645,33 @@ mod tests {
             reduced.drain(at..at+count);
             assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");
         }
-        for conflict in ["--admission-only","--grid","--ui","--camera","--ime","--setup",
-            "--prepare-emulator","--paging-proof","--codex-invalidation-diagnostic","--codex-startup-terminal-capture",
-            "--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral",
-            "--development-continuity","--development-owner-feedback","--development-android-only",
-            "--keep-foreground-for-feedback","--defer-retention-crossing"] {
-            let mut conflicting=args.clone();conflicting.push(conflict);
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflicting).is_err(),"{conflict}");
+        for conflict in [
+            "--admission-only",
+            "--grid",
+            "--ui",
+            "--camera",
+            "--ime",
+            "--setup",
+            "--prepare-emulator",
+            "--paging-proof",
+            "--codex-invalidation-diagnostic",
+            "--omp-creation-diagnostic",
+            "--physical-hello-capture",
+            "--physical-relay-ephemeral",
+            "--development-continuity",
+            "--development-owner-feedback",
+            "--development-android-only",
+            "--keep-foreground-for-feedback",
+            "--defer-retention-crossing",
+        ] {
+            let mut conflicting = args.clone();
+            conflicting.push(conflict);
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(conflicting)
+                    .is_err(),
+                "{conflict}"
+            );
         }
     }
     #[test]
@@ -14951,13 +14825,33 @@ mod tests {
             }
             assert!(feedback_arguments(arguments_base()).try_get_matches_from(missing).is_err(),"{required}");
         }
-        for conflict in ["--grid","--ui","--camera","--ime","--setup","--prepare-emulator",
-            "--paging-proof","--codex-invalidation-diagnostic","--codex-startup-terminal-capture",
-            "--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral",
-            "--development-continuity","--development-owner-feedback","--development-android-only",
-            "--keep-foreground-for-feedback","--defer-retention-crossing","--automate-native-inputs"] {
-            let mut conflicting = args.clone(); conflicting.push(conflict);
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflicting).is_err(),"{conflict}");
+        for conflict in [
+            "--grid",
+            "--ui",
+            "--camera",
+            "--ime",
+            "--setup",
+            "--prepare-emulator",
+            "--paging-proof",
+            "--codex-invalidation-diagnostic",
+            "--omp-creation-diagnostic",
+            "--physical-hello-capture",
+            "--physical-relay-ephemeral",
+            "--development-continuity",
+            "--development-owner-feedback",
+            "--development-android-only",
+            "--keep-foreground-for-feedback",
+            "--defer-retention-crossing",
+            "--automate-native-inputs",
+        ] {
+            let mut conflicting = args.clone();
+            conflicting.push(conflict);
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(conflicting)
+                    .is_err(),
+                "{conflict}"
+            );
         }
     }
     #[test]

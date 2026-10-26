@@ -3,7 +3,6 @@ use goatr::{
     config::Config,
     herdr::*,
     protocol::*,
-    state::{ProviderSnapshot, SafeHistory, SessionUpdate, State},
     storage::*,
 };
 use serde_json::{Value, json};
@@ -11,16 +10,10 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
 };
 use tokio::{
     io::{AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{mpsc, watch},
 };
 fn fixture_shell() -> PathBuf {
     std::env::split_paths(&std::env::var_os("PATH").expect("fixture PATH is required"))
@@ -189,6 +182,13 @@ fn strict_snapshot_routing_empty_focus_and_duplicate_terminal_are_not_proof() {
     let snapshot: Snapshot = serde_json::from_value(topology("workspace")).unwrap();
     snapshot.validate().unwrap();
     snapshot.no_focus().unwrap();
+    assert!(
+        !snapshot.pane_grid_subscribe_bound
+            && !snapshot.shell_grid_subscribe_bound
+            && !snapshot.shell_read_bound
+            && !snapshot.artifact_read_bound
+    );
+    assert!(snapshot.panes.iter().all(|pane| pane.read_identity.is_none()));
     let mut empty = snapshot.clone();
     empty.focused_workspace_id = None;
     assert!(empty.no_focus().is_err());
@@ -201,511 +201,7 @@ fn strict_snapshot_routing_empty_focus_and_duplicate_terminal_are_not_proof() {
     wrong.agents[0].terminal_id = Id::new("other").unwrap();
     assert!(wrong.validate().is_err());
 }
-#[tokio::test]
-async fn subscribe_before_snapshot_coalesces_dirty_refresh_reconnects_events_lost_and_exposes_unbound()
- {
-    let root = Root::new();
-    let config = root.config();
-    let listener = UnixListener::bind(root.socket()).unwrap();
-    fs::set_permissions(root.socket(), fs::Permissions::from_mode(0o600)).unwrap();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let subscribed = Arc::new(AtomicUsize::new(0));
-    let (events, rx) = watch::channel(None::<Value>);
-    let (seen, mut seen_rx) = mpsc::channel(32);
-    let (release, release_rx) = watch::channel(false);
-    let count = calls.clone();
-    let active = subscribed.clone();
-    let server = tokio::spawn(async move {
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut event_rx = rx.clone();
-            let count = count.clone();
-            let active = active.clone();
-            let seen = seen.clone();
-            let mut release = release_rx.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stream);
-                let request: Value =
-                    serde_json::from_slice(&read_line(&mut reader).await.unwrap()).unwrap();
-                let id = request["id"].clone();
-                match request["method"].as_str().unwrap() {
-                    "events.subscribe" => {
-                        active.fetch_add(1, Ordering::SeqCst);
-                        write(
-                            reader.get_mut(),
-                            json!({"id":id,"result":{"type":"subscription_started"}}),
-                        )
-                        .await;
-                        loop {
-                            if event_rx.changed().await.is_err() {
-                                break;
-                            }
-                            let event = event_rx.borrow().clone();
-                            if let Some(value) = event
-                                && reader
-                                    .get_mut()
-                                    .write_all(format!("{value}\n").as_bytes())
-                                    .await
-                                    .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                    "session.snapshot" => {
-                        assert!(active.load(Ordering::SeqCst) > 0);
-                        let n = count.fetch_add(1, Ordering::SeqCst) + 1;
-                        seen.send(n).await.unwrap();
-                        if n == 3 {
-                            while !*release.borrow() {
-                                release.changed().await.unwrap();
-                            }
-                        }
-                        let ws = if n < 3 { "first" } else { "after-event" };
-                        write(reader.get_mut(),json!({"id":id,"result":{"type":"session_snapshot","snapshot":topology(ws)}})).await;
-                    }
-                    _ => panic!("unexpected public request"),
-                }
-            });
-        }
-    });
-    let mut storage = Storage::memory([4; 32], 0).unwrap();
-    let p = peer(&mut storage);
-    let storage = Arc::new(StorageOwner::new(storage).unwrap());
-    let state = Arc::new(State::default());
-    let connection = state.connect(&p);
-    let host = EndpointId(iroh::SecretKey::from_bytes(&[7; 32]).public().to_string());
-    let owner = Topology::new(config, storage.clone(), state.clone(), host)
-        .await
-        .unwrap();
-    let (stop, stop_rx) = watch::channel(false);
-    let job = tokio::spawn(owner.clone().run(stop_rx));
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while seen_rx.recv().await.unwrap() < 2 {}
-    })
-    .await
-    .unwrap();
-    events
-        .send(Some(json!({"event":"pane_updated","data":{}})))
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while seen_rx.recv().await.unwrap() < 3 {}
-    })
-    .await
-    .unwrap();
-    events
-        .send(Some(json!({"event":"pane_moved","data":{}})))
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    release.send(true).unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while seen_rx.recv().await.unwrap() < 4 {}
-    })
-    .await
-    .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            state.host_snapshot(&connection, Uuid::random()).unwrap();
-            let mut found = false;
-            while let (Some(bytes), _) = state.pop_output(&connection).unwrap() {
-                if let Envelope::Response(response) =
-                    decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
-                    && let Ok(ResultBody::HostSnapshot(value)) = response.outcome
-                    && value
-                        .unbound
-                        .iter()
-                        .any(|r| r.workspace_id.0 == "after-event")
-                {
-                    assert_eq!(value.unbound.len(), 1);
-                    assert!(value.projects.is_empty());
-                    assert!(!value.servers[0].can_create.omp);
-                    let graph = value
-                        .hierarchy
-                        .iter()
-                        .find(|h| h.server_id == value.servers[0].server_id)
-                        .unwrap();
-                    assert_eq!(graph.freshness, NativeFreshness::Current);
-                    assert_eq!(
-                        graph
-                            .workspaces
-                            .iter()
-                            .map(|w| (
-                                w.workspace_id.0.as_str(),
-                                w.number.0,
-                                w.label.as_ref().unwrap().0.as_str()
-                            ))
-                            .collect::<Vec<_>>(),
-                        vec![
-                            ("after-event", 7, "Native workspace"),
-                            ("shell-workspace", 1, "Shell only"),
-                            ("empty-workspace", 3, "Empty workspace"),
-                            ("unsupported-workspace", 4, "Unsupported agent")
-                        ]
-                    );
-                    assert_eq!(
-                        graph
-                            .tabs
-                            .iter()
-                            .map(|t| (t.tab_id.0.as_str(), t.label.as_ref().unwrap().0.as_str()))
-                            .collect::<Vec<_>>(),
-                        vec![
-                            ("tab", "Native tab"),
-                            ("shell-tab", "Development shell"),
-                            ("unsupported-tab", "Other agent tab")
-                        ]
-                    );
-                    assert_eq!(
-                        graph.panes[0].unbound_row_id,
-                        Some(value.unbound[0].row_id.clone())
-                    );
-                    let shell = graph
-                        .panes
-                        .iter()
-                        .find(|p| p.terminal_id.0 == "shell-terminal")
-                        .unwrap();
-                    assert!(
-                        shell.target.is_none()
-                            && shell.unbound_row_id.is_none()
-                            && shell.agent.is_none()
-                    );
-                    assert_eq!(shell.label.as_ref().unwrap().0, "Local shell");
-                    assert!(shell.title.is_none());
-                    assert_eq!(
-                        shell.display_unavailable,
-                        Some(NativeDisplayUnavailable::TooLarge)
-                    );
-                    let unsupported = graph
-                        .panes
-                        .iter()
-                        .find(|p| p.terminal_id.0 == "unsupported-terminal")
-                        .unwrap();
-                    assert!(unsupported.target.is_none() && unsupported.unbound_row_id.is_none());
-                    assert_eq!(unsupported.agent_name.as_ref().unwrap().0, "desktop-alias");
-                    assert_eq!(unsupported.agent_status, NativeAgentStatus::Blocked);
-                    assert_eq!(
-                        unsupported.restore_reason,
-                        Some(NativeRestoreReason::RestoreFailed)
-                    );
-                    assert!(
-                        !std::str::from_utf8(&bytes)
-                            .unwrap()
-                            .contains("/private/host/restore/process-report")
-                    );
-                    found = true;
-                }
-            }
-            if found {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let before = subscribed.load(Ordering::SeqCst);
-    events
-        .send(Some(
-            json!({"id":"lost","error":{"code":"events_lost","message":"resnapshot"}}),
-        ))
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(4), async {
-        while subscribed.load(Ordering::SeqCst) == before {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    stop.send(true).unwrap();
-    job.await.unwrap().unwrap();
-    server.abort();
-    drop(owner);
-    Arc::try_unwrap(storage)
-        .ok()
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-}
 
-#[tokio::test]
-async fn silent_native_report_refresh_is_stable_and_discards_event_races() {
-    let root = Root::new();
-    let config = root.config();
-    let listener = UnixListener::bind(root.socket()).unwrap();
-    fs::set_permissions(root.socket(), fs::Permissions::from_mode(0o600)).unwrap();
-    let mut pending = topology("workspace");
-    pending["agents"][0]["agent_session"] = Value::Null;
-    pending["agents"][0]["launch_pending"] = json!(true);
-    pending["agents"][0]["interactive_ready"] = json!(false);
-    let (current, current_rx) = watch::channel(pending);
-    let (events, event_rx) = watch::channel(None::<Value>);
-    let (release, release_rx) = watch::channel(false);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let subscribed = Arc::new(AtomicUsize::new(0));
-    let blocked_call = Arc::new(AtomicUsize::new(usize::MAX));
-    let (seen, mut seen_rx) = mpsc::channel(32);
-    let count = calls.clone();
-    let subscriptions = subscribed.clone();
-    let blocked = blocked_call.clone();
-    let server = tokio::spawn(async move {
-        let mut requests = tokio::task::JoinSet::new();
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut event_rx = event_rx.clone();
-            let current_rx = current_rx.clone();
-            let mut release_rx = release_rx.clone();
-            let count = count.clone();
-            let subscriptions = subscriptions.clone();
-            let blocked = blocked.clone();
-            let seen = seen.clone();
-            requests.spawn(async move {
-                let mut reader = BufReader::new(stream);
-                let request: Value =
-                    serde_json::from_slice(&read_line(&mut reader).await.unwrap()).unwrap();
-                match request["method"].as_str().unwrap() {
-                    "events.subscribe" => {
-                        write(reader.get_mut(), json!({"id":request["id"],"result":{"type":"subscription_started"}})).await;
-                        subscriptions.fetch_add(1, Ordering::SeqCst);
-                        while event_rx.changed().await.is_ok() {
-                            let value = event_rx.borrow_and_update().clone();
-                            if let Some(value) = value
-                                && reader.get_mut().write_all(format!("{value}\n").as_bytes()).await.is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                    "session.snapshot" => {
-                        assert!(subscriptions.load(Ordering::SeqCst) > 0);
-                        let snapshot = current_rx.borrow().clone();
-                        let n = count.fetch_add(1, Ordering::SeqCst) + 1;
-                        seen.send(n).await.unwrap();
-                        if n == blocked.load(Ordering::SeqCst) {
-                            while !*release_rx.borrow() {
-                                release_rx.changed().await.unwrap();
-                            }
-                        }
-                        write(reader.get_mut(), json!({"id":request["id"],"result":{"type":"session_snapshot","snapshot":snapshot}})).await;
-                    }
-                    _ => panic!("unexpected public request"),
-                }
-            });
-        }
-    });
-    let mut store = Storage::memory([14; 32], 0).unwrap();
-    let paired = peer(&mut store);
-    let boot = store.boot_id.clone();
-    let storage = Arc::new(StorageOwner::new(store).unwrap());
-    let state = Arc::new(State::default());
-    let connection = state.connect(&paired);
-    let host = EndpointId(iroh::SecretKey::from_bytes(&[14; 32]).public().to_string());
-    let owner = Topology::new(config, storage.clone(), state.clone(), host.clone())
-        .await
-        .unwrap();
-    let (stop, stop_rx) = watch::channel(false);
-    let job = tokio::spawn(owner.clone().run(stop_rx));
-    let first = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Some(server) = inventory(&state, &connection).servers.first()
-                && let Ok(source) = owner.source(&server.server_id)
-            {
-                break source;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(first.snapshot.agents[0].agent_session.is_none());
-    assert!(first.snapshot.agents[0].launch_pending);
-
-    // Native/readiness-only changes deliberately send no Herdr event.
-    let mut matured = topology("workspace");
-    matured["agents"][0]["launch_pending"] = json!(false);
-    matured["agents"][0]["interactive_ready"] = json!(true);
-    current.send(matured.clone()).unwrap();
-    let mature_source = tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            if let Ok(source) = owner.source(&first.server_id)
-                && source.snapshot.agents[0].agent_session.is_some()
-                && source.snapshot.agents[0].interactive_ready
-            {
-                break source;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("existing discovery cadence must refresh a silent native report");
-    assert!(!mature_source.snapshot.agents[0].launch_pending);
-    assert!(first.recheck().is_err());
-    assert_eq!(first.incarnation, mature_source.incarnation);
-    assert_eq!(first.evidence, mature_source.evidence);
-    let subscriptions_before = subscribed.load(Ordering::SeqCst);
-    let native_owner = process_evidence(std::process::id()).unwrap();
-    let key = StableSessionKey {
-        host_id: host,
-        server_id: mature_source.server_id.clone(),
-        server_incarnation: mature_source.incarnation.clone(),
-        terminal_id: Id::new("terminal").unwrap(),
-        provider_owner_identity: Id::new(format!(
-            "{}:{}",
-            native_owner.pid, native_owner.start_ticks
-        ))
-        .unwrap(),
-        native_conversation_id: Id::new("/outside/session.jsonl").unwrap(),
-    };
-    let display: SessionState = serde_json::from_value(json!({
-        "summary":{"sessionId":Uuid::random(),"generation":Uuid::random(),"serverId":mature_source.server_id,
-            "workspaceId":"workspace","terminalId":"terminal","paneId":"pane","provider":"omp",
-            "nativeId":"/outside/session.jsonl","title":"retained fixture","status":"idle","connectivity":"ready",
-            "capabilities":{"history":true,"prompt":true,"cancel":true,"respond":true,"promptMode":"submit_or_steer","cancelMode":"current_work"},
-            "historyCoverage":{"scope":"all_branches","source":"persisted_and_live","olderAvailable":false,"sourceTruncated":false,"desktopBranchKnown":false}},
-        "desktopSelection":"unknown","activity":{"state":"idle"}
-    })).unwrap();
-    let (target, epoch) = owner
-        .begin_native(key.clone(), native_owner.clone(), display.clone(), false)
-        .await
-        .unwrap();
-    let mut installed = display;
-    installed.summary.session_id = target.session_id.clone();
-    installed.summary.generation = target.generation.clone();
-    owner.finish_native(&key, &native_owner, &epoch, ProviderSnapshot {
-        state: installed,
-        history: vec![SafeHistory::from_redacted_display(serde_json::from_value(json!({
-            "id":"retained","order":0,"role":"assistant","kind":"message",
-            "text":{"kind":"text","text":"retained fixture history"},"source":"live","complete":true,"sourceTruncated":false
-        })).unwrap()).unwrap()],
-        pending: vec![],
-        older_available: false,
-        native_older: None,
-    }).await.unwrap();
-    let prompt = Request {
-        id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
-        target: target.clone(),
-        text: PromptText::new("fixture admission").unwrap(), }),
-    };
-    state.validate_session_mutation(&prompt).unwrap();
-    let retained_history = state
-        .history(&paired, &target, None, 100, 0)
-        .unwrap()
-        .result
-        .records;
-
-    let before = calls.load(Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(7), async {
-        while seen_rx.recv().await.unwrap() <= before {}
-    })
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let unchanged = owner.source(&first.server_id).unwrap();
-    assert!(Arc::ptr_eq(&mature_source.snapshot, &unchanged.snapshot));
-    assert!(mature_source.recheck().is_ok());
-    assert_eq!(subscribed.load(Ordering::SeqCst), subscriptions_before);
-    state.validate_session_mutation(&prompt).unwrap();
-    state.validate_source(&target, &epoch).unwrap();
-
-    // Equal data after an event is still dirty and must be revalidated.
-    events
-        .send(Some(json!({"event":"pane_updated","data":{}})))
-        .unwrap();
-    let revalidated = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if unchanged.recheck().is_err()
-                && let Ok(source) = owner.source(&first.server_id)
-                && !Arc::ptr_eq(&unchanged.snapshot, &source.snapshot)
-            {
-                break source;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(revalidated.snapshot.as_ref(), unchanged.snapshot.as_ref());
-    assert_eq!(revalidated.incarnation, unchanged.incarnation);
-    assert_eq!(subscribed.load(Ordering::SeqCst), subscriptions_before);
-    state.validate_session_mutation(&prompt).unwrap();
-    state.validate_source(&target, &epoch).unwrap();
-    assert_eq!(
-        state
-            .session_state(&target, &epoch)
-            .unwrap()
-            .summary
-            .connectivity,
-        SessionConnectivity::Ready
-    );
-    assert_eq!(
-        state
-            .history(&paired, &target, None, 100, 0)
-            .unwrap()
-            .result
-            .records,
-        retained_history
-    );
-
-    let mut raced = matured.clone();
-    raced["agents"][0]["title"] = json!("race must not install");
-    current.send(raced).unwrap();
-    let blocked_number = calls.load(Ordering::SeqCst) + 1;
-    blocked_call.store(blocked_number, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(7), async {
-        while seen_rx.recv().await.unwrap() < blocked_number {}
-    })
-    .await
-    .unwrap();
-    let mut final_snapshot = matured;
-    final_snapshot["agents"][0]["title"] = json!("after racing event");
-    current.send(final_snapshot).unwrap();
-    events
-        .send(Some(json!({"event":"pane_updated","data":{}})))
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while revalidated.recheck().is_ok() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    release.send(true).unwrap();
-    let recovered = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Ok(source) = owner.source(&first.server_id)
-                && source.snapshot.agents[0].title.as_deref() == Some("after racing event")
-            {
-                break source;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("raced cadence snapshot must be discarded and refetched");
-    assert_eq!(recovered.incarnation, revalidated.incarnation);
-    assert_eq!(recovered.evidence, revalidated.evidence);
-    state.validate_session_mutation(&prompt).unwrap();
-    state.validate_source(&target, &epoch).unwrap();
-    assert_eq!(
-        state
-            .history(&paired, &target, None, 100, 0)
-            .unwrap()
-            .result
-            .records,
-        retained_history
-    );
-    stop.send(true).unwrap();
-    job.await.unwrap().unwrap();
-    server.abort();
-    let _ = server.await;
-    drop(owner);
-    Arc::try_unwrap(storage)
-        .ok()
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-}
 
 #[test]
 fn grouping_is_not_proof_mapping_display_restores_offline_and_retirement_preserves_receipts() {
@@ -870,472 +366,8 @@ async fn response_socket_replacement_preserves_known_creation_ids_as_changed_not
     drop(server.await.unwrap());
 }
 
-fn inventory(state: &State, connection: &Uuid) -> HostSnapshotResult {
-    let request = Uuid::random();
-    state.host_snapshot(connection, request.clone()).unwrap();
-    let mut snapshot = None;
-    while let (Some(bytes), _) = state.pop_output(connection).unwrap() {
-        if let Envelope::Response(response) =
-            decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
-            && response.id == request
-        {
-            let Ok(ResultBody::HostSnapshot(value)) = response.outcome else {
-                panic!("host snapshot response required")
-            };
-            snapshot = Some(value);
-        }
-    }
-    snapshot.unwrap()
-}
-
-fn idle_topology_server(
-    listener: UnixListener,
-    subscribed: Arc<AtomicUsize>,
-    snapshot: Value,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut requests = tokio::task::JoinSet::new();
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let subscribed = subscribed.clone();
-            let snapshot = snapshot.clone();
-            requests.spawn(async move {
-                let mut reader = BufReader::new(stream);
-                let request: Value =
-                    serde_json::from_slice(&read_line(&mut reader).await.unwrap()).unwrap();
-                match request["method"].as_str().unwrap() {
-                    "events.subscribe" => {
-                        write(
-                            reader.get_mut(),
-                            json!({"id":request["id"],"result":{"type":"subscription_started"}}),
-                        )
-                        .await;
-                        subscribed.fetch_add(1, Ordering::SeqCst);
-                        // Keep the real subscription idle: no topology event wakes recovery.
-                        let _ = read_line(&mut reader).await;
-                    }
-                    "session.snapshot" => {
-                        assert!(subscribed.load(Ordering::SeqCst) > 0);
-                        write(
-                            reader.get_mut(),
-                            json!({"id":request["id"],"result":{"type":"session_snapshot","snapshot":snapshot}}),
-                        )
-                        .await;
-                    }
-                    _ => panic!("unexpected public request"),
-                }
-            });
-        }
-    })
-}
-
-async fn healthy_prerequisites(config: &Config) {
-    let slots = discover(config)
-        .await
-        .expect("initial real discovery process must succeed");
-    assert_eq!(slots.len(), 1);
-    let path = &slots[0].socket_path;
-    Client::connect(path)
-        .await
-        .expect("initial private socket, credentials and procfs evidence must succeed")
-        .request(
-            "events.subscribe",
-            json!({"subscriptions":[]}),
-            "subscription_started",
-        )
-        .await
-        .expect("initial subscription_started must be observable");
-    Client::connect(path)
-        .await
-        .expect("initial snapshot socket evidence must succeed")
-        .snapshot()
-        .await
-        .expect("initial authoritative public snapshot must validate");
-}
-
 #[tokio::test]
-async fn replacement_owner_with_unchanged_herdr_report_offlines_old_authority() {
-    let root = Root::new();
-    let config = root.config();
-    let listener = UnixListener::bind(root.socket()).unwrap();
-    fs::set_permissions(root.socket(), fs::Permissions::from_mode(0o600)).unwrap();
-    // Retain the old socket object through replacement so the kernel cannot reuse its inode.
-    let _socket_inode = std::os::fd::AsFd::as_fd(&listener)
-        .try_clone_to_owned()
-        .unwrap();
-    let mut server = idle_topology_server(
-        listener,
-        Arc::new(AtomicUsize::new(0)),
-        topology("workspace"),
-    );
-    healthy_prerequisites(&config).await;
-    let mut store = Storage::memory([11; 32], 0).unwrap();
-    let p = peer(&mut store);
-    let boot = store.boot_id.clone();
-    let storage = Arc::new(StorageOwner::new(store).unwrap());
-    let state = Arc::new(State::default());
-    let connection = state.connect(&p);
-    let host = EndpointId(iroh::SecretKey::from_bytes(&[11; 32]).public().to_string());
-    let owner = Topology::new(config, storage.clone(), state.clone(), host.clone())
-        .await
-        .unwrap();
-    let (stop, stop_rx) = watch::channel(false);
-    let job = tokio::spawn(owner.clone().run(stop_rx));
-    let source = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let snapshot = inventory(&state, &connection);
-            if let Some(server) = snapshot.servers.first()
-                && let Ok(source) = owner.source(&server.server_id)
-            {
-                break source;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "initial source bootstrap failed: {error}; inventory={:?}",
-            inventory(&state, &connection)
-        )
-    });
-    let mut old_process = tokio::process::Command::new("sleep")
-        .arg("30")
-        .kill_on_drop(true)
-        .spawn()
-        .expect("owned native-owner identity fixture must start");
-    let old_evidence = process_evidence(old_process.id().unwrap()).unwrap();
-    let key = StableSessionKey {
-        host_id: host,
-        server_id: source.server_id.clone(),
-        server_incarnation: source.incarnation.clone(),
-        terminal_id: Id::new("terminal").unwrap(),
-        provider_owner_identity: Id::new(format!(
-            "{}:{}",
-            old_evidence.pid, old_evidence.start_ticks
-        ))
-        .unwrap(),
-        native_conversation_id: Id::new("/outside/session.jsonl").unwrap(),
-    };
-    let display: SessionState = serde_json::from_value(json!({
-        "summary":{
-            "sessionId":Uuid::random(),"generation":Uuid::random(),"serverId":source.server_id,
-            "workspaceId":"workspace","terminalId":"terminal","paneId":"pane","provider":"omp",
-            "nativeId":"/outside/session.jsonl","title":"native binding","status":"idle",
-            "connectivity":"ready",
-            "capabilities":{"history":true,"prompt":true,"cancel":true,"respond":true,
-                "promptMode":"submit_or_steer","cancelMode":"current_work"},
-            "historyCoverage":{"scope":"all_branches","source":"persisted_and_live",
-                "olderAvailable":false,"sourceTruncated":false,"desktopBranchKnown":false}
-        },
-        "desktopSelection":"unknown","activity":{"state":"idle"}
-    }))
-    .unwrap();
-    let history = SafeHistory::from_redacted_display(
-        serde_json::from_value(json!({
-            "id":"retained","order":0,"role":"assistant","kind":"message",
-            "text":{"kind":"text","text":"old history"},"source":"live",
-            "complete":true,"sourceTruncated":false
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let snapshot = ProviderSnapshot {
-        state: display,
-        history: vec![history],
-        pending: vec![],
-        older_available: false,
-        native_older: None,
-    };
-    let (old, epoch) = owner
-        .begin_native(
-            key.clone(),
-            old_evidence.clone(),
-            snapshot.state.clone(),
-            false,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        inventory(&state, &connection)
-            .sessions
-            .iter()
-            .find(|s| s.session_id == old.session_id)
-            .unwrap()
-            .connectivity,
-        SessionConnectivity::Synchronizing
-    );
-    let large = state
-        .content(&old, Mime::TextPlain, "large".repeat(CONTENT_INLINE_MAX), 0)
-        .unwrap();
-    let mut old_snapshot = snapshot.clone();
-    old_snapshot.state.summary.session_id = old.session_id.clone();
-    old_snapshot.state.summary.generation = old.generation.clone();
-    old_snapshot.history.push(
-        SafeHistory::from_redacted_display(HistoryRecord {
-            id: Id("large-original".into()),
-            parent_id: None,
-            turn_id: None,
-            order: Uint(1),
-            timestamp: None,
-            role: Role::Assistant,
-            kind: RecordKind::Message,
-            text: Some(large.clone()),
-            tool: None,
-            original: None,
-            source: RecordSource::Persisted,
-            complete: true,
-            source_truncated: false,
-        })
-        .unwrap(),
-    );
-    let stale_snapshot = old_snapshot.clone();
-    owner
-        .finish_native(&key, &old_evidence, &epoch, old_snapshot)
-        .await
-        .unwrap();
-    let retained_history = state
-        .history(&p, &old, None, 100, 0)
-        .unwrap()
-        .result
-        .records;
-    let prompt = Request {
-        id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
-        target: old.clone(),
-        text: PromptText::new("old owner").unwrap(), }),
-    };
-    state.validate_session_mutation(&prompt).unwrap();
-    let proof = p.clone();
-    let request = prompt.clone();
-    let retained = storage
-        .call(move |s| {
-            s.reserve(&proof, &request, 0, |_| Ok(()))?;
-            s.status(&proof, &request.id, 0)
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    let Content::Ref(content) = state
-        .content(&old, Mime::TextPlain, "x".repeat(CONTENT_INLINE_MAX + 1), 0)
-        .unwrap()
-    else {
-        panic!("content handle required")
-    };
-    let read = ContentReadParams {
-        target: old.clone(),
-        handle: content.handle,
-        offset_bytes: Uint(0),
-        limit_bytes: Uint(1),
-    };
-    state.read_content(&p, &read, 0).unwrap();
-    old_process.kill().await.unwrap();
-    old_process.wait().await.unwrap();
-    let mut replacement_process = tokio::process::Command::new("sleep")
-        .arg("30")
-        .kill_on_drop(true)
-        .spawn()
-        .expect("replacement native-owner identity fixture must start");
-    let replacement_evidence = process_evidence(replacement_process.id().unwrap()).unwrap();
-    let changed = StableSessionKey {
-        provider_owner_identity: Id::new(format!(
-            "{}:{}",
-            replacement_evidence.pid, replacement_evidence.start_ticks
-        ))
-        .unwrap(),
-        ..key.clone()
-    };
-    let (new, new_epoch) = owner
-        .begin_native(
-            changed.clone(),
-            replacement_evidence.clone(),
-            snapshot.state.clone(),
-            false,
-        )
-        .await
-        .unwrap();
-    assert!(
-        owner
-            .finish_native(&key, &old_evidence, &epoch, stale_snapshot)
-            .await
-            .is_err()
-    );
-    assert!(state.abort_install(&old, &epoch).is_err());
-    assert_eq!(
-        inventory(&state, &connection)
-            .sessions
-            .iter()
-            .find(|s| s.session_id == new.session_id)
-            .unwrap()
-            .connectivity,
-        SessionConnectivity::Synchronizing
-    );
-    let mut new_snapshot = snapshot;
-    new_snapshot.state.summary.session_id = new.session_id.clone();
-    new_snapshot.state.summary.generation = new.generation.clone();
-    owner
-        .finish_native(&changed, &replacement_evidence, &new_epoch, new_snapshot)
-        .await
-        .unwrap();
-    assert_ne!(old.session_id, new.session_id);
-    assert_eq!(
-        source.snapshot.agents[0].agent_session,
-        owner.source(&source.server_id).unwrap().snapshot.agents[0].agent_session,
-    );
-    let visible = inventory(&state, &connection);
-    let graph = visible
-        .hierarchy
-        .iter()
-        .find(|h| h.server_id == source.server_id)
-        .unwrap();
-    assert_eq!(graph.server_incarnation, source.incarnation);
-    assert_eq!(
-        graph
-            .panes
-            .iter()
-            .find(|p| p.terminal_id.0 == "terminal")
-            .unwrap()
-            .target,
-        Some(new.clone())
-    );
-    assert!(graph.panes.iter().all(|p| p.target.as_ref() != Some(&old)));
-    let old_row = visible
-        .sessions
-        .iter()
-        .find(|s| s.session_id == old.session_id)
-        .unwrap();
-    assert_eq!(old_row.connectivity, SessionConnectivity::Offline);
-    assert_eq!(
-        visible
-            .sessions
-            .iter()
-            .find(|s| s.session_id == new.session_id)
-            .unwrap()
-            .connectivity,
-        SessionConnectivity::Ready,
-    );
-    assert_eq!(
-        state.validate_session_mutation(&prompt),
-        Err(ErrorCode::NotReady)
-    );
-    assert_eq!(
-        state.update_from_source(
-            &old,
-            &epoch,
-            SessionUpdate::Activity(Activity {
-                state: ActivityState::Working,
-                text: None,
-                tool_record_id: None,
-            }),
-        ),
-        Err(ErrorCode::CursorExpired),
-    );
-    assert_eq!(
-        state.read_content(&p, &read, 0).unwrap_err(),
-        ErrorCode::ContentExpired
-    );
-    state.validate_source(&new, &new_epoch).unwrap();
-    assert_eq!(
-        state
-            .history(&p, &old, None, 100, 0)
-            .unwrap()
-            .result
-            .records,
-        retained_history,
-        "owner replacement must preserve completed history unchanged"
-    );
-    assert_eq!(
-        storage
-            .call(|s| s.persisted_sessions())
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
-    let proof = p.clone();
-    let action = prompt.id.clone();
-    assert_eq!(
-        storage
-            .call(move |s| s.status(&proof, &action, 0))
-            .await
-            .unwrap(),
-        Some(retained)
-    );
-    server.abort();
-    let _ = server.await;
-    fs::remove_file(root.socket()).unwrap();
-    let listener = UnixListener::bind(root.socket()).unwrap();
-    fs::set_permissions(root.socket(), fs::Permissions::from_mode(0o600)).unwrap();
-    server = idle_topology_server(
-        listener,
-        Arc::new(AtomicUsize::new(0)),
-        topology("workspace"),
-    );
-    let replaced = tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
-            let inventory = inventory(&state, &connection);
-            if inventory.hierarchy.iter().any(|h| {
-                h.server_id == source.server_id
-                    && h.server_incarnation != source.incarnation
-                    && h.freshness == NativeFreshness::Current
-            }) {
-                break inventory;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(
-        replaced
-            .sessions
-            .iter()
-            .filter(|s| s.session_id == old.session_id || s.session_id == new.session_id)
-            .all(|s| s.connectivity == SessionConnectivity::Offline)
-    );
-    let graph = replaced
-        .hierarchy
-        .iter()
-        .find(|h| h.server_id == source.server_id)
-        .unwrap();
-    let pane = graph
-        .panes
-        .iter()
-        .find(|p| p.terminal_id.0 == "terminal")
-        .unwrap();
-    assert!(
-        pane.target.is_none(),
-        "matching native route strings cannot join an old incarnation Target"
-    );
-    assert_eq!(
-        pane.unbound_row_id,
-        Some(
-            replaced
-                .unbound
-                .iter()
-                .find(|r| r.terminal_id.0 == "terminal")
-                .unwrap()
-                .row_id
-                .clone()
-        )
-    );
-    replacement_process.kill().await.unwrap();
-    replacement_process.wait().await.unwrap();
-    stop.send(true).unwrap();
-    job.await.unwrap().unwrap();
-    server.abort();
-    let _ = server.await;
-    drop(owner);
-    Arc::try_unwrap(storage)
-        .ok()
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn discovery_failure_then_idle_healthy_subscription_recovers_without_event() {
+async fn discovery_failure_then_healthy_cli_recovers_without_replacing_configuration() {
     let root = Root::new();
     let config = root.config();
     let executable = config.executables.herdr.clone();
@@ -1351,150 +383,118 @@ async fn discovery_failure_then_idle_healthy_subscription_recovers_without_event
         ),
     )
     .unwrap();
-    let listener = UnixListener::bind(root.socket()).unwrap();
-    fs::set_permissions(root.socket(), fs::Permissions::from_mode(0o600)).unwrap();
-    let subscribed = Arc::new(AtomicUsize::new(0));
-    let server = idle_topology_server(listener, subscribed.clone(), topology("workspace"));
-    healthy_prerequisites(&config).await;
-    fs::remove_file(&count).unwrap();
-    let mut store = Storage::memory([12; 32], 0).unwrap();
-    let p = peer(&mut store);
-    let storage = Arc::new(StorageOwner::new(store).unwrap());
-    let state = Arc::new(State::default());
-    let connection = state.connect(&p);
-    let host = EndpointId(iroh::SecretKey::from_bytes(&[12; 32]).public().to_string());
-    let owner = Topology::new(config, storage.clone(), state.clone(), host)
-        .await
-        .unwrap();
-    let (stop, stop_rx) = watch::channel(false);
-    let job = tokio::spawn(owner.clone().run(stop_rx));
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if inventory(&state, &connection)
-                .servers
-                .first()
-                .is_some_and(|s| s.connectivity == ServerConnectivity::Online)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "initial source bootstrap failed: {error}; inventory={:?}",
-            inventory(&state, &connection)
-        )
-    });
-    let before = subscribed.load(Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(7), async {
-        loop {
-            if inventory(&state, &connection)
-                .servers
-                .first()
-                .is_some_and(|s| {
-                    s.reason.as_deref() == Some("Configured Herdr discovery is unavailable")
-                })
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    tokio::time::timeout(Duration::from_secs(7), async {
-        loop {
-            if inventory(&state, &connection)
-                .servers
-                .first()
-                .is_some_and(|s| s.connectivity == ServerConnectivity::Online)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("healthy discovery must recover idle inventory without a topology event");
-    assert!(subscribed.load(Ordering::SeqCst) > before);
-    assert!(
-        fs::read_to_string(count)
-            .unwrap()
-            .trim()
-            .parse::<usize>()
-            .unwrap()
-            >= 3
-    );
-    stop.send(true).unwrap();
-    job.await.unwrap().unwrap();
-    server.abort();
-    let _ = server.await;
-    drop(owner);
-    Arc::try_unwrap(storage)
-        .ok()
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
+    let first = discover(&config).await.unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].socket_path, root.socket());
+    assert!(discover(&config).await.is_err());
+    let recovered = discover(&config).await.unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].socket_path, first[0].socket_path);
+    assert_eq!(config.executables.herdr, executable);
+    assert_eq!(fs::read_to_string(count).unwrap().trim(), "3");
 }
 
 #[tokio::test]
-async fn hierarchy_node_overflow_is_explicit_without_hiding_supported_inventory() {
+async fn stock_creation_and_rename_acknowledgments_admit_without_private_fields() {
     let root = Root::new();
-    let config = root.config();
-    let mut snapshot = topology("workspace");
-    for n in 3..510 {
-        snapshot["panes"].as_array_mut().unwrap().push(json!({
-            "pane_id":format!("shell-pane-{n}"),"terminal_id":format!("shell-terminal-{n}"),
-            "workspace_id":"shell-workspace","tab_id":"shell-tab","focused":false,"agent_status":"unknown"
-        }));
-    }
     let listener = UnixListener::bind(root.socket()).unwrap();
     fs::set_permissions(root.socket(), fs::Permissions::from_mode(0o600)).unwrap();
-    let server = idle_topology_server(listener, Arc::new(AtomicUsize::new(0)), snapshot);
-    let mut store = Storage::memory([13; 32], 0).unwrap();
-    let peer = peer(&mut store);
-    let storage = Arc::new(StorageOwner::new(store).unwrap());
-    let state = Arc::new(State::default());
-    let connection = state.connect(&peer);
-    let host = EndpointId(iroh::SecretKey::from_bytes(&[13; 32]).public().to_string());
-    let owner = Topology::new(config, storage.clone(), state.clone(), host)
-        .await
-        .unwrap();
-    let (stop, rx) = watch::channel(false);
-    let job = tokio::spawn(owner.clone().run(rx));
-    let inventory = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let inventory = inventory(&state, &connection);
-            if !inventory.hierarchy.is_empty() && !inventory.unbound.is_empty() {
-                break inventory;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    let server = tokio::spawn(async move {
+        for expected in [
+            "workspace.create",
+            "tab.create",
+            "agent.rename",
+            "workspace.rename",
+        ] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let request: Value =
+                serde_json::from_slice(&read_line(&mut reader).await.unwrap()).unwrap();
+            assert_eq!(request["method"], expected);
+            let result = match expected {
+                "workspace.create" => {
+                    assert_eq!(
+                        request["params"],
+                        json!({"cwd":"/approved","label":"Created","focus":false})
+                    );
+                    json!({"type":"workspace_created",
+                        "workspace":{"workspace_id":"created","number":2,"label":"Created","focused":false,"active_tab_id":"new-tab","agent_status":"unknown"},
+                        "root_pane":{"pane_id":"new-pane","terminal_id":"new-terminal","workspace_id":"created","tab_id":"new-tab","focused":false,"agent_status":"unknown"},
+                        "tab":{"tab_id":"new-tab","workspace_id":"created","number":1,"label":"Shell","focused":false,"agent_status":"unknown"}})
+                }
+                "tab.create" => {
+                    assert_eq!(
+                        request["params"],
+                        json!({"workspace_id":"created","cwd":"/approved","focus":false})
+                    );
+                    json!({"type":"tab_created",
+                        "root_pane":{"pane_id":"tab-pane","terminal_id":"tab-terminal","workspace_id":"created","tab_id":"another-tab","focused":false,"agent_status":"unknown"},
+                        "tab":{"tab_id":"another-tab","workspace_id":"created","number":2,"label":"Shell","focused":false,"agent_status":"unknown"}})
+                }
+                "agent.rename" => {
+                    assert_eq!(
+                        request["params"],
+                        json!({"target":"new-pane","name":"renamed-agent"})
+                    );
+                    json!({"type":"agent_info","agent":{"pane_id":"new-pane","terminal_id":"new-terminal",
+                        "workspace_id":"created","tab_id":"new-tab","agent":"codex","name":"renamed-agent"}})
+                }
+                "workspace.rename" => {
+                    assert_eq!(
+                        request["params"],
+                        json!({"workspace_id":"created","label":"Renamed workspace"})
+                    );
+                    json!({"type":"workspace_info","workspace":{"workspace_id":"created","number":2,
+                        "label":"Renamed workspace","focused":false,"active_tab_id":"new-tab","agent_status":"unknown"}})
+                }
+                _ => unreachable!(),
+            };
+            write(reader.get_mut(), json!({"id":request["id"],"result":result})).await;
         }
-    })
-    .await
-    .unwrap();
-    let graph = &inventory.hierarchy[0];
-    assert_eq!(graph.freshness, NativeFreshness::Unavailable);
-    assert_eq!(graph.reason, Some(NativeUnavailableReason::TooLarge));
-    assert!(graph.workspaces.is_empty() && graph.tabs.is_empty() && graph.panes.is_empty());
-    assert_eq!(inventory.unbound[0].terminal_id.0, "terminal");
-    assert!(inventory.sessions.is_empty() && inventory.projects.is_empty());
-    assert_eq!(
-        owner.source(&graph.server_id).unwrap().snapshot.panes.len(),
-        510
-    );
-    stop.send(true).unwrap();
-    job.await.unwrap().unwrap();
-    server.abort();
-    let _ = server.await;
-    drop(owner);
-    Arc::try_unwrap(storage)
-        .ok()
+    });
+    let created = Client::connect(&root.socket())
+        .await
         .unwrap()
-        .close()
+        .request(
+            "workspace.create",
+            json!({"cwd":"/approved","label":"Created","focus":false}),
+            "workspace_created",
+        )
         .await
         .unwrap();
+    assert_eq!(created["workspace"]["workspace_id"], "created");
+    assert_eq!(created["root_pane"]["terminal_id"], "new-terminal");
+    let tab = Client::connect(&root.socket())
+        .await
+        .unwrap()
+        .request(
+            "tab.create",
+            json!({"workspace_id":"created","cwd":"/approved","focus":false}),
+            "tab_created",
+        )
+        .await
+        .unwrap();
+    assert_eq!(tab["root_pane"]["tab_id"], tab["tab"]["tab_id"]);
+    let agent = Client::connect(&root.socket())
+        .await
+        .unwrap()
+        .agent_rename(
+            &Id("new-pane".into()),
+            &AgentName::new("renamed-agent").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(agent.name.as_deref(), Some("renamed-agent"));
+    assert!(!agent.launch_pending && !agent.interactive_ready);
+    let workspace = Client::connect(&root.socket())
+        .await
+        .unwrap()
+        .workspace_rename(
+            &Id("created".into()),
+            &Label::new("Renamed workspace").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(workspace.label, "Renamed workspace");
+    server.await.unwrap();
 }

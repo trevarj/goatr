@@ -1053,10 +1053,7 @@ pub async fn run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
     }
     // Validate the private diagnostic executable before it can enter this
     // run's serialized configuration or any owned process command.
-    let private_herdr = owned_herdr_report_binary(
-        omp_receiver_capture.then_some(OwnedHerdrReportMode::OmpReceiver),
-        &workspace,
-    )?;
+    let private_herdr = owned_herdr_report_binary(omp_receiver_capture, &workspace)?;
     let runtime = PathBuf::from(
         std::env::var_os("XDG_RUNTIME_DIR")
             .ok_or_else(|| failure("unchanged real user XDG_RUNTIME_DIR required"))?,
@@ -1291,7 +1288,6 @@ pub async fn run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
         &root,
         &socket,
         Some(&listener),
-        false,
         false,
         herdr_report_capture.as_ref(),
     )

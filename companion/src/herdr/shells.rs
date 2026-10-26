@@ -295,7 +295,7 @@ impl Topology {
         if self.terminal_stopping.load(Ordering::Acquire){return Err(ErrorCode::NotReady);}
         let source=selection.validate_terminal(self,params)?;
         let directory=selection.terminal_directory(params)?;
-        let client=Client::connect(&source.socket_path).await.map_err(policy)?;
+        let client = Client::connect_source(&source).await.map_err(policy)?;
         if client.evidence!=source.evidence{return Err(ErrorCode::StaleSession);}
         let fd=client.fence_socket().map_err(policy)?;
         self.begin_creation_shell_fence(auth,action,&source).await?;
@@ -373,7 +373,7 @@ impl Topology {
     async fn confirm_created_terminal(&self,source:&Source,selection:&CreationSelection,params:&TerminalCreateParams,resources:&ShellCreationResources,deadline:tokio::time::Instant)->SecurityResult<Source> {
         let pane_id=resources.pane_id.as_ref().ok_or(ErrorCode::NotReady)?;
         let reporter=process_evidence(source.evidence.pid).map_err(policy)?;
-        let client=Client::connect(&source.socket_path).await.map_err(policy)?;
+        let client = Client::connect_source(source).await.map_err(policy)?;
         if client.evidence!=source.evidence{return Err(ErrorCode::StaleSession);}
         let (_,snapshot)=client.snapshot().await.map_err(policy)?;
         let pane=snapshot.pane(pane_id).map_err(policy)?;
@@ -382,7 +382,7 @@ impl Topology {
         loop {
             grid::before(deadline)?;source.recheck_identity().map_err(policy)?;selection.terminal_directory(params)?;
             if self.terminal_stopping.load(Ordering::Acquire){return Err(ErrorCode::NotReady);}
-            let client=Client::connect(&source.socket_path).await.map_err(policy)?;
+            let client = Client::connect_source(source).await.map_err(policy)?;
             if client.evidence!=source.evidence{return Err(ErrorCode::StaleSession);}
             let info=client.process_info(pane_id).await.map_err(policy)?;
             if let Some(pid)=info.shell_pid {

@@ -2799,7 +2799,7 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| unbound("OMP collaboration registry is not configured"))?;
         let entries=registry(dir).map_err(|_|unbound("No readable private stock collaboration publication; enable desktop control collaboration explicitly"))?;
-        let client = herdr::Client::connect(&source.socket_path)
+        let client = herdr::Client::connect_source(&source)
             .await
             .map_err(|_| unbound("Herdr process evidence is unavailable"))?;
         let info = client
@@ -4739,29 +4739,15 @@ mod tests {
     use crate::storage::{PairedDevice, Storage};
     use base64::engine::general_purpose::STANDARD;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use tokio::io::AsyncReadExt;
     struct Root(PathBuf);
     impl Root {
         fn new() -> Self {
-            // The discovery executable requires protected ancestors, not shared /tmp.
+            // Keep runtime and registry fixtures under protected same-user ancestors.
             let path = PathBuf::from(std::env::var_os("HOME").unwrap())
                 .join(format!(".go-{}", &Uuid::random().0[..8]));
             fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
             Self(path)
-        }
-        fn herdr_executable(&self, socket: &Path) -> PathBuf {
-            let executable = self.0.join("herdr");
-            let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-                .filter_map(|path| fs::canonicalize(path.join("sh")).ok())
-                .find(|path| path.is_file())
-                .expect("fixture discovery interpreter is required");
-            let listing = json!({"sessions":[{"name":"owned","default":false,"running":true,"socket_path":socket,"session_dir":self.0}]});
-            fs::write(
-                &executable,
-                format!("#!{}\nprintf '%s\\n' '{}'\n", shell.display(), listing),
-            )
-            .unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-            executable
         }
     }
     impl Drop for Root {
@@ -5110,6 +5096,8 @@ mod tests {
         snapshot: watch::Sender<Value>,
         snapshot_gate: Arc<Semaphore>,
         events: watch::Sender<Option<Value>>,
+        process_info_requests: Arc<AtomicUsize>,
+        registry_requests: Arc<AtomicUsize>,
         stop: watch::Sender<bool>,
         tasks: Vec<tokio::task::JoinHandle<()>>,
         database: PathBuf,
@@ -5138,6 +5126,7 @@ mod tests {
         view: watch::Sender<Value>,
         snapshots: Arc<Semaphore>,
         events_rx: watch::Receiver<Option<Value>>,
+        process_info_requests: Arc<AtomicUsize>,
     ) -> tokio::task::JoinHandle<()> {
         // SAFETY: getpgrp has no pointer or lifetime preconditions.
         let process_group = unsafe { libc::getpgrp() };
@@ -5148,6 +5137,7 @@ mod tests {
                 let view = view.clone();
                 let snapshots = snapshots.clone();
                 let mut events = events_rx.clone();
+                let process_info_requests = process_info_requests.clone();
                 clients.spawn(async move {
                     let mut reader = BufReader::new(stream);
                     let request: Value = serde_json::from_slice(&herdr::read_line(&mut reader).await.unwrap()).unwrap();
@@ -5157,11 +5147,14 @@ mod tests {
                             let _gate = snapshots.acquire().await.unwrap();
                             json!({"type":"session_snapshot","snapshot":view.borrow().clone()})
                         },
-                        "pane.process_info" => json!({"type":"pane_process_info","process_info":{
-                            "pane_id":request["params"]["pane_id"],"shell_pid":std::process::id(),
-                            "foreground_process_group_id":process_group,
-                            "foreground_processes":[{"pid":std::process::id(),"name":"owned-native-fixture"}]
-                        }}),
+                        "pane.process_info" => {
+                            process_info_requests.fetch_add(1, Ordering::SeqCst);
+                            json!({"type":"pane_process_info","process_info":{
+                                "pane_id":request["params"]["pane_id"],"shell_pid":std::process::id(),
+                                "foreground_process_group_id":process_group,
+                                "foreground_processes":[{"pid":std::process::id(),"name":"owned-native-fixture"}]
+                            }})
+                        }
                         _ => panic!("fixture received an unauthorized public effect"),
                     };
                     reader.get_mut().write_all(format!("{}\n", json!({"id":request["id"],"result":result})).as_bytes()).await.unwrap();
@@ -5221,11 +5214,12 @@ mod tests {
                     writeln!(file, "{entry}").unwrap();
                 }
             }
-            let executable = root.herdr_executable(&herdr_socket);
+            let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
             let config = Config::parse(&format!(
-                "version=1\nruntime_dir={:?}\nruntime_dir_agent={:?}\nomp_registry_dir={registry_dir:?}\nomp_session_roots=[{:?}]\n[executables]\nherdr={executable:?}\n",
+                "version=1\nruntime_dir={:?}\nruntime_dir_agent={:?}\nherdr_sockets=[{herdr_socket:?}]\nomp_registry_dir={registry_dir:?}\nomp_session_roots=[{:?}]\n[executables]\nherdr={executable:?}\n",
                 root.0, root.0, root.0
-            )).unwrap();
+            ))
+            .unwrap();
             let (snapshot, _) = watch::channel(json!({
                 "version":"0.9.1","protocol":22,"focused_workspace_id":"desktop",
                 "workspaces":[{"workspace_id":"desktop","number":1,"label":"Desktop","focused":true,"active_tab_id":"","agent_status":"unknown"},{"workspace_id":"native-workspace","number":2,"label":"Native workspace","focused":false,"active_tab_id":"tab","agent_status":"idle"}],
@@ -5237,11 +5231,13 @@ mod tests {
             let listener = tokio::net::UnixListener::bind(&herdr_socket).unwrap();
             fs::set_permissions(&herdr_socket, fs::Permissions::from_mode(0o600)).unwrap();
             let snapshot_gate = Arc::new(Semaphore::new(1));
+            let process_info_requests = Arc::new(AtomicUsize::new(0));
             let herdr_task = subscribed_topology_server(
                 listener,
                 snapshot.clone(),
                 snapshot_gate.clone(),
                 events_rx,
+                process_info_requests.clone(),
             );
             let relay = Relay::bind(0).await.unwrap();
             let port = relay.port();
@@ -5265,6 +5261,8 @@ mod tests {
                 .unwrap();
             writeln!(metadata, "{}", json!({"version":1,"instanceId":"owned-instance","pid":std::process::id(),"endpoint":registry_socket,"createdAt":0,"token":"synthetic-registry-token"})).unwrap();
             drop(metadata);
+            let registry_requests = Arc::new(AtomicUsize::new(0));
+            let registry_request_counter = registry_requests.clone();
             let registry_task = tokio::spawn(async move {
                 loop {
                     let (stream, _) = listener.accept().await.unwrap();
@@ -5273,6 +5271,7 @@ mod tests {
                         native_json::parse(&herdr::read_line(&mut reader).await.unwrap(), REGISTRY)
                             .unwrap();
                     assert_eq!(request["token"], "synthetic-registry-token");
+                    registry_request_counter.fetch_add(1, Ordering::SeqCst);
                     let result = match request["op"].as_str().unwrap() {
                         "snapshot" => json!({"v":1,"ok":true,"snapshot":{
                             "instanceId":"owned-instance","generation":1,"pid":std::process::id(),
@@ -5355,7 +5354,11 @@ mod tests {
             .unwrap();
             let topology_owner = topology.clone();
             let rx = stop.subscribe();
-            let topology_task = tokio::spawn(async move { topology_owner.run(rx).await.unwrap() });
+            let topology_task = tokio::spawn(async move {
+                crate::herdr::stock_compat_tests::run_source(topology_owner, rx)
+                    .await
+                    .unwrap()
+            });
             let source = fixture_until(|| topology.sources().into_iter().next()).await;
             let runtime = Runtime::new(topology, security, None);
             let native_owner = runtime.clone();
@@ -5414,6 +5417,8 @@ mod tests {
                 snapshot,
                 snapshot_gate,
                 events,
+                process_info_requests,
+                registry_requests,
                 stop,
                 tasks: vec![herdr_task, registry_task, topology_task, relay_task],
                 database,
@@ -5528,25 +5533,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_rejections_preserve_report_precedence_and_registry_aggregation() {
+    async fn invalid_native_reports_require_setup_before_process_or_registry_requests() {
         let fixture = NativeFixture::new(None).await;
         let source = fixture.connection.source.clone();
         let agent = source.snapshot.agents[0].clone();
-        for (report, expected) in [
-            (None, "Herdr native session report is absent"),
-            (
-                Some(("codex", "id")),
-                "Herdr native session report agent is not OMP",
-            ),
-            (
-                Some(("codex", "path")),
-                "Herdr native session report agent is not OMP",
-            ),
-            (
-                Some(("omp", "id")),
-                "Herdr OMP native session report is not a path",
-            ),
-        ] {
+        for report in [None, Some(("codex", "path")), Some(("omp", "id"))] {
             let mut candidate = agent.clone();
             candidate.agent_session = report.map(|(provider, kind)| {
                 let mut native = agent.agent_session.clone().unwrap();
@@ -5554,20 +5545,67 @@ mod tests {
                 native.kind = kind.into();
                 native
             });
-            assert_eq!(
+            let process_requests = fixture.process_info_requests.load(Ordering::SeqCst);
+            let registry_requests = fixture.registry_requests.load(Ordering::SeqCst);
+            assert!(matches!(
                 fixture
                     .runtime
                     .clone()
                     .follow(source.clone(), candidate, fixture.stop.subscribe())
                     .await,
-                Err((UnboundState::SetupRequired, expected))
+                Err((UnboundState::SetupRequired, _))
+            ));
+            assert_eq!(
+                fixture.process_info_requests.load(Ordering::SeqCst),
+                process_requests
+            );
+            assert_eq!(
+                fixture.registry_requests.load(Ordering::SeqCst),
+                registry_requests
             );
         }
+        fixture.close().await;
+    }
 
-        // Keep genuine registry snapshots, but report no matching foreground owner.
+    #[tokio::test]
+    async fn unjoined_native_process_requires_setup_across_registry_availability_states() {
+        let fixture = NativeFixture::new(None).await;
+        let source = fixture.connection.source.clone();
+        let agent = source.snapshot.agents[0].clone();
         let socket = fixture.root.0.join("unjoined.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let client = herdr::Client::connect(&socket)
+            .await
+            .unwrap()
+            .qualify_executable(&fixture.runtime.topology.config.executables.herdr)
+            .unwrap();
+        let (mut bootstrap, _) = listener.accept().await.unwrap();
+        assert_eq!(client.evidence.pid, std::process::id());
+        assert_eq!(
+            (
+                &client.evidence.linux_boot_id,
+                client.evidence.pid,
+                client.evidence.pid_start_ticks
+            ),
+            (
+                &source.evidence.linux_boot_id,
+                source.evidence.pid,
+                source.evidence.pid_start_ticks
+            )
+        );
+        let mut unjoined = source.clone();
+        unjoined.socket_path = socket;
+        unjoined.evidence = client.evidence.clone();
+        // Retain the original Source pin/incarnation/latch, with the new socket's evidence.
+        source.recheck().unwrap();
+        unjoined.recheck().unwrap();
+        drop(client);
+        assert_eq!(bootstrap.read(&mut [0]).await.unwrap(), 0);
+        drop(bootstrap);
+
+        let process_requests = Arc::new(AtomicUsize::new(0));
+        let process_request_counter = process_requests.clone();
         let process_server = tokio::spawn(async move {
             for _ in 0..4 {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -5575,6 +5613,7 @@ mod tests {
                 let request: Value =
                     serde_json::from_slice(&herdr::read_line(&mut reader).await.unwrap()).unwrap();
                 assert_eq!(request["method"], "pane.process_info");
+                process_request_counter.fetch_add(1, Ordering::SeqCst);
                 let response = json!({"id":request["id"],"result":{
                     "type":"pane_process_info","process_info":{
                         "pane_id":"pane","foreground_processes":[]
@@ -5587,27 +5626,41 @@ mod tests {
                     .unwrap();
             }
         });
-        let mut unjoined = source;
-        unjoined.socket_path = socket;
         let registry_dir = fixture.root.0.join("registry");
         let owner_file = registry_dir.join("owner.json");
         let saved_owner = registry_dir.join("owner.saved");
         let failed_file = registry_dir.join("failed.json");
-        for (step, expected) in [
-            "Registry native ID and exact kernel terminal/owner namespace ancestry join could not be proved",
-            "Stock collaboration registry snapshots and terminal/owner joins are unavailable",
-            "Stock collaboration registry snapshots are unavailable",
-            "Stock collaboration registry has no candidates",
-        ]
-        .into_iter()
-        .enumerate()
+        let failed_socket = registry_dir.join("failed.sock");
+        let listener = tokio::net::UnixListener::bind(&failed_socket).unwrap();
+        fs::set_permissions(&failed_socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let failed_requests = Arc::new(AtomicUsize::new(0));
+        let failed_request_counter = failed_requests.clone();
+        let failed_server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let request =
+                    native_json::parse(&herdr::read_line(&mut reader).await.unwrap(), REGISTRY)
+                        .unwrap();
+                assert_eq!(request["token"], "synthetic-registry-token");
+                assert_eq!(request["op"], "snapshot");
+                failed_request_counter.fetch_add(1, Ordering::SeqCst);
+                reader
+                    .get_mut()
+                    .write_all(b"{\"v\":1,\"ok\":false}\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        // Valid owner snapshot only, both snapshot outcomes, failed snapshot only, no candidates.
+        for (step, (owner_requests, unavailable_requests)) in
+            [(1, 0), (1, 1), (0, 1), (0, 0)].into_iter().enumerate()
         {
             match step {
                 1 => {
-                    // A valid private publication with an absent endpoint fails snapshot only.
                     let mut publication: Value =
                         serde_json::from_slice(&fs::read(&owner_file).unwrap()).unwrap();
-                    publication["endpoint"] = json!(registry_dir.join("absent.sock"));
+                    publication["endpoint"] = json!(failed_socket);
                     let mut file = OpenOptions::new()
                         .write(true)
                         .create_new(true)
@@ -5620,16 +5673,33 @@ mod tests {
                 3 => fs::remove_file(&failed_file).unwrap(),
                 _ => {}
             }
-            assert_eq!(
+            let original_process_requests = fixture.process_info_requests.load(Ordering::SeqCst);
+            let registry_requests = fixture.registry_requests.load(Ordering::SeqCst);
+            let unavailable_before = failed_requests.load(Ordering::SeqCst);
+            assert!(matches!(
                 fixture
                     .runtime
                     .clone()
                     .follow(unjoined.clone(), agent.clone(), fixture.stop.subscribe())
                     .await,
-                Err((UnboundState::SetupRequired, expected))
+                Err((UnboundState::SetupRequired, _))
+            ));
+            assert_eq!(process_requests.load(Ordering::SeqCst), step + 1);
+            assert_eq!(
+                fixture.process_info_requests.load(Ordering::SeqCst),
+                original_process_requests
+            );
+            assert_eq!(
+                fixture.registry_requests.load(Ordering::SeqCst) - registry_requests,
+                owner_requests
+            );
+            assert_eq!(
+                failed_requests.load(Ordering::SeqCst) - unavailable_before,
+                unavailable_requests
             );
         }
         process_server.await.unwrap();
+        failed_server.await.unwrap();
         fixture.close().await;
     }
 
@@ -5838,9 +5908,9 @@ mod tests {
     async fn subscribed_shell_node_overflow_invalidates_display_and_fences_late_capture() {
         let root = Root::new();
         let socket = root.0.join("h.sock");
-        let executable = root.herdr_executable(&socket);
+        let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
         let config = Config::parse(&format!(
-            "version=1\nruntime_dir={:?}\nruntime_dir_agent={:?}\n[executables]\nherdr={executable:?}\n",
+            "version=1\nruntime_dir={:?}\nruntime_dir_agent={:?}\nherdr_sockets=[{socket:?}]\n[executables]\nherdr={executable:?}\n",
             root.0, root.0
         ))
         .unwrap();
@@ -5866,6 +5936,7 @@ mod tests {
             snapshot.clone(),
             snapshot_gate.clone(),
             events_rx,
+            Arc::new(AtomicUsize::new(0)),
         );
         let storage = Arc::new(
             crate::storage::StorageOwner::new(Storage::memory([13; 32], 0).unwrap()).unwrap(),
@@ -5878,7 +5949,11 @@ mod tests {
             .unwrap();
         let (stop, rx) = watch::channel(false);
         let owner = topology.clone();
-        let job = tokio::spawn(async move { owner.run(rx).await.unwrap() });
+        let job = tokio::spawn(async move {
+            crate::herdr::stock_compat_tests::run_source(owner, rx)
+                .await
+                .unwrap()
+        });
         let source = fixture_until(|| topology.sources().into_iter().next()).await;
         let gate = snapshot_gate.acquire().await.unwrap();
         // Installing Source precedes awaited shell enrollment and State publication.
