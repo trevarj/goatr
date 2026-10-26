@@ -11,6 +11,14 @@ implementation progress, verification status and next actions belong in
 Do not invent product commands, dummy bindings, insecure native fallbacks, or
 passing runtime evidence.
 
+The mobile MVP must use the currently installed Herdr unchanged. Do not patch
+Herdr, build a replacement, or require new native APIs/protocols. Qualify the
+installed package's actual capabilities; report unsupported guarantees before
+changing acceptance criteria, and never substitute unsafe native fallbacks.
+The default and any diagnostic native executable must be the qualified installed
+binary. An isolated owned runtime may use it unchanged; no replacement artifact,
+native receiver channel, native build/profile override or new native API is authorized.
+
 ## One coordinator, isolated writers
 
 - One named integration owner controls each work package and its merge/check
@@ -199,18 +207,11 @@ The owner authorizes fresh owned OMP creation/source-loss diagnostics without re
 Capture requires explicit opt-in and a validated owned relay, one shared counter
 with at most eight sanitized closed phase/guard lines, and no extra native reads,
 RPCs, probes, action replay, deadline changes or identity/permission relaxation.
-For the current blocker work, the owner also authorizes a private Herdr build
-and a private receiver diagnostic channel; installed Herdr, wrappers and global
-settings remain unchanged. Do not repeat the resolved scope-approval question.
-Private Herdr diagnostic builds must retain the production `herdr` config/socket
-namespace: use the package-only `profile.dev.package.herdr.debug-assertions=false`
-build override, with version/manifest update checks disabled only in the run’s
-private Herdr config. Default dev builds use `herdr-dev` and fail the owned socket gate.
-Owned private Creation diagnostics may use the approved 60-second startup budget
-only when capture is requested and its owned receiver is validated; ordinary
-startup remains 20 seconds and provider deadlines stay unchanged.
-This does not authorize pairing.rs capture edits. Remove temporary capture after
-exercising the causal fix.
+These diagnostics use the qualified installed Herdr unchanged. No private native
+build, receiver instrumentation or extended startup budget is authorized.
+Ordinary startup remains 20 seconds and provider deadlines stay unchanged.
+This does not authorize pairing.rs capture edits. Remove temporary Goatr/OMP
+capture after exercising the causal fix.
 Capture-only edits must preserve each authorization guard's exact lexical scope.
 Absolute creation deadlines are rechecked inside native admission validators
 after intervening waits; a check before an await does not cover admission.
@@ -219,17 +220,13 @@ diagnostic copy of the stock OMP reporting hook and isolated diagnostic output/r
 Preserve effective extension lists, verify exactly one reporter, retain the shared
 eight-line limit and existing native calls/deadlines; leave installed files unchanged.
 
-The owner subsequently authorized all necessary scoped diagnostic iterations and
-checks through a working pass, without further approval questions. This includes
-bounded native startup-log reads and fresh process-local hook captures. Preserve
-identity, native permission, privacy, resource ownership and no-replay protections.
-
-The explicit owned Codex startup Terminal feature check may perform one
-post-settlement inventory and one `pane.read_bound`, using an immutable runtime
-pin from the existing prelaunch snapshot. It requires the separate helper flag,
-owned Codex consent/relay and hash-verified private Herdr artifact. Ordinary
-diagnostics retain their no-extra-RPC boundary. No unguarded read, replacement
-adoption, retry, raw terminal text/hash/capture or additional report budget.
+The owner authorized scoped Goatr/OMP diagnostic iterations through a working
+pass without repeated approval questions, within the opt-in, owned-relay,
+eight-line and no-extra-native-read/RPC guards above. Preserve identity,
+native permission, privacy, resource ownership and no-replay protections.
+This does not authorize native startup-log capture, a replacement Herdr artifact
+or the unavailable `pane.read_bound` diagnostic. Do not substitute an unbound
+read, adopt a replacement, retry an action or capture raw terminal text/hashes.
 
 ### Owned continuity test capability context
 
@@ -245,11 +242,11 @@ Do not repeat this resolved authorization question.
 
 ### Strict native Close boundary
 
-The owner chose the strict single-pane guarantee for the continuity MVP.
-Native session/shell Close is unavailable on the current stock Herdr API:
-`pane.close` can cascade to a native worktree group after concurrent changes.
-Keep viewer release distinct and present the specific limitation. Do not add
-workspace/group fallback, guessed atomic fencing, signals or a no-op Close.
+Native session/shell Close and preserved empty-workspace retention are omitted
+from the installed-only mobile MVP by explicit owner decision. Stock `pane.close`
+can close the final workspace and cascade to a worktree group; it is not a safe
+mobile fallback. Keep provider Stop and viewer/control Release distinct. Do not
+add workspace/group fallback, guessed atomic fencing, signals or a no-op Close.
 
 ### Autonomous MVP execution
 
@@ -272,8 +269,9 @@ information with assertions retained; test inherits `profile.dev`. Use narrow
 checks while iterating. Build the Nix release only after the reviewed handoff
 is frozen.
 
-For the approved mobile MVP, use one GPT-6.1 Sol medium implementation writer
-and an independent GPT-6.1 Sol high reviewer before signed feature commits.
+For the approved mobile MVP, the coordinator owns model/effort configuration,
+shared-contract review, validation and signed task commits; use one implementation
+writer at a time and an independent correctness review before contract handoff.
 Run targeted regressions and actual functional checks on the authorized device
 after each reviewed handoff; exhaustive clean/release checks remain later.
 Preserve app data and pairing on APK updates; exclude pairing secrets and
