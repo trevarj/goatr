@@ -13,32 +13,58 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 
-/** One foreground confirmation; invalidation stops pre-admission only, never an admitted action. */
-internal class AgentTerminalLease {private val gate=Any();private var active=true
+/** One original foreground configured-workspace claim; invalidation never replays an action. */
+internal class TerminalCreationLease {private val gate=Any();private var active=true
     fun invalidate(){synchronized(gate){active=false}}
     fun <T> admit(block:()->T):T=synchronized(gate){if(!active)throw StorePolicy(ErrorCode.NotReady);block()}
 }
-class AgentTerminalMutationContext internal constructor(internal val original:Any,internal val lease:AgentTerminalLease)
-internal class AgentTerminalCreation(val key:ConversationKey,val source:Uuid,val foreground:Any,val context:AgentTerminalMutationContext) {
+class TerminalCreationMutationContext internal constructor(internal val original:Any,internal val lease:TerminalCreationLease)
+internal class TerminalCreationState(val host:String,val server:Uuid,val workspace:Id,val source:ArtifactSource?,
+    val foreground:Any,val originScreen:Screen,val context:TerminalCreationMutationContext) {
+    var project by mutableStateOf<Uuid?>(null)
     var loaded by mutableStateOf(false);var pending by mutableStateOf(true)
     var prior by mutableStateOf<LocalAction?>(null);var separate by mutableStateOf<Uuid?>(null)
     var loading:Any?=null
+    var directories:CreationDirectoryBrowser?=null
 }
-@Composable internal fun AgentTerminalCreationDialog(shown:AgentTerminalCreation,model:GoatrViewModel,hostName:String,agentTitle:String,connectionStatus:String,compactConnectionStatus:String){
-    AlertDialog(onDismissRequest=model::closeAgentTerminal,title={GoatrTitleBar("New terminal beside agent",connectionStatus,!shown.loaded,compactStatus=compactConnectionStatus)},text={Column(Modifier.fillMaxWidth().heightIn(max=460.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)){
-        UiText("Create an ordinary shell beside this exact agent on the selected desktop. Herdr uses the original agent process’s current OS directory, which may differ from its conversation directory.")
-        UiText("The desktop stays unfocused. No command is sent and no existing terminal is closed.")
-        UiText(hostName,style=MaterialTheme.typography.titleMedium)
-        UiText(agentTitle,style=MaterialTheme.typography.bodyMedium)
-        var details by remember(shown) {mutableStateOf(false)}
-        DetailDisclosure(details,{details=!details},"agent_terminal_details")
-        if(details) UiText("Host "+shown.key.host+" · original session "+shown.key.target.sessionId.value,style=MaterialTheme.typography.bodySmall,softWrap=true)
-        shown.prior?.let {prior->ReceiptPanel(shown.key.host,prior,model)
-            if(prior.authoritative&&prior.outcomeShown&&prior.receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain))TextButton(onClick={model.permitSeparateAgentTerminal(shown,prior.metadata.actionId)},enabled=!shown.pending,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Add,"Create a separate terminal")}
-        }
-        TextButton(onClick={model.terminals(shown.key.host)},modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Terminal,"View terminals")}
-        if(model.agentTerminalCreatedAvailable(shown))TextButton(onClick={model.openCreatedAgentTerminal(shown)},modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Terminal,"Open created terminal")}
-        if(shown.pending)UiText("Inspect the retained action before creating another terminal. It is never replayed.",style=MaterialTheme.typography.bodySmall)
-        TextButton(onClick={model.inspectAgentTerminal(shown)},modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Refresh,"Check retained receipt")}
-    }},confirmButton={TextButton(onClick={model.createAgentTerminal(shown)},enabled=!model.busy&&model.agentTerminalAllowed(shown),modifier=Modifier.heightIn(min=48.dp).testTag("agent_terminal_create")){IconLabel(MaterialGlyph.Terminal,"Create terminal")}},dismissButton={TextButton(onClick=model::closeAgentTerminal,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Close,"Cancel")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn),modifier=Modifier.testTag("agent_terminal_confirmation"))
+@OptIn(ExperimentalLayoutApi::class)
+@Composable internal fun TerminalCreationDialog(shown:TerminalCreationState,view:ConnectionView,model:GoatrViewModel,hostName:String) {
+    val inventory=view.inventory[shown.host]
+    val graph=inventory?.hierarchy?.singleOrNull {it.serverId==shown.server}
+    val workspace=graph?.workspaces?.singleOrNull {it.workspaceId==shown.workspace}
+    AlertDialog(onDismissRequest=model::closeTerminalCreation,
+        title={GoatrTitleBar("New terminal",connectionLabel(shown.host,view,model.connectingHosts[shown.host]==true),!shown.loaded,
+            compactStatus=compactConnectionLabel(shown.host,view,model.connectingHosts[shown.host]==true))},
+        text={Column(Modifier.fillMaxWidth().heightIn(max=460.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            UiText(hostName,style=MaterialTheme.typography.titleMedium)
+            UiText(workspace?.label?.value ?: "Original workspace",style=MaterialTheme.typography.bodyMedium)
+            UiText("Create one unfocused native tab in this original workspace. Choose an approved project/directory; no cwd is inferred from a conversation or terminal.")
+            UiText("Requires the desktop’s explicit terminal-control grant. Goatr verifies the actual new shell directory before enabling input. A directory replacement or lost outcome retains uncertain resources without cd, retry or cleanup.")
+            val projects=inventory?.projects.orEmpty().filter {it.available}
+            if(projects.isEmpty())UiText("Configure an approved creation project on this desktop first.")
+            else {
+                GoatrSection("Configured project")
+                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    for(project in projects)FilterChip(selected=shown.project==project.projectId,
+                        onClick={model.selectTerminalProject(shown,project.projectId)},enabled=!shown.pending,
+                        label={UiText(project.label.value)})
+                }
+                shown.directories?.takeIf {shown.project!=null}?.let {browser->
+                    CreationDirectoriesChooser(browser,projects.singleOrNull {it.projectId==shown.project}?.label?.value ?: "Selected project")
+                }
+            }
+            shown.prior?.let {prior->
+                ReceiptPanel(shown.host,prior,model)
+                if(prior.authoritative&&prior.outcomeShown&&prior.receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain))
+                    TextButton(onClick={model.permitSeparateTerminal(shown,prior.metadata.actionId)},enabled=!shown.pending,modifier=Modifier.heightIn(min=48.dp)){
+                        UiText("Allow a fresh, separate terminal")
+                    }
+            }
+            if(shown.pending)UiText("Inspect the retained creation first. It is never retried, adopted or cleaned up.")
+            TextButton(onClick={model.inspectTerminalCreation(shown)},modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Refresh,"Check retained receipt")}
+            if(model.terminalCreatedAvailable(shown))TextButton(onClick={model.openCreatedTerminal(shown)},modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Terminal,"Open created terminal")}
+        }},
+        confirmButton={TextButton(onClick={model.createTerminal(shown)},enabled=!model.busy&&model.terminalCreationAllowed(shown),modifier=Modifier.heightIn(min=48.dp).testTag("terminal_create_confirm")){IconLabel(MaterialGlyph.Add,"Create terminal")}},
+        dismissButton={TextButton(onClick=model::closeTerminalCreation,modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},
+        properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn),modifier=Modifier.testTag("terminal_creation_confirmation"))
 }

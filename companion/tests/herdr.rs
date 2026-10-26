@@ -582,11 +582,9 @@ async fn silent_native_report_refresh_is_stable_and_discards_event_races() {
     }).await.unwrap();
     let prompt = Request {
         id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams {
-            boot_id: boot,
-            target: target.clone(),
-            text: PromptText::new("fixture admission").unwrap(),
-        }),
+        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
+        target: target.clone(),
+        text: PromptText::new("fixture admission").unwrap(), }),
     };
     state.validate_session_mutation(&prompt).unwrap();
     let retained_history = state
@@ -744,11 +742,9 @@ fn grouping_is_not_proof_mapping_display_restores_offline_and_retirement_preserv
     let p = peer(&mut store);
     let request = Request {
         id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams {
-            boot_id: store.boot_id.clone(),
-            target: target.clone(),
-            text: PromptText::new("not retained").unwrap(),
-        }),
+        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: store.boot_id.clone(),
+        target: target.clone(),
+        text: PromptText::new("not retained").unwrap(), }),
     };
     store.reserve(&p, &request, 0, |_| Ok(())).unwrap();
     assert!(
@@ -1105,11 +1101,9 @@ async fn replacement_owner_with_unchanged_herdr_report_offlines_old_authority() 
         .records;
     let prompt = Request {
         id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams {
-            boot_id: boot,
-            target: old.clone(),
-            text: PromptText::new("old owner").unwrap(),
-        }),
+        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
+        target: old.clone(),
+        text: PromptText::new("old owner").unwrap(), }),
     };
     state.validate_session_mutation(&prompt).unwrap();
     let proof = p.clone();

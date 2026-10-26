@@ -26,14 +26,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let peer = store.authenticated_hello(&device.device_id, epoch)?;
         let request = Request {
             id: Uuid::random(),
-            body: RequestBody::PromptSubmit(PromptSubmitParams {
-                boot_id: store.boot_id.clone(),
-                target: Target {
-                    session_id: Uuid::random(),
-                    generation: Uuid::random(),
-                },
-                text: PromptText::new("not stored in receipt database")?,
-            }),
+            body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: store.boot_id.clone(),
+            target: Target {
+                session_id: Uuid::random(),
+                generation: Uuid::random(),
+            },
+            text: PromptText::new("not stored in receipt database")?, }),
         };
         assert!(matches!(
             store.reserve(&peer, &request, 1, |_| Ok(()))?,

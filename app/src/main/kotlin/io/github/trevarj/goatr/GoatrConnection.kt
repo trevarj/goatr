@@ -58,16 +58,10 @@ internal class AgentAliasLease {
     fun admit(block:()->Unit)=synchronized(gate){if(!active)throw StorePolicy(ErrorCode.StaleSession);block()}
 }
 class AgentAliasMutationContext internal constructor(internal val original:Any,internal val lease:AgentAliasLease)
-internal class WorktreeRemovalLease {
-    private val gate=Any();private var active=true
-    fun invalidate(){synchronized(gate){active=false}}
-    fun admit(block:()->Unit)=synchronized(gate){if(!active)throw StorePolicy(ErrorCode.StaleSession);block()}
-}
-class WorktreeRemovalMutationContext internal constructor(internal val original:Any,internal val lease:WorktreeRemovalLease,val preview:WorktreesRemovePreviewResult,internal val ticket:Long,internal val expiresAt:Long)
 data class ShellInputObservation(val token:Uuid,val unknown:Boolean)
 private data class ShellInputStatusObservation(val order:Long,val observation:ShellInputObservation)
-internal enum class ShellMutationPurpose {Create,Input}
-class ShellMutationContext internal constructor(internal val original:Any,internal val lease:ShellMutationLease,internal val purpose:ShellMutationPurpose,internal val inputObservation:Pair<Uuid,Uuid>?=null)
+internal enum class ShellMutationPurpose {Input,Resize}
+class ShellMutationContext internal constructor(internal val original:Any,internal val lease:ShellMutationLease,internal val purpose:ShellMutationPurpose,internal val inputObservation:Pair<Uuid,Uuid>?=null,internal val grid:Any?=null,internal val gridSubscription:Uuid?=null)
 enum class ConnectionFailurePhase { Dial, OpenStream, Hello, Snapshot, Reader, Recovery }
 enum class ConnectionFailureCategory { Timeout, Known, Protocol, Transport, Other }
 enum class HelloReceivePhase { NotStarted, Header, Payload, Decode, Apply, Completed }
@@ -107,6 +101,28 @@ internal class NewActionContinuationBarrier internal constructor(val host:String
     internal val frameStarts=AtomicInteger(0)
 }
 
+/** Original viewer ownership, shared by its automatic read-only reopen routes. */
+class ConversationSubscription internal constructor(internal val original:Any,internal val host:String,internal val target:Target) {
+    internal val active=AtomicBoolean(true)
+}
+/** One sheet's entry gate; invalidation never cancels an already-admitted frame. */
+internal class SkillInvocationLease {
+    val active=AtomicBoolean(true)
+    private val gate=Any()
+    fun invalidate(){synchronized(gate){active.set(false)}}
+    fun admit(block:()->Unit)=synchronized(gate){if(!active.get())throw StorePolicy(ErrorCode.StaleSession);block()}
+}
+/** A fresh explicit invocation, separate from the completed catalogue read ticket. */
+class SkillInvocationContext internal constructor(internal val publication:Any?,internal val catalogue:SkillsListResult,internal val reference:Uuid?,internal val lease:SkillInvocationLease,internal val admitted:()->Boolean)
+internal class NativeControlsLease {
+    val active=AtomicBoolean(true)
+    private val gate=Any()
+    fun invalidate(){synchronized(gate){active.set(false)}}
+    fun admit(block:()->Unit)=synchronized(gate){if(!active.get())throw StorePolicy(ErrorCode.StaleSession);block()}
+}
+class ControlsMutationContext internal constructor(internal val publication:Any?,internal val catalogue:SessionControlsReadResult,internal val lease:NativeControlsLease,internal val admitted:()->Boolean)
+class QueueMutationContext internal constructor(internal val publication:Any?,internal val lease:NativeControlsLease,internal val admitted:()->Boolean)
+
 /** Foreground-only owner. Constructor uses applicationContext; start installs JNI context BEFORE
  * binding. One installation endpoint, one coalesced platform callback, explicit native handles.
  * There is no automatic replay, hidden foreground service, or plaintext credential cache. */
@@ -138,35 +154,69 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val admitted=AtomicBoolean(false)
         var sent=false
     }
-    private class ShellReadContext(val host:String,val live:Live,val hostReducer:HostReducer,val subscription:Uuid,val shell:ShellSummary) {val active=AtomicBoolean(true)}
+    private class ShellReadContext(val host:String,val live:Live,val hostReducer:HostReducer,val shell:ShellSummary) {
+        val active=AtomicBoolean(true)
+        val incarnation=hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==shell.serverId}?.serverIncarnation ?: throw StorePolicy(ErrorCode.NotReady)
+    }
     private class TerminalReadContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid) {
         /** Caller cancellation invalidates a correlated late reply without closing the transport. */
         val active=AtomicBoolean(true)
+    }
+    private class GridReadContext(val live:Live,val terminal:TerminalReadContext?,val shell:ShellReadContext?,val lease:TerminalGridLease,val display:(TerminalGrid?,TerminalGridLease)->Unit) {
+        val reducer=TerminalGridReducer()
+        val server=terminal?.reducer?.state?.summary?.serverId ?: shell?.shell?.serverId
+        val incarnation=server?.let {id->live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==id}?.serverIncarnation}
+        var subscription:Uuid?=null
+        val active get()=lease.active()
+        var deadline=0L
+        var timeout:Job?=null
+        var paused=false
     }
     private class WorktreesReadContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid) {
         /** A dialog ticket owns this transient read; canceled or replaced contexts cannot admit a late result. */
         val active=AtomicBoolean(true)
     }
     private class SkillsReadContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid,val generation:Uuid) {val active=AtomicBoolean(true);var catalogueRefresh=false}
+    private class SkillsInvocationPublication(val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid,val catalogue:SkillsListResult)
+    private class ControlsReadContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid,val lease:NativeControlsLease,val admitted:()->Boolean,val queue:Boolean=false) {
+        val active=AtomicBoolean(true);val hello=live.hello;val revision=if(queue)reducer.queueRevision else reducer.controlsRevision
+    }
+    private class ControlsPublication(val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid,val catalogue:SessionControlsReadResult,val expires:Long,val revision:Long) {val hello=live.hello}
+    private class QueuePublication(val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid,val expires:Long,val revision:Long,
+        val entries:LinkedHashMap<Id,Boolean>,val next:Id?,val bytes:Long) {val complete get()=next==null;val hello=live.hello}
+    private class ControlsClaim(val publication:ControlsPublication,val scope:ControlsReadContext)
+    private class QueueClaim(val publication:QueuePublication,val scope:ControlsReadContext)
     private class AttachmentContext(val host:String,val live:Live,val reducer:SessionReducer?,val target:Target,val source:Uuid?,val subscription:Uuid?)
     private class ArtifactOriginal(val host:String,val live:Live,val hostReducer:HostReducer,val subscription:Uuid,val source:ArtifactSource,val reducer:SessionReducer?,val epoch:Uuid?,val shell:ShellSummary?,val server:Uuid,val incarnation:Uuid)
     private class AgentSessionContext(val host:String,val live:Live,val boot:Uuid,val reducer:SessionReducer,val target:Target,val source:Uuid,val subscription:Uuid?,val server:Uuid,val provider:Provider,val workspace:Id,val pane:Id,val terminal:Id)
-    private class AgentTerminalContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid,val subscription:Uuid?)
+    private class CreationDirectoryOriginal(
+        val host:String,val live:Live,val boot:Uuid,val incarnation:Uuid,
+        val source:ArtifactSource?,val agent:AgentSessionMutationContext?,
+        val terminal:TerminalCreationMutationContext?=null,
+    )
+    private class TerminalCreationOriginal(val host:String,val live:Live,val boot:Uuid,val server:Uuid,val workspace:Id,val incarnation:Uuid,
+        val source:ArtifactSource?,val session:SessionSummary?,val shell:ShellSummary?)
     private class AgentAliasContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid)
     private class ChangesReadContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid) {
         /** The sheet ticket owns this memory-only read; replacement UI cannot receive a late reply. */
         val active=AtomicBoolean(true)
     }
+    private class ConversationRoute(val target:Target,val owner:ConversationSubscription)
     private class Live(val host:HostMetadata,val attempt:ConnectionAttempt,val candidateToken:Any,val connection:Connection,val stream:BiStream,val send:SendStream,val recv:RecvStream) {
+        var grid:GridReadContext?=null
+        var skillsPublication:SkillsInvocationPublication?=null
+        var controlsPublication:ControlsPublication?=null
+        var queuePublication:QueuePublication?=null
+        var payloadBytes=0
         val attachmentStatuses=ConcurrentHashMap<Uuid,AttachmentsStatusResult>()
         val alive=AtomicBoolean(true);val disposed=AtomicBoolean(false);val writer=Mutex();val pending=ConcurrentHashMap<Uuid,Pending>();val inflight=Semaphore(64)
         val teardownDone=CompletableDeferred<Unit>()
-        val hostReducer=HostReducer();val reducers=ConcurrentHashMap<Uuid,SessionReducer>();val subscriptions=ConcurrentHashMap<Uuid,Uuid>()
+        val hostReducer=HostReducer();val reducers=ConcurrentHashMap<Uuid,SessionReducer>();val subscriptions=ConcurrentHashMap<Uuid,ConversationRoute>()
+        val conversation=AtomicReference<ConversationSubscription?>(null)
         val operations=Mutex();val resnapshot=linkedSetOf<Uuid>();var recoveryRequested=false;var recovery:Job?=null;var receiptsRecovered=false
         val watches=mutableListOf<WatchHandle>();var reader:Job?=null;var authenticated=false;var hello:HelloResult?=null;var selectedPath:String?=null;var selectedRoute:SelectedIrohPath?=null
         val helloReceivePhase=AtomicReference(HelloReceivePhase.NotStarted)
         val helloReadObservation=AtomicReference<OwnedReadObservation?>(null);val helloHeaderPending=AtomicBoolean(false)
-        val worktreeCreationScopes=mutableMapOf<Target,Pair<Uuid,WorktreeCreationScope>>()
         var statusObservationOrder=0L
         var statusObservationFloor=0L
         val shellInputStatuses=linkedMapOf<Uuid,ShellInputStatusObservation>()
@@ -241,9 +291,10 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         }
         return current
     }
-    private inner class NewActionContinuation(val host:String,val live:Live,val request:Request,val caller:Job,val shell:ShellMutationContext?=null,val alias:AgentAliasMutationContext?=null,val removal:WorktreeRemovalMutationContext?=null,val attachment:AttachmentMutationContext?=null,val terminal:AgentTerminalMutationContext?=null,val agentCreation:AgentSessionMutationContext?=null) {
+    private inner class NewActionContinuation(val host:String,val live:Live,val request:Request,val caller:Job,val shell:ShellMutationContext?=null,val alias:AgentAliasMutationContext?=null,val attachment:AttachmentMutationContext?=null,val terminal:TerminalCreationMutationContext?=null,val agentCreation:AgentSessionMutationContext?=null,val skill:SkillInvocationContext?=null,val directories:CreationDirectoriesContext?=null,val controls:ControlsMutationContext?=null,val queue:QueueMutationContext?=null) {
         private val body=request.body
-        private val creationSource=(body as? RequestBody.SessionCreate)?.params?.sourceTarget?.let {live.reducers[it.sessionId]?.source}
+        private val creationSource=(body as? RequestBody.SessionCreate)?.params?.placement?.sourceTarget?.let {live.reducers[it.sessionId]?.source}
+        private val promptSource=(body as? RequestBody.PromptSubmit)?.takeIf {it.params.images!=null||it.params.delivery?.let {delivery->delivery!=PromptDelivery.Native}==true}?.params?.target?.let {live.reducers[it.sessionId]?.source}
         private fun original(current:Live,requested:RequestBody,id:Uuid,onFailure:((ActionAdmissionGuard,ErrorCode)->Unit)?=null) {
             caller.ensureActive()
             when {
@@ -253,18 +304,25 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                 id!=request.id || requested!==body -> throw StorePolicy(ErrorCode.InvalidRequest)
             }
             if(agentCreation!=null)validateAgentSession(agentCreation,current,requested as? RequestBody.SessionCreate ?: throw StorePolicy(ErrorCode.InvalidRequest))
-            if(requested is RequestBody.TerminalCreate)validateAgentTerminal(terminal ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
+            if(directories!=null)validateCreationDirectoryMutation(directories,current,requested)
+            if(requested is RequestBody.TerminalCreate)validateTerminalCreation(terminal ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
             if(requested.attachmentTarget()!=null)validateAttachment(attachment ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
-            if(requested is RequestBody.WorktreesRemove) validateWorktreeRemoval(removal ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
             if(requested is RequestBody.AgentRename) validateAgentAlias(alias ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
-            if(requested is RequestBody.ShellCreate || requested is RequestBody.ShellInput) {
+            if(requested is RequestBody.ShellInput || requested is RequestBody.ShellResize) {
                 try {validateShellMutation(shell ?: throw StorePolicy(ErrorCode.NotReady),current,requested)}
                 catch(failure:StorePolicy){onFailure?.invoke(ActionAdmissionGuard.SourceNotCurrent,failure.code);throw failure}
             }
         }
         private fun validate(current:Live,requested:RequestBody,id:Uuid,onFailure:((ActionAdmissionGuard,ErrorCode)->Unit)?=null) {
             original(current,requested,id,onFailure)
-            val target=(requested as? RequestBody.SessionCreate)?.params?.sourceTarget
+            if(requested is RequestBody.PromptSubmit && requested.params.skill!=null)validateSkillInvocation(skill ?: throw StorePolicy(ErrorCode.NotReady),current,requested.params)
+            else if(skill!=null)throw StorePolicy(ErrorCode.InvalidRequest)
+            if(requested is RequestBody.SessionControlsApply)validateControlsMutation(controls ?: throw StorePolicy(ErrorCode.NotReady),current,requested.params)
+            else if(controls!=null)throw StorePolicy(ErrorCode.InvalidRequest)
+            if(requested.queueTarget()!=null)validateQueueMutation(queue ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
+            else if(queue!=null)throw StorePolicy(ErrorCode.InvalidRequest)
+            if(requested is RequestBody.PromptSubmit&&(requested.params.images!=null||requested.params.delivery?.let {it!=PromptDelivery.Native}==true))validatePromptOptions(current,requested.params,promptSource)
+            val target=(requested as? RequestBody.SessionCreate)?.params?.placement?.sourceTarget
             if(target!=null && (creationSource==null || current.reducers[target.sessionId]?.source!=creationSource)) {onFailure?.invoke(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.StaleSession);throw StorePolicy(ErrorCode.StaleSession)}
             mutationContext(current,requested,onFailure)
         }
@@ -280,6 +338,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                 originalBeforeRequest(current,requested,id,onFailure)
                 val canonical=store.localAction(host,request.id)
                 originalBeforeRequest(current,requested,id,onFailure)
+                if(canonical?.authoritative==true && canonical.receipt!=null) throw CanonicalAdmissionReceipt(canonical.receipt)
                 try {
                     validate(current,requested,id)
                 } catch(failure:StorePolicy) {
@@ -294,7 +353,6 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                     } catch(rejected:StorePolicy) {throw rejected}
                     continue
                 }
-                if(canonical?.authoritative==true && canonical.receipt!=null) throw CanonicalAdmissionReceipt(canonical.receipt)
                 return
             }
         }
@@ -304,6 +362,12 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         suspend fun beforePreSend() {
             while(true) {
                 originalBeforePreSend()
+                if(body is RequestBody.PromptSubmit&&(body.params.skill!=null||body.params.images!=null||body.params.delivery!=null)||body is RequestBody.SessionControlsApply||body.queueTarget()!=null) {
+                    val existing=store.localAction(host,request.id)
+                    originalBeforePreSend()
+                    // preSend still verifies the keyed body fingerprint before status-only recovery.
+                    if(existing!=null)return
+                }
                 try {
                     validate(live,body,request.id)
                     return
@@ -335,7 +399,11 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         fun validateFrame(current:Live,requested:RequestBody,id:Uuid,onFailure:(ActionAdmissionGuard,ErrorCode)->Unit) =
             validate(current,requested,id,onFailure)
         fun admitFrame(current:Live,requested:RequestBody,id:Uuid,admit:()->Unit) {
-            if(agentCreation!=null){agentCreation.lease.admit {validate(current,requested,id);admit()}}else if(requested is RequestBody.TerminalCreate){val original=terminal ?: throw StorePolicy(ErrorCode.NotReady);original.lease.admit {validate(current,requested,id);admit()}}else if(requested is RequestBody.ShellCreate || requested is RequestBody.ShellInput) {
+            if(directories!=null){directories.lease.admit {
+                if(agentCreation!=null)agentCreation.lease.admit {validate(current,requested,id);admit()}
+                else if(terminal!=null)terminal.lease.admit {validate(current,requested,id);admit()}
+                else {validate(current,requested,id);admit()}
+            }}else if(agentCreation!=null){agentCreation.lease.admit {validate(current,requested,id);admit()}}else if(requested is RequestBody.TerminalCreate){val original=terminal ?: throw StorePolicy(ErrorCode.NotReady);original.lease.admit {validate(current,requested,id);admit()}}else if(requested is RequestBody.ShellInput || requested is RequestBody.ShellResize) {
                 val original=shell ?: throw StorePolicy(ErrorCode.NotReady)
                 // No suspension or write under this gate. Revocation wins before
                 // admission; once admitted, the existing frame owner finishes.
@@ -343,11 +411,17 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             }else if(requested.attachmentTarget()!=null){
                 val original=attachment ?: throw StorePolicy(ErrorCode.NotReady)
                 original.lease.admit {validate(current,requested,id);admit()}
-            }else if(requested is RequestBody.WorktreesRemove){
-                val original=removal ?: throw StorePolicy(ErrorCode.NotReady)
-                original.lease.admit {validate(current,requested,id);admit()}
             }else if(requested is RequestBody.AgentRename) {
                 val original=alias ?: throw StorePolicy(ErrorCode.NotReady)
+                original.lease.admit {validate(current,requested,id);admit()}
+            }else if(requested is RequestBody.PromptSubmit && requested.params.skill!=null){
+                val original=skill ?: throw StorePolicy(ErrorCode.NotReady)
+                original.lease.admit {validate(current,requested,id);admit()}
+            }else if(requested is RequestBody.SessionControlsApply) {
+                val original=controls ?: throw StorePolicy(ErrorCode.NotReady)
+                original.lease.admit {validate(current,requested,id);admit()}
+            }else if(requested.queueTarget()!=null) {
+                val original=queue ?: throw StorePolicy(ErrorCode.NotReady)
                 original.lease.admit {validate(current,requested,id);admit()}
             }else admit()
         }
@@ -564,12 +638,13 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         // Seed only after Hello and installation; callbacks from a candidate grant no path claim.
         withContext(serial) {refreshSelectedPath(live);publish()}
     }
-    private suspend fun request(live:Live,body:RequestBody,id:Uuid=Uuid(UUID.randomUUID().toString()),admissionAction:Uuid?=null,continuation:NewActionContinuation?=null,inheritedDeadline:Boolean=false,terminal:TerminalReadContext?=null,shell:ShellReadContext?=null,worktrees:WorktreesReadContext?=null,changes:ChangesReadContext?=null,skills:SkillsReadContext?=null,artifact:ArtifactReadContext?=null,apply:suspend (ResultBody)->Unit = {}):ResultBody = withContext(serial) {
+    private suspend fun request(live:Live,body:RequestBody,id:Uuid=Uuid(UUID.randomUUID().toString()),admissionAction:Uuid?=null,continuation:NewActionContinuation?=null,inheritedDeadline:Boolean=false,terminal:TerminalReadContext?=null,shell:ShellReadContext?=null,worktrees:WorktreesReadContext?=null,changes:ChangesReadContext?=null,skills:SkillsReadContext?=null,controls:ControlsReadContext?=null,artifact:ArtifactReadContext?=null,apply:suspend (ResultBody)->Unit = {}):ResultBody = withContext(serial) {
         terminal?.let(::validateTerminalRead)
         shell?.let(::validateShellRead)
         worktrees?.let(::validateWorktreesRead)
         changes?.let(::validateChangesRead)
         skills?.let(::validateSkillsRead)
+        controls?.let(::validateControlsRead)
                                     artifact?.let(::validateArtifactRead)
         if (!live.alive.get()) {admissionAction?.let {captureActionAdmission(live.host.hostId,it,ActionAdmissionPhase.Request,ActionAdmissionGuard.NotAlive,ErrorCode.Unauthorized)};throw StorePolicy(ErrorCode.Unauthorized)}
         if (!live.authenticated && body !is RequestBody.Hello && body !is RequestBody.PairConfirm) {admissionAction?.let {captureActionAdmission(live.host.hostId,it,ActionAdmissionPhase.Request,ActionAdmissionGuard.Unauthenticated,ErrorCode.Unauthorized)};throw StorePolicy(ErrorCode.Unauthorized)}
@@ -596,6 +671,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                                     worktrees?.let(::validateWorktreesRead)
                                     changes?.let(::validateChangesRead)
                                     skills?.let(::validateSkillsRead)
+                                    controls?.let(::validateControlsRead)
                                     artifact?.let(::validateArtifactRead)
                                     try {
                                         if(continuation==null) mutationContext(live,body) {guard,code->admissionAction?.let {captureActionAdmission(live.host.hostId,it,ActionAdmissionPhase.Writer,guard,code,pending.sent,frameStarted)}}
@@ -664,6 +740,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                 val length=Protocol.frameLength(header);requireWire(live.authenticated || length<=4096)
                 live.helloReceivePhase.set(HelloReceivePhase.Payload)
                 val bytes=live.recv.readExact(length.toUInt())
+                live.payloadBytes=bytes.size
                 try {
                     live.helloReceivePhase.set(HelloReceivePhase.Decode)
                     val raw=Protocol.parseRawJson(bytes) as? JsonObject ?: invalidWire()
@@ -672,7 +749,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                     // Canceled/timed-out callers keep their bounded method correlation until
                     // a strictly validated reply or close; untracked replies are still fatal.
                     if(raw["type"]?.jsonPrimitive?.content=="response" && pending==null) throw StorePolicy(ErrorCode.InvalidRequest)
-                    when(val frame=Protocol.decodePayload(bytes,pending?.method)) {
+                    when(val frame=Protocol.decodeParsed(raw,pending?.method)) {
                         is Envelope.ResponseFrame->{
                             val response=frame.response
                             val expected=live.pending.remove(response.id) ?: throw StorePolicy(ErrorCode.InvalidRequest)
@@ -704,25 +781,41 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         }
     }
     private suspend fun event(live:Live,event:Event) {
+        live.grid?.takeIf {it.subscription==event.subscription}?.let {grid->
+            try {
+                val current=validateGrid(grid)
+                if(grid.reducer.event(event,live.payloadBytes)&&current){
+                    grid.paused=false
+                    grid.lease.stage(grid.reducer.committed ?: invalidWire())
+                    grid.lease.deliver(grid.display)
+                }
+                gridTimeout(grid)
+            } catch(_:Exception){endGrid(grid)}
+            return
+        }
         val host=live.host.hostId
         if(event.subscription==live.hostReducer.inventory?.subscription) {
             if(event.body is EventBody.SyncRequired)notificationWakeupMutable.tryEmit(NotificationWakeup(host,true))
             val decision=live.hostReducer.event(event)
+            invalidateGrid(live)
             if(decision==SessionReducer.Decision.Resnapshot) {recover(live);return}
             if(decision==SessionReducer.Decision.Duplicate) return
             when(val body=event.body) {
                 is EventBody.ActionStatus->{if(store.localAction(host,body.data.receipt.actionId)!=null) committedReceipt(live,body.data.receipt)}
-                is EventBody.NotificationUpsert->{store.liveNotification(host,body.data.event);notificationWakeupMutable.tryEmit(NotificationWakeup(host))}
-                is EventBody.NotificationRead->{store.readConfirmed(host,body.data.read);notificationWakeupMutable.tryEmit(NotificationWakeup(host))}
+                is EventBody.NotificationUpsert->{val expected=live.hello ?: throw StorePolicy(ErrorCode.NotReady);store.liveNotification(host,body.data.event){notificationOwnerCurrent(live,expected)};if(notificationOwnerCurrent(live,expected))notificationWakeupMutable.tryEmit(NotificationWakeup(host))}
+                is EventBody.NotificationRead->{val expected=live.hello ?: throw StorePolicy(ErrorCode.NotReady);store.readConfirmed(host,body.data.read){notificationOwnerCurrent(live,expected)};if(notificationOwnerCurrent(live,expected))notificationWakeupMutable.tryEmit(NotificationWakeup(host))}
                 else->invalidWire()
             }
         } else {
             // Ordered unsubscribe ACKs drain the old source; untracked streams cannot alter the current view.
-            val session=live.subscriptions[event.subscription] ?: return
-            val reducer=live.reducers[session] ?: throw StorePolicy(ErrorCode.InvalidRequest)
+            val route=live.subscriptions[event.subscription] ?: return
+            val reducer=live.reducers[route.target.sessionId] ?: throw StorePolicy(ErrorCode.InvalidRequest)
             val decision=reducer.event(event)
-            if(decision==SessionReducer.Decision.Resnapshot) {live.resnapshot.add(session);recover(live);return}
+            invalidateGrid(live)
+            if(decision==SessionReducer.Decision.Resnapshot) {live.resnapshot.add(route.target.sessionId);recover(live);return}
             if(decision==SessionReducer.Decision.Applied) when(val body=event.body) {
+                is EventBody.ControlsChanged->{live.controlsPublication?.takeIf {it.target==body.data.target}?.let {live.controlsPublication=null}}
+                is EventBody.QueueChanged->{live.queuePublication?.takeIf {it.target==body.data.target}?.let {live.queuePublication=null}}
                 is EventBody.HistoryUpsert -> {
                     // Persist the retained post-merge records, never raw event placeholders
                     // or unrelated history. Older browsing may reject a new event record.
@@ -749,9 +842,14 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                         snapshot(live)
                         for(session in live.resnapshot.toList()) {
                             if(!live.hostReducer.ready) break
-                            val summary=live.hostReducer.inventory?.sessions?.firstOrNull {it.sessionId==session && it.connectivity==SessionConnectivity.Ready} ?: continue
-                            try {open(live,Target(summary.sessionId,summary.generation))}
+                            val owner=live.conversation.get()
+                            if(owner==null || owner.original!==live || owner.host!=live.host.hostId || owner.target.sessionId!=session || !owner.active.get()){live.resnapshot.remove(session);continue}
+                            val summary=live.hostReducer.inventory?.sessions?.singleOrNull {it.sessionId==session} ?: continue
+                            if(Target(summary.sessionId,summary.generation)!=owner.target){owner.active.set(false);live.resnapshot.remove(session);continue}
+                            if(summary.connectivity!=SessionConnectivity.Ready)continue
+                            try {open(live,owner.target,owner)}
                             catch(failure:RemoteFailure) {if(failure.code!=ErrorCode.NotReady && failure.code!=ErrorCode.StaleSession) throw failure}
+                            catch(failure:StorePolicy) {if(failure.code!=ErrorCode.NotReady || owner.active.get())throw failure}
                         }
                         recoverReceipts(live)
                     }
@@ -773,6 +871,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         store.cache(live.host.hostId,summary,records.map(SafeDisplayHistory::redacted),reducer.partial,snapshot=snapshot,source=source)
     }
     private fun publish() {
+        for(live in sessions.values)invalidateGrid(live)
         mutable.value=ConnectionView(
             hello=sessions.filterValues {it.authenticated&&it.alive.get()}.mapValues {it.value.hello!!},
             inventory=sessions.mapNotNull {(host,live)->live.hostReducer.inventory?.let {host to it}}.toMap(),
@@ -783,7 +882,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             activeRoutes=sessions.filterValues {isInstalledLive(it)}.mapValues {(_,live)->live.attempt.routes.copy(supplied=true)},
             routeAttempts=synchronized(connectionFailureLock) {connectionAttempts.mapValues {it.value.routes.copy(supplied=it.value.hintsSupplied)}},
             inventoryReady=sessions.mapValues {it.value.authenticated&&it.value.alive.get()&&it.value.hostReducer.ready},
-            sources=sessions.mapValues {(_,live)->if(!live.authenticated||!live.alive.get()||!live.hostReducer.ready) emptyMap() else live.reducers.values.mapNotNull {reducer->val s=reducer.state?.summary;val source=reducer.source;if(s==null||source==null||s.connectivity!=SessionConnectivity.Ready||!live.hostReducer.sourceCurrent(s.serverId)) null else Target(s.sessionId,s.generation) to source}.toMap()},
+            sources=sessions.mapValues {(_,live)->if(!live.authenticated||!live.alive.get()||!live.hostReducer.ready) emptyMap() else live.reducers.values.mapNotNull {reducer->val s=reducer.state?.summary;val source=reducer.source;val route=source?.let {live.subscriptions[it]};if(s==null||source==null||route==null||!route.owner.active.get()||route.target!=Target(s.sessionId,s.generation)||s.connectivity!=SessionConnectivity.Ready||!live.hostReducer.sourceCurrent(s.serverId)) null else route.target to source}.toMap()},
             shellInputStatus=sessions.filterValues {isInstalledLive(it)}.mapValues {(_,live)->live.shellInputStatuses.mapValues {(_,record)->record.observation}},
             latestReceipt=sessions.mapNotNull {(host,live)->live.latestReceipt?.let {host to it}}.toMap(),
             mutationReady=sessions.mapValues {it.value.authenticated&&it.value.alive.get()&&it.value.hostReducer.ready&&it.value.receiptsRecovered},
@@ -798,30 +897,54 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         if(live.resnapshot.isNotEmpty()) recover(live)
         snapshot
     }
-    private suspend fun snapshot(live:Live):HostSnapshotResult = (request(live,RequestBody.HostSnapshot(HostSnapshotParams())) {result->val snapshot=(result as ResultBody.HostSnapshot).result;live.hostReducer.snapshot(snapshot);store.cacheInventory(live.host.hostId,snapshot);publish()} as ResultBody.HostSnapshot).result
-    suspend fun open(host:String,target:Target):SessionOpenResult = withContext(serial) {
-        val live=live(host)
-        try {live.operations.withLock {val result=open(live,target);recoverReceipts(live);result}}
+    private suspend fun snapshot(live:Live):HostSnapshotResult = (request(live,RequestBody.HostSnapshot(HostSnapshotParams())) {result->val snapshot=(result as ResultBody.HostSnapshot).result;live.hostReducer.snapshot(snapshot);invalidateGrid(live);store.cacheInventory(live.host.hostId,snapshot);publish()} as ResultBody.HostSnapshot).result
+    suspend fun open(host:String,target:Target,admitted:()->Boolean={true}):SessionOpenResult = withContext(serial) {
+        val live=live(host);if(!admitted())throw StorePolicy(ErrorCode.NotReady)
+        val owner=ConversationSubscription(live,host,target)
+        try {live.operations.withLock {
+            if(!admitted())throw StorePolicy(ErrorCode.NotReady)
+            val previous=live.conversation.getAndSet(owner)
+            if(previous!=null) {
+                previous.active.set(false)
+                // Register exact-owner cleanup independently before this open can suspend/cancel.
+                scope.launch(start=CoroutineStart.UNDISPATCHED) {
+                    try {leave(previous)}
+                    catch(cancel:CancellationException) {throw cancel}
+                    catch(failure:Exception) {
+                        if(failure is computer.iroh.IrohException)failure.close()
+                        teardown(live);publish()
+                    }
+                }
+            }
+            val result=open(live,target,owner,admitted)
+            if(!admitted()){if(owner.active.getAndSet(false))abandonSubscription(live,result.subscription);throw StorePolicy(ErrorCode.NotReady)}
+            recoverReceipts(live)
+            if(!admitted()){if(owner.active.getAndSet(false))abandonSubscription(live,result.subscription);throw StorePolicy(ErrorCode.NotReady)}
+            result
+        }}
+        catch(cancel:CancellationException) {owner.active.set(false);throw cancel}
         catch(failure:RemoteFailure) {if((failure.code==ErrorCode.NotReady || failure.code==ErrorCode.StaleSession) && target.sessionId in live.resnapshot) recover(live);throw failure}
     }
-    private suspend fun open(live:Live,target:Target):SessionOpenResult {
+    private suspend fun open(live:Live,target:Target,owner:ConversationSubscription,admitted:()->Boolean={true}):SessionOpenResult {
+        if(!owner.active.get()||!admitted())throw StorePolicy(ErrorCode.NotReady)
         val caller=currentCoroutineContext()[Job]!!
         live.receiptsRecovered=false;publish()
         // Keep each old route/reducer until its ordered unsubscribe response has applied.
-        for((subscription,session) in live.subscriptions) if(session==target.sessionId) unsubscribe(live,subscription)
+        for((subscription,route) in live.subscriptions) if(route.target.sessionId==target.sessionId) unsubscribe(live,subscription)
         live.reducers[target.sessionId]?.disconnected();publish()
         try {
             return (request(live,RequestBody.SessionOpen(SessionOpenParams(target))) {result->
                 val snapshot=(result as ResultBody.SessionOpen).result
                 requireWire(Target(snapshot.state.summary.sessionId,snapshot.state.summary.generation)==target)
-                if(!caller.isActive) {abandonSubscription(live,snapshot.subscription);return@request}
+                if(!caller.isActive||!owner.active.get()||!admitted()){owner.active.set(false);abandonSubscription(live,snapshot.subscription);return@request}
                 val reducer=live.reducers.getOrPut(target.sessionId) {SessionReducer()}
-                live.subscriptions[snapshot.subscription]=target.sessionId
+                live.subscriptions[snapshot.subscription]=ConversationRoute(target,owner)
                 reducer.snapshot(snapshot);live.resnapshot.remove(target.sessionId)
+                invalidateGrid(live)
                 cache(live,reducer,true)
-                if(caller.isActive) store.viewing(live.host.hostId,target.sessionId)
+                if(caller.isActive&&owner.active.get()&&admitted())store.viewing(live.host.hostId,target.sessionId)
                 publish()
-                if(!caller.isActive) abandonSubscription(live,snapshot.subscription)
+                if(!caller.isActive||!owner.active.get()||!admitted()){owner.active.set(false);abandonSubscription(live,snapshot.subscription)}
             } as ResultBody.SessionOpen).result
         } catch(failure:RemoteFailure) {
             if((failure.code==ErrorCode.NotReady || failure.code==ErrorCode.StaleSession) &&
@@ -843,23 +966,37 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     suspend fun history(host:String,target:Target,cursor:Id?=null,limit:Uint?=null):SessionHistoryResult = withContext(serial) {val live=live(host);val reducer=live.reducers[target.sessionId] ?: throw StorePolicy(ErrorCode.NotReady);val ticket=reducer.historyPage(target,cursor);(request(live,RequestBody.SessionHistory(SessionHistoryParams(target,cursor,limit,ticket.viewId))) {result->reducer.page(ticket,(result as ResultBody.SessionHistory).result);cache(live,reducer,snapshot=true);publish()} as ResultBody.SessionHistory).result}
     private suspend fun unsubscribe(live:Live,subscription:Uuid) {
         request(live,RequestBody.SessionUnsubscribe(SessionUnsubscribeParams(subscription))) {
-            live.subscriptions.remove(subscription)?.let {session->live.reducers[session]?.takeIf {it.source==subscription}?.disconnected()}
+            live.subscriptions.remove(subscription)?.let {route->live.reducers[route.target.sessionId]?.takeIf {it.source==subscription}?.disconnected()}
             publish()
         }
     }
-    /** Resolve the CURRENT route under the existing owner, including automatic reopen. */
-    suspend fun leave(host:String,target:Target) = withContext(serial) {
-        val live=sessions[host]
-        if(live!=null) live.operations.withLock {
-            for((subscription,session) in live.subscriptions.toMap()) if(session==target.sessionId && live.alive.get()) unsubscribe(live,subscription)
-            live.resnapshot.remove(target.sessionId);live.reducers[target.sessionId]?.disconnected()
+    /** Retire synchronously; never inspect mutable reducer state from the main owner. */
+    internal fun retireConversationSubscription(host:String,target:Target):ConversationSubscription? {
+        val live=sessions[host] ?: return null
+        val original=live.conversation.get()?.takeIf {it.target==target}
+            ?: live.subscriptions.values.firstOrNull {it.owner.target==target}?.owner ?: return null
+        if(original.active.getAndSet(false))scope.launch {publish()}
+        return original
+    }
+    /** Delayed cleanup can remove only routes of the captured original viewer, not a new foreground. */
+    suspend fun leave(original:ConversationSubscription) = withContext(serial) {
+        val live=original.original as? Live ?: throw StorePolicy(ErrorCode.InvalidRequest)
+        if(sessions[original.host]!==live || !live.alive.get())return@withContext
+        live.operations.withLock {
+            for((subscription,route) in live.subscriptions.toMap()) {
+                if(route.owner===original && live.alive.get() && live.subscriptions[subscription]===route)unsubscribe(live,subscription)
+            }
+            if(live.conversation.get()===original)live.resnapshot.remove(original.target.sessionId)
+            invalidateGrid(live)
+            if(live.subscriptions.isEmpty())store.viewing(original.host,null)
         }
-        store.viewing(host,null);publish()
+        publish()
     }
     private fun contentSource(host:String,target:Target,source:Uuid):Pair<Live,SessionReducer> {
         val live=live(host);val reducer=live.reducers[target.sessionId] ?: throw StorePolicy(ErrorCode.NotReady)
         val summary=reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
         if(!live.hostReducer.ready || !live.hostReducer.sourceCurrent(summary.serverId) || summary.connectivity!=SessionConnectivity.Ready || reducer.source!=source || Target(summary.sessionId,summary.generation)!=target) throw StorePolicy(ErrorCode.ContentExpired)
+        if(live.subscriptions[source]?.owner?.active?.get()!=true)throw StorePolicy(ErrorCode.ContentExpired)
         return live to reducer
     }
     /** Every chunk and completed admission rechecks this exact subscription, never a UI epoch. */
@@ -868,7 +1005,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val result=(request(live,RequestBody.ContentRead(params)) as ResultBody.ContentRead).result
         contentSource(host,params.target,source);result
     }
-    /** Terminal text is transient: retain the original live/reducer/source triple. */
+    /** The selected terminal retains its original live/reducer/source triple. */
     private fun terminalContext(host:String,target:Target,source:Uuid):TerminalReadContext {
         val (live,reducer)=contentSource(host,target,source)
         if(reducer.state?.summary?.capabilities?.terminalRead!=true) throw StorePolicy(ErrorCode.NotReady)
@@ -878,6 +1015,95 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         if(!context.active.get() || sessions[context.host]!==context.live || !context.live.alive.get() || context.live.reducers[context.target.sessionId]!==context.reducer) throw StorePolicy(ErrorCode.StaleSession)
         val summary=context.reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
         if(!context.live.hostReducer.ready || !context.live.hostReducer.sourceCurrent(summary.serverId) || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.terminalRead || context.reducer.source!=context.source || Target(summary.sessionId,summary.generation)!=context.target) throw StorePolicy(ErrorCode.StaleSession)
+    }
+    private fun validateControlsRead(context:ControlsReadContext) {
+        val live=context.live;val reducer=context.reducer
+        if(!context.active.get()||!context.lease.active.get()||!context.admitted()||sessions[context.host]!==live||!live.alive.get()||live.disposed.get()||!live.authenticated||live.hello!==context.hello||context.hello==null||live.reducers[context.target.sessionId]!==reducer)throw StorePolicy(ErrorCode.StaleSession)
+        val summary=reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
+        if(!live.hostReducer.ready||!live.hostReducer.sourceCurrent(summary.serverId)||summary.connectivity!=SessionConnectivity.Ready||!summary.capabilities.controls
+            ||reducer.source!=context.source||summary.sessionId!=context.target.sessionId||summary.generation!=context.target.generation
+            ||live.subscriptions[context.source]?.owner?.active?.get()!=true
+            ||(if(context.queue)reducer.queueRevision else reducer.controlsRevision)!=context.revision||context.queue&&summary.provider!=Provider.Codex)throw StorePolicy(ErrorCode.StaleSession)
+    }
+    internal suspend fun nativeControls(host:String,target:Target,source:Uuid,lease:NativeControlsLease,admitted:()->Boolean):SessionControlsReadResult=withContext(serial) {
+        val(live,reducer)=contentSource(host,target,source);live.controlsPublication=null
+        val context=ControlsReadContext(host,live,reducer,target,source,lease,admitted);validateControlsRead(context)
+        val expires=android.os.SystemClock.elapsedRealtime()+300000
+        try {
+            val result=(request(live,RequestBody.SessionControlsRead(SessionControlsReadParams(target)),controls=context) {response->
+                validateControlsRead(context);if((response as ResultBody.SessionControlsRead).result.target!=target)throw StorePolicy(ErrorCode.StaleSession)
+            } as ResultBody.SessionControlsRead).result
+            validateControlsRead(context)
+            if(result.target!=target||android.os.SystemClock.elapsedRealtime()>=expires)throw StorePolicy(ErrorCode.StaleSession)
+            live.controlsPublication=ControlsPublication(live,reducer,target,source,result,expires,context.revision);result
+        }finally{context.active.set(false)}
+    }
+    internal suspend fun controlsMutation(host:String,catalogue:SessionControlsReadResult,lease:NativeControlsLease,admitted:()->Boolean):ControlsMutationContext=withContext(serial) {
+        val publication=sessions[host]?.controlsPublication?.takeIf {it.catalogue===catalogue}
+        val claim=publication?.let {ControlsClaim(it,ControlsReadContext(host,it.live,it.reducer,it.target,it.source,lease,admitted))}
+        ControlsMutationContext(claim,catalogue,lease,admitted)
+    }
+    private fun validateControlsMutation(context:ControlsMutationContext,live:Live,params:SessionControlsApplyParams) {
+        val claim=context.publication as? ControlsClaim ?: throw StorePolicy(ErrorCode.StaleSession)
+        val publication=claim.publication;validateControlsRead(claim.scope)
+        if(publication.live!==live||live.controlsPublication!==publication||publication.catalogue!==context.catalogue||live.hello!==publication.hello
+            ||publication.revision!=publication.reducer.controlsRevision||android.os.SystemClock.elapsedRealtime()>=publication.expires
+            ||params.target!=publication.target||params.catalogueGeneration!=publication.catalogue.catalogueGeneration)throw StorePolicy(ErrorCode.StaleSession)
+        val catalogue=publication.catalogue
+        val selected=(params.modelRef ?: catalogue.current.modelRef)?.let {reference->catalogue.models.singleOrNull {it.reference==reference} ?: throw StorePolicy(ErrorCode.StaleSession)}
+        params.effort?.let {if(selected==null||it !in selected.efforts)throw StorePolicy(ErrorCode.InvalidRequest)}
+        params.mode?.let {if(it !in catalogue.modes||params.modelRef==null&&catalogue.current.modelRef==null)throw StorePolicy(ErrorCode.NotReady)}
+    }
+    internal suspend fun nativeQueue(host:String,target:Target,source:Uuid,cursor:Id?,lease:NativeControlsLease,admitted:()->Boolean):SessionQueueListResult=withContext(serial) {
+        val(live,reducer)=contentSource(host,target,source)
+        val previous=if(cursor!=null)live.queuePublication?.takeIf {it.live===live&&it.reducer===reducer&&it.hello===live.hello&&it.revision==reducer.queueRevision&&it.target==target&&it.source==source&&it.next==cursor} ?: throw StorePolicy(ErrorCode.StaleSession)
+            else null.also {live.queuePublication=null}
+        val context=ControlsReadContext(host,live,reducer,target,source,lease,admitted,true);validateControlsRead(context)
+        val expires=previous?.expires ?: (android.os.SystemClock.elapsedRealtime()+300000)
+        if(android.os.SystemClock.elapsedRealtime()>=expires)throw StorePolicy(ErrorCode.StaleSession)
+        try {
+            val result=(request(live,RequestBody.SessionQueueList(SessionQueueListParams(target,cursor)),controls=context) {response->
+                validateControlsRead(context);if((response as ResultBody.SessionQueueList).result.target!=target)throw StorePolicy(ErrorCode.StaleSession)
+            } as ResultBody.SessionQueueList).result
+            validateControlsRead(context)
+            if(result.target!=target||live.queuePublication!==previous||android.os.SystemClock.elapsedRealtime()>=expires)throw StorePolicy(ErrorCode.StaleSession)
+            val entries=LinkedHashMap<Id,Boolean>(previous?.entries ?: emptyMap())
+            if(entries.size+result.entries.size>128)throw StorePolicy(ErrorCode.ResourceLimit)
+            var bytes=previous?.bytes ?: 0
+            for(entry in result.entries) {
+                if(entries.putIfAbsent(entry.id,entry.editable)!=null)throw StorePolicy(ErrorCode.StaleSession)
+                bytes+=utf8Size(entry.id.value)+(when(val text=entry.text) {is ContentText->utf8Size(text.text.value).toLong();is ContentRef->text.byteLength.value;is ContentUnavailable->0})
+                if(bytes>256L*1024)throw StorePolicy(ErrorCode.ResourceLimit)
+            }
+            live.queuePublication=QueuePublication(live,reducer,target,source,expires,context.revision,entries,result.nextCursor,bytes);result
+        }finally{context.active.set(false)}
+    }
+    internal suspend fun queueMutation(host:String,target:Target,source:Uuid,lease:NativeControlsLease,admitted:()->Boolean):QueueMutationContext=withContext(serial) {
+        val publication=sessions[host]?.queuePublication?.takeIf {it.target==target&&it.source==source}
+        val claim=publication?.let {QueueClaim(it,ControlsReadContext(host,it.live,it.reducer,it.target,it.source,lease,admitted,true))}
+        QueueMutationContext(claim,lease,admitted)
+    }
+    private fun validateQueueMutation(context:QueueMutationContext,live:Live,body:RequestBody) {
+        val claim=context.publication as? QueueClaim ?: throw StorePolicy(ErrorCode.StaleSession)
+        val publication=claim.publication;validateControlsRead(claim.scope)
+        if(publication.live!==live||live.queuePublication!==publication||live.hello!==publication.hello
+            ||publication.revision!=publication.reducer.queueRevision||android.os.SystemClock.elapsedRealtime()>=publication.expires)throw StorePolicy(ErrorCode.StaleSession)
+        val target:Target;val entry:Id?
+        when(body) {
+            is RequestBody.SessionQueueUpdate->{target=body.params.target;entry=body.params.entryId;if(publication.entries[entry]!=true)throw StorePolicy(ErrorCode.InvalidRequest)}
+            is RequestBody.SessionQueueDelete->{target=body.params.target;entry=body.params.entryId}
+            is RequestBody.SessionQueueStart->{
+                target=body.params.target;entry=body.params.entryId
+                val state=publication.reducer.state ?: throw StorePolicy(ErrorCode.NotReady)
+                if(state.nativeTurnId!=null||state.summary.status!=SessionStatus.Idle)throw StorePolicy(ErrorCode.Busy)
+            }
+            is RequestBody.SessionQueueReorder->{
+                target=body.params.target;entry=null
+                if(!publication.complete||body.params.entryIds.size!=publication.entries.size||body.params.entryIds.any {it !in publication.entries})throw StorePolicy(ErrorCode.StaleSession)
+            }
+            else->throw StorePolicy(ErrorCode.InvalidRequest)
+        }
+        if(target!=publication.target||entry!=null&&entry !in publication.entries)throw StorePolicy(ErrorCode.StaleSession)
     }
     private fun worktreesContext(host:String,target:Target,source:Uuid):WorktreesReadContext {
         val (live,reducer)=contentSource(host,target,source)
@@ -894,8 +1120,22 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val summary=context.reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
         if(!context.live.hostReducer.ready || !context.live.hostReducer.sourceCurrent(summary.serverId) || summary.provider !in listOf(Provider.Codex,Provider.Omp) || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.skillsRead || (if(context.catalogueRefresh&&summary.provider==Provider.Omp)summary.skillsGeneration==null else summary.skillsGeneration!=context.generation) || context.reducer.source!=context.source || Target(summary.sessionId,summary.generation)!=context.target) throw StorePolicy(ErrorCode.StaleSession)
     }
+    internal suspend fun skillInvocation(host:String,catalogue:SkillsListResult,entry:SkillEntry,lease:SkillInvocationLease,admitted:()->Boolean):SkillInvocationContext = withContext(serial) {
+        val publication=sessions[host]?.skillsPublication?.takeIf {it.catalogue===catalogue&&catalogue.skills.any {row->row===entry}}
+        SkillInvocationContext(publication,catalogue,entry.invocationRef,lease,admitted)
+    }
+    private fun validateSkillInvocation(context:SkillInvocationContext,live:Live,params:PromptSubmitParams) {
+        if(!context.lease.active.get())throw StorePolicy(ErrorCode.StaleSession)
+        val publication=context.publication as? SkillsInvocationPublication ?: throw StorePolicy(ErrorCode.NotReady)
+        val selector=params.skill ?: throw StorePolicy(ErrorCode.InvalidRequest)
+        if(publication.live!==live || live.skillsPublication!==publication || publication.catalogue!==context.catalogue || selector.reference!=context.reference || selector.catalogueGeneration!=context.catalogue.catalogueGeneration || params.target!=publication.target || params.text.value.isNotEmpty())throw StorePolicy(ErrorCode.StaleSession)
+        if(!context.admitted() || !live.alive.get() || live.disposed.get() || !live.authenticated || live.reducers[publication.target.sessionId]!==publication.reducer)throw StorePolicy(ErrorCode.StaleSession)
+        val summary=publication.reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
+        if(sessions[live.host.hostId]!==live || !live.hostReducer.ready || !live.hostReducer.sourceCurrent(summary.serverId) || publication.reducer.source!=publication.source || Target(summary.sessionId,summary.generation)!=publication.target || summary.provider!=Provider.Codex || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.prompt || !summary.capabilities.skillsRead || summary.skillsGeneration!=selector.catalogueGeneration || !context.catalogue.skills.any {it.enabled&&it.invocationRef==selector.reference})throw StorePolicy(ErrorCode.StaleSession)
+    }
     suspend fun skills(host:String,target:Target,source:Uuid,generation:Uuid):SkillsListResult = withContext(serial) {
         val (live,reducer)=contentSource(host,target,source)
+        live.skillsPublication=null
         val context=SkillsReadContext(host,live,reducer,target,source,generation)
         validateSkillsRead(context)
         context.catalogueRefresh=true
@@ -907,6 +1147,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             } as ResultBody.SkillsList).result
             validateSkillsRead(context)
             if(result.target!=target || result.provider!=reducer.state?.summary?.provider || result.catalogueGeneration!=reducer.state?.summary?.skillsGeneration || result.provider==Provider.Codex&&result.catalogueGeneration!=generation) throw StorePolicy(ErrorCode.StaleSession)
+            live.skillsPublication=SkillsInvocationPublication(live,reducer,target,source,result)
             result
         } finally {context.active.set(false)}
     }
@@ -915,7 +1156,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val caller=currentCoroutineContext()[Job] ?: throw StorePolicy(ErrorCode.NotReady)
         return withContext(serial){
             val(live,reducer)=contentSource(host,target,source);val context=SkillsReadContext(host,live,reducer,target,source,generation)
-            validateSkillsRead(context);if(reducer.state?.summary?.provider!=Provider.Omp)throw StorePolicy(ErrorCode.NotReady)
+            validateSkillsRead(context)
             var observed:Uuid?=null;var abandoned=false;var owned=false;val cleanupStarted=AtomicBoolean(false)
             suspend fun close(read:Uuid){
                 if(!live.alive.get()||!live.authenticated||live.disposed.get())return
@@ -962,21 +1203,67 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val summary=context.reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
         if(!context.live.hostReducer.ready || !context.live.hostReducer.sourceCurrent(summary.serverId) || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.changesRead || context.reducer.source!=context.source || Target(summary.sessionId,summary.generation)!=context.target) throw StorePolicy(ErrorCode.StaleSession)
     }
-    suspend fun terminal(host:String,target:Target,source:Uuid):TerminalReadResult = withContext(serial) {
+    internal suspend fun terminal(host:String,target:Target,source:Uuid,display:(TerminalGrid?,TerminalGridLease)->Unit)=withContext(serial) {
         val context=terminalContext(host,target,source)
-        var delivered=false
-        try {
-            val result=(request(context.live,RequestBody.TerminalRead(TerminalReadParams(target)),terminal=context) { response->
-                validateTerminalRead(context)
-                if((response as ResultBody.TerminalRead).result.target!=context.target) throw StorePolicy(ErrorCode.StaleSession)
-            } as ResultBody.TerminalRead).result
-            if(result.target!=target) throw StorePolicy(ErrorCode.StaleSession)
-            validateTerminalRead(context)
-            delivered=true
-            result
-        } finally {
-            if(!delivered) context.active.set(false)
+        gridStream(context.live,RequestBody.TerminalGridSubscribe(TerminalGridSubscribeParams(target)),context,null,display)
+    }
+    private fun invalidateGrid(live:Live) {
+        live.grid?.let {grid->try {
+            if(!validateGrid(grid)){grid.paused=true;grid.lease.pause();scope.launch{grid.lease.clearPaused(grid.display)}}
+            else if(grid.paused){grid.paused=false;grid.reducer.committed?.let {grid.lease.stage(it);scope.launch{grid.lease.deliver(grid.display)}}}
+        }catch(_:Exception){endGrid(grid)}}
+    }
+    private fun validateGrid(grid:GridReadContext):Boolean {
+        if(!grid.active || grid.live.grid!==grid || grid.reducer.expired())throw StorePolicy(ErrorCode.StaleSession)
+        var current=true
+        grid.terminal?.let {
+            validateTerminalRead(it)
+            if(grid.live.hostReducer.inventory?.hierarchy?.singleOrNull {graph->graph.serverId==grid.server}?.serverIncarnation!=grid.incarnation)
+                throw StorePolicy(ErrorCode.StaleSession)
         }
+        grid.shell?.let {context->
+            current=shellReadCurrent(context)
+            if(context.live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==context.shell.serverId}?.serverIncarnation!=grid.incarnation)throw StorePolicy(ErrorCode.StaleSession)
+            if(current&&context.live.hostReducer.inventory?.shells?.singleOrNull {it.target==context.shell.target}?.capabilities?.grid!=true)throw StorePolicy(ErrorCode.NotReady)
+        }
+        return current
+    }
+    private fun gridTimeout(grid:GridReadContext) {
+        val deadline=grid.reducer.transactionDeadline
+        if(deadline==grid.deadline)return
+        grid.timeout?.cancel();grid.timeout=null;grid.deadline=deadline
+        if(deadline!=0L)grid.timeout=scope.launch(serial) {
+            delay(((deadline-System.nanoTime()).coerceAtLeast(0)+999_999)/1_000_000)
+            if(grid.active && grid.live.grid===grid && grid.reducer.transactionDeadline==deadline && grid.reducer.expired())endGrid(grid)
+        }
+    }
+    private fun endGrid(grid:GridReadContext) {
+        if(!grid.lease.close())return
+        grid.terminal?.active?.set(false);grid.shell?.active?.set(false)
+        grid.timeout?.cancel();grid.timeout=null;grid.deadline=0
+        grid.reducer.clear()
+        scope.launch {grid.lease.clear(grid.display)}
+        if(grid.live.grid===grid)grid.live.grid=null
+        grid.subscription?.let {abandonSubscription(grid.live,it)}
+    }
+    private suspend fun gridStream(live:Live,body:RequestBody,terminal:TerminalReadContext?,shell:ShellReadContext?,display:(TerminalGrid?,TerminalGridLease)->Unit) {
+        if(live.grid!=null)throw StorePolicy(ErrorCode.Busy)
+        val caller=currentCoroutineContext()[Job]!!
+        val grid=GridReadContext(live,terminal,shell,TerminalGridLease(caller),display);live.grid=grid
+        try {
+            request(live,body,terminal=terminal,shell=shell){response->
+                val (subscription,frame)=when(response){
+                    is ResultBody.TerminalGridSubscribe->{requireWire(response.result.target==terminal?.target);response.result.subscription to response.result.frame}
+                    is ResultBody.ShellGridSubscribe->{requireWire(response.result.target==shell?.shell?.target);response.result.subscription to response.result.frame}
+                    else->invalidWire()
+                }
+                grid.subscription=subscription
+                if(!caller.isActive || !grid.active){abandonSubscription(live,subscription);return@request}
+                validateGrid(grid);grid.reducer.open(frame,live.payloadBytes);gridTimeout(grid)
+            }
+            grid.lease.stopped.await()
+            throw StorePolicy(ErrorCode.NotReady)
+        } finally {endGrid(grid)}
     }
     /** This inventory has no cache or reducer mutation. Every delayed response remains bound to
      * the live connection, reducer, original Target and source captured at dialog open. */
@@ -990,8 +1277,6 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             } as ResultBody.WorktreesList).result
             if(result.target!=target) throw StorePolicy(ErrorCode.StaleSession)
             validateWorktreesRead(context)
-            if(context.live.worktreeCreationScopes.size>=512 && !context.live.worktreeCreationScopes.containsKey(target)) context.live.worktreeCreationScopes.clear()
-            result.creationScope?.let {context.live.worktreeCreationScopes[target]=source to it} ?: context.live.worktreeCreationScopes.remove(target)
             delivered=true
             result
         } finally {
@@ -1023,38 +1308,66 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val text=store.content(host,target,source,reference.handle)
         contentSource(host,target,source);text
     }
+    private fun notificationOwnerCurrent(original:Live,expected:HelloResult):Boolean =
+        sessions[original.host.hostId]===original&&original.alive.get()&&original.authenticated&&original.hello===expected&&mutable.value.hello[original.host.hostId]===expected
     // A sync completion is caller-driven reconciliation, never a delivery wakeup. Emitting here
     // would make foreground read confirmation recursively request another sync page.
     internal suspend fun reconcilePush(host:String,expected:HelloResult)=withContext(serial){
         val original=live(host)
-        fun admitted(){if(sessions[host]!==original||!original.alive.get()||!original.authenticated||original.hello!==expected||!original.hostReducer.ready)throw StorePolicy(ErrorCode.NotReady)}
+        fun admitted(){if(!notificationOwnerCurrent(original,expected)||!original.hostReducer.ready)throw StorePolicy(ErrorCode.NotReady)}
         admitted();var after:Uint?=null;var pages=0
         do{
             admitted();if(++pages>100)throw StorePolicy(ErrorCode.ResourceLimit)
             val previous=after
-            val result=(request(original,RequestBody.NotificationsSync(NotificationsSyncParams(after,Uint(100)))){reply->admitted();store.notifications(host,(reply as ResultBody.NotificationsSync).result);admitted()}as ResultBody.NotificationsSync).result
+            val result=(request(original,RequestBody.NotificationsSync(NotificationsSyncParams(after,Uint(100)))){reply->admitted();store.notifications(host,(reply as ResultBody.NotificationsSync).result){notificationOwnerCurrent(original,expected)&&original.hostReducer.ready};admitted()}as ResultBody.NotificationsSync).result
             admitted();after=result.nextSequence;if(after!=null&&after.value<=(previous?.value ?: 0L))throw StorePolicy(ErrorCode.InvalidRequest)
         }while(after!=null)
     }
-    internal suspend fun registerPush(host:String,registration:LocalPushRegistration):PushRegisterResult=withContext(serial){
-        val original=live(host);val boot=original.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady);val endpoint=registration.endpoint ?: throw StorePolicy(ErrorCode.NotReady)
-        val result=(request(original,RequestBody.PushRegister(PushRegisterParams(boot,endpoint,registration.generation,Key32(registration.key),registration.probe))){reply->
-            if(sessions[host]!==original||!original.alive.get()||!original.authenticated)throw StorePolicy(ErrorCode.NotReady)
+    internal suspend fun registerPush(host:String,expected:HelloResult,registration:LocalPushRegistration):PushRegisterResult=withContext(serial){
+        val original=live(host);if(!notificationOwnerCurrent(original,expected)||registration.device!=expected.deviceId)throw StorePolicy(ErrorCode.NotReady)
+        val endpoint=registration.endpoint ?: throw StorePolicy(ErrorCode.NotReady)
+        val result=(request(original,RequestBody.PushRegister(PushRegisterParams(expected.bootId,endpoint,registration.generation,Key32(registration.key),registration.probe))){reply->
+            if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
             val result=(reply as ResultBody.PushRegister).result;if(result.endpointGeneration!=registration.generation||result.probe!=registration.probe)throw StorePolicy(ErrorCode.PushRejected)
-        }as ResultBody.PushRegister).result;result
+        }as ResultBody.PushRegister).result
+        if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        result
     }
-    internal suspend fun acknowledgePush(host:String,registration:LocalPushRegistration):PushProbeAckResult=withContext(serial){
-        val original=live(host);val boot=original.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
-        (request(original,RequestBody.PushProbeAck(PushProbeAckParams(boot,registration.generation,registration.probe))){
-            if(sessions[host]!==original||!original.alive.get()||!original.authenticated)throw StorePolicy(ErrorCode.NotReady)
+    internal suspend fun acknowledgePush(host:String,expected:HelloResult,registration:LocalPushRegistration):PushProbeAckResult=withContext(serial){
+        val original=live(host);if(!notificationOwnerCurrent(original,expected)||registration.device!=expected.deviceId)throw StorePolicy(ErrorCode.NotReady)
+        val result=(request(original,RequestBody.PushProbeAck(PushProbeAckParams(expected.bootId,registration.generation,registration.probe))){
+            if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
         }as ResultBody.PushProbeAck).result
+        if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        result
     }
-    internal suspend fun unregisterPush(host:String,generation:Uuid):PushUnregisterResult=withContext(serial){
-        val original=live(host);val boot=original.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
-        (request(original,RequestBody.PushUnregister(PushUnregisterParams(boot,generation))){if(sessions[host]!==original||!original.alive.get())throw StorePolicy(ErrorCode.NotReady)}as ResultBody.PushUnregister).result
+    internal suspend fun unregisterPush(host:String,expected:HelloResult,generation:Uuid):PushUnregisterResult=withContext(serial){
+        val original=live(host);if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        val result=(request(original,RequestBody.PushUnregister(PushUnregisterParams(expected.bootId,generation))){if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)}as ResultBody.PushUnregister).result
+        if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        result
     }
-    suspend fun notificationsSync(host:String,after:Uint?=null,limit:Uint?=null):NotificationsSyncResult = (request(live(host),RequestBody.NotificationsSync(NotificationsSyncParams(after,limit))) {result->store.notifications(host,(result as ResultBody.NotificationsSync).result)} as ResultBody.NotificationsSync).result
-    suspend fun markRead(host:String,session:Uuid,through:Uint):ReadWatermark {val live=live(host);val boot=live.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady);val params=store.readRequest(host,boot,session,through);return (request(live,RequestBody.NotificationsRead(params)) {result->store.readConfirmed(host,(result as ResultBody.NotificationsRead).result.read);notificationWakeupMutable.tryEmit(NotificationWakeup(host))} as ResultBody.NotificationsRead).result.read}
+    suspend fun notificationsSync(host:String,expected:HelloResult,after:Uint?=null,limit:Uint?=null):NotificationsSyncResult=withContext(serial){
+        val original=live(host);if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        val result=(request(original,RequestBody.NotificationsSync(NotificationsSyncParams(after,limit))){reply->
+            if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+            store.notifications(host,(reply as ResultBody.NotificationsSync).result){notificationOwnerCurrent(original,expected)}
+        }as ResultBody.NotificationsSync).result
+        if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        result
+    }
+    suspend fun markRead(host:String,expected:HelloResult,session:Uuid,through:Uint):ReadWatermark=withContext(serial){
+        val original=live(host);if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        val params=store.readRequest(host,expected.bootId,session,through)
+        if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        val result=(request(original,RequestBody.NotificationsRead(params)){reply->
+            if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+            store.readConfirmed(host,(reply as ResultBody.NotificationsRead).result.read){notificationOwnerCurrent(original,expected)}
+            if(notificationOwnerCurrent(original,expected))notificationWakeupMutable.tryEmit(NotificationWakeup(host))
+        }as ResultBody.NotificationsRead).result.read
+        if(!notificationOwnerCurrent(original,expected))throw StorePolicy(ErrorCode.NotReady)
+        result
+    }
     /** A coalesced UI inspect hint, derived only from the durable canonical committed outcome.
      * An ignored old frame cannot regress it; it carries no payload and grants no readiness. */
     private fun nextShellStatusOrder(live:Live):Long {
@@ -1114,34 +1427,73 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     }
     private fun mutationContext(live:Live,body:RequestBody,onFailure:((ActionAdmissionGuard,ErrorCode)->Unit)?=null) {
         fun reject(guard:ActionAdmissionGuard,code:ErrorCode):Nothing {onFailure?.invoke(guard,code);throw StorePolicy(code)}
-        val (boot,target)=when(body) {is RequestBody.TerminalCreate->body.params.bootId to body.params.target;is RequestBody.AttachmentsBegin->body.params.bootId to body.params.target;is RequestBody.AttachmentsChunk->body.params.bootId to body.params.target;is RequestBody.AttachmentsComplete->body.params.bootId to body.params.target;is RequestBody.AttachmentsDiscard->body.params.bootId to null;is RequestBody.WorktreesRemove->body.params.bootId to body.params.target;is RequestBody.AgentRename->body.params.bootId to body.params.target;is RequestBody.WorkspaceRename->body.params.bootId to body.params.target;is RequestBody.PromptSubmit->body.params.bootId to body.params.target;is RequestBody.TurnCancel->body.params.bootId to body.params.target;is RequestBody.RequestRespond->body.params.bootId to body.params.target;is RequestBody.SessionCreate->body.params.bootId to body.params.sourceTarget;is RequestBody.ShellCreate->body.params.bootId to null;is RequestBody.ShellInput->body.params.bootId to null;else->return}
+        val (boot,target)=when(body) {
+            is RequestBody.SessionControlsApply->body.params.bootId to body.params.target
+            is RequestBody.SessionQueueUpdate->body.params.bootId to body.params.target
+            is RequestBody.SessionQueueDelete->body.params.bootId to body.params.target
+            is RequestBody.SessionQueueReorder->body.params.bootId to body.params.target
+            is RequestBody.SessionQueueStart->body.params.bootId to body.params.target
+            is RequestBody.TerminalCreate->body.params.bootId to null
+            is RequestBody.AttachmentsBegin->body.params.bootId to body.params.target
+            is RequestBody.AttachmentsChunk->body.params.bootId to body.params.target
+            is RequestBody.AttachmentsComplete->body.params.bootId to body.params.target
+            is RequestBody.AttachmentsDiscard->body.params.bootId to null
+            is RequestBody.AgentRename->body.params.bootId to body.params.target
+            is RequestBody.WorkspaceRename->body.params.bootId to body.params.target
+            is RequestBody.PromptSubmit->body.params.bootId to body.params.target
+            is RequestBody.TurnCancel->body.params.bootId to body.params.target
+            is RequestBody.RequestRespond->body.params.bootId to body.params.target
+            is RequestBody.SessionCreate->body.params.bootId to body.params.placement?.sourceTarget
+            is RequestBody.ShellInput->body.params.bootId to null
+            is RequestBody.ShellResize->body.params.bootId to null
+            else->return
+        }
         if(boot!=live.hello?.bootId) reject(ActionAdmissionGuard.BootChanged,ErrorCode.StaleHost)
         if(body !is RequestBody.AttachmentsDiscard && !live.hostReducer.ready) reject(ActionAdmissionGuard.HostNotReady,ErrorCode.NotReady)
         if(!live.receiptsRecovered) reject(ActionAdmissionGuard.ReceiptsUnreconciled,ErrorCode.NotReady)
-        if(body is RequestBody.ShellCreate || body is RequestBody.ShellInput) {
-            val shellTarget=when(body){is RequestBody.ShellCreate->body.params.target;is RequestBody.ShellInput->body.params.target;else->throw StorePolicy(ErrorCode.InvalidRequest)}
+        if(body is RequestBody.ShellInput || body is RequestBody.ShellResize) {
+            val shellTarget=when(body){is RequestBody.ShellInput->body.params.target;is RequestBody.ShellResize->body.params.target;else->throw StorePolicy(ErrorCode.InvalidRequest)}
             val shell=live.hostReducer.inventory?.shells?.singleOrNull {it.target==shellTarget} ?: reject(ActionAdmissionGuard.TargetChanged,ErrorCode.StaleSession)
-            if(shell.connectivity!=SessionConnectivity.Ready || !shell.capabilities.read || (if(body is RequestBody.ShellInput)!shell.capabilities.input else !shell.capabilities.create) || !live.hostReducer.sourceCurrent(shell.serverId)) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
+            val allowed=when(body){is RequestBody.ShellInput->shell.capabilities.input;is RequestBody.ShellResize->shell.capabilities.grid;else->shell.capabilities.create}
+            if(shell.connectivity!=SessionConnectivity.Ready || !shell.capabilities.read || !allowed || !live.hostReducer.sourceCurrent(shell.serverId)) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
         }
-        if(target!=null) {val reducer=live.reducers[target.sessionId] ?: reject(ActionAdmissionGuard.ReducerAbsent,ErrorCode.NotReady);val summary=reducer.state?.summary ?: reject(ActionAdmissionGuard.SummaryAbsent,ErrorCode.NotReady);if(Target(summary.sessionId,summary.generation)!=target) reject(ActionAdmissionGuard.TargetChanged,ErrorCode.StaleSession);if(!reducer.mutationsEnabled) reject(ActionAdmissionGuard.MutationsDisabled,ErrorCode.NotReady);if(!live.hostReducer.sourceCurrent(summary.serverId)) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)}
+        if(target!=null) {val reducer=live.reducers[target.sessionId] ?: reject(ActionAdmissionGuard.ReducerAbsent,ErrorCode.NotReady);val summary=reducer.state?.summary ?: reject(ActionAdmissionGuard.SummaryAbsent,ErrorCode.NotReady);if(Target(summary.sessionId,summary.generation)!=target) reject(ActionAdmissionGuard.TargetChanged,ErrorCode.StaleSession);if(!reducer.mutationsEnabled) reject(ActionAdmissionGuard.MutationsDisabled,ErrorCode.NotReady);val route=reducer.source?.let {live.subscriptions[it]};if(route==null || route.target!=target || !route.owner.active.get())reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady);if(!live.hostReducer.sourceCurrent(summary.serverId)) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)}
         if(body.attachmentTarget()!=null && body !is RequestBody.AttachmentsDiscard && live.reducers[body.attachmentTarget()!!.sessionId]?.state?.summary?.capabilities?.attachments!=true)reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
-        if(body is RequestBody.TerminalCreate&&live.reducers[body.params.target.sessionId]?.state?.summary?.capabilities?.terminalCreate!=true)reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
-        if(body is RequestBody.WorktreesRemove && live.reducers[body.params.target.sessionId]?.state?.summary?.capabilities?.worktreeRemove!=true)reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
         if(body is RequestBody.AgentRename && live.reducers[body.params.target.sessionId]?.state?.summary?.capabilities?.agentRename!=true) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
-        if(body is RequestBody.SessionCreate && body.params.sourceTarget!=null) {
-            val sourceTarget=body.params.sourceTarget
+        if(body is RequestBody.SessionControlsApply&&live.reducers[body.params.target.sessionId]?.state?.summary?.capabilities?.controls!=true)reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
+        if(body is RequestBody.SessionCreate && body.params.placement!=null) {
+            val sourceTarget=body.params.placement.sourceTarget
             val reducer=live.reducers[sourceTarget.sessionId] ?: reject(ActionAdmissionGuard.ReducerAbsent,ErrorCode.NotReady)
             val summary=reducer.state?.summary ?: reject(ActionAdmissionGuard.SummaryAbsent,ErrorCode.NotReady)
-            val scope=live.worktreeCreationScopes[sourceTarget] ?: reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
-            if(scope.first!=reducer.source || !scope.second.canCreate || scope.second.projectId!=body.params.projectId || summary.serverId!=body.params.serverId || !summary.capabilities.worktreeCreate) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
+            if(summary.serverId!=body.params.serverId)reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.StaleSession)
             if(live.hostReducer.inventory?.projects?.none {it.projectId==body.params.projectId && it.available}!=false) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
         }
 
     }
+    private fun validatePromptOptions(live:Live,params:PromptSubmitParams,source:Uuid?) {
+        val reducer=live.reducers[params.target.sessionId] ?: throw StorePolicy(ErrorCode.NotReady)
+        val state=reducer.state ?: throw StorePolicy(ErrorCode.NotReady)
+        if(source==null||reducer.source!=source||state.summary.sessionId!=params.target.sessionId||state.summary.generation!=params.target.generation
+            ||live.subscriptions[source]?.owner?.active?.get()!=true)throw StorePolicy(ErrorCode.StaleSession)
+        val delivery=params.delivery ?: PromptDelivery.Native
+        when(state.summary.provider) {
+            Provider.Omp->if(delivery==PromptDelivery.Queue||params.nativeTurnId!=null||delivery!=PromptDelivery.Native&&!state.summary.capabilities.controls)throw StorePolicy(ErrorCode.NotReady)
+            Provider.Codex->if(delivery==PromptDelivery.FollowUp||delivery==PromptDelivery.Aside||delivery==PromptDelivery.Steer&&(params.nativeTurnId==null||params.nativeTurnId!=state.nativeTurnId))throw StorePolicy(ErrorCode.StaleSession)
+        }
+        params.images?.let {images->
+            if(!state.summary.capabilities.attachments)throw StorePolicy(ErrorCode.NotReady)
+            var bytes=0L
+            for(image in images) {
+                val status=live.attachmentStatuses[image] ?: throw StorePolicy(ErrorCode.NotReady)
+                if(status.target!=params.target||status.state!=AttachmentUploadState.Complete||!status.insertionReady||status.progress.published!=true||status.progress.discarded==true)throw StorePolicy(ErrorCode.StaleSession)
+                bytes+=status.size.value;if(bytes>8L*1024*1024)throw StorePolicy(ErrorCode.ResourceLimit)
+            }
+        }
+    }
     /** Capture actual immutable owner references before any suspension or system-picker launch. */
     internal fun captureAttachment(host:String,target:Target,source:Uuid,expected:SessionReducer,resume:AttachmentsStatusResult?=null):AttachmentMutationContext {
         val live=sessions[host] ?: throw StorePolicy(ErrorCode.NotReady)
-        val original=AttachmentContext(host,live,expected,target,source,live.subscriptions[target.sessionId])
+        val original=AttachmentContext(host,live,expected,target,source,live.subscriptions.entries.singleOrNull {it.value.target==target}?.key)
         val context=AttachmentMutationContext(original,AttachmentActionLease(),host,target,source,resumeStatus=resume)
         validateAttachment(context,live,null);return context
     }
@@ -1160,7 +1512,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             if(context.cleanupUpload!=null){if(body!=null && (body !is RequestBody.AttachmentsDiscard || body.params.uploadId!=context.cleanupUpload))throw StorePolicy(ErrorCode.InvalidRequest);return@admit}
             val reducer=original.reducer ?: throw StorePolicy(ErrorCode.NotReady)
             val summary=reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
-            if(live.reducers[original.target.sessionId]!==reducer || original.source==null || reducer.source!=original.source || live.subscriptions[original.target.sessionId]!=original.subscription || Target(summary.sessionId,summary.generation)!=original.target || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.attachments || !reducer.mutationsEnabled || !live.hostReducer.ready || !live.hostReducer.sourceCurrent(summary.serverId))throw StorePolicy(ErrorCode.NotReady)
+            if(live.reducers[original.target.sessionId]!==reducer || original.source==null || reducer.source!=original.source || original.subscription==null || live.subscriptions[original.subscription]?.target!=original.target || Target(summary.sessionId,summary.generation)!=original.target || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.attachments || !reducer.mutationsEnabled || !live.hostReducer.ready || !live.hostReducer.sourceCurrent(summary.serverId))throw StorePolicy(ErrorCode.NotReady)
         }
     }
     internal fun attachmentBoot(context:AttachmentMutationContext):Uuid {val original=context.original as? AttachmentContext ?: throw StorePolicy(ErrorCode.InvalidRequest);validateAttachment(context,original.live,null);return original.live.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady)}
@@ -1177,28 +1529,6 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val observed=if(context==null || !attachmentCurrent(context) || (context.original as? AttachmentContext)?.live!==original)result.copy(insertionReady=false)else result
         if(original.attachmentStatuses.size>=32 && !original.attachmentStatuses.containsKey(upload))throw StorePolicy(ErrorCode.ResourceLimit)
         original.attachmentStatuses[upload]=observed;observed
-    }
-    internal suspend fun previewWorktreeRemoval(host:String,target:Target,source:Uuid,candidate:Uuid,ticket:Long,lease:WorktreeRemovalLease):WorktreeRemovalMutationContext=withContext(serial) {
-        val original=worktreesContext(host,target,source);var delivered=false
-        try {
-            lease.admit {validateWorktreesRead(original);if(original.reducer.state?.summary?.capabilities?.worktreeRemove!=true)throw StorePolicy(ErrorCode.NotReady)}
-            val result=(request(original.live,RequestBody.WorktreesRemovePreview(WorktreesRemovePreviewParams(target,candidate)),worktrees=original){response->
-                lease.admit {validateWorktreesRead(original)}
-                val preview=(response as ResultBody.WorktreesRemovePreview).result
-                if(preview.target!=target || preview.candidateId!=candidate)throw StorePolicy(ErrorCode.StaleSession)
-            } as ResultBody.WorktreesRemovePreview).result
-            lease.admit {validateWorktreesRead(original)}
-            if(result.target!=target || result.candidateId!=candidate)throw StorePolicy(ErrorCode.StaleSession)
-            delivered=true
-            WorktreeRemovalMutationContext(original,lease,result,ticket,android.os.SystemClock.elapsedRealtime()+25000)
-        }finally{if(!delivered)original.active.set(false)}
-    }
-    private fun validateWorktreeRemoval(context:WorktreeRemovalMutationContext,live:Live,body:RequestBody.WorktreesRemove) {
-        context.lease.admit {
-            val original=context.original as? WorktreesReadContext ?: throw StorePolicy(ErrorCode.InvalidRequest)
-            if(original.live!==live || sessions[original.host]!==live || context.preview.target!=body.params.target || context.preview.candidateId!=body.params.candidateId || context.preview.previewId!=body.params.previewId || !context.preview.removable || android.os.SystemClock.elapsedRealtime()>=context.expiresAt)throw StorePolicy(ErrorCode.StaleSession)
-            validateWorktreesRead(original);mutationContext(live,body)
-        }
     }
     internal fun captureArtifacts(host:String,source:ArtifactSource,expected:SessionReducer?,subscription:Uuid,epoch:Uuid?):ArtifactReadContext{
         val live=sessions[host] ?: throw StorePolicy(ErrorCode.NotReady)
@@ -1273,43 +1603,146 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         // Closing only an already-owned memory lease needs no new Ready source.
         val result=(request(original.live,RequestBody.ArtifactsClose(ArtifactsCloseParams(original.source,read)))as ResultBody.ArtifactsClose).result;if(result.source!=original.source||result.readId!=read)throw StorePolicy(ErrorCode.StaleSession)
     }
-    /** Presentation origin only: the configured project remains the sole new-session directory authority. */
+    internal fun captureCreationDirectories(host:String,server:Uuid,project:Uuid,agent:AgentSessionMutationContext?,terminal:TerminalCreationMutationContext?=null,viewCurrent:()->Boolean):CreationDirectoriesContext {
+        val live=sessions[host] ?: throw StorePolicy(ErrorCode.NotReady)
+        if(agent!=null&&terminal!=null)throw StorePolicy(ErrorCode.InvalidRequest)
+        agent?.let {validateAgentSessionOrigin(it,live,false)}
+        terminal?.let {validateTerminalCreationOrigin(it,live,false)}
+        val originalAgent=agent?.original as? AgentSessionContext
+        val originalTerminal=terminal?.original as? TerminalCreationOriginal
+        if(originalTerminal!=null&&originalTerminal.server!=server)throw StorePolicy(ErrorCode.StaleSession)
+        val source=originalTerminal?.source ?: originalAgent?.takeIf {it.server==server}?.let {ArtifactSource.Session(it.target)}
+        val hierarchy=live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==server&&it.freshness==NativeFreshness.Current}
+            ?: throw StorePolicy(ErrorCode.NotReady)
+        val original=CreationDirectoryOriginal(host,live,live.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady),hierarchy.serverIncarnation,source,agent,terminal)
+        val context=CreationDirectoriesContext(original,AgentSessionLease(),server,project,android.os.SystemClock.elapsedRealtime()+300000,viewCurrent)
+        validateCreationDirectories(context,live,true);return context
+    }
+    internal fun creationDirectoriesCurrent(context:CreationDirectoriesContext):Boolean=try {
+        val original=context.original as? CreationDirectoryOriginal ?: throw StorePolicy(ErrorCode.InvalidRequest)
+        validateCreationDirectories(context,original.live,false);true
+    }catch(_:Exception){false}
+    private fun validateCreationDirectories(context:CreationDirectoriesContext,live:Live,ready:Boolean)=context.lease.admit {
+        val original=context.original as? CreationDirectoryOriginal ?: throw StorePolicy(ErrorCode.InvalidRequest)
+        if(!context.viewCurrent()||original.live!==live||sessions[original.host]!==live||!live.alive.get()||!live.authenticated||live.hello?.bootId!=original.boot)throw StorePolicy(ErrorCode.StaleSession)
+        original.agent?.let {validateAgentSessionOrigin(it,live,false)}
+        original.terminal?.let {validateTerminalCreationOrigin(it,live,false)}
+        val inventory=live.hostReducer.inventory ?: throw StorePolicy(ErrorCode.NotReady)
+        val hierarchy=inventory.hierarchy.singleOrNull {it.serverId==context.server&&it.serverIncarnation==original.incarnation}
+            ?: throw StorePolicy(ErrorCode.StaleSession)
+        if(hierarchy.freshness==NativeFreshness.Unavailable||inventory.projects.none {it.projectId==context.project&&it.available})throw StorePolicy(ErrorCode.NotReady)
+        if(ready&&(!live.hostReducer.ready||!live.hostReducer.sourceCurrent(context.server)||hierarchy.freshness!=NativeFreshness.Current))throw StorePolicy(ErrorCode.NotReady)
+    }
+    internal suspend fun creationDirectories(context:CreationDirectoriesContext,parent:Uuid?,cursor:Uuid?):CreationDirectoriesResult=withContext(serial) {
+        val original=context.original as? CreationDirectoryOriginal ?: throw StorePolicy(ErrorCode.InvalidRequest)
+        fun validate()=context.lease.admit {
+            validateCreationDirectories(context,original.live,true)
+            if(android.os.SystemClock.elapsedRealtime()>=context.expiresAt)throw StorePolicy(ErrorCode.CursorExpired)
+            if(parent!=null&&parent !in context.references)throw StorePolicy(ErrorCode.CursorExpired)
+            if(cursor!=null&&(!context.cursors.containsKey(cursor)||context.cursors[cursor]!=parent))throw StorePolicy(ErrorCode.CursorExpired)
+        }
+        validate()
+        val params=CreationDirectoriesParams(context.server,context.project,original.source,parent,cursor,Uint(100))
+        val result=(request(original.live,RequestBody.CreationDirectories(params)){response->
+            context.lease.admit {
+                validate()
+                val page=(response as? ResultBody.CreationDirectories)?.result ?: throw ProtocolFailure(FailureKind.Incompatible)
+                if(page.serverId!=context.server||page.projectId!=context.project||page.source!=original.source)throw StorePolicy(ErrorCode.StaleSession)
+                val incoming=page.entries.count {it.reference !in context.references}
+                val next=page.nextCursor
+                if(context.references.size+incoming>4096||next!=null&&next !in context.cursors&&context.cursors.size>=4096)throw StorePolicy(ErrorCode.ResourceLimit)
+                if(next!=null&&context.cursors.containsKey(next)&&context.cursors[next]!=parent)throw StorePolicy(ErrorCode.CursorExpired)
+                page.entries.forEach {context.references.add(it.reference)}
+                if(next!=null)context.cursors[next]=parent
+            }
+        } as ResultBody.CreationDirectories).result
+        validate();result
+    }
+    private fun validateCreationDirectoryMutation(context:CreationDirectoriesContext,live:Live,body:RequestBody)=context.lease.admit {
+        validateCreationDirectories(context,live,true)
+        val (server,project,reference)=when(body) {
+            is RequestBody.SessionCreate->Triple(body.params.serverId,body.params.projectId,body.params.directoryRef)
+            is RequestBody.TerminalCreate->{
+                val original=context.original as? CreationDirectoryOriginal ?: throw StorePolicy(ErrorCode.InvalidRequest)
+                if(body.params.source!=original.source)throw StorePolicy(ErrorCode.StaleSession)
+                Triple(body.params.serverId,body.params.projectId,body.params.directoryRef)
+            }
+            else->throw StorePolicy(ErrorCode.InvalidRequest)
+        }
+        if(server!=context.server||project!=context.project)throw StorePolicy(ErrorCode.StaleSession)
+        reference?.let {if(android.os.SystemClock.elapsedRealtime()>=context.expiresAt||it !in context.references)throw StorePolicy(ErrorCode.CursorExpired)}
+    }
+    /** Original-view claim; configured roots and scoped references remain independent directory authority. */
     internal fun captureAgentSession(host:String,target:Target,source:Uuid,expected:SessionReducer):AgentSessionMutationContext {
         val live=sessions[host] ?: throw StorePolicy(ErrorCode.NotReady)
         val summary=expected.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
-        val subscription=live.subscriptions.entries.singleOrNull {it.value==target.sessionId}?.key ?: throw StorePolicy(ErrorCode.NotReady)
+        val subscription=live.subscriptions.entries.singleOrNull {it.value.target==target}?.key ?: throw StorePolicy(ErrorCode.NotReady)
         val original=AgentSessionContext(host,live,live.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady),expected,target,source,subscription,summary.serverId,summary.provider,summary.workspaceId,summary.paneId,summary.terminalId)
         val context=AgentSessionMutationContext(original,AgentSessionLease())
         validateAgentSessionOrigin(context,live);return context
     }
     internal fun agentSessionCurrent(context:AgentSessionMutationContext):Boolean=try {
         val original=context.original as? AgentSessionContext ?: throw StorePolicy(ErrorCode.InvalidRequest)
-        validateAgentSessionOrigin(context,original.live);true
+        validateAgentSessionOrigin(context,original.live,false);true
     }catch(_:Exception){false}
-    private fun validateAgentSessionOrigin(context:AgentSessionMutationContext,live:Live)=context.lease.admit {
+    private fun validateAgentSessionOrigin(context:AgentSessionMutationContext,live:Live,ready:Boolean=true)=context.lease.admit {
         val original=context.original as? AgentSessionContext ?: throw StorePolicy(ErrorCode.InvalidRequest)
-        if(original.live!==live||sessions[original.host]!==live||!live.alive.get()||!live.authenticated||live.hello?.bootId!=original.boot||live.reducers[original.target.sessionId]!==original.reducer||original.reducer.source!=original.source||original.subscription==null||live.subscriptions[original.subscription]!=original.target.sessionId)throw StorePolicy(ErrorCode.StaleSession)
+        if(original.live!==live||sessions[original.host]!==live||!live.alive.get()||!live.authenticated||live.hello?.bootId!=original.boot||live.reducers[original.target.sessionId]!==original.reducer||original.reducer.source!=original.source||original.subscription==null||live.subscriptions[original.subscription]?.target!=original.target)throw StorePolicy(ErrorCode.StaleSession)
         val summary=original.reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
         if(Target(summary.sessionId,summary.generation)!=original.target||summary.serverId!=original.server||summary.provider!=original.provider||summary.workspaceId!=original.workspace||summary.paneId!=original.pane||summary.terminalId!=original.terminal)throw StorePolicy(ErrorCode.StaleSession)
-        if(!original.reducer.mutationsEnabled||!live.hostReducer.ready||!live.hostReducer.sourceCurrent(original.server))throw StorePolicy(ErrorCode.NotReady)
+        if(summary.connectivity!=SessionConnectivity.Ready&&summary.connectivity!=SessionConnectivity.Synchronizing)throw StorePolicy(ErrorCode.NotReady)
+        if(ready&&(!original.reducer.mutationsEnabled||!live.hostReducer.ready||!live.hostReducer.sourceCurrent(original.server)))throw StorePolicy(ErrorCode.NotReady)
     }
     private fun validateAgentSession(context:AgentSessionMutationContext,live:Live,body:RequestBody.SessionCreate)=context.lease.admit {
         validateAgentSessionOrigin(context,live)
         val original=context.original as AgentSessionContext
-        if(body.params.serverId!=original.server||body.params.provider!=original.provider||body.params.sourceTarget!=null||body.params.checkout!=null)throw StorePolicy(ErrorCode.InvalidRequest)
+        body.params.placement?.let {if(it.sourceTarget!=original.target||body.params.serverId!=original.server)throw StorePolicy(ErrorCode.InvalidRequest)}
         mutationContext(live,body)
     }
-    internal fun captureAgentTerminal(host:String,target:Target,source:Uuid,expected:SessionReducer):AgentTerminalMutationContext {
+    internal fun captureTerminalCreation(host:String,server:Uuid,workspace:Id,source:ArtifactSource?):TerminalCreationMutationContext {
         val live=sessions[host] ?: throw StorePolicy(ErrorCode.NotReady)
-        val original=AgentTerminalContext(host,live,expected,target,source,live.subscriptions[target.sessionId])
-        val context=AgentTerminalMutationContext(original,AgentTerminalLease())
-        validateAgentTerminal(context,live,RequestBody.TerminalCreate(TerminalCreateParams(live.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady),target)));return context
+        val inventory=live.hostReducer.inventory ?: throw StorePolicy(ErrorCode.NotReady)
+        val graph=inventory.hierarchy.singleOrNull {it.serverId==server&&it.freshness==NativeFreshness.Current} ?: throw StorePolicy(ErrorCode.NotReady)
+        val target=(source as? ArtifactSource.Session)?.target
+        val session=target?.let {value->inventory.sessions.singleOrNull {Target(it.sessionId,it.generation)==value} ?: throw StorePolicy(ErrorCode.NotReady)}
+        val shell=(source as? ArtifactSource.Shell)?.target?.let {value->inventory.shells.singleOrNull {it.target==value} ?: throw StorePolicy(ErrorCode.NotReady)}
+        val original=TerminalCreationOriginal(host,live,live.hello?.bootId ?: throw StorePolicy(ErrorCode.NotReady),server,workspace,graph.serverIncarnation,source,session,shell)
+        return TerminalCreationMutationContext(original,TerminalCreationLease()).also {validateTerminalCreationOrigin(it,live)}
     }
-    private fun validateAgentTerminal(context:AgentTerminalMutationContext,live:Live,body:RequestBody.TerminalCreate){context.lease.admit {
-        val original=context.original as? AgentTerminalContext ?: throw StorePolicy(ErrorCode.InvalidRequest)
-        if(original.live!==live||sessions[original.host]!==live||!live.alive.get()||!live.authenticated||body.params.target!=original.target||live.reducers[original.target.sessionId]!==original.reducer||original.reducer.source!=original.source||live.subscriptions[original.target.sessionId]!=original.subscription)throw StorePolicy(ErrorCode.StaleSession)
+    internal fun terminalCreationCurrent(context:TerminalCreationMutationContext):Boolean=try {
+        val original=context.original as? TerminalCreationOriginal ?: throw StorePolicy(ErrorCode.InvalidRequest)
+        validateTerminalCreationOrigin(context,original.live,false);true
+    }catch(_:Exception){false}
+    private fun validateTerminalCreationOrigin(context:TerminalCreationMutationContext,live:Live,ready:Boolean=true)=context.lease.admit {
+        val original=context.original as? TerminalCreationOriginal ?: throw StorePolicy(ErrorCode.InvalidRequest)
+        if(original.live!==live||sessions[original.host]!==live||!live.alive.get()||!live.authenticated||live.hello?.bootId!=original.boot)throw StorePolicy(ErrorCode.StaleSession)
+        val inventory=live.hostReducer.inventory ?: throw StorePolicy(ErrorCode.NotReady)
+        val graph=inventory.hierarchy.singleOrNull {it.serverId==original.server&&it.serverIncarnation==original.incarnation} ?: throw StorePolicy(ErrorCode.StaleSession)
+        if(graph.freshness==NativeFreshness.Unavailable||graph.workspaces.none {it.workspaceId==original.workspace}
+            ||inventory.servers.singleOrNull {it.serverId==original.server}?.connectivity!=ServerConnectivity.Online)throw StorePolicy(ErrorCode.StaleSession)
+        when(val source=original.source) {
+            is ArtifactSource.Session->{
+                val captured=original.session ?: throw StorePolicy(ErrorCode.StaleSession)
+                val current=inventory.sessions.singleOrNull {Target(it.sessionId,it.generation)==source.target} ?: throw StorePolicy(ErrorCode.StaleSession)
+                if(current.serverId!=original.server||current.workspaceId!=original.workspace||current.terminalId!=captured.terminalId
+                    ||current.paneId!=captured.paneId||current.provider!=captured.provider||current.nativeId!=captured.nativeId)throw StorePolicy(ErrorCode.StaleSession)
+            }
+            is ArtifactSource.Shell->{
+                val shell=inventory.shells.singleOrNull {it.target==source.target} ?: throw StorePolicy(ErrorCode.StaleSession)
+                if(original.shell==null||!shell.sameLogicalIdentity(original.shell)||shell.serverId!=original.server||shell.workspaceId!=original.workspace)throw StorePolicy(ErrorCode.StaleSession)
+                if(ready&&shell.connectivity!=SessionConnectivity.Ready)throw StorePolicy(ErrorCode.NotReady)
+            }
+            null->{}
+        }
+        if(ready&&(!live.hostReducer.ready||!live.hostReducer.sourceCurrent(original.server)||graph.freshness!=NativeFreshness.Current))throw StorePolicy(ErrorCode.NotReady)
+    }
+    private fun validateTerminalCreation(context:TerminalCreationMutationContext,live:Live,body:RequestBody.TerminalCreate)=context.lease.admit {
+        validateTerminalCreationOrigin(context,live)
+        val original=context.original as TerminalCreationOriginal
+        if(body.params.serverId!=original.server||body.params.workspaceId!=original.workspace||body.params.source!=original.source)throw StorePolicy(ErrorCode.StaleSession)
+        if(live.hostReducer.inventory?.projects?.none {it.projectId==body.params.projectId&&it.available}!=false)throw StorePolicy(ErrorCode.NotReady)
         mutationContext(live,body)
-    }}
+    }
     internal suspend fun captureAgentAlias(host:String,target:Target,source:Uuid,lease:AgentAliasLease,name:AgentName):AgentAliasMutationContext=withContext(serial) {
         val live=live(host);val reducer=live.reducers[target.sessionId] ?: throw StorePolicy(ErrorCode.NotReady)
         val context=AgentAliasMutationContext(AgentAliasContext(host,live,reducer,target,source),lease)
@@ -1325,21 +1758,31 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     }
     /** Ordinary recovery consent is action-bound; secret forms are memory-only. Call only for an
      * explicitly pressed Send/Stop/Answer after authoritative snapshots+receipt reconciliation. */
-    suspend fun mutate(host:String,request:Request,ordinaryComposer:Boolean=false,approval:RecoveryApproval=RecoveryApproval(),shell:ShellMutationContext?=null,alias:AgentAliasMutationContext?=null,removal:WorktreeRemovalMutationContext?=null,attachment:AttachmentMutationContext?=null,terminal:AgentTerminalMutationContext?=null,agentCreation:AgentSessionMutationContext?=null):Receipt = withContext(serial) {
+    suspend fun mutate(host:String,request:Request,ordinaryComposer:Boolean=false,approval:RecoveryApproval=RecoveryApproval(),shell:ShellMutationContext?=null,alias:AgentAliasMutationContext?=null,attachment:AttachmentMutationContext?=null,terminal:TerminalCreationMutationContext?=null,agentCreation:AgentSessionMutationContext?=null,skill:SkillInvocationContext?=null,directories:CreationDirectoriesContext?=null,controls:ControlsMutationContext?=null,queue:QueueMutationContext?=null):Receipt = withContext(serial) {
         val live=originalLive(host,request.id);val body=request.body
-        if(body.attachmentTarget()==null && body !is RequestBody.TerminalCreate && body !is RequestBody.WorktreesRemove && body !is RequestBody.AgentRename && body !is RequestBody.WorkspaceRename && body !is RequestBody.PromptSubmit && body !is RequestBody.TurnCancel && body !is RequestBody.RequestRespond && body !is RequestBody.SessionCreate && body !is RequestBody.ShellCreate && body !is RequestBody.ShellInput) throw StorePolicy(ErrorCode.InvalidRequest)
+        if((body is RequestBody.TerminalCreate||body is RequestBody.ShellInput||body is RequestBody.ShellResize||body is RequestBody.SessionControlsApply||body.queueTarget()!=null)&&store.localAction(host,request.id)!=null) {
+            val key=secrets.receipt(host,store)
+            val matched=try {store.matchingAction(host,request,key)}finally {key.fill(0)}
+            if(!matched)throw StorePolicy(ErrorCode.NotReady)
+            return@withContext when(val status=status(host,request.id)) {
+                is ActionStatusResult.Known->status.value.receipt
+                is ActionStatusResult.Unknown->throw StorePolicy(ErrorCode.NotReady)
+            }
+        }
+        if(body.attachmentTarget()==null&&body !is RequestBody.TerminalCreate&&body !is RequestBody.AgentRename&&body !is RequestBody.WorkspaceRename&&body !is RequestBody.PromptSubmit&&body !is RequestBody.TurnCancel&&body !is RequestBody.RequestRespond&&body !is RequestBody.SessionCreate&&body !is RequestBody.ShellInput&&body !is RequestBody.ShellResize&&body !is RequestBody.SessionControlsApply&&body.queueTarget()==null)throw StorePolicy(ErrorCode.InvalidRequest)
         if(agentCreation!=null)validateAgentSession(agentCreation,live,body as? RequestBody.SessionCreate ?: throw StorePolicy(ErrorCode.InvalidRequest))
         if((body is RequestBody.TerminalCreate)!=(terminal!=null))throw StorePolicy(ErrorCode.InvalidRequest)
-        if(body is RequestBody.TerminalCreate)validateAgentTerminal(terminal!!,live,body)
-        if((body is RequestBody.ShellCreate || body is RequestBody.ShellInput)!=(shell!=null)) throw StorePolicy(ErrorCode.InvalidRequest)
-        if(body is RequestBody.ShellCreate || body is RequestBody.ShellInput) validateShellMutation(shell!!,live,body)
+        if(body is RequestBody.TerminalCreate)validateTerminalCreation(terminal!!,live,body)
+        if((body is RequestBody.ShellInput || body is RequestBody.ShellResize)!=(shell!=null)) throw StorePolicy(ErrorCode.InvalidRequest)
+        if(body is RequestBody.ShellInput || body is RequestBody.ShellResize) validateShellMutation(shell!!,live,body)
         if((body is RequestBody.AgentRename)!=(alias!=null)) throw StorePolicy(ErrorCode.InvalidRequest)
         if(body is RequestBody.AgentRename) validateAgentAlias(alias!!,live,body)
         if((body.attachmentTarget()!=null)!=(attachment!=null))throw StorePolicy(ErrorCode.InvalidRequest)
         if(attachment!=null)validateAttachment(attachment,live,body)
-        if((body is RequestBody.WorktreesRemove)!=(removal!=null))throw StorePolicy(ErrorCode.InvalidRequest)
-        if(body is RequestBody.WorktreesRemove)validateWorktreeRemoval(removal!!,live,body)
-        val continuation=NewActionContinuation(host,live,request,currentCoroutineContext()[Job]!!,shell,alias,removal,attachment,terminal,agentCreation)
+        if(directories!=null)validateCreationDirectoryMutation(directories,live,body)
+        else if(body is RequestBody.SessionCreate&&body.params.directoryRef!=null||body is RequestBody.TerminalCreate&&body.params.directoryRef!=null)throw StorePolicy(ErrorCode.NotReady)
+        if((body is RequestBody.SessionControlsApply)!=(controls!=null)||(body.queueTarget()!=null)!=(queue!=null))throw StorePolicy(ErrorCode.NotReady)
+        val continuation=NewActionContinuation(host,live,request,currentCoroutineContext()[Job]!!,shell,alias,attachment,terminal,agentCreation,skill,directories,controls,queue)
         val requestDeadline=if(body is RequestBody.SessionCreate) 120000L else 15000L
         val receipt=try {
             withTimeout(requestDeadline) {
@@ -1359,7 +1802,27 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                 awaitNewActionContinuationBarrier(host,request.id,NewActionContinuationBarrierPoint.AfterPreSend)
                 continuation.beforeRequest()
                 val result=this@GoatrConnection.request(live,body,request.id,admissionAction=request.id,continuation=continuation,inheritedDeadline=true)
-                when(result) {is ResultBody.TerminalCreate->result.result.receipt;is ResultBody.AttachmentsBegin->result.result.receipt;is ResultBody.AttachmentsChunk->result.result.receipt;is ResultBody.AttachmentsComplete->result.result.receipt;is ResultBody.AttachmentsDiscard->result.result.receipt;is ResultBody.WorktreesRemove->result.result.receipt;is ResultBody.AgentRename->result.result.receipt;is ResultBody.WorkspaceRename->result.result.receipt;is ResultBody.PromptSubmit->result.result.receipt;is ResultBody.TurnCancel->result.result.receipt;is ResultBody.RequestRespond->result.result.receipt;is ResultBody.SessionCreate->result.result.receipt;is ResultBody.ShellCreate->result.result.receipt;is ResultBody.ShellInput->result.result.receipt;else->invalidWire()}
+                when(result) {
+                    is ResultBody.SessionControlsApply->result.result.receipt
+                    is ResultBody.SessionQueueUpdate->result.result.receipt
+                    is ResultBody.SessionQueueDelete->result.result.receipt
+                    is ResultBody.SessionQueueReorder->result.result.receipt
+                    is ResultBody.SessionQueueStart->result.result.receipt
+                    is ResultBody.TerminalCreate->result.result.receipt
+                    is ResultBody.AttachmentsBegin->result.result.receipt
+                    is ResultBody.AttachmentsChunk->result.result.receipt
+                    is ResultBody.AttachmentsComplete->result.result.receipt
+                    is ResultBody.AttachmentsDiscard->result.result.receipt
+                    is ResultBody.AgentRename->result.result.receipt
+                    is ResultBody.WorkspaceRename->result.result.receipt
+                    is ResultBody.PromptSubmit->result.result.receipt
+                    is ResultBody.TurnCancel->result.result.receipt
+                    is ResultBody.RequestRespond->result.result.receipt
+                    is ResultBody.SessionCreate->result.result.receipt
+                    is ResultBody.ShellInput->result.result.receipt
+                    is ResultBody.ShellResize->result.result.receipt
+                    else->invalidWire()
+                }
             }
         } catch(settled:CanonicalAdmissionReceipt) {settled.receipt}
         finally {clearNewActionContinuationBarrier(host,request.id)}
@@ -1386,6 +1849,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val caller=currentCoroutineContext()[Job]
         withContext(NonCancellable+serial) {
             if(!live.disposed.compareAndSet(false,true)) {if(live.reader!=caller) withTimeoutOrNull(5000) {live.teardownDone.await()};return@withContext}
+            live.grid?.let(::endGrid)
             retiring[live]=Unit;live.alive.set(false);live.authenticated=false;live.shellInputStatuses.clear();live.selectedRoute=null;live.selectedPath=null;live.connection.close(0,"closed".toByteArray())
             live.receiptsRecovered=false;publish();live.recovery?.cancel()
             try {
@@ -1413,50 +1877,63 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     internal fun ownsNetworkCallback():Boolean=callback!=null
     /** Count-only observation of the existing serialized owner, used by native consumer tests. */
     internal suspend fun pendingReplies(host:String,sentOnly:Boolean=true):Int = withContext(serial) {sessions[host]?.pending?.values?.count {!sentOnly || it.sent} ?: 0}
+    /** TEMPORARY ephemeral guard. Hello is assigned once before this Live is installed. */
+    internal fun debugEligibilityOriginalGuard(host:String,expectedHello:HelloResult):(() -> Boolean)? {
+        val original=sessions[host] ?: return null
+        if(original.host.hostId!=host || expectedHello.hostId.value!=host || original.hello!==expectedHello)return null
+        return {sessions[host]===original && original.hello===expectedHello && original.alive.get() && !original.disposed.get()}
+    }
     suspend fun recreate():String = hostOperations.withLock {shutdownEndpoint();bindEndpoint()}
     private fun shellContext(host:String,target:ShellTarget,source:Uuid):ShellReadContext {
         val live=live(host)
         val snapshot=live.hostReducer.inventory ?: throw StorePolicy(ErrorCode.NotReady)
+        if(snapshot.subscription!=source)throw StorePolicy(ErrorCode.StaleSession)
         val shell=snapshot.shells.singleOrNull {it.target==target} ?: throw StorePolicy(ErrorCode.StaleSession)
-        return ShellReadContext(host,live,live.hostReducer,source,shell).also(::validateShellRead)
+        return ShellReadContext(host,live,live.hostReducer,shell).also(::validateShellRead)
     }
-    private fun validateShellRead(context:ShellReadContext) {
+    private fun shellReadCurrent(context:ShellReadContext):Boolean {
         if(!context.active.get() || sessions[context.host]!==context.live || !context.live.alive.get() || !context.live.authenticated || context.live.hostReducer!==context.hostReducer) throw StorePolicy(ErrorCode.StaleSession)
         val inventory=context.hostReducer.inventory ?: throw StorePolicy(ErrorCode.NotReady)
-        if(!context.hostReducer.ready || inventory.subscription!=context.subscription || !context.hostReducer.sourceCurrent(context.shell.serverId)) throw StorePolicy(ErrorCode.StaleSession)
+        val graph=inventory.hierarchy.singleOrNull {it.serverId==context.shell.serverId} ?: throw StorePolicy(ErrorCode.StaleSession)
+        if(graph.serverIncarnation!=context.incarnation || inventory.servers.singleOrNull {it.serverId==context.shell.serverId}?.connectivity!=ServerConnectivity.Online)throw StorePolicy(ErrorCode.StaleSession)
         val current=inventory.shells.singleOrNull {it.target==context.shell.target} ?: throw StorePolicy(ErrorCode.StaleSession)
-        if(current!=context.shell || current.connectivity!=SessionConnectivity.Ready || !current.capabilities.read) throw StorePolicy(ErrorCode.NotReady)
+        if(!current.sameLogicalIdentity(context.shell))throw StorePolicy(ErrorCode.StaleSession)
+        if(graph.freshness==NativeFreshness.Unavailable)throw StorePolicy(ErrorCode.StaleSession)
+        if(graph.freshness==NativeFreshness.Stale||!context.hostReducer.ready)return false
+        if(graph.freshness!=NativeFreshness.Current || !context.hostReducer.ready || !context.hostReducer.sourceCurrent(current.serverId) || current.connectivity!=SessionConnectivity.Ready || !current.capabilities.read)throw StorePolicy(ErrorCode.NotReady)
+        return true
     }
+    private fun validateShellRead(context:ShellReadContext){if(!shellReadCurrent(context))throw StorePolicy(ErrorCode.NotReady)}
     /** Admission only. Invalidating the viewer lease never cancels a committed frame. */
-    internal suspend fun captureShellMutation(host:String,target:ShellTarget,source:Uuid,lease:ShellMutationLease,purpose:ShellMutationPurpose=ShellMutationPurpose.Create,inputObservation:Pair<Uuid,Uuid>?=null):ShellMutationContext=withContext(serial) {
+    internal suspend fun captureShellMutation(host:String,target:ShellTarget,source:Uuid,lease:ShellMutationLease,purpose:ShellMutationPurpose,inputObservation:Pair<Uuid,Uuid>?=null):ShellMutationContext=withContext(serial) {
         if(!lease.active.get()) throw StorePolicy(ErrorCode.StaleSession)
         val original=shellContext(host,target,source)
-        if(if(purpose==ShellMutationPurpose.Create)!original.shell.capabilities.create else !original.shell.capabilities.input) throw StorePolicy(ErrorCode.NotReady)
+        val allowed=when(purpose){ShellMutationPurpose.Input->original.shell.capabilities.input;ShellMutationPurpose.Resize->original.shell.capabilities.grid}
+        if(!allowed)throw StorePolicy(ErrorCode.NotReady)
         if(inputObservation!=null && (purpose!=ShellMutationPurpose.Input || original.live.shellInputStatuses[inputObservation.first]?.observation?.token!=inputObservation.second))throw StorePolicy(ErrorCode.NotReady)
-        ShellMutationContext(original,lease,purpose,inputObservation)
+        val grid=original.live.grid?.takeIf {it.shell?.shell?.target==target&&validateGrid(it)&&it.reducer.committed!=null} ?: throw StorePolicy(ErrorCode.NotReady)
+        if(grid.reducer.committed?.begin?.popupBlocked==true)throw StorePolicy(ErrorCode.NotReady)
+        ShellMutationContext(original,lease,purpose,inputObservation,grid,grid.subscription)
     }
     private fun validateShellMutation(context:ShellMutationContext,live:Live,body:RequestBody) {
-        val (target,purpose)=when(body){is RequestBody.ShellCreate->body.params.target to ShellMutationPurpose.Create;is RequestBody.ShellInput->body.params.target to ShellMutationPurpose.Input;else->throw StorePolicy(ErrorCode.InvalidRequest)}
+        val (target,purpose)=when(body){is RequestBody.ShellInput->body.params.target to ShellMutationPurpose.Input;is RequestBody.ShellResize->body.params.target to ShellMutationPurpose.Resize;else->throw StorePolicy(ErrorCode.InvalidRequest)}
         if(context.purpose!=purpose) throw StorePolicy(ErrorCode.InvalidRequest)
         context.inputObservation?.let {(action,token)->if(purpose!=ShellMutationPurpose.Input || live.shellInputStatuses[action]?.observation?.token!=token)throw StorePolicy(ErrorCode.NotReady)}
         if(!context.lease.active.get()) throw StorePolicy(ErrorCode.StaleSession)
         val original=context.original as? ShellReadContext ?: throw StorePolicy(ErrorCode.InvalidRequest)
         if(original.live!==live || original.host!=live.host.hostId || original.shell.target!=target) throw StorePolicy(ErrorCode.StaleSession)
         validateShellRead(original)
-        if(if(purpose==ShellMutationPurpose.Create)!original.shell.capabilities.create else !original.shell.capabilities.input) throw StorePolicy(ErrorCode.NotReady)
+        val allowed=when(purpose){ShellMutationPurpose.Input->original.shell.capabilities.input;ShellMutationPurpose.Resize->original.shell.capabilities.grid}
+        if(!allowed)throw StorePolicy(ErrorCode.NotReady)
+        val subscription=when(body){is RequestBody.ShellInput->body.params.subscription;is RequestBody.ShellResize->body.params.subscription;else->throw StorePolicy(ErrorCode.InvalidRequest)}
+        val grid=context.grid as? GridReadContext ?: throw StorePolicy(ErrorCode.InvalidRequest)
+        if(live.grid!==grid || grid.subscription!=subscription || context.gridSubscription!=grid.subscription || !validateGrid(grid) || grid.reducer.committed==null || grid.reducer.committed?.begin?.popupBlocked==true)throw StorePolicy(ErrorCode.StaleSession)
     }
-    /** Memory-only terminal read on the original authenticated host inventory. */
-    suspend fun shell(host:String,target:ShellTarget,source:Uuid):ShellReadResult=withContext(serial) {
+    /** Both input and resize bind this exact active original control lease. */
+    internal suspend fun shell(host:String,target:ShellTarget,source:Uuid,display:(TerminalGrid?,TerminalGridLease)->Unit)=withContext(serial) {
         val context=shellContext(host,target,source)
-        try {
-            val result=(request(context.live,RequestBody.ShellRead(ShellReadParams(target)),shell=context) {response->
-                validateShellRead(context)
-                if((response as ResultBody.ShellRead).result.target!=target) throw StorePolicy(ErrorCode.StaleSession)
-            } as ResultBody.ShellRead).result
-            validateShellRead(context)
-            if(result.target!=target) throw StorePolicy(ErrorCode.StaleSession)
-            result
-        } finally {context.active.set(false)}
+        if(!context.shell.capabilities.grid)throw StorePolicy(ErrorCode.NotReady)
+        gridStream(context.live,RequestBody.ShellGridSubscribe(ShellGridSubscribeParams(target)),null,context,display)
     }
 
 }

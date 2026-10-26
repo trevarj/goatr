@@ -126,8 +126,25 @@ object Protocol {
             else -> {}
         }
     }
-    fun decodePayload(bytes: ByteArray, responseMethod: Method? = null): Envelope {
-        val o = parseRawJson(bytes) as? JsonObject ?: invalidWire()
+    /** Strict grid parts are decoded once, without re-serializing terminal cells for comparison. */
+    internal fun gridPart(value:JsonElement):GridPart {
+        fun shape(v:JsonElement) {
+            when(v) {
+                is JsonObject->for((key,child)in v){
+                    if(key=="text" || key=="kind" || key=="underline")requireWire(child is JsonPrimitive && child.isString)
+                    if(key=="bold" || key=="faint" || key=="italic" || key=="blink" || key=="strike")requireWire(child is JsonPrimitive && !child.isString && child.booleanOrNull!=null)
+                    shape(child)
+                }
+                is JsonArray->v.forEach(::shape)
+                else->requireWire(v!=JsonNull)
+            }
+        }
+        shape(value)
+        val part=strictJson.decodeFromJsonElement<GridPart>(value);part.validate();return part
+    }
+    fun decodePayload(bytes:ByteArray,responseMethod:Method?=null):Envelope =
+        decodeParsed(parseRawJson(bytes) as? JsonObject ?: invalidWire(),responseMethod)
+    internal fun decodeParsed(o:JsonObject,responseMethod:Method?=null):Envelope {
         val id = o["id"]?.let { try { strictJson.decodeFromJsonElement<Uuid>(it) } catch (_: Exception) { null } }
         val version = o["v"] as? JsonPrimitive
         if (version == null || version.isString || version.longOrNull == null) throw ProtocolFailure(FailureKind.InvalidRequest, id)
@@ -164,7 +181,7 @@ object Protocol {
     }
     fun canonicalRequest(request: Request): ByteArray {
         request.id.validate(); val body = requestJson(request.body).toMutableMap()
-        if (request.body.method == Method.SessionHistory || request.body.method == Method.NotificationsSync) { val params = body.getValue("params").jsonObject.toMutableMap(); params.putIfAbsent("limit", JsonPrimitive(100)); body["params"] = JsonObject(params) }
+        if (request.body.method == Method.SessionHistory || request.body.method == Method.NotificationsSync || request.body.method == Method.SessionQueueList) { val params = body.getValue("params").jsonObject.toMutableMap(); params.putIfAbsent("limit", JsonPrimitive(100)); body["params"] = JsonObject(params) }
         return canonicalJson(JsonObject(body))
     }
     fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)

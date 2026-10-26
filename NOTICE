@@ -29,6 +29,17 @@ LICENSE-APACHE. toml_writer's crate source records revision
 eb251609a333580bf005cae27df853bb63dffdbe, crates/toml_writer; this is publisher
 source metadata, not an independently reproduced source/archive identity.
 
+Read-only host Git review uses the same locked nixpkgs Git derivation in the
+product and development shells, not a Cargo library or a system-PATH fallback.
+The generated goatrManifest.readGit retains its actual source/patches/build
+options, direct ELF/interpreter identities and exact runtime NAR/reference
+graph. Git's actual source COPYING and the runtime outputs' packaged notice
+files are retained in share/licenses/goatr/read-git. The locked Nixpkgs recipe
+tree and derivation preserve separate non-Cargo source/license provenance;
+the Cargo notice collector does not establish coverage of that closure.
+Native runtime compatibility and distribution/compliance approval remain
+separate from those source records. This does not change installed native tools.
+
 The product UnifiedPush publisher reuses exact reqwest0.13.5 through HTTP2
 and Rustls with no automatic retry/proxy/redirect; httpdate1.0.3 parses bounded
 Retry-After dates. Non-installed owned camera acceptance also reuses reqwest

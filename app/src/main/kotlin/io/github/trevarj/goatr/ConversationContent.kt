@@ -20,6 +20,7 @@ import androidx.compose.material3.Text as UiText
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.IconButton
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.runtime.*
@@ -27,6 +28,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.font.FontFamily
@@ -137,7 +141,7 @@ fun MarkdownText(backing: String,onLink: (String)->Unit,modifier: Modifier=Modif
 @Composable
 fun ContentView(
     content: Content,key: ConversationKey?,source: Uuid?,model: GoatrViewModel?,
-    completed: Boolean=false,markdown: Boolean=false,onLoaded: ((String)->Unit)?=null,
+    completed: Boolean=false,markdown: Boolean=false,actions: (@Composable RowScope.()->Unit)?=null,onLoaded: ((String)->Unit)?=null,
 ) {
     var expanded by remember(content,key,source) {mutableStateOf(false)}
     var loaded by remember(content,key,source) {mutableStateOf<String?>(null)}
@@ -158,15 +162,25 @@ fun ContentView(
             text!=null -> {
                 if(markdown) MarkdownText(text,{url->model?.forms?.values?.forEach(FormMemory::clearSecrets);openHttpUrl(context,url)})
                 else SelectionContainer {UiText(text,style=MaterialTheme.typography.bodyLarge,modifier=Modifier.fillMaxWidth())}
-                if(completed) TextButton(onClick={context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Goatr backing text",text))},modifier=Modifier.heightIn(min=48.dp).testTag("content_copy")) {IconLabel(MaterialGlyph.Copy,"Copy original")}
             }
             content is ContentUnavailable -> UiText("Content unavailable: ${content.reason}${content.byteLength?.let {" (${it.value} bytes)"}.orEmpty()}",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
             content is ContentRef -> {
                 UiText("${content.byteLength.value} bytes · ${content.mime}${if(source==null) " · stale cache only" else ""}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                Action(if(expanded) "Loading content" else "Expand content","content_expand",enabled=!expanded && model!=null) { expanded=true }
+                Action(when {
+                    error!=null -> "Content unavailable"
+                    expanded -> "Loading content"
+                    else -> "Expand content"
+                },"content_expand",enabled=!expanded && model!=null) { expanded=true }
             }
         }
         error?.let {message->UiText(message);if(source!=null && model!=null) Action("Refresh authoritative item","content_refresh",enabled=!model.busy) { model.refresh() }}
+        if((completed && text!=null) || actions!=null) Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+            if(completed && text!=null) TextButton(onClick={context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Goatr backing text",text))},modifier=Modifier.heightIn(min=48.dp).testTag("content_copy").semantics {contentDescription="Copy original backing text"}) {UiText("Copy original",style=MaterialTheme.typography.bodySmall)}
+            if(actions!=null) {
+                Spacer(Modifier.weight(1f))
+                actions()
+            }
+        }
     }
     DisposableEffect(content,key,source) {onDispose {loaded=null}}
 }
@@ -177,25 +191,34 @@ fun HistoryCard(record: HistoryRecord,key: ConversationKey,source: Uuid?,model: 
     var originalExpanded by remember(record.id,key,source) {mutableStateOf(false)}
     var details by remember(record.id,key,source) {mutableStateOf(false)}
     val user=record.role==Role.User
-    Box(Modifier.fillMaxWidth(),contentAlignment=if(user) Alignment.CenterEnd else Alignment.CenterStart) {
-    Surface(color=if(user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,contentColor=if(user) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,shape=MaterialTheme.shapes.large,border=if(user) null else BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant),modifier=Modifier.widthIn(max=if(user) 560.dp else 720.dp).fillMaxWidth(if(user) .88f else 1f).testTag(if(user) "history_user_message" else "history_native_message")) {
-    Column(Modifier.padding(if(user) 12.dp else 10.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
-            UiText(if(user) "You" else record.role.name,style=MaterialTheme.typography.labelLarge,color=if(user) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.weight(1f))
-            DetailDisclosure(details,{
-                details=!details
-                if(!details) originalExpanded=false
-            },"history_details_${record.id.value}")
+    val assistantMessage=record.role==Role.Assistant&&record.kind==RecordKind.Message&&record.tool==null
+    val message=(user || assistantMessage) && record.kind==RecordKind.Message && record.tool==null
+    val detailAction: @Composable RowScope.()->Unit = {
+        IconButton(onClick={details=!details;if(!details) originalExpanded=false},modifier=Modifier.size(48.dp).testTag("history_details_${record.id.value}").semantics {stateDescription=if(details) "Record details expanded" else "Record details collapsed"}) {
+            GoatrIcon(MaterialGlyph.Visibility,if(details) "Hide record details" else "Show record details")
         }
+    }
+    HistoryRecordContainer(user,assistantMessage) {
+    Column(Modifier.padding(horizontal=if(assistantMessage)4.dp else 12.dp,vertical=if(assistantMessage)8.dp else 12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+        val roleLabel=if(user) "You" else record.role.name
+        if(message) UiText(roleLabel,style=MaterialTheme.typography.labelMedium,color=if(user) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant)
+        else Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
+            // Native tool names can be paths; keep the name and status independently wrapped.
+            UiText(record.tool?.let {"Tool · ${it.name}"} ?: roleLabel,style=MaterialTheme.typography.titleSmall,modifier=Modifier.weight(1f))
+            detailAction()
+        }
+        record.tool?.let {tool->UiText(tool.status.toString(),style=MaterialTheme.typography.labelMedium,color=when(tool.status) {
+            ToolStatus.Failed -> MaterialTheme.colorScheme.error
+            ToolStatus.Running -> MaterialTheme.colorScheme.tertiary
+            else -> MaterialTheme.colorScheme.onSurfaceVariant
+        })}
         if(!record.complete) UiText("In progress",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.tertiary)
         if(record.sourceTruncated) UiText("Native source truncated; this is not full content.",style=MaterialTheme.typography.bodySmall)
         if(record.kind==RecordKind.Unsupported) UiText("Unsupported native history entry; safe original display is available when supplied.",style=MaterialTheme.typography.bodySmall)
-        record.text?.let {ContentView(it,key,source,model,record.complete,record.role==Role.Assistant)}
+        record.text?.let {ContentView(it,key,source,model,record.complete,record.role==Role.Assistant,actions=if(message) detailAction else null)}
+        if(message && record.text==null) Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End,content=detailAction)
         record.tool?.let {tool->
-            GroupedSurface {
-                // Native tool names can be paths; give name and status independent wrapping lines.
-                UiText("Tool · ${tool.name}",style=MaterialTheme.typography.titleSmall,modifier=Modifier.fillMaxWidth())
-                UiText(tool.status.toString(),style=MaterialTheme.typography.labelMedium,color=if(tool.status==ToolStatus.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(Modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(6.dp)) {
                 TextButton(onClick={toolExpanded=!toolExpanded},modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("tool_expand")) {
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically) {
                         GoatrIcon(MaterialGlyph.ExpandMore,null)
@@ -206,6 +229,7 @@ fun HistoryCard(record: HistoryRecord,key: ConversationKey,source: Uuid?,model: 
             }
         }
         if(details) {
+            UiText("Role: ${record.role.name} · Kind: ${record.kind} · Source: ${record.source}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
             SelectionContainer {UiText("Record ${record.id.value}${record.parentId?.let {"\nParent ${it.value}"}.orEmpty()}${record.turnId?.let {"\nTurn ${it.value}"}.orEmpty()}",style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.fillMaxWidth())}
             record.original?.let {original->
                 TextButton(onClick={originalExpanded=!originalExpanded},modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("original_expand")) {
@@ -219,5 +243,16 @@ fun HistoryCard(record: HistoryRecord,key: ConversationKey,source: Uuid?,model: 
         }
     }
     }
+}
+
+@Composable
+internal fun HistoryRecordContainer(user:Boolean,assistantMessage:Boolean,content:@Composable ()->Unit) {
+    Box(Modifier.fillMaxWidth(),contentAlignment=if(user)Alignment.CenterEnd else Alignment.CenterStart) {
+        val bounds=Modifier.widthIn(max=if(user)560.dp else 720.dp).fillMaxWidth(if(user) .88f else 1f).testTag(if(user)"history_user_message" else "history_native_message")
+        if(assistantMessage)Box(bounds){content()}
+        else Surface(color=if(user)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+            contentColor=if(user)MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+            shape=MaterialTheme.shapes.large,border=if(user)null else BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant),modifier=bounds,content=content)
     }
 }
+

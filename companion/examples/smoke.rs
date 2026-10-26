@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Non-installed transport-only gate. Real packaged child + independent real Rust iroh client.
+//! Non-installed transport/provider/grid gates. Grid requires qualified fresh resources and retains its supervisor; never phone/cleanup authority.
 use clap::{Arg, Command, value_parser};
 use futures_util::StreamExt;
 use goatr::{
@@ -15,7 +15,7 @@ use std::{
         fd::{AsRawFd, FromRawFd},
         unix::{
             fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-            process::ExitStatusExt,
+            process::{CommandExt, ExitStatusExt},
         },
     },
     path::{Path, PathBuf},
@@ -433,66 +433,66 @@ fn binary_sha256(path: &Path) -> io::Result<String> {
     let digest: [u8; 32] = hash.finalize().into();
     Ok(hex(&digest))
 }
+fn transport_identity(path: &Path, metadata: &fs::Metadata) -> Value {
+    use std::os::unix::fs::FileTypeExt;
+    let kind = if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else if metadata.file_type().is_socket() {
+        "socket"
+    } else if metadata.file_type().is_symlink() {
+        "symlink"
+    } else {
+        "other"
+    };
+    json!({"path":path,"uid":metadata.uid(),"device":metadata.dev(),"inode":metadata.ino(),
+        "mode":metadata.mode()&0o7777,"kind":kind})
+}
+fn retained_resource(path: &Path, original: Option<&Value>) -> Value {
+    let current = fs::symlink_metadata(path)
+        .map(|metadata| transport_identity(path, &metadata))
+        .map_err(|error| error.kind());
+    let matches = original.is_some_and(|original| current.as_ref().is_ok_and(|current| current == original));
+    json!({"original":original,"current":current.as_ref().ok(),"matchesOriginal":matches,
+        "captureErrorKind":current.as_ref().err().map(|kind|format!("{kind:?}"))})
+}
 struct OwnedRun {
     child: Child,
-    boot: String,
-    start: String,
+    original_process: Result<goatr::herdr::ProcessEvidence, io::ErrorKind>,
     root: PathBuf,
-    root_dev: u64,
-    root_ino: u64,
+    root_original: Value,
     admin_parent: PathBuf,
-    admin_dev: u64,
-    admin_ino: u64,
+    admin_original: Value,
 }
 impl OwnedRun {
-    fn matches(&self) -> bool {
-        boot().is_ok_and(|b| b == self.boot)
-            && start(self.child.id()).is_ok_and(|s| s == self.start)
+    fn spawn(command: &mut std::process::Command, root: PathBuf, root_original: Value, admin_parent: PathBuf, admin_original: Value) -> io::Result<Self> {
+        let child = command.process_group(0).spawn()?;
+        let original_process = goatr::herdr::process_evidence(child.id()).map_err(|error| error.kind());
+        Ok(Self { child, original_process, root, root_original, admin_parent, admin_original })
     }
-    async fn stop(&mut self) -> io::Result<()> {
-        if self.child.try_wait()?.is_none() {
-            if !self.matches() {
-                return Err(failure("owned process identity changed; cleanup refused"));
-            }
-            // SAFETY: PID/start/boot above prove this invocation's child, never a provider.
-            unsafe {
-                libc::kill(self.child.id() as i32, libc::SIGTERM);
-            }
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while self.child.try_wait()?.is_none() && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            if self.child.try_wait()?.is_none() {
-                if !self.matches() {
-                    return Err(failure("owned process identity changed; cleanup refused"));
-                }
-                self.child.kill()?;
-                self.child.wait()?;
-            }
-        }
-        for (path, dev, ino) in [
-            (&self.root, self.root_dev, self.root_ino),
-            (&self.admin_parent, self.admin_dev, self.admin_ino),
-        ] {
-            let m = fs::symlink_metadata(path)?;
-            if m.uid() != uid()
-                || m.dev() != dev
-                || m.ino() != ino
-                || !m.is_dir()
-                || m.mode() & 0o7777 != 0o700
-            {
-                return Err(failure("owned directory changed; cleanup refused"));
-            }
-        }
-        Ok(())
+    fn matches_process(&self, current: &goatr::herdr::ProcessEvidence) -> bool {
+        self.original_process.as_ref().is_ok_and(|original| original == current)
     }
-}
-impl Drop for OwnedRun {
-    fn drop(&mut self) {
-        if self.child.try_wait().is_ok_and(|s| s.is_none()) && self.matches() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+    fn process_comparison(&self, current: Result<goatr::herdr::ProcessEvidence, io::ErrorKind>) -> Value {
+        let matches = current.as_ref().is_ok_and(|current| self.matches_process(current));
+        json!({"original":self.original_process.as_ref().ok(),"current":current.as_ref().ok(),
+            "matchesOriginal":matches,
+            "originalCaptureErrorKind":self.original_process.as_ref().err().map(|kind|format!("{kind:?}")),
+            "currentCaptureErrorKind":current.as_ref().err().map(|kind|format!("{kind:?}"))})
+    }
+    fn retained_resources(&mut self, socket: &Path, original_socket: Option<&Value>) -> Value {
+        let current = goatr::herdr::process_evidence(self.child.id()).map_err(|error| error.kind());
+        let child_state = match self.child.try_wait() {
+            Ok(None) => json!({"state":"running"}),
+            Ok(Some(status)) => json!({"state":"exited","code":status.code(),"signal":status.signal()}),
+            Err(error) => json!({"state":"unavailable","errorKind":format!("{:?}",error.kind())}),
+        };
+        json!({"childPid":self.child.id(),"childState":child_state,"process":self.process_comparison(current),
+            "root":retained_resource(&self.root,Some(&self.root_original)),
+            "adminParent":retained_resource(&self.admin_parent,Some(&self.admin_original)),
+            "adminSocket":retained_resource(socket,original_socket),
+            "cleanup":"pending_owner_review","cleanupPerformed":false,"cleanupAuthority":false})
     }
 }
 fn scoped(command: &mut std::process::Command, root: &Path, socket: &Path) {
@@ -944,6 +944,121 @@ mod terminal_pair_tests {
         );
     }
 }
+#[cfg(test)]
+mod transport_retention_tests {
+    use super::*;
+
+    fn fixture() -> (OwnedRun, std::process::ChildStdin, PathBuf, goatr::herdr::ProcessEvidence) {
+        let parent = std::env::temp_dir().join(format!("goatr-transport-retention-{}",Uuid::random().0));
+        let root = parent.join("root");
+        let admin = parent.join("admin");
+        for directory in [&parent,&root,&admin] {
+            fs::DirBuilder::new().mode(0o700).create(directory).unwrap();
+        }
+        let root_original = transport_identity(&root,&fs::symlink_metadata(&root).unwrap());
+        let admin_original = transport_identity(&admin,&fs::symlink_metadata(&admin).unwrap());
+        // Keep stdin outside OwnedRun: dropping Child must not make this fixture exit.
+        let mut command = std::process::Command::new("cat");
+        command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut owned = OwnedRun::spawn(&mut command,root,root_original,admin,admin_original).unwrap();
+        let input = owned.child.stdin.take().unwrap();
+        let original = owned.original_process.as_ref().unwrap().clone();
+        (owned,input,parent,original)
+    }
+
+    fn finish_fixture(input: std::process::ChildStdin, parent: &Path, pid: u32) {
+        drop(input); // EOF, not a signal or unreviewed stop of the retained owner.
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid as libc::pid_t,&mut status,0) },pid as libc::pid_t);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status),0);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn transport_owner_drop_retains_original_child_and_private_roots() {
+        let (owned,input,parent,original) = fixture();
+        let root_original = owned.root_original.clone();
+        let admin_original = owned.admin_original.clone();
+        drop(owned);
+        assert_eq!(goatr::herdr::process_evidence(original.pid).unwrap(),original);
+        assert_eq!(retained_resource(&parent.join("root"),Some(&root_original))["matchesOriginal"],true);
+        assert_eq!(retained_resource(&parent.join("admin"),Some(&admin_original))["matchesOriginal"],true);
+        finish_fixture(input,&parent,original.pid);
+    }
+
+    #[test]
+    fn retained_transport_launcher_isolates_child_from_controller_process_group() {
+        let controller_group = unsafe { libc::getpgrp() };
+        assert!(controller_group > 0);
+        let (owned,input,parent,original) = fixture();
+        let child_group = unsafe { libc::getpgid(original.pid as libc::pid_t) };
+        assert_eq!(child_group,original.pid as libc::pid_t);
+        assert_ne!(child_group,controller_group);
+        assert_eq!(unsafe { libc::getpgrp() },controller_group);
+        drop(owned);
+        assert_eq!(goatr::herdr::process_evidence(original.pid).unwrap(),original);
+        finish_fixture(input,&parent,original.pid);
+    }
+
+    #[tokio::test]
+    async fn cancelled_transport_owner_retains_original_child_and_private_roots() {
+        let (owned,input,parent,original) = fixture();
+        let root_original = owned.root_original.clone();
+        let admin_original = owned.admin_original.clone();
+        let (entered,ready) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let retained = owned;
+            entered.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(retained);
+        });
+        ready.await.unwrap();
+        owner.abort();
+        assert!(owner.await.unwrap_err().is_cancelled());
+        assert_eq!(goatr::herdr::process_evidence(original.pid).unwrap(),original);
+        assert_eq!(retained_resource(&parent.join("root"),Some(&root_original))["matchesOriginal"],true);
+        assert_eq!(retained_resource(&parent.join("admin"),Some(&admin_original))["matchesOriginal"],true);
+        finish_fixture(input,&parent,original.pid);
+    }
+
+    #[test]
+    fn retained_comparisons_do_not_adopt_changed_or_previously_unproved_identities() {
+        let (mut owned,input,parent,original) = fixture();
+        let root_original = owned.root_original.clone();
+        let mut changed = original.clone();
+        changed.namespaces.mount.1 ^= 1;
+        let changed_observation = owned.process_comparison(Ok(changed.clone()));
+        assert_eq!(changed_observation["matchesOriginal"],false);
+        assert_eq!(changed_observation["original"],json!(original));
+        assert_eq!(changed_observation["current"],json!(changed));
+        assert_eq!(owned.original_process.as_ref().unwrap(),&original);
+        assert_eq!(owned.process_comparison(Err(io::ErrorKind::NotFound))["matchesOriginal"],false);
+
+        fs::rename(&owned.root,parent.join("original-root")).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&owned.root).unwrap();
+        let socket = owned.admin_parent.join("admin.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let observed = owned.retained_resources(&socket,None);
+        assert_eq!(observed["root"]["matchesOriginal"],false);
+        assert_eq!(observed["root"]["original"],root_original);
+        assert_eq!(owned.root_original,root_original);
+        assert_eq!(observed["adminSocket"]["matchesOriginal"],false);
+        assert!(observed["adminSocket"]["original"].is_null());
+        assert_eq!(observed["adminSocket"]["current"]["kind"],"socket");
+        assert_eq!(observed["cleanupAuthority"],false);
+        assert_eq!(observed["cleanupPerformed"],false);
+
+        owned.original_process = Err(io::ErrorKind::PermissionDenied);
+        let unproved = owned.process_comparison(Ok(original.clone()));
+        assert_eq!(unproved["matchesOriginal"],false);
+        assert!(unproved["original"].is_null());
+        assert_eq!(unproved["current"],json!(original));
+        assert_eq!(owned.original_process.as_ref().unwrap_err(),&io::ErrorKind::PermissionDenied);
+        drop(owned);
+        finish_fixture(input,&parent,original.pid);
+    }
+}
 async fn run() -> io::Result<bool> {
     let args = Command::new("smoke")
         .about("Non-installed real packaged direct/public-N0 transport gate only")
@@ -1038,9 +1153,15 @@ async fn run() -> io::Result<bool> {
     goatr::admin::validate_socket_path(&socket, false, false)?;
     let root_meta = fs::symlink_metadata(&root)?;
     let admin_meta = fs::symlink_metadata(&admin_parent)?;
+    let root_original = transport_identity(&root, &root_meta);
+    let admin_original = transport_identity(&admin_parent, &admin_meta);
+    let ownership_path = evidence.join(format!("ownership-{}.json", run_id.0));
+    let process_path = evidence.join(format!("process-{}.json", run_id.0));
+    let gate_path = evidence.join(format!("gate-{}.json", run_id.0));
+    let candidate_path = evidence.join(format!("cleanup-candidate-{}.json", run_id.0));
     write_json(
-        &evidence.join(format!("ownership-{}.json", run_id.0)),
-        &json!({"runId":run_id,"linuxBoot":linux_boot,"root":identity(&root)?,"adminParent":identity(&admin_parent)?,"adminSocket":socket,"configHome":root.join("config"),"stateHome":root.join("state"),"XDG_RUNTIME_DIR":runtime,"packageExecutable":binary,"stage":"owned roots; no child yet"}),
+        &ownership_path,
+        &json!({"runId":run_id,"linuxBoot":linux_boot,"root":root_original,"adminParent":admin_original,"adminSocket":socket,"configHome":root.join("config"),"stateHome":root.join("state"),"XDG_RUNTIME_DIR":runtime,"packageExecutable":binary,"stage":"owned roots; no child yet"}),
     )?;
     let mut cmd = std::process::Command::new(&binary);
     cmd.arg("serve");
@@ -1050,23 +1171,15 @@ async fn run() -> io::Result<bool> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let child = cmd.spawn()?;
-    let process_start = start(child.id())?;
-    let mut owned = OwnedRun {
-        child,
-        boot: linux_boot,
-        start: process_start,
-        root: root.clone(),
-        root_dev: root_meta.dev(),
-        root_ino: root_meta.ino(),
-        admin_parent: admin_parent.clone(),
-        admin_dev: admin_meta.dev(),
-        admin_ino: admin_meta.ino(),
-    };
-    write_json(
-        &evidence.join(format!("process-{}.json", run_id.0)),
-        &json!({"runId":run_id,"linuxBoot":owned.boot,"pid":owned.child.id(),"start":owned.start,"packageExecutable":binary,"adminSocket":socket}),
-    )?;
+    let mut owned = OwnedRun::spawn(&mut cmd, root.clone(), root_original, admin_parent.clone(), admin_original)?;
+    let process_record = write_json(
+        &process_path,
+        &json!({"runId":run_id,"linuxBoot":linux_boot,"pid":owned.child.id(),
+            "originalProcess":owned.original_process.as_ref().ok(),
+            "captureErrorKind":owned.original_process.as_ref().err().map(|kind|format!("{kind:?}")),
+            "packageExecutable":binary,"adminSocket":socket,"cleanup":"pending_owner_review"}),
+    );
+    let process_record_written = process_record.is_ok();
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut commands = vec![
         json!({"executable":binary,"command":"--version"}),
@@ -1078,6 +1191,10 @@ async fn run() -> io::Result<bool> {
     let mut phone_owner: Option<iroh::Endpoint> = None;
     let mut result = tokio::select! {result=async {
         let deadline = Instant::now() + Duration::from_secs(60);
+        process_record?;
+        if let Err(kind) = owned.original_process.as_ref() {
+            return Err(io::Error::new(*kind,"original owned process evidence unavailable; retained for owner review"));
+        }
         while !hints.exists() || !socket.exists() {
             if owned.child.try_wait()?.is_some() {
                 let mut diagnostic = String::new();
@@ -1094,7 +1211,7 @@ async fn run() -> io::Result<bool> {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        private_file(&hints)?;admin_identity=Some(identity(&socket)?);let mut bytes=Vec::new();File::open(&hints)?.take(65537).read_to_end(&mut bytes)?;if bytes.len()>65536 {return Err(failure("address hints exceeded bound"));}let public:transport::LocalHints=serde_json::from_slice(&bytes).map_err(io::Error::other)?;if public.companion_lock_sha256!=transport::lock_sha256() || public.core_iroh!="1.3.0" || public.package_version!=env!("CARGO_PKG_VERSION") {return Err(failure("packaged source/lock transport provenance mismatch"));}let addr=public.endpoint_addr;host_identity=Some(addr.id.to_string());
+        private_file(&hints)?;admin_identity=Some(transport_identity(&socket,&fs::symlink_metadata(&socket)?));let mut bytes=Vec::new();File::open(&hints)?.take(65537).read_to_end(&mut bytes)?;if bytes.len()>65536 {return Err(failure("address hints exceeded bound"));}let public:transport::LocalHints=serde_json::from_slice(&bytes).map_err(io::Error::other)?;if public.companion_lock_sha256!=transport::lock_sha256() || public.core_iroh!="1.3.0" || public.package_version!=env!("CARGO_PKG_VERSION") {return Err(failure("packaged source/lock transport provenance mismatch"));}let addr=public.endpoint_addr;host_identity=Some(addr.id.to_string());
         let mut builder=goatr::endpoint_builder(iroh::SecretKey::from_bytes(&random32()?));if mode=="direct" {builder=builder.relay_mode(iroh::RelayMode::Disabled).clear_address_lookup();if addr.ip_addrs().next().is_none() || addr.relay_urls().next().is_some() {return Err(failure("direct gate requires actual local hints and no relays"));}} else {builder=builder.clear_ip_transports();}
         phone_owner=Some(builder.bind().await.map_err(|_|failure("client endpoint unavailable"))?);let phone=phone_owner.as_ref().expect("bound client");phone_identity=Some(phone.id().to_string());
         async {
@@ -1113,41 +1230,55 @@ async fn run() -> io::Result<bool> {
             result = Err(failure("client endpoint shutdown deadline"));
         }
     }
-    let cleanup = owned.stop().await;
-    let status = if result.is_ok() && cleanup.is_ok() {
+    let transport_observation = if result.is_ok() {
         "pass"
-    } else if mode == "relay"
-        && result
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.to_string().contains("unavailable"))
+    } else if owned.original_process.is_err()
+        || (mode == "relay" && result.as_ref().err().is_some_and(|error|error.to_string().contains("unavailable")))
     {
         "blocked"
     } else {
         "fail"
     };
-    let report = json!({"gate":format!("transport-{mode}"),"status":status,"runId":run_id,"version":version,"packageExecutable":binary,"packageSha256":binary_sha256(&binary)?,"companionLockSha256":transport::lock_sha256(),"coreIroh":"1.3.0","tls":"normal N0 public relay TLS; no insecure verification or custom relay","scope":"transport-only; empty real State snapshot is not provider proof","commands":commands,"linuxBoot":owned.boot,"child":{"pid":owned.child.id(),"start":owned.start},"root":identity(&root)?,"adminParent":identity(&admin_parent)?,"adminSocket":admin_identity,"hostEndpoint":host_identity,"phoneEndpoint":phone_identity,"selectedPath.events":events.lock().expect("path observation mutex").clone(),"failure":result.err().map(|e|e.to_string()),"cleanupFailure":cleanup.err().map(|e|e.to_string()),"configHome":root.join("config"),"stateHome":root.join("state"),"XDG_RUNTIME_DIR":runtime});
-    write_json(&evidence.join(format!("gate-{}.json", run_id.0)), &report)?;
-    // Remove only proven same-inode private owned resources; failures retain diagnostics/leases.
-    if status == "pass" {
-        removable_tree(&root)?;
-        fs::remove_dir_all(&root)?;
-        if fs::read_dir(&admin_parent)?.next().is_none() {
-            fs::remove_dir(&admin_parent)?;
-        } else {
-            return Err(failure("admin owner left resources; cleanup refused"));
-        }
-    }
-    println!(
-        "{}",
-        json!({"gate":format!("transport-{mode}"),"status":status,"evidence":evidence.join(format!("gate-{}.json",run_id.0))})
-    );
-    Ok(status == "pass")
+    let status = if transport_observation == "pass" { "pending_owner_review" } else { transport_observation };
+    let retained = owned.retained_resources(&socket, admin_identity.as_ref());
+    let package_sha256 = binary_sha256(&binary);
+    let report = json!({"gate":format!("transport-{mode}"),"status":status,
+        "transportObservation":transport_observation,"cleanup":"pending_owner_review","fullGateComplete":false,
+        "exitStatusScope":"transport_observation_only","runId":run_id,"version":version,
+        "packageExecutable":binary,"packageSha256":package_sha256.as_ref().ok(),
+        "packageHashErrorKind":package_sha256.as_ref().err().map(|error|format!("{:?}",error.kind())),
+        "companionLockSha256":transport::lock_sha256(),"coreIroh":"1.3.0",
+        "tls":"normal N0 public relay TLS; no insecure verification or custom relay",
+        "scope":"transport-only; empty real State snapshot is not provider proof",
+        "commands":commands,"linuxBoot":linux_boot,"retainedResources":retained,
+        "hostEndpoint":host_identity,"phoneEndpoint":phone_identity,
+        "selectedPath.events":events.lock().expect("path observation mutex").clone(),
+        "failure":result.as_ref().err().map(|error|error.to_string()),
+        "configHome":root.join("config"),"stateHome":root.join("state"),"XDG_RUNTIME_DIR":runtime,
+        "ownershipRecord":ownership_path,"processRecord":process_path,"cleanupCandidate":candidate_path});
+    let gate_record = write_json(&gate_path, &report);
+    // This is passive evidence, never approval or a substitute for fresh owner revalidation.
+    let candidate_record = write_json(&candidate_path, &json!({"runId":run_id,
+        "kind":"retained_transport_resources","transportObservation":transport_observation,
+        "cleanup":"pending_owner_review","cleanupPerformed":false,"cleanupAuthority":false,
+        "fullGateComplete":false,"ownershipRecord":ownership_path,"processRecord":process_path,
+        "processRecordWritten":process_record_written,"outcomeRecord":gate_path,
+        "outcomeRecordWritten":gate_record.is_ok(),"resources":retained,
+        "hostEndpoint":host_identity,"phoneEndpoint":phone_identity}));
+    gate_record?;
+    candidate_record?;
+    println!("{}",json!({"gate":format!("transport-{mode}"),"status":status,
+        "transportObservation":transport_observation,"cleanup":"pending_owner_review",
+        "fullGateComplete":false,"exitStatusScope":"transport_observation_only",
+        "evidence":gate_path,"cleanupCandidate":candidate_path}));
+    Ok(transport_observation == "pass")
 }
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
+    let background=std::env::args_os().skip(1).any(|arg|arg.to_str().is_some_and(|arg|arg=="--background"||arg.starts_with("--background=")));
     let mut native_args = std::env::args_os().skip(1);
-    if native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
+    if !background&&native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
+        if std::env::args_os().any(|arg|arg==std::ffi::OsStr::new("--project-read-only")){return std::process::ExitCode::FAILURE;}
         let Some(lease) = native_args.next() else {
             return std::process::ExitCode::FAILURE;
         };
@@ -1162,12 +1293,17 @@ async fn main() -> std::process::ExitCode {
             }
         };
     }
-    let result = if std::env::args().any(|arg| arg == "--review-fixture") {
+    let result = if background {live::run().await} else if !std::env::args().any(|arg|matches!(arg.as_str(),"--terminal-only"|"--project-read-only"))&&std::env::args().any(|arg| arg == "--review-fixture") {
         review::run().await
     } else if std::env::args().any(|arg| {
         matches!(
             arg.as_str(),
             "--backend"
+                | "--admission-only"
+                | "--shared-agent-only"
+                | "--terminal-only"
+                | "--project-read-only"
+                | "--grid"
                 | "--ui"
                 | "--prepare-emulator"
                 | "--camera"

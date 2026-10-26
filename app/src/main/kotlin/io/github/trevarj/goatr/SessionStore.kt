@@ -41,7 +41,11 @@ sealed interface PreSendDecision {
     data class NewAction(val metadata: ActionMetadata) : PreSendDecision
     data class ExistingAction(val action: LocalAction) : PreSendDecision
 }
-data class RecoveryDraft(val hostId: String, val action: ActionMetadata, val text: String, val expiresAt: Uint)
+@Serializable
+data class ComposerOptions(val images:List<Uuid>?=null,val delivery:PromptDelivery?=null,val nativeTurnId:Id?=null) {
+    fun byteSize():Int=if(images==null&&delivery==null&&nativeTurnId==null)0 else utf8Size(Protocol.strictJson.encodeToString(this))
+}
+data class RecoveryDraft(val hostId: String, val action: ActionMetadata, val text: String, val expiresAt: Uint,val options:ComposerOptions=ComposerOptions())
 data class CachedSession(val hostId: String, val summary: SessionSummary, val history: List<HistoryRecord>, val stale: Boolean = true, val partial: Boolean = true)
 /** Serialized display only; never install this as a live HostReducer snapshot. */
 data class CachedInventory(val hostId: String, val inventory: HostSnapshotResult, val savedAt: Uint) {
@@ -90,10 +94,16 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
     val state: StateFlow<StoreView> = mutable.asStateFlow()
     private var opened = false
     private var closed = false
+    /** Writer-owned invalidation keys, not retained history or a deferred-write queue. */
+    private val historyChanges=linkedSetOf<Pair<String,String>>()
+    private val committedHistoryChanges=linkedSetOf<Pair<String,String>>()
+    private var collectingHistoryChanges=false
+    private fun historyChanged(host:String,session:String){check(collectingHistoryChanges);historyChanges.add(host to session)}
+    private data class StoredRecord(val data:String,val origins:String,val order:Long,val bytes:Long,val at:Long)
     @Volatile private var presentationSink: PresentationSink? = null
     /** Installed once by the application runtime, never by a UI or service. */
     fun installPresentationSink(sink: PresentationSink) { presentationSink = sink }
-    private class Database(context: Context, name: String) : SQLiteOpenHelper(context, name, null, 7) {
+    private class Database(context: Context, name: String) : SQLiteOpenHelper(context, name, null, 8) {
         override fun onConfigure(db: SQLiteDatabase) {
             db.setForeignKeyConstraintsEnabled(true)
             // This PRAGMA returns a row; Android execSQL rejects row-returning statements.
@@ -107,7 +117,7 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
             db.execSQL("CREATE TABLE records(host TEXT NOT NULL,session TEXT NOT NULL,id TEXT NOT NULL,ord INTEGER NOT NULL,data TEXT NOT NULL,bytes INTEGER NOT NULL,at INTEGER NOT NULL,origins TEXT NOT NULL,PRIMARY KEY(host,session,id),FOREIGN KEY(host,session) REFERENCES sessions(host,session) ON DELETE CASCADE)")
             db.execSQL("CREATE TABLE content(host TEXT NOT NULL,session TEXT NOT NULL,generation TEXT NOT NULL,source TEXT NOT NULL,handle TEXT NOT NULL,data BLOB NOT NULL,bytes INTEGER NOT NULL,at INTEGER NOT NULL,expires INTEGER NOT NULL,used INTEGER NOT NULL,PRIMARY KEY(host,handle),FOREIGN KEY(host,session) REFERENCES sessions(host,session) ON DELETE CASCADE)")
             db.execSQL("CREATE TABLE actions(host TEXT NOT NULL,action TEXT NOT NULL,metadata TEXT NOT NULL,fingerprint BLOB NOT NULL,receipt TEXT,state TEXT,authoritative INTEGER NOT NULL DEFAULT 0,shown INTEGER NOT NULL DEFAULT 0,updated INTEGER NOT NULL,PRIMARY KEY(host,action),FOREIGN KEY(host) REFERENCES hosts(host) ON DELETE CASCADE)")
-            db.execSQL("CREATE TABLE recovery(host TEXT NOT NULL,action TEXT NOT NULL,text TEXT NOT NULL,bytes INTEGER NOT NULL,at INTEGER NOT NULL,expires INTEGER NOT NULL,consent TEXT NOT NULL,PRIMARY KEY(host,action),FOREIGN KEY(host,action) REFERENCES actions(host,action) ON DELETE CASCADE)")
+            db.execSQL("CREATE TABLE recovery(host TEXT NOT NULL,action TEXT NOT NULL,text TEXT NOT NULL,bytes INTEGER NOT NULL,at INTEGER NOT NULL,expires INTEGER NOT NULL,consent TEXT NOT NULL,options TEXT NOT NULL DEFAULT '{}',PRIMARY KEY(host,action),FOREIGN KEY(host,action) REFERENCES actions(host,action) ON DELETE CASCADE)")
             db.execSQL("CREATE TABLE notifications(host TEXT NOT NULL,sequence INTEGER NOT NULL,id TEXT NOT NULL,event TEXT NOT NULL,session TEXT NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(host,sequence),UNIQUE(host,id),FOREIGN KEY(host) REFERENCES hosts(host) ON DELETE CASCADE)")
             db.execSQL("CREATE TABLE notification_state(host TEXT PRIMARY KEY,highwater INTEGER NOT NULL DEFAULT 0,retained INTEGER NOT NULL DEFAULT 1,presentation_floor INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(host) REFERENCES hosts(host) ON DELETE CASCADE)")
             presentationTables(db)
@@ -139,7 +149,7 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         private fun attachmentTable(db:SQLiteDatabase){db.execSQL("CREATE TABLE attachment_local(host TEXT NOT NULL,upload TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(host,upload))")}
         private fun pushTables(db:SQLiteDatabase){db.execSQL("CREATE TABLE push_hints(host TEXT NOT NULL,event TEXT NOT NULL,sequence INTEGER NOT NULL,session TEXT NOT NULL,category TEXT NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(host,event),UNIQUE(host,sequence),FOREIGN KEY(host) REFERENCES hosts(host) ON DELETE CASCADE)")}
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion in 1..6 && newVersion==7) {"Unsupported private state version"}
+            check(oldVersion in 1..7 && newVersion==8) {"Unsupported private state version"}
             if(oldVersion<2) inventoryTable(db)
             if(oldVersion<3) snippetsTable(db)
             if(oldVersion<4) {
@@ -150,6 +160,7 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
             if(oldVersion<5)routesTable(db)
             if(oldVersion<6)attachmentTable(db)
             if(oldVersion<7)pushTables(db)
+            if(oldVersion<8)db.execSQL("ALTER TABLE recovery ADD COLUMN options TEXT NOT NULL DEFAULT '{}'")
         }
     }
     private fun clock(): Long = now().also { Uint(it) }
@@ -159,12 +170,26 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
             val db = helper.writableDatabase
             if (!opened) { db.execSQL("UPDATE sessions SET viewed=0"); opened = true }
             val time = clock()
-            // Expiry is independently committed: a rejected send cannot roll it back.
-            db.beginTransaction()
-            try { trim(db,time); db.setTransactionSuccessful() } finally { db.endTransaction() }
-            db.beginTransaction()
-            try { val value = block(db, time); trim(db, time); db.setTransactionSuccessful(); value }
-            finally { db.endTransaction(); mutable.value = load(db,time) }
+            val committed=committedHistoryChanges
+            val attempted=historyChanges
+            check(committed.isEmpty()&&attempted.isEmpty())
+            collectingHistoryChanges=true
+            try {
+                // Expiry commits independently, even when the requested operation is rejected.
+                db.beginTransaction()
+                var success=false
+                try {trim(db,time);db.setTransactionSuccessful();success=true}
+                finally {db.endTransaction();if(success)committed.addAll(attempted)}
+                attempted.clear()
+                db.beginTransaction()
+                success=false
+                try {val value=block(db,time);trim(db,time);db.setTransactionSuccessful();success=true;value}
+                finally {db.endTransaction();if(success)committed.addAll(attempted)}
+            } finally {
+                collectingHistoryChanges=false
+                try {mutable.value=load(db,time,committed)}
+                finally {committed.clear();attempted.clear()}
+            }
         }
     }
     suspend fun open() { write { _, _ -> } }
@@ -183,6 +208,10 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
     suspend fun close() = withContext(writer) { mutex.withLock { helper.close(); closed = true } }
     private fun requireHost(db: SQLiteDatabase, host: String) {
         if (scalar(db, "SELECT count(*) FROM hosts WHERE host=?", host) != 1L) throw StorePolicy(ErrorCode.Unauthorized)
+    }
+    private fun requirePushDevice(db:SQLiteDatabase,host:String,device:Uuid) {
+        val metadata=string(db,"SELECT metadata FROM hosts WHERE host=?",host)?.let {Protocol.strictJson.decodeFromString<HostMetadata>(it)} ?: throw StorePolicy(ErrorCode.NotReady)
+        if(metadata.deviceId!=device)throw StorePolicy(ErrorCode.NotReady)
     }
     private fun validateSnippet(title: String, body: String) {
         val titleBytes = title.toByteArray(Charsets.UTF_8).size
@@ -252,29 +281,64 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         val oldSource = string(db,"SELECT source FROM sessions WHERE host=? AND session=?",host,summary.sessionId.value)
         if(!snapshot && previous != null && (previous != summary.generation.value || source != null && oldSource != source.value)) throw StorePolicy(ErrorCode.StaleSession)
         val activeSource = if(snapshot || previous != summary.generation.value) source?.value else source?.value ?: oldSource
-        if(snapshot && oldSource != activeSource) db.execSQL("DELETE FROM content WHERE host=? AND session=?",arrayOf(host,summary.sessionId.value))
+        if(snapshot && oldSource != activeSource) {
+            db.execSQL("DELETE FROM content WHERE host=? AND session=?",arrayOf(host,summary.sessionId.value))
+            historyChanged(host,summary.sessionId.value)
+        }
         if (previous != null && previous != summary.generation.value) {
             db.execSQL("DELETE FROM content WHERE host=? AND session=?", arrayOf(host, summary.sessionId.value))
             db.execSQL("DELETE FROM records WHERE host=? AND session=?", arrayOf(host, summary.sessionId.value))
+            historyChanged(host,summary.sessionId.value)
         }
-        if(snapshot) db.execSQL("DELETE FROM records WHERE host=? AND session=?",arrayOf(host,summary.sessionId.value))
+        if(snapshot) {
+            val retained=records.mapTo(HashSet()) {it.record.id.value}
+            val absent=db.rawQuery("SELECT id FROM records WHERE host=? AND session=?",arrayOf(host,summary.sessionId.value)).use {rows->buildList {
+                while(rows.moveToNext()){val id=rows.getString(0);if(id !in retained)add(id)}
+            }}
+            for(id in absent)db.execSQL("DELETE FROM records WHERE host=? AND session=? AND id=?",arrayOf(host,summary.sessionId.value,id))
+            if(absent.isNotEmpty())historyChanged(host,summary.sessionId.value)
+        }
         // Do not REPLACE a parent row: SQLite REPLACE would cascade-delete existing history.
         db.execSQL("INSERT OR IGNORE INTO sessions(host,session,generation,summary,used) VALUES(?,?,?,?,?)", arrayOf<Any?>(host,summary.sessionId.value,summary.generation.value,Protocol.strictJson.encodeToString(summary),time))
         val incomplete = partial || summary.historyCoverage.olderAvailable || summary.historyCoverage.sourceTruncated || summary.historyCoverage.scope == HistoryScope.Unavailable || summary.historyCoverage.source == HistorySource.Unavailable
         val sticky = !snapshot && previous == summary.generation.value && scalar(db,"SELECT partial FROM sessions WHERE host=? AND session=?",host,summary.sessionId.value) != 0L
         db.execSQL("UPDATE sessions SET generation=?,summary=?,partial=?,used=?,source=? WHERE host=? AND session=?", arrayOf<Any?>(summary.generation.value,Protocol.strictJson.encodeToString(summary),if (incomplete || sticky) 1 else 0,time,activeSource,host,summary.sessionId.value))
+        var displayChanged=false
         records.forEach { safe ->
-            val record = safe.record
-            val previous = db.rawQuery("SELECT data,origins FROM records WHERE host=? AND session=? AND id=?",arrayOf(host,summary.sessionId.value,record.id.value)).use { row -> if(row.moveToFirst()) Protocol.strictJson.decodeFromString<HistoryRecord>(row.getString(0)) to Protocol.strictJson.decodeFromString<HistoryOrigins>(row.getString(1)) else null }
-            val origins = previous?.second ?: HistoryOrigins()
-            val merged = previous?.first?.let { mergeDisplayHistory(summary.provider,it,record,origins,historical) } ?: record.also { origins.observe(it) }
-            val data = Protocol.strictJson.encodeToString(merged)
-            db.execSQL("INSERT OR REPLACE INTO records VALUES(?,?,?,?,?,?,?,?)", arrayOf<Any?>(host,summary.sessionId.value,record.id.value,merged.order.value,data,utf8Size(data),time,Protocol.strictJson.encodeToString(origins)))
+            val record=safe.record
+            val previous=db.rawQuery("SELECT data,origins,ord,bytes,at FROM records WHERE host=? AND session=? AND id=?",arrayOf(host,summary.sessionId.value,record.id.value)).use {row->
+                if(row.moveToFirst())StoredRecord(row.getString(0),row.getString(1),row.getLong(2),row.getLong(3),row.getLong(4)) else null
+            }
+            // An authoritative snapshot resets provenance; never merge an old source into it.
+            val oldRecord=previous?.takeIf {!snapshot}?.let {Protocol.strictJson.decodeFromString<HistoryRecord>(it.data)}
+            val origins=previous?.takeIf {!snapshot}?.let {Protocol.strictJson.decodeFromString<HistoryOrigins>(it.origins)} ?: HistoryOrigins()
+            val merged=oldRecord?.let {mergeDisplayHistory(summary.provider,it,record,origins,historical)} ?: record.also {origins.observe(it)}
+            val data=Protocol.strictJson.encodeToString(merged)
+            val encodedOrigins=Protocol.strictJson.encodeToString(origins)
+            val size=if(previous!=null && previous.data==data)previous.bytes else utf8Size(data).toLong()
+            if(previous==null) {
+                db.execSQL("INSERT INTO records VALUES(?,?,?,?,?,?,?,?)",arrayOf<Any?>(host,summary.sessionId.value,record.id.value,merged.order.value,data,size,time,encodedOrigins))
+                displayChanged=true
+            } else if(previous.data!=data || previous.origins!=encodedOrigins || previous.order!=merged.order.value || previous.bytes!=size) {
+                val update=android.content.ContentValues(5)
+                if(previous.data!=data)update.put("data",data)
+                if(previous.origins!=encodedOrigins)update.put("origins",encodedOrigins)
+                if(previous.order!=merged.order.value)update.put("ord",merged.order.value)
+                if(previous.bytes!=size)update.put("bytes",size)
+                if(previous.at!=time)update.put("at",time)
+                db.update("records",update,"host=? AND session=? AND id=?",arrayOf(host,summary.sessionId.value,record.id.value))
+                if(previous.data!=data || previous.order!=merged.order.value)displayChanged=true
+            } else if(previous.at!=time) {
+                // Incoming/snapshot retention refresh is real; unchanged payload is not rewritten.
+                db.execSQL("UPDATE records SET at=? WHERE host=? AND session=? AND id=?",arrayOf<Any?>(time,host,summary.sessionId.value,record.id.value))
+            }
         }
+        if(displayChanged)historyChanged(host,summary.sessionId.value)
         val count = scalar(db,"SELECT count(*) FROM records WHERE host=? AND session=?",host,summary.sessionId.value)
         if (count > 1000) {
             db.execSQL("DELETE FROM records WHERE host=? AND session=? AND id IN (SELECT id FROM records WHERE host=? AND session=? ORDER BY ord LIMIT ?)", arrayOf<Any?>(host,summary.sessionId.value,host,summary.sessionId.value,count - 1000))
             markPartial(db,host,summary.sessionId.value)
+            historyChanged(host,summary.sessionId.value)
         }
     }
     suspend fun viewing(host: String, session: Uuid?) = write { db, time ->
@@ -299,6 +363,7 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         val bytes = safeText.toByteArray(Charsets.UTF_8)
         requireWire(bytes.size.toLong() == reference.byteLength.value && bytes.size <= Protocol.CONTENT_MAX)
         db.execSQL("INSERT OR REPLACE INTO content VALUES(?,?,?,?,?,?,?,?,?,?)", arrayOf(host,target.sessionId.value,target.generation.value,source.value,reference.handle.value,bytes,bytes.size,time,time + CONTENT_TTL,time))
+        historyChanged(host,target.sessionId.value)
     }
     suspend fun content(host: String, target: Target, source: Uuid, handle: Uuid): String? = write { db, time ->
         requireHost(db,host)
@@ -335,6 +400,7 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
     suspend fun invalidateSource(host: String, target: Target) = write { db, _ ->
         requireHost(db,host); db.execSQL("DELETE FROM content WHERE host=? AND session=?",arrayOf(host,target.sessionId.value)); markPartial(db,host,target.sessionId.value)
         db.execSQL("UPDATE sessions SET source=NULL WHERE host=? AND session=?",arrayOf(host,target.sessionId.value))
+        historyChanged(host,target.sessionId.value)
     }
     /** Atomic pre-send metadata + keyed fingerprint + composer recovery. No Answer/raw request
      * enters SQLite. This is not permission to send or retry; package6 checks authoritative state. */
@@ -351,25 +417,39 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         }
         if (scalar(db,"SELECT count(*) FROM actions WHERE host=?",host) >= 10000) throw StorePolicy(ErrorCode.ActionCapacity)
         val text = if (ordinaryComposer) (request.body as? RequestBody.PromptSubmit)?.params?.text?.value ?: throw StorePolicy(ErrorCode.InvalidRequest) else null
+        val prompt=(request.body as? RequestBody.PromptSubmit)?.params
+        val options=if(ordinaryComposer&&prompt!=null)ComposerOptions(prompt.images,prompt.delivery,prompt.nativeTurnId)else ComposerOptions()
         var consent: RecoveryConsent? = null
         var deadline: Long? = null
         if (text != null) {
             val identity = RecoveryIdentity(host,request.id)
             val expiry = approval.expiry?.takeIf { it.identity == identity && it.expiresAt.value > time && it.expiresAt.value <= time + RECOVERY_AGE }
-            val warning = recoveryWarning(db,utf8Size(text).toLong()).copy(futureExpiry=expiry ?: RecoveryExpiry(identity,Uint(time + RECOVERY_AGE)))
+            val warning = recoveryWarning(db,(utf8Size(text)+options.byteSize()).toLong()).copy(futureExpiry=expiry ?: RecoveryExpiry(identity,Uint(time + RECOVERY_AGE)))
             if (expiry == null || approval.replace != warning.replace) throw RecoveryApprovalRequired(warning)
             warning.replace.forEach { id -> db.execSQL("DELETE FROM recovery WHERE host=? AND action=?",arrayOf(id.hostId,id.actionId.value)) }
             consent = RecoveryConsent(warning,Uint(time)); deadline = expiry.expiresAt.value
         }
         db.execSQL("INSERT INTO actions(host,action,metadata,fingerprint,updated) VALUES(?,?,?,?,?)",arrayOf(host,request.id.value,Protocol.strictJson.encodeToString(metadata),fingerprint,time))
-        if (text != null) db.execSQL("INSERT INTO recovery VALUES(?,?,?,?,?,?,?)",arrayOf<Any?>(host,request.id.value,text,utf8Size(text),time,deadline,Protocol.strictJson.encodeToString(consent ?: throw StorePolicy(ErrorCode.InvalidRequest))))
+        if (text != null) db.execSQL("INSERT INTO recovery(host,action,text,bytes,at,expires,consent,options) VALUES(?,?,?,?,?,?,?,?)",arrayOf<Any?>(host,request.id.value,text,utf8Size(text)+options.byteSize(),time,deadline,Protocol.strictJson.encodeToString(consent ?: throw StorePolicy(ErrorCode.InvalidRequest)),Protocol.strictJson.encodeToString(options)))
         PreSendDecision.NewAction(metadata)
     }
-    suspend fun recoveryWarning(host: String, action: Uuid, text: PromptText): RecoveryWarning = write { db,time ->
-        requireHost(db,host); recoveryWarning(db,utf8Size(text.value).toLong()).copy(futureExpiry=RecoveryExpiry(RecoveryIdentity(host,action),Uint(time + RECOVERY_AGE)))
+    suspend fun recoveryWarning(host: String, action: Uuid, text: PromptText,options:ComposerOptions=ComposerOptions()): RecoveryWarning = write { db,time ->
+        requireHost(db,host); recoveryWarning(db,(utf8Size(text.value)+options.byteSize()).toLong()).copy(futureExpiry=RecoveryExpiry(RecoveryIdentity(host,action),Uint(time + RECOVERY_AGE)))
     }
     suspend fun recoveryConsent(host: String, action: Uuid): RecoveryConsent? = write { db,_ ->
         requireHost(db,host); string(db,"SELECT consent FROM recovery WHERE host=? AND action=?",host,action.value)?.let { Protocol.strictJson.decodeFromString<RecoveryConsent>(it) }
+    }
+    /** Lookup only: an old action may be inspected after its original viewer/chooser retires.
+     * Absence never reserves a replacement or grants permission to send. */
+    internal suspend fun matchingAction(host:String,request:Request,protectedReceiptKey:ByteArray):Boolean=write {db,_->
+        requireHost(db,host);requireWire(protectedReceiptKey.size==32)
+        val old=db.rawQuery("SELECT fingerprint FROM actions WHERE host=? AND action=?",arrayOf(host,request.id.value)).use {if(it.moveToFirst())it.getBlob(0) else null}
+            ?: return@write false
+        Protocol.encodePayload(Envelope.RequestFrame(request))
+        val canonical=Protocol.canonicalRequest(request)
+        val fingerprint=try {Protocol.hmacSha256(protectedReceiptKey,canonical)}finally {canonical.fill(0)}
+        try {if(!java.security.MessageDigest.isEqual(old,fingerprint))throw StorePolicy(ErrorCode.ActionIdConflict)}finally {fingerprint.fill(0)}
+        true
     }
     suspend fun localAction(host: String, action: Uuid): LocalAction? = write { db,_ -> requireHost(db,host); localAction(db,host,action) }
     /** Host-scoped UUID keyset page for action.status recovery, including actions without drafts.
@@ -430,6 +510,9 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
             val known=(old.result as? ActionResultShellInput)?.progress
             val nextFacts=(next.result as? ActionResultShellInput)?.progress
             if(known!=null && (nextFacts==null || !nextFacts.retains(known))) return false
+            val dispatch=(old.result as? ActionResultShellDispatch)?.progress
+            val nextDispatch=(next.result as? ActionResultShellDispatch)?.progress
+            if(dispatch!=null && (nextDispatch==null || !nextDispatch.retains(dispatch)))return false
         }
         val prior = old.creation ?: return true
         val progress = next.creation ?: return false
@@ -471,7 +554,8 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         val receipt = string(db,"SELECT receipt FROM actions WHERE host=? AND action=? AND authoritative=1",host,action.value)?.let { Protocol.strictJson.decodeFromString<Receipt>(it) } ?: throw StorePolicy(ErrorCode.NotReady)
         if (receipt != authoritativeOutcome || receipt.actionId != action) throw StorePolicy(ErrorCode.InvalidRequest)
         db.execSQL("UPDATE actions SET shown=1 WHERE host=? AND action=?",arrayOf(host,action.value))
-        if (receipt.state == ReceiptState.Dispatched || receipt.state == ReceiptState.Succeeded) db.execSQL("DELETE FROM recovery WHERE host=? AND action=?",arrayOf(host,action.value))
+        val options=string(db,"SELECT options FROM recovery WHERE host=? AND action=?",host,action.value)?.let {Protocol.strictJson.decodeFromString<ComposerOptions>(it)}
+        if (receipt.state == ReceiptState.Succeeded&&options?.images==null) db.execSQL("DELETE FROM recovery WHERE host=? AND action=?",arrayOf(host,action.value))
     }
     suspend fun actionStatus(host: String, action: Uuid): Receipt? = write { db, _ ->
         requireHost(db,host); string(db,"SELECT receipt FROM actions WHERE host=? AND action=?",host,action.value)?.let { Protocol.strictJson.decodeFromString<Receipt>(it) }
@@ -481,7 +565,8 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         requireHost(db,host); if (!approved) throw StorePolicy(ErrorCode.InvalidRequest)
         db.execSQL("DELETE FROM recovery WHERE host=? AND action=?",arrayOf(host,action.value))
     }
-    suspend fun notifications(host: String, sync: NotificationsSyncResult) = write { db, time ->
+    suspend fun notifications(host: String, sync: NotificationsSyncResult,admitted:()->Boolean={true}) = write { db, time ->
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
         requireHost(db,host); sync.validate()
         if (sync.resetRequired) {
             // A provider reset invalidates presentation eligibility, never event/read authority.
@@ -504,11 +589,14 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
             ensureWatermark(db,host,read.sessionId,lastEvent)
             db.execSQL("UPDATE readwater SET through=? WHERE host=? AND session=?",arrayOf<Any?>(maxOf(old,read.throughSequence.value),host,read.sessionId.value))
         }
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
     }
-    suspend fun liveNotification(host: String, event: AttentionEvent) = write { db,time ->
+    suspend fun liveNotification(host: String, event: AttentionEvent,admitted:()->Boolean={true}) = write { db,time ->
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
         requireHost(db,host); event.validate()
         addNotification(db,host,event,time)
         db.execSQL("UPDATE notification_state SET highwater=max(highwater,?) WHERE host=?",arrayOf<Any?>(event.sequence.value,host))
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
     }
     /** Local stale cache projection, not a transport handler or push notification authority. */
     suspend fun cachedNotifications(host: String, after: Uint = Uint(0), limit: Int = 100): NotificationsSyncResult = write { db,_ ->
@@ -559,13 +647,25 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
             val db=helper.writableDatabase
             if (!opened) { db.execSQL("UPDATE sessions SET viewed=0"); opened=true }
             val time=clock()
-            fun transaction(block: () -> Unit) {
-                db.beginTransaction(); try { block(); trim(db,time); db.setTransactionSuccessful() } finally {db.endTransaction()}
-            }
             val sink=presentationSink ?: return@withLock
+            val committed=committedHistoryChanges
+            val attempted=historyChanges
+            check(committed.isEmpty()&&attempted.isEmpty())
+            collectingHistoryChanges=true
+            fun transaction(block: () -> Unit) {
+                check(attempted.isEmpty())
+                db.beginTransaction()
+                var success=false
+                try {block();trim(db,time);db.setTransactionSuccessful();success=true}
+                finally {
+                    try {db.endTransaction();if(success)committed.addAll(attempted)}
+                    finally {attempted.clear()}
+                }
+            }
+            try {
             drainPendingCancels(db,time,sink)
             mutatePolicy?.invoke()
-            if (scalar(db,"SELECT count(*) FROM hosts WHERE host=?",host)==0L) { mutable.value=load(db,time);return@withLock }
+            if (scalar(db,"SELECT count(*) FROM hosts WHERE host=?",host)==0L) return@withLock
             val current=policy()
             val active=db.rawQuery("SELECT p.event,n.event FROM notification_presentations p LEFT JOIN notifications n ON n.host=p.host AND n.id=p.event WHERE p.host=? AND p.active=1",arrayOf(host)).use { rows->buildList {while(rows.moveToNext()) add(rows.getString(0) to rows.getString(1))} }
             active.forEach { (event,payload) ->
@@ -573,18 +673,23 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
                 val completed=payload?.let {Protocol.strictJson.decodeFromString<AttentionEvent>(it).category==AttentionCategory.Completed} ?: (string(db,"SELECT category FROM push_hints WHERE host=? AND event=?",host,event)==AttentionCategory.Completed.name)
                 if (!current.enabled || !current.includeCompleted && completed || !unread) cancelPresentation(db,host,event,time,sink)
             }
-            if (!current.enabled) { mutable.value=load(db,time);return@withLock }
+            if (!current.enabled) return@withLock
             val floor=scalar(db,"SELECT presentation_floor FROM notification_state WHERE host=?",host)
             val unread=db.rawQuery("SELECT n.event FROM notifications n LEFT JOIN readwater w ON w.host=n.host AND w.session=n.session WHERE n.host=? AND n.sequence>coalesce(w.through,0) AND n.sequence>? ORDER BY n.sequence DESC LIMIT 100",arrayOf(host,floor.toString())).use { rows->buildList {while(rows.moveToNext()) add(Protocol.strictJson.decodeFromString<AttentionEvent>(rows.getString(0)))} }
             unread.reversed().forEach { event ->
                 event.validate()
                 val hinted=string(db,"SELECT disposition FROM notification_presentations WHERE host=? AND event=?",host,event.eventId.value)
                 if(hinted!=null){
-                    if(hinted=="hint_posted"){
+                    if(hinted=="hint_posted"||hinted=="suppressed_visible"&&scalar(db,"SELECT count(*) FROM push_hints WHERE host=? AND event=?",host,event.eventId.value)>0){
                         val exact=scalar(db,"SELECT count(*) FROM push_hints WHERE host=? AND event=? AND sequence=? AND session=? AND category=?",host,event.eventId.value,event.sequence.value.toString(),event.sessionId.value,event.category.name)==1L
                         if(!exact)throw StorePolicy(ErrorCode.InvalidRequest)
-                        transaction{db.execSQL("UPDATE notification_presentations SET disposition='posted' WHERE host=? AND event=?",arrayOf(host,event.eventId.value));db.execSQL("DELETE FROM push_hints WHERE host=? AND event=?",arrayOf(host,event.eventId.value))}
-                        try{sink.post(host,event)}catch(_:Exception){}
+                        val disposition=when {
+                            event.category==AttentionCategory.Completed&&!current.includeCompleted -> "suppressed_policy"
+                            current.suppress(event) -> "suppressed_visible"
+                            else -> "posted"
+                        }
+                        transaction{db.execSQL("UPDATE notification_presentations SET disposition=?,active=CASE WHEN ? THEN active ELSE 1 END WHERE host=? AND event=?",arrayOf<Any?>(disposition,if(disposition!="posted")1 else 0,host,event.eventId.value));db.execSQL("DELETE FROM push_hints WHERE host=? AND event=?",arrayOf(host,event.eventId.value))}
+                        if(disposition!="posted"){if(hinted=="hint_posted")cancelPresentation(db,host,event.eventId.value,time,sink)}else try{sink.post(host,event)}catch(_:Exception){}
                     }
                     return@forEach
                 }
@@ -601,7 +706,16 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
                     try { sink.post(host,event) } catch (_: Exception) {}
                 }
             }
-            mutable.value=load(db,time)
+            } finally {
+                collectingHistoryChanges=false
+                try {
+                    // A no-transaction policy/cancellation path still projects hard content TTL.
+                    db.rawQuery("SELECT DISTINCT host,session FROM content WHERE expires<=?",arrayOf(time.toString())).use {rows->
+                        while(rows.moveToNext())committed.add(rows.getString(0) to rows.getString(1))
+                    }
+                    mutable.value=load(db,time,committed)
+                } finally {committed.clear();attempted.clear()}
+            }
         }
     }
     private fun cancelPresentation(db: SQLiteDatabase, host:String, event:String, time:Long, sink:PresentationSink) {
@@ -645,7 +759,8 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         if (!viewed || !received) throw StorePolicy(ErrorCode.InvalidRequest)
         NotificationsReadParams(bootId,session,through)
     }
-    suspend fun readConfirmed(host: String, read: ReadWatermark) = write { db,_ ->
+    suspend fun readConfirmed(host: String, read: ReadWatermark,admitted:()->Boolean={true}) = write { db,_ ->
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
         requireHost(db,host); read.validate()
         val received = scalar(db,"SELECT count(*) FROM notifications WHERE host=? AND session=? AND sequence=?",host,read.sessionId.value,read.throughSequence.value.toString()) == 1L
         val prior = scalar(db,"SELECT coalesce(max(through),0) FROM readwater WHERE host=? AND session=?",host,read.sessionId.value)
@@ -656,6 +771,7 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         val at = scalar(db,"SELECT coalesce(max(at),0) FROM notifications WHERE host=? AND session=?",host,read.sessionId.value)
         ensureWatermark(db,host,read.sessionId,at)
         db.execSQL("UPDATE readwater SET through=max(through,?) WHERE host=? AND session=?",arrayOf<Any?>(read.throughSequence.value,host,read.sessionId.value))
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
     }
     private fun cancelReadPresentations(db:SQLiteDatabase,host:String,session:String,through:Long,time:Long) {
         val active=db.rawQuery("SELECT event FROM notification_presentations WHERE host=? AND session=? AND sequence<=? AND active=1",arrayOf(host,session,through.toString())).use {rows->buildList {while(rows.moveToNext()) add(rows.getString(0))}}
@@ -666,43 +782,51 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         val sink=presentationSink ?: return
         db.rawQuery("SELECT event FROM notification_presentations WHERE host=? AND active=1",arrayOf(host)).use {rows->while(rows.moveToNext()) cancelPresentation(db,host,rows.getString(0),time,sink)}
     }
-    suspend fun encryptedRegistration(host: String, generation: Uuid, encrypted: ByteArray) = write { db,time ->
-        requireHost(db,host); requireWire(encrypted.isNotEmpty() && encrypted.size <= 65536)
+    internal suspend fun encryptedRegistration(host:String,generation:Uuid,device:Uuid,expectedGeneration:Uuid?,encrypted:ByteArray,admitted:()->Boolean={true}) = write { db,time ->
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
+        requirePushDevice(db,host,device);requireWire(encrypted.isNotEmpty()&&encrypted.size<=65536)
         if (scalar(db,"SELECT count(*) FROM retired_push WHERE host=? AND generation=?",host,generation.value) > 0) throw StorePolicy(ErrorCode.StaleRegistration)
         val prior = string(db,"SELECT generation FROM private_registration WHERE host=?",host)
+        if(prior!=expectedGeneration?.value)throw StorePolicy(ErrorCode.StaleRegistration)
         if(prior != null && prior != generation.value) {
             db.execSQL("DELETE FROM retired_push WHERE host=? AND at<=?",arrayOf<Any?>(host,time-CACHE_AGE))
             if(scalar(db,"SELECT count(*) FROM retired_push WHERE host=?",host)>=10000) throw StorePolicy(ErrorCode.ResourceLimit)
             db.execSQL("INSERT OR IGNORE INTO retired_push VALUES(?,?,?)",arrayOf<Any?>(host,prior,time))
         }
         db.execSQL("INSERT OR REPLACE INTO private_registration VALUES(?,?,?)",arrayOf(host,generation.value,encrypted))
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
     }
-    internal suspend fun ensurePushAlias(host:String,alias:String):Boolean=write {db,_->
-        requireHost(db,host);requireWire(alias==SecretStore.hostAlias(host,"push"))
+    internal suspend fun ensurePushAlias(host:String,device:Uuid,alias:String):Boolean=write {db,_->
+        requirePushDevice(db,host,device);requireWire(alias==SecretStore.hostAlias(host,"push"))
         val metadata=Protocol.strictJson.decodeFromString<HostMetadata>(string(db,"SELECT metadata FROM hosts WHERE host=?",host) ?: throw StorePolicy(ErrorCode.NotReady));val retained=alias in metadata.keyAliases
         if(!retained){if(metadata.keyAliases.size>=8)throw StorePolicy(ErrorCode.ResourceLimit);db.execSQL("UPDATE hosts SET metadata=? WHERE host=?",arrayOf(Protocol.strictJson.encodeToString(metadata.copy(keyAliases=metadata.keyAliases+alias)),host))};retained
     }
     /** Hint metadata is presentation-only: never inserts AttentionEvent/read/sync state. */
-    internal suspend fun pushHint(host:String,hint:PushEventHint,enabled:()->Boolean,completed:()->Boolean,suppressed:()->Boolean)=withContext(writer){mutex.withLock {
-        check(!closed);val db=helper.writableDatabase;requireHost(db,host);val time=clock()
+    internal suspend fun pushHint(host:String,hint:PushEventHint,enabled:()->Boolean,completed:()->Boolean,suppressed:(AttentionEvent)->Boolean)=withContext(writer){mutex.withLock {
+        check(!closed);val db=helper.writableDatabase;requirePushDevice(db,host,hint.device);val time=clock()
         if(string(db,"SELECT generation FROM private_registration WHERE host=?",host)!=hint.endpointGeneration.value)throw StorePolicy(ErrorCode.StaleRegistration)
         val through=scalar(db,"SELECT coalesce(max(through),0) FROM readwater WHERE host=? AND session=?",host,hint.sessionId.value)
         val floor=maxOf(scalar(db,"SELECT retained FROM notification_state WHERE host=?",host)-1,scalar(db,"SELECT presentation_floor FROM notification_state WHERE host=?",host))
         if(hint.sequence.value<=through||hint.sequence.value<=floor||scalar(db,"SELECT count(*) FROM notification_presentations WHERE host=? AND (event=? OR sequence=?)",host,hint.eventId.value,hint.sequence.value.toString())>0)return@withLock
         val count=scalar(db,"SELECT count(*) FROM notification_presentations WHERE host=?",host);if(count>=10000)throw StorePolicy(ErrorCode.ResourceLimit)
-        val disposition=if(!enabled()||hint.category==AttentionCategory.Completed&&!completed())"suppressed_policy" else if(suppressed())"suppressed_visible" else "hint_posted"
+        val authenticated=string(db,"SELECT event FROM notifications WHERE host=? AND id=?",host,hint.eventId.value)?.let {Protocol.strictJson.decodeFromString<AttentionEvent>(it)}
+        if(authenticated!=null&&(authenticated.sequence!=hint.sequence||authenticated.sessionId!=hint.sessionId||authenticated.category!=hint.category))throw StorePolicy(ErrorCode.InvalidRequest)
+        val disposition=if(!enabled()||hint.category==AttentionCategory.Completed&&!completed())"suppressed_policy"else if(authenticated!=null&&suppressed(authenticated))"suppressed_visible"else if(authenticated!=null)"posted"else"hint_posted"
         db.beginTransaction();try{
-            db.execSQL("INSERT INTO push_hints VALUES(?,?,?,?,?,?)",arrayOf<Any?>(host,hint.eventId.value,hint.sequence.value,hint.sessionId.value,hint.category.name,time))
-            db.execSQL("INSERT INTO notification_presentations VALUES(?,?,?,?,?,?,?)",arrayOf<Any?>(host,hint.eventId.value,hint.sequence.value,hint.sessionId.value,disposition,if(disposition=="hint_posted")1 else 0,time));db.setTransactionSuccessful()
+            if(authenticated==null)db.execSQL("INSERT INTO push_hints VALUES(?,?,?,?,?,?)",arrayOf<Any?>(host,hint.eventId.value,hint.sequence.value,hint.sessionId.value,hint.category.name,time))
+            db.execSQL("INSERT INTO notification_presentations VALUES(?,?,?,?,?,?,?)",arrayOf<Any?>(host,hint.eventId.value,hint.sequence.value,hint.sessionId.value,disposition,if(disposition=="hint_posted"||disposition=="posted")1 else 0,time));db.setTransactionSuccessful()
         }finally{db.endTransaction()}
-        if(disposition=="hint_posted")try{presentationSink?.postHint(host,hint)}catch(_:Exception){}
+        if(disposition=="hint_posted")try{presentationSink?.postHint(host,hint)}catch(_:Exception){}else if(disposition=="posted"&&authenticated!=null)try{presentationSink?.post(host,authenticated)}catch(_:Exception){}
     }}
-    suspend fun retirePush(host: String, generation: Uuid) = write { db,time ->
-        requireHost(db,host)
+    internal suspend fun retirePush(host:String,generation:Uuid,device:Uuid,admitted:()->Boolean) = write { db,time ->
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
+        requirePushDevice(db,host,device)
+        if(string(db,"SELECT generation FROM private_registration WHERE host=?",host)!=generation.value)throw StorePolicy(ErrorCode.StaleRegistration)
         db.execSQL("DELETE FROM retired_push WHERE host=? AND at<=?",arrayOf<Any?>(host,time - CACHE_AGE))
         if (scalar(db,"SELECT count(*) FROM retired_push WHERE host=? AND generation=?",host,generation.value) == 0L && scalar(db,"SELECT count(*) FROM retired_push WHERE host=?",host) >= 10000) throw StorePolicy(ErrorCode.ResourceLimit)
         db.execSQL("INSERT OR IGNORE INTO retired_push VALUES(?,?,?)",arrayOf<Any?>(host,generation.value,time))
         db.execSQL("DELETE FROM private_registration WHERE host=? AND generation=?",arrayOf(host,generation.value))
+        if(!admitted())throw StorePolicy(ErrorCode.NotReady)
     }
     suspend fun encryptedRegistration(host: String): Pair<Uuid,ByteArray>? = write { db,_ ->
         requireHost(db,host)
@@ -782,26 +906,36 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
     }
     private fun action(request: Request,time: Long): ActionMetadata {
         val (method,boot,target) = when(val body=request.body) {
+            is RequestBody.SessionControlsApply->Triple(ActionMethod.SessionControlsApply,body.params.bootId,body.params.target)
+            is RequestBody.SessionQueueUpdate->Triple(ActionMethod.SessionQueueUpdate,body.params.bootId,body.params.target)
+            is RequestBody.SessionQueueDelete->Triple(ActionMethod.SessionQueueDelete,body.params.bootId,body.params.target)
+            is RequestBody.SessionQueueReorder->Triple(ActionMethod.SessionQueueReorder,body.params.bootId,body.params.target)
+            is RequestBody.SessionQueueStart->Triple(ActionMethod.SessionQueueStart,body.params.bootId,body.params.target)
             is RequestBody.PromptSubmit -> Triple(ActionMethod.PromptSubmit,body.params.bootId,body.params.target)
             is RequestBody.TurnCancel -> Triple(ActionMethod.TurnCancel,body.params.bootId,body.params.target)
             is RequestBody.RequestRespond -> Triple(ActionMethod.RequestRespond,body.params.bootId,body.params.target)
             is RequestBody.SessionCreate -> Triple(ActionMethod.SessionCreate,body.params.bootId,null)
-            is RequestBody.TerminalCreate->Triple(ActionMethod.TerminalCreate,body.params.bootId,body.params.target)
-            is RequestBody.ShellCreate -> Triple(ActionMethod.ShellCreate,body.params.bootId,null)
+            is RequestBody.TerminalCreate->Triple(ActionMethod.TerminalCreate,body.params.bootId,null)
             is RequestBody.ShellInput -> Triple(ActionMethod.ShellInput,body.params.bootId,null)
+            is RequestBody.ShellResize->Triple(ActionMethod.ShellResize,body.params.bootId,null)
             is RequestBody.AttachmentsBegin->Triple(ActionMethod.AttachmentsBegin,body.params.bootId,body.params.target)
             is RequestBody.AttachmentsChunk->Triple(ActionMethod.AttachmentsChunk,body.params.bootId,body.params.target)
             is RequestBody.AttachmentsComplete->Triple(ActionMethod.AttachmentsComplete,body.params.bootId,body.params.target)
             is RequestBody.AttachmentsDiscard->Triple(ActionMethod.AttachmentsDiscard,body.params.bootId,body.params.target)
-            is RequestBody.WorktreesRemove->Triple(ActionMethod.WorktreesRemove,body.params.bootId,body.params.target)
             is RequestBody.AgentRename -> Triple(ActionMethod.AgentRename,body.params.bootId,body.params.target)
             is RequestBody.WorkspaceRename -> Triple(ActionMethod.WorkspaceRename,body.params.bootId,body.params.target)
             else -> throw StorePolicy(ErrorCode.InvalidRequest)
         }
-        return ActionMetadata(request.id,method,boot,target,Uint(time),(request.body as? RequestBody.SessionCreate)?.params?.sourceTarget,when(val body=request.body){is RequestBody.ShellCreate->body.params.target;is RequestBody.ShellInput->body.params.target;else->null},(request.body as? RequestBody.WorktreesRemove)?.params?.let {WorktreeRemovalIntent(it.candidateId,it.previewId)},request.body.attachmentUpload())
+        return ActionMetadata(request.id,method,boot,target,Uint(time),
+            sourceTarget=(request.body as? RequestBody.SessionCreate)?.params?.placement?.sourceTarget,
+            shellTarget=when(val body=request.body){is RequestBody.ShellInput->body.params.target;is RequestBody.ShellResize->body.params.target;else->null},
+            attachmentUpload=request.body.attachmentUpload())
     }
     private fun markPartial(db: SQLiteDatabase,host: String,session: String) { db.execSQL("UPDATE sessions SET partial=1 WHERE host=? AND session=?",arrayOf(host,session)) }
     private fun trim(db: SQLiteDatabase,time: Long) {
+        db.rawQuery("SELECT host,session FROM records WHERE at<=? UNION SELECT host,session FROM content WHERE expires<=? OR at<=?",arrayOf((time-CACHE_AGE).toString(),time.toString(),(time-CACHE_AGE).toString())).use {rows->
+            while(rows.moveToNext())historyChanged(rows.getString(0),rows.getString(1))
+        }
         db.execSQL("DELETE FROM push_hints WHERE at<=?",arrayOf<Any?>(time-CACHE_AGE))
         db.execSQL("DELETE FROM recovery WHERE expires<=?",arrayOf(time))
         db.execSQL("DELETE FROM inventory WHERE at<=?",arrayOf(time-CACHE_AGE))
@@ -820,35 +954,48 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         while (scalar(db,"SELECT coalesce((SELECT sum(bytes) FROM records),0)+coalesce((SELECT sum(bytes) FROM content),0)+coalesce((SELECT sum(bytes) FROM inventory),0)") > CACHE_BYTES) {
             val unviewed = db.rawQuery("SELECT host,session FROM sessions WHERE viewed=0 AND (EXISTS(SELECT 1 FROM records WHERE records.host=sessions.host AND records.session=sessions.session) OR EXISTS(SELECT 1 FROM content WHERE content.host=sessions.host AND content.session=sessions.session)) ORDER BY used LIMIT 1",null).use { if(it.moveToFirst()) it.getString(0) to it.getString(1) else null }
             if (unviewed != null) {
+                historyChanged(unviewed.first,unviewed.second)
                 db.execSQL("DELETE FROM records WHERE host=? AND session=?",arrayOf(unviewed.first,unviewed.second)); db.execSQL("DELETE FROM content WHERE host=? AND session=?",arrayOf(unviewed.first,unviewed.second)); markPartial(db,unviewed.first,unviewed.second)
             } else if(scalar(db,"SELECT count(*) FROM inventory") > 0) {
                 db.execSQL("DELETE FROM inventory WHERE rowid IN (SELECT rowid FROM inventory ORDER BY at LIMIT 1)")
             } else {
                 val oldest = db.rawQuery("SELECT host,session,id FROM records ORDER BY at,ord LIMIT 1",null).use { if(it.moveToFirst()) Triple(it.getString(0),it.getString(1),it.getString(2)) else null }
-                if (oldest != null) { db.execSQL("DELETE FROM records WHERE host=? AND session=? AND id=?",arrayOf(oldest.first,oldest.second,oldest.third)); markPartial(db,oldest.first,oldest.second) }
-                else db.execSQL("DELETE FROM content WHERE rowid IN (SELECT rowid FROM content ORDER BY used LIMIT 1)")
+                if (oldest != null) {historyChanged(oldest.first,oldest.second);db.execSQL("DELETE FROM records WHERE host=? AND session=? AND id=?",arrayOf(oldest.first,oldest.second,oldest.third));markPartial(db,oldest.first,oldest.second)}
+                else {
+                    db.rawQuery("SELECT host,session FROM content ORDER BY used LIMIT 1",null).use {rows->if(rows.moveToFirst())historyChanged(rows.getString(0),rows.getString(1))}
+                    db.execSQL("DELETE FROM content WHERE rowid IN (SELECT rowid FROM content ORDER BY used LIMIT 1)")
+                }
             }
         }
     }
-    private fun load(db: SQLiteDatabase,time: Long): StoreView {
+    private fun load(db: SQLiteDatabase,time: Long,changed:Set<Pair<String,String>>? = null): StoreView {
+        // The cancellation owner intentionally keeps its existing nontransactional OS boundary.
+        val reload=changed ?: db.rawQuery("SELECT DISTINCT host,session FROM content WHERE expires<=?",arrayOf(time.toString())).use {rows->buildSet {
+            while(rows.moveToNext())add(rows.getString(0) to rows.getString(1))
+        }}
+        val previous=mutable.value.cached.associateBy {it.hostId to it.summary.sessionId.value}
         val hosts = db.rawQuery("SELECT metadata FROM hosts ORDER BY host",null).use { c -> buildList { while(c.moveToNext()) add(Protocol.strictJson.decodeFromString<HostMetadata>(c.getString(0))) } }
         val cached = db.rawQuery("SELECT host,session,summary,partial FROM sessions ORDER BY used DESC",null).use { c -> buildList {
             while(c.moveToNext()) {
-                val host=c.getString(0); val session=c.getString(1); val summary=Protocol.strictJson.decodeFromString<SessionSummary>(c.getString(2))
-                val history=db.rawQuery("SELECT data FROM records WHERE host=? AND session=? ORDER BY ord",arrayOf(host,session)).use { rows -> buildList { while(rows.moveToNext()) {
+                // Old display-only capability keys are ignored, never restored as authority.
+                val host=c.getString(0); val session=c.getString(1); val summary=Protocol.responseJson.decodeFromString<SessionSummary>(c.getString(2)).also {it.validate()}
+                val key=host to session
+                val retained=previous[key]
+                val history=if(key !in reload && retained!=null && retained.summary.generation==summary.generation)retained.history else db.rawQuery("SELECT data FROM records WHERE host=? AND session=? ORDER BY ord",arrayOf(host,session)).use { rows -> buildList { while(rows.moveToNext()) {
                     val record = Protocol.strictJson.decodeFromString<HistoryRecord>(rows.getString(0))
                     fun offline(value: Content?): Content? = if(value is ContentRef && scalar(db,"SELECT count(*) FROM content WHERE host=? AND session=? AND generation=? AND handle=? AND expires>?",host,session,summary.generation.value,value.handle.value,time.toString()) == 0L) ContentUnavailable(ContentUnavailableReason.NotCached,value.byteLength) else value
                     add(record.copy(text=offline(record.text),original=offline(record.original),tool=record.tool?.let { it.copy(input=offline(it.input),output=offline(it.output)) }))
                 } } }
-                val missingContent = history.any { it.text is ContentUnavailable || it.original is ContentUnavailable || it.tool?.input is ContentUnavailable || it.tool?.output is ContentUnavailable }
-                add(CachedSession(host,summary,history,partial=c.getInt(3)!=0 || missingContent))
+                val partial=c.getInt(3)!=0 || !(retained!=null && retained.history===history && !retained.partial) &&
+                    history.any {it.text is ContentUnavailable || it.original is ContentUnavailable || it.tool?.input is ContentUnavailable || it.tool?.output is ContentUnavailable}
+                add(if(retained!=null && retained.summary==summary && retained.history===history && retained.partial==partial)retained else CachedSession(host,summary,history,partial=partial))
             }
         } }
-        val recovery=db.rawQuery("SELECT r.host,a.metadata,r.text,r.expires FROM recovery r JOIN actions a ON a.host=r.host AND a.action=r.action ORDER BY r.at",null).use { c -> buildList { while(c.moveToNext()) add(RecoveryDraft(c.getString(0),Protocol.strictJson.decodeFromString(c.getString(1)),c.getString(2),Uint(c.getLong(3)))) } }
+        val recovery=db.rawQuery("SELECT r.host,a.metadata,r.text,r.expires,r.options FROM recovery r JOIN actions a ON a.host=r.host AND a.action=r.action ORDER BY r.at",null).use { c -> buildList { while(c.moveToNext()) add(RecoveryDraft(c.getString(0),Protocol.strictJson.decodeFromString(c.getString(1)),c.getString(2),Uint(c.getLong(3)),Protocol.strictJson.decodeFromString(c.getString(4)))) } }
         val deletion=db.rawQuery("SELECT host,aliases FROM key_deletion",null).use { c -> buildList { while(c.moveToNext()) add(KeyDeletion(c.getString(0),Protocol.strictJson.decodeFromString(c.getString(1)))) } }
         val inventory=db.rawQuery("SELECT host,payload,at FROM inventory ORDER BY at DESC",null).use { c -> buildList {
             while(c.moveToNext()) {
-                val inventory=Protocol.strictJson.decodeFromString<HostSnapshotResult>(c.getString(1)).also { it.validate() }
+                val inventory=Protocol.responseJson.decodeFromString<HostSnapshotResult>(c.getString(1)).also { it.validate() }
                 add(CachedInventory(c.getString(0),inventory,Uint(c.getLong(2))))
             }
         } }

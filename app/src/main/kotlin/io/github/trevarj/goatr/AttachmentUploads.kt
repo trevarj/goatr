@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.serialization.Serializable
 
 /** One original user lease; invalidation prevents new frames and never cancels an admitted frame. */
@@ -26,6 +27,12 @@ data class LocalAttachmentUpload(val host:String,val target:Target,val source:Uu
     internal fun validateLocal(){EndpointId(host);target.validate();source.validate();uploadId.validate();actionId?.validate();requireWire(size in 1..8L*1024*1024&&committedBytes in 0..size&&sha256.matches(Regex("[0-9a-f]{64}")));providerPath?.let {requireWire(validUnicode(it)&&it.startsWith('/')&&it.toByteArray(Charsets.UTF_8).size<=4096&&it.none(Char::isISOControl)&&published)};local?.let {file->requireWire(java.util.UUID.fromString(file.id).toString()==file.id&&file.size==size&&file.sha256==sha256&&file.expiresAt>0&&file.inode!=0L&&file.ciphertextSize==size+37)}}
     override fun toString()="LocalAttachmentUpload(redacted)"
 }
+/** Memory-only explicit image selection; durable upload provenance is never rewritten on reopen. */
+internal data class ComposerImageInput(val record:LocalAttachmentUpload,val key:ConversationKey,val source:Uuid) {
+    fun current(selected:ConversationKey,currentSource:Uuid?):Boolean =
+        key==selected&&source==currentSource&&record.host==selected.host&&record.target==selected.target
+            &&record.published&&!record.discarded
+}
 internal class AttachmentConsentScope(val key:ConversationKey,val source:Uuid,val generation:Any,val context:AttachmentMutationContext,val draft:String,val revision:Long,val cursor:Pair<Int,Int>)
 internal class AttachmentTransfer(val ticket:AttachmentSourceTicket,val original:AttachmentConsentScope,val prepared:PreparedAttachment?,record:LocalAttachmentUpload) {
     var record by mutableStateOf(record)
@@ -39,6 +46,9 @@ internal class AttachmentTransfer(val ticket:AttachmentSourceTicket,val original
     var inspectedAction:Uuid?=null
     var inspection:Any?=null
     var reviewedDraft by mutableStateOf<Pair<Long,Pair<Int,Int>>?>(null)
+    var preview by mutableStateOf<android.graphics.Bitmap?>(null)
+    var previewLoading by mutableStateOf(false)
+    var previewUnavailable by mutableStateOf(false)
 }
 
 internal class AttachmentRecovery(val generation:Any,record:LocalAttachmentUpload) {
@@ -60,6 +70,10 @@ internal fun AttachmentTransferSheet(transfer:AttachmentTransfer,model:GoatrView
         title={GoatrTitleBar("Attachment",connectionStatus,transfer.working,compactStatus=compactConnectionStatus)},
         text={androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.fillMaxWidth().heightIn(max=420.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),verticalArrangement=androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp)){
             androidx.compose.material3.Text(transfer.prepared?.displayName ?: "Retained desktop attachment",softWrap=true)
+            if(transfer.prepared!=null)androidx.compose.material3.TextButton(onClick={model.previewAttachment(transfer)},enabled=!transfer.previewLoading,modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp)){androidx.compose.material3.Text("Preview selected image locally")}
+            if(transfer.previewLoading)androidx.compose.material3.Text("Authenticating local preview…")
+            if(transfer.previewUnavailable)androidx.compose.material3.Text("Local raster preview unavailable (unsupported image or dimensions over 16 megapixels). The original upload is unchanged.")
+            transfer.preview?.let {bitmap->androidx.compose.foundation.Image(bitmap=bitmap.asImageBitmap(),contentDescription="Selected attachment preview",modifier=androidx.compose.ui.Modifier.fillMaxWidth().heightIn(max=240.dp))}
             androidx.compose.material3.Text("${record.committedBytes} / ${record.size} bytes committed on the desktop")
             androidx.compose.material3.LinearProgressIndicator(progress={record.committedBytes.toFloat()/record.size.toFloat()},modifier=androidx.compose.ui.Modifier.fillMaxWidth())
             if(transfer.working)androidx.compose.material3.Text("Processing this action; the bar shows desktop-confirmed bytes only.",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)
@@ -75,7 +89,18 @@ internal fun AttachmentTransferSheet(transfer:AttachmentTransfer,model:GoatrView
             transfer.status?.progress?.providerPath?.let {path->androidx.compose.foundation.text.selection.SelectionContainer {androidx.compose.material3.Text(path,softWrap=true,style=androidx.compose.material3.MaterialTheme.typography.bodySmall)}}
             if(transfer.status?.insertionReady==true){
                 if(!model.attachmentDraftCurrent(transfer))androidx.compose.material3.TextButton(onClick={model.reviewAttachmentDraft(transfer)},enabled=!transfer.working,modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Edit,"Review current draft")}
-                androidx.compose.material3.TextButton(onClick={model.insertAttachment(transfer)},enabled=!transfer.working&&model.attachmentDraftCurrent(transfer)&&model.attachmentAdmitted(transfer.ticket),modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp).testTag("attachment_insert")){AttachmentIconLabel(R.drawable.ic_material_content_paste,"Append path to draft")}
+                androidx.compose.material3.TextButton(onClick={model.insertAttachment(transfer)},enabled=!transfer.working&&model.attachmentDraftCurrent(transfer)&&model.attachmentAdmitted(transfer.ticket)&&!model.submittedComposer(transfer.original.key),modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp).testTag("attachment_insert")){AttachmentIconLabel(R.drawable.ic_material_content_paste,"Append path to draft")}
+                androidx.compose.material3.TextButton(onClick={model.attachNativeImage(transfer)},enabled=!transfer.working&&model.attachmentDraftCurrent(transfer)&&model.attachmentAdmitted(transfer.ticket)&&!model.submittedComposer(transfer.original.key),modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp).testTag("attachment_image_input")){AttachmentIconLabel(R.drawable.ic_material_attach_file,"Attach as native image input")}
+                androidx.compose.material3.Text("Path reference and image input are different. Neither choice sends; native Send checks image type, size and the actual selected model.",style=androidx.compose.material3.MaterialTheme.typography.bodySmall)
+            }
+            transfer.status?.nativePreparation?.let {preparation->
+                androidx.compose.material3.Text(when(preparation.reason) {
+                    ImagePreparationReason.PendingOriginalRead->"A dispatched image still awaits its original native read. Staging is retained, not retried."
+                    ImagePreparationReason.OriginalSourceUnavailable->"Original native read proof is unavailable. Staging remains protected; no replacement session can consume it."
+                    ImagePreparationReason.OwnershipProofUnavailable->"Native image ownership metadata cannot be proved. New image admission and cleanup are refused."
+                    ImagePreparationReason.CapacityInUse->"All image-read slots are held by original native work. Inspect those actions; expiry is not completion."
+                },style=androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                preparation.actions.forEach {action->androidx.compose.material3.TextButton(onClick={model.inspect(record.host,action)},enabled=!model.busy,modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp)){androidx.compose.material3.Text("Inspect original image action ${action.value}")}}
             }
             if(transfer.status?.state==AttachmentUploadState.Receiving&&transfer.prepared!=null&&!transfer.working)androidx.compose.material3.TextButton(onClick={model.prepareAttachmentResume(transfer)},modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp).testTag("attachment_prepare_resume")){IconLabel(MaterialGlyph.Play,"Review separate continuation")}
             androidx.compose.material3.TextButton(onClick={discard=true},enabled=!transfer.working&&!record.discarded,modifier=androidx.compose.ui.Modifier.heightIn(min=48.dp).testTag("attachment_discard_remote")){IconLabel(MaterialGlyph.Delete,"Discard desktop staging")}

@@ -35,7 +35,8 @@ fn permitted(ip:IpAddr,private:bool)->bool{
    if private{return true}
    !(a==10||(a==172&&(16..=31).contains(&b))||(a==192&&b==168)||(a==100&&(64..=127).contains(&b))||(a==198&&(b==18||b==19))||(a==192&&b==0)||(a==198&&b==51&&c==100)||(a==203&&b==0&&c==113))
   },
-  IpAddr::V6(v)=>{if let Some(v4)=v.to_ipv4_mapped(){return permitted(IpAddr::V4(v4),private)}let s=v.segments();if v.is_unspecified()||v.is_loopback()||v.is_multicast()||(s[0]&0xffc0)==0xfe80||((s[0]==0xfd00&&s[1]==0xec2||s[0]==0xfd20&&s[1]==0xce)&&s[7]==0x254){return false}if private{return true}(s[0]&0xe000)==0x2000&&!(s[0]==0x2001&&s[1]==0xdb8)}
+  IpAddr::V6(v)=>{if let Some(v4)=v.to_ipv4_mapped(){return permitted(IpAddr::V4(v4),private)}let s=v.segments();if v.is_unspecified()||v.is_loopback()||v.is_multicast()||(s[0]&0xffc0)==0xfe80||((s[0]==0xfd00&&s[1]==0xec2||s[0]==0xfd20&&s[1]==0xce)&&s[7]==0x254){return false}
+  if private{return true}(s[0]&0xe000)==0x2000&&!(s[0]==0x2001&&s[1]==0xdb8)}
  }
 }
 impl Attempt{
@@ -94,14 +95,14 @@ impl Publisher{
   let peer=attempt.proof.peer_id().clone();
   let mut canceled=receiver.clone();
   let operation=async{
-   if *receiver.borrow()!=0{return Ok(Publication::Canceled)}
+   if *receiver.borrow()!=0{return Ok::<_,ErrorCode>(Publication::Canceled)}
    let guard=security.push_guard(&attempt.proof).await?;
    let check=attempt.clone();let admitted=security.storage.call(move|s|s.push_attempt_current(&check,crate::pairing::now_ms())).await.map_err(crate::pairing::store_error)?;
    let url=self.validate(&attempt.registration.endpoint);let hint=attempt.hint(&security.host);drop(guard);
    if !admitted{return Ok(Publication::Canceled)}
    Ok(match(url,hint){(Ok(url),Ok(hint))=>tokio::select!{biased;_=stop.changed()=>Publication::Canceled,result=publish(url,hint,receiver,&security,&attempt)=>result},_=>Publication::Rejected})
   };
-  let result=tokio::select!{biased;_=canceled.changed()=>Publication::Canceled,result=operation=>result.unwrap_or_else(|_:ErrorCode|Publication::Canceled)};
+  let result=tokio::select!{biased;_=canceled.changed()=>Publication::Canceled,result=operation=>result.unwrap_or(Publication::Canceled)};
   done.send_replace(true);
   if security.storage.call(move|s|s.push_finish(attempt,result,crate::pairing::now_ms())).await.is_err(){Self::failed(&security)}
   self.active.lock().expect("push attempt mutex").remove(&peer);
@@ -128,4 +129,43 @@ impl Publisher{
 /// tool, message or frame contents. Generation prevents cross-incarnation reuse.
 pub(crate) fn correlation(target:&Target,provider:&str,native:&str,family:&str)->Id{
  let bytes=serde_json::to_vec(&(target,provider,native,family)).expect("correlation tuple serialization");Id(format!("push:{}",crate::pairing::hex(&sha256(&bytes))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parsed_origin_consent_drives_the_real_endpoint_authorizer_without_empty_fallback() {
+        let base = "version=1\nruntime_dir='/configured/runtime'\nruntime_dir_agent='/configured/runtime'\n[executables]\nherdr='/configured/herdr'\n";
+        let omitted = crate::config::Config::parse(base).unwrap();
+        let public = Publisher::new(omitted.push_allowed_origins);
+        assert!(public.validate("https://ntfy.sh/topic?up=1").is_ok());
+        assert_eq!(public.validate("https://ntfy.sh:8443/topic").unwrap_err(), ErrorCode::PushRejected);
+        let deny = crate::config::Config::parse(&format!("push_allowed_origins=[]\n{base}")).unwrap();
+        let deny = crate::config::Config::parse(&deny.serialized().unwrap()).unwrap();
+        assert_eq!(Publisher::new(deny.push_allowed_origins).validate("https://ntfy.sh/topic").unwrap_err(), ErrorCode::PushRejected);
+        let private = crate::config::Config::parse(&format!("push_allowed_origins=['https://push.example:8443']\n{base}")).unwrap();
+        let private = crate::config::Config::parse(&private.serialized().unwrap()).unwrap();
+        let private = Publisher::new(private.push_allowed_origins);
+        assert!(private.validate("https://push.example:8443/topic?exact=kept").is_ok());
+        for refused in ["https://ntfy.sh/topic", "https://push.example/topic", "https://push.example:8443/a/../topic", "https://user@push.example:8443/topic", "http://push.example:8443/topic", "https://push.example:8443/topic#fragment"] {
+            assert_eq!(private.validate(refused).unwrap_err(), ErrorCode::PushRejected);
+        }
+    }
+
+    #[test]
+    fn actual_address_policy_keeps_public_private_and_metadata_boundaries_separate() {
+        for value in ["127.0.0.1", "169.254.169.254", "100.100.100.200", "168.63.129.16", "::1", "fe80::1", "fd00:ec2::254"] {
+            let address: IpAddr = value.parse().unwrap();
+            assert!(!permitted(address, false));
+            assert!(!permitted(address, true));
+        }
+        for value in ["10.0.0.4", "192.168.0.7", "fd12::42"] {
+            let address: IpAddr = value.parse().unwrap();
+            assert!(!permitted(address, false));
+            assert!(permitted(address, true));
+        }
+        assert!(permitted("8.8.8.8".parse().unwrap(), false));
+    }
 }

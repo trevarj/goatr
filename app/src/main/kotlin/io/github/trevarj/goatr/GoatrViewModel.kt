@@ -9,27 +9,36 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 
 data class ConversationKey(val host: String, val target: Target)
 internal data class AttentionInboxState(val host:String,val ticket:Long,val entries:List<StoredAttentionEvent> = emptyList(),val loading:Boolean=true,val error:Boolean=false)
 internal data class AgentAliasScope(val key:ConversationKey,val source:Uuid,val lease:AgentAliasLease)
-data class TerminalSnapshot(val key: ConversationKey,val source: Uuid,val ticket: Long,val text: String?,val truncated: Boolean,val loading: Boolean,val error: Boolean)
-data class WorktreesSnapshot(val key: ConversationKey,val source: Uuid,val ticket: Long,val worktrees: List<WorktreeEntry>?,val loading: Boolean,val error: Boolean,val creationScope: WorktreeCreationScope? = null)
-internal data class WorktreeRemovalState(val key:ConversationKey,val source:Uuid,val ticket:Long,val candidate:Uuid,val lease:WorktreeRemovalLease,val context:WorktreeRemovalMutationContext?=null,val loading:Boolean=true,val error:Boolean=false,val submittedAction:Uuid?=null)
-data class WorktreeCreationRequestScope(val key: ConversationKey,val source: Uuid,val ticket: Long)
-data class WorktreeCreationGate(val scope: WorktreeCreationRequestScope,val loaded: Boolean,val prior: LocalAction?,val pending: Boolean)
+data class TerminalSnapshot(val key:ConversationKey,val source:Uuid,val ticket:Long,val grid:TerminalGrid?,val loading:Boolean,val error:Boolean)
+data class WorktreesSnapshot(val key: ConversationKey,val source: Uuid,val ticket: Long,val worktrees: List<WorktreeEntry>?,val loading: Boolean,val error: Boolean)
 data class SkillsSnapshot(val key:ConversationKey,val source:Uuid,val generation:Uuid,val ticket:Long,val catalogue:SkillsListResult?,val loading:Boolean,val error:Boolean)
 data class SkillsDocumentState(val snapshot:SkillsSnapshot,val entry:SkillEntry,val ticket:Any,val loading:Boolean=true,val text:String?=null,val failed:Boolean=false)
 data class ChangesSnapshot(val key: ConversationKey,val source: Uuid,val ticket: Long,val changes: ChangesReadResult?,val loading: Boolean,val error: Boolean)
 data class ShellSelection(val host:String,val target:ShellTarget)
-data class ShellSnapshot(val selection:ShellSelection,val source:Uuid,val ticket:Long,val summary:ShellSummary,val text:String?,val truncated:Boolean,val loading:Boolean,val error:Boolean)
-data class ShellInputDraft(val value:androidx.compose.ui.text.input.TextFieldValue=androidx.compose.ui.text.input.TextFieldValue(),val revision:Long=0,val keys:Boolean=false,val keyCharacter:String="",val modifiers:TerminalModifierState=TerminalModifierState())
-data class ShellInputGate(val scope:ShellCreateScope,val loaded:Boolean,val prior:LocalAction?,val pending:Boolean,val observation:ShellInputObservation?=null)
-data class ShellCreateScope(val selection:ShellSelection,val source:Uuid,val ticket:Long)
-data class ShellCreationGate(val scope:ShellCreateScope,val loaded:Boolean,val prior:LocalAction?,val pending:Boolean)
+data class ShellSnapshot(val selection:ShellSelection,val source:Uuid,val ticket:Long,val summary:ShellSummary,val grid:TerminalGrid?,val loading:Boolean,val error:Boolean,val controlBegun:Boolean=false,val incarnation:Uuid?=null,val originalHello:HelloResult?=null)
+data class ShellInputDraft(val value:androidx.compose.ui.text.input.TextFieldValue=androidx.compose.ui.text.input.TextFieldValue(),val revision:Long=0,val direct:Boolean=false,val keyCharacter:String="",val modifiers:TerminalModifierState=TerminalModifierState(),val queuedRevision:Long?=null)
+data class ShellInputGate(val scope:ShellControlScope,val loaded:Boolean,val prior:LocalAction?,val pending:Boolean,val observation:ShellInputObservation?=null)
+data class ShellControlScope(val selection:ShellSelection,val source:Uuid,val ticket:Long)
+private data class ShellSubmittedInput(val selection:ShellSelection,val revision:Long?,val text:String) {
+    override fun toString()="ShellSubmittedInput(redacted)"
+}
 enum class Screen { Connections, Pairing, Sessions, Conversation, Terminals, Settings }
-data class SendReservation(val key: ConversationKey, val action: Uuid, val text: String, val warning: RecoveryWarning)
+data class SendReservation(val key: ConversationKey, val action: Uuid, val text: String, val warning: RecoveryWarning,val options:ComposerOptions=ComposerOptions())
+private data class SubmittedComposer(val key:ConversationKey,val text:String,val options:ComposerOptions,val action:Uuid)
 private data class ForegroundGeneration(val claim: RuntimeClaim, val ready: CompletableDeferred<Unit>)
+/** Resolve the displayed continuation before a read can advance its loaded-view revision. */
+internal fun nativeQueueReadCursor(shown:SessionControlsState,currentRevision:Long,cursor:Id?):Id? {
+    if(cursor==null||currentRevision==shown.queueRevision)return cursor
+    shown.observeRevisions(shown.revision,currentRevision)
+    shown.queueEntries=emptyList();shown.queueText=emptyMap();shown.next=null;shown.queueLoaded=false
+    return null
+}
 
 /** Local-only list presentation; it never carries session, host, or receipt state. */
 data class SessionListPreferences(
@@ -38,6 +47,70 @@ data class SessionListPreferences(
     val showWorkspaceContext: Boolean = true,
     val showHostContext: Boolean = true,
 )
+
+/** Route-surviving local filters, never persisted native authority. */
+internal class SessionListFilters {
+    var host by mutableStateOf<String?>(null)
+    var query by mutableStateOf("")
+    var provider by mutableStateOf<Provider?>(null)
+    var status by mutableStateOf<SessionStatus?>(null)
+    fun clearFilters(){host=null;provider=null;status=null}
+    fun forgetHost(removed:String){if(host==removed)host=null;query=""}
+    fun retainHosts(paired:Set<String>){if(host!=null&&host !in paired){host=null;query=""}}
+}
+internal data class ConversationReaderIdentity(val server:Uuid,val incarnation:Uuid,val provider:Provider,val native:Id)
+internal data class ConversationReaderAnchor(val row:String,val order:Long?,val offset:Int)
+/** One original conversation's metadata-only reading intent, not transcript storage or admission. */
+internal class ConversationReaderPosition(val identity:ConversationReaderIdentity?) {
+    var following by mutableStateOf(true)
+    var toolsExpanded by mutableStateOf(false)
+    private var olderView=false
+    fun observeHistoryView(older:Boolean){if(older!=olderView){olderView=older;toolsExpanded=older}}
+    var anchor:ConversationReaderAnchor?=null
+        private set
+    var readTail by mutableStateOf<Id?>(null)
+        private set
+    var anchorMissing by mutableStateOf(false)
+        private set
+    private var ticket:Any?=null
+    fun attach():Any=Any().also {ticket=it}
+    fun retire(){ticket=null}
+    fun current(expected:Any?)=expected!=null&&ticket===expected
+    fun release(expected:Any?){if(ticket===expected)ticket=null}
+    fun capture(expected:Any?,row:String,order:Long?,itemOffset:Int,atEnd:Boolean,scrolling:Boolean,older:Boolean,tail:Id?):Boolean {
+        if(!current(expected)||anchorMissing&&!scrolling)return false
+        if(scrolling){following=atEnd&&!older;anchorMissing=false}
+        val boundedOffset=(-itemOffset.toLong()).coerceIn(0,Int.MAX_VALUE.toLong()).toInt()
+        val previous=anchor
+        if(previous==null||previous.row!=row||previous.order!=order||previous.offset!=boundedOffset)anchor=ConversationReaderAnchor(row,order,boundedOffset)
+        if(following)readTail=tail
+        return true
+    }
+    fun latest(tail:Id?){following=true;anchorMissing=false;readTail=tail}
+    fun locate(history:List<HistoryRecord>,focused:Uuid?,receipts:List<Uuid>):Int? {
+        val saved=anchor ?: return null
+        val start=1+if(focused!=null)1 else 0
+        val exact=when {
+            saved.row=="conversation_header" -> 0
+            saved.row=="conversation_activity_tail" -> start+history.size
+            saved.row.startsWith("history_") -> {
+                val id=saved.row.removePrefix("history_")
+                history.indexOfFirst {it.id.value==id}.takeIf {it>=0}?.let {start+it}
+            }
+            saved.row.startsWith("receipt_") -> {
+                val id=saved.row.removePrefix("receipt_")
+                if(focused?.value==id)1 else receipts.indexOfFirst {it.value==id}.takeIf {it>=0}?.let {start+history.size+1+it}
+            }
+            else -> null
+        }
+        anchorMissing=exact==null
+        if(exact!=null)return exact
+        if(history.isEmpty())return 0
+        val nearest=saved.order?.let {order->history.indexOfFirst {it.order.value>=order}.takeIf {it>=0}} ?: history.lastIndex
+        return start+nearest
+    }
+}
+
 
 /** Retained constructor wiring, not another protocol/state owner. Nothing here uses SavedState. */
 class GoatrViewModel(application: Application) : AndroidViewModel(application) {
@@ -49,8 +122,12 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var notificationPermissionRequest by mutableStateOf(0L)
         private set
+    internal var notificationPermissionLaunch by mutableStateOf<Long?>(null)
+        private set
     private var deliveryPreferenceRevision by mutableStateOf(0L)
-    private var permissionRequestVisible=false
+    private var permissionRequest:Pair<Long,()->Boolean>?=null
+    @Volatile private var navigationTicket=Any()
+    private var attentionRouteJob:Job?=null
     // Sessions is the landing console. A host filter is presentation state only.
     var screen by mutableStateOf(Screen.Sessions)
         private set
@@ -70,34 +147,35 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var replacement by mutableStateOf<SendReservation?>(null)
         private set
-    var shell by mutableStateOf<ShellSnapshot?>(null)
+    private val shellState=mutableStateOf<ShellSnapshot?>(null)
+    var shell by shellState
         private set
     val shellInputDrafts=mutableStateMapOf<ShellSelection,ShellInputDraft>()
     var shellInputGate by mutableStateOf<ShellInputGate?>(null)
         private set
-    var separateShellInput by mutableStateOf<Pair<ShellCreateScope,Uuid>?>(null)
+    var separateShellInput by mutableStateOf<Pair<ShellControlScope,Uuid>?>(null)
         private set
     private val shellInputActions=mutableMapOf<ShellSelection,Uuid>()
-    private val shellSubmittedDrafts=mutableMapOf<Uuid,Pair<ShellSelection,Long>>()
+    private val shellSubmittedInputs=mutableStateMapOf<Uuid,ShellSubmittedInput>()
     var clearShellDraftHost by mutableStateOf<String?>(null)
         private set
     private var shellInputObservedStatus:ShellInputObservation?=null
     private var shellInputSeparateStatus:ShellInputObservation?=null
     private var shellInputPermitStatus:ShellInputObservation?=null
     private var shellInputObserved:Pair<ShellSelection,Uuid>?=null
-    private var shellInputPermit:Pair<ShellCreateScope,Uuid>?=null
+    private var shellInputPermit:Pair<ShellControlScope,Uuid>?=null
     private var shellInputGeneration=0L
-    var shellCreationGate by mutableStateOf<ShellCreationGate?>(null)
-        private set
-    var separateShellCreation by mutableStateOf<Pair<ShellCreateScope,Uuid>?>(null)
-        private set
     private var shellJob:Job?=null
     private var shellMutationLease:ShellMutationLease?=null
     private var shellTicket=0L
-    private var shellGateGeneration=0L
-    private val shellCreationActions=mutableMapOf<String,Uuid>()
-    private var shellSeparatePermit:Pair<ShellCreateScope,Uuid>?=null
-    var terminal by mutableStateOf<TerminalSnapshot?>(null)
+    private var terminalInputOwner by mutableStateOf<TerminalInputOwner?>(null)
+    private var terminalInputScope:ShellControlScope?=null
+    private var terminalInputToken:Any?=null
+    private var terminalInputPreparation:Job?=null
+    internal var terminalInputPause by mutableStateOf<TerminalInputPause?>(null)
+        private set
+    private val terminalState=mutableStateOf<TerminalSnapshot?>(null)
+    var terminal by terminalState
         private set
     var worktrees by mutableStateOf<WorktreesSnapshot?>(null)
         private set
@@ -111,6 +189,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     private var skillsCatalogue by mutableStateOf<SkillsSnapshot?>(null)
     private var skillsTicket=0L
     private var skillsJob:Job?=null
+    private var skillsInvocationLease:SkillInvocationLease?=null
     var changes by mutableStateOf<ChangesSnapshot?>(null)
         private set
     var actions by mutableStateOf<Map<String,List<LocalAction>>>(emptyMap())
@@ -121,9 +200,19 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         private set
     private var actionAfter: Uuid? = null
     private var focusedId: Uuid? = null
+        set(value) {
+            field=value
+            if(focusedAction?.metadata?.actionId!=value)focusedAction=null
+        }
     private var observedHello: Map<String,HelloResult> = emptyMap()
     private var observedReceipts: Map<String,Receipt> = emptyMap()
     val composers = mutableStateMapOf<ConversationKey,String>()
+    internal val composerUploads=mutableStateMapOf<ConversationKey,List<ComposerImageInput>>()
+    private val composerDeliveries=mutableStateMapOf<ConversationKey,Pair<PromptDelivery,Id?>>()
+    internal var sessionControls by mutableStateOf<SessionControlsState?>(null)
+        private set
+    private var controlsReadJob:Job?=null
+    private var queueReadJob:Job?=null
     val forms = mutableMapOf<Triple<String,Target,Uuid>,FormMemory>()
     val creationForms = mutableMapOf<String,FormMemory>()
     val creationActions = mutableStateMapOf<String,Uuid>()
@@ -131,17 +220,13 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     var separateCreationAction by mutableStateOf<Uuid?>(null)
         private set
     private var separateCreationGeneration=0L
-    var separateWorktreeScope by mutableStateOf<WorktreeCreationRequestScope?>(null)
-        private set
-    var worktreeCreationGate by mutableStateOf<WorktreeCreationGate?>(null)
-        private set
-    private var worktreeGateGeneration=0L
-    private var worktreeSeparatePermit: Pair<WorktreeCreationRequestScope,Uuid>? = null
     val connectingHosts = mutableStateMapOf<String,Boolean>()
     // Presentation preferences only; they never persist drafts or change host/session state.
     private val presentationPreferences = application.getSharedPreferences(PRESENTATION_PREFERENCES, Context.MODE_PRIVATE)
     private var appearanceState by mutableStateOf(loadAppearance())
     private var sessionListPreferencesState by mutableStateOf(loadSessionListPreferences())
+    internal val sessionFilters=SessionListFilters()
+    private val readerPositions=LinkedHashMap<ConversationKey,ConversationReaderPosition>()
     var recentlyOpenedSessions by mutableStateOf<List<ConversationKey>>(emptyList())
         private set
     var appearance: Appearance
@@ -162,7 +247,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
                 .putBoolean(SESSION_LIST_SHOW_HOST_CONTEXT_KEY, value.showHostContext)
                 .apply()
         }
-    private val sentText = mutableMapOf<RecoveryIdentity,Pair<ConversationKey,String>>()
+    private val sentText = mutableStateMapOf<RecoveryIdentity,SubmittedComposer>()
     private var gate: PairingGate? = null
     private var pairingJob: Job? = null
     private var warningJob: Job? = null
@@ -177,6 +262,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     internal var attachmentVisible by mutableStateOf(false)
         private set
     private var attachmentJob:Job?=null
+    private var attachmentPreviewJob:Job?=null
     private var attachmentCleanup:AttachmentMutationContext?=null
     private var attachmentPickerConsent:AttachmentConsentScope?=null
     internal var artifacts by mutableStateOf<ArtifactBrowserState?>(null)
@@ -189,18 +275,36 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     internal var attachmentRecovery by mutableStateOf<AttachmentRecovery?>(null)
         private set
     private val composerRevisions=mutableMapOf<ConversationKey,Long>()
-    private val composerCursors=mutableMapOf<ConversationKey,Pair<Int,Int>>()
-    private var worktreeRemovalJob:Job?=null
-    internal var worktreeRemoval by mutableStateOf<WorktreeRemovalState?>(null)
-        private set
+    private val composerCursors=mutableStateMapOf<ConversationKey,Pair<Int,Int>>()
     private var worktreesJob: Job? = null
     private var worktreesTicket=0L
     private var changesJob: Job? = null
     private var changesTicket=0L
     private var lifecycleActive = false
     /** Replaced atomically on every foreground entry; stale cleanup cannot release a new entry. */
-    private var foregroundGeneration: ForegroundGeneration?=null
-    private var pendingAttention:Pair<String,String>?=null
+    @Volatile private var foregroundGeneration: ForegroundGeneration?=null
+    /** TEMPORARY main-owner scalar capture; never fetch action pages to improve dump knowledge. */
+    internal fun debugEligibilityMain(request:DebugEligibilityArgs,publication:ConnectionView):DebugEligibilityMain {
+        val generation=foregroundGeneration;val active=foreground;val operationBusy=busy
+        val paired=store.state.value;val pageActions=actions;val focused=focusedAction
+        val creation=creationActions[request.host];val currentHost=host;val currentScreen=screen
+        val ongoing=creationOngoing(request.host,publication.inventory[request.host],this,focused?.takeIf {it.metadata.method==ActionMethod.SessionCreate})
+        // A positive resident latch is known. Baseline has no freshness/completeness proof of absence.
+        return DebugEligibilityMain(active,operationBusy,if(ongoing)true else null,paired.hosts.any {it.hostId==request.host}) {
+            generation!=null && foreground==active && foregroundGeneration===generation && busy==operationBusy &&
+                store.state.value===paired && actions===pageActions && focusedAction===focused &&
+                creationActions[request.host]===creation && host==currentHost && screen==currentScreen
+        }
+    }
+    internal fun debugEligibilityGate(request:DebugEligibilityArgs,publication:ConnectionView,main:DebugEligibilityMain,connection:DebugEligibilityConnection):Boolean? {
+        if(!main.foreground || main.busy)return false
+        if(!main.paired || !connection.scopeMatched)return null
+        // Backend availability is diagnostic: the existing CreateSession conjunction uses canCreate.
+        val allowed=creationReadinessReason(publication.hello[request.host],main.busy,connection.inventoryReady,connection.mutationReady,main.ongoing==true)==null
+        return if(!allowed)false else if(main.ongoing==null)null else true
+    }
+    private data class PendingAttention(val host:String,val event:Uuid,val navigation:Any)
+    @Volatile private var pendingAttention:PendingAttention?=null
     internal var attentionInbox by mutableStateOf<AttentionInboxState?>(null)
         private set
     private var attentionInboxForeground:ForegroundGeneration?=null
@@ -210,8 +314,9 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
 
     internal var agentSessionCreation by mutableStateOf<AgentSessionCreation?>(null)
         private set
-    internal var agentTerminalCreation by mutableStateOf<AgentTerminalCreation?>(null)
+    internal var terminalCreation by mutableStateOf<TerminalCreationState?>(null)
         private set
+    private var creationDirectoriesBrowser:CreationDirectoryBrowser?=null
 
     init {
         viewModelScope.launch {store.open();while(isActive){cleanupLocalAttachments();delay(30000)}}
@@ -252,6 +357,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     startup?.join();startup=null
                 } else {
+                    creationDirectoriesBrowser?.let(::closeCreationDirectories)
                     operation?.cancelAndJoin(); operation = null; busy = false
                     closePairing(); closeWorktrees(); closeChanges();closeSkills(); forms.values.forEach(FormMemory::clearSecrets)
                     reservation = null; replacement = null; warningJob?.cancel()
@@ -262,8 +368,17 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             connection.state.collect { view ->
                 attachmentTransfer?.let {if(!attachmentAdmitted(it.ticket))pauseAttachments()}
                 val current = selection
-                agentSessionCreation?.let {if(!agentSessionAdmitted(it))closeAgentSession()}
-                agentTerminalCreation?.let {if(!agentTerminalAdmitted(it))closeAgentTerminal()}
+                sessionControls?.let {shown->
+                    if(!controlsAdmitted(shown))closeSessionControls()
+                    else {
+                        val reducer=view.sessions[shown.key.host]?.firstOrNull {it.state?.summary?.sessionId==shown.key.target.sessionId}
+                        if(reducer!=null)shown.observeRevisions(reducer.controlsRevision,reducer.queueRevision)
+                        servicePendingNativeReads(shown)
+                    }
+                }
+                agentSessionCreation?.let {if(!agentSessionAdmitted(it))closeAgentSession(it)}
+                creationDirectoriesBrowser?.let {if(!it.current())closeCreationDirectories(it)}
+                terminalCreation?.let {if(!terminalCreationAdmitted(it))closeTerminalCreation()}
                 agentAliasScope?.let {shown->if(!foreground || selection!=shown.key || view.sources[shown.key.host]?.get(shown.key.target)!=shown.source)closeAgentAlias()}
                 if(current!=null && (!foreground || screen!=Screen.Conversation || view.sources[current.host]?.containsKey(current.target)!=true)) runtime.setVisibleConversation(null)
                 val retained = forms.keys.toList()
@@ -274,11 +389,16 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
                     if (request == null || current != ConversationKey(key.first,key.second) || forms[key]?.source != view.sources[key.first]?.get(key.second)) forms.remove(key)?.clear()
                 }
                 shell?.let {shown->
-                    if(!shellAdmitted(shown)) closeShell()
+                    if(!shellRetained(shown)) closeShell()
                     else {
-                        val scope=ShellCreateScope(shown.selection,shown.source,shown.ticket)
-                        if(runCatching {requireShellInputScope(scope)}.isFailure) clearShellModifiers(scope)
-                        shellInputGate?.takeIf {it.loaded && it.prior!=null && it.observation!=view.shellInputStatus[shown.selection.host]?.get(it.prior.metadata.actionId)}?.let {loadShellInput(it.scope)}
+                        val current=shellAdmitted(shown)
+                        val latest=view.inventory[shown.selection.host]?.shells?.singleOrNull {it.target==shown.selection.target}
+                        if(latest!=null&&latest!=shown.summary)shell=shown.copy(summary=latest,grid=if(current)shown.grid else null)
+                        else if(!current&&shown.grid!=null)shell=shown.copy(grid=null,loading=shown.controlBegun,error=false)
+                        val scope=ShellControlScope(shown.selection,shown.source,shown.ticket)
+                        if(runCatching {requireShellInputScope(scope)}.isFailure)clearShellModifiers(scope)
+                        if(runCatching {requireShellInputOwnerScope(scope)}.isFailure)terminalInputOwner?.unavailable()
+                        if(current)shellInputGate?.takeIf {it.loaded && it.prior!=null && it.observation!=view.shellInputStatus[shown.selection.host]?.get(it.prior.metadata.actionId)}?.let {loadShellInput(it.scope)}
                     }
                 }
                 terminal?.let {shown->if(selection!=shown.key || !foreground || view.sources[shown.key.host]?.get(shown.key.target)!=shown.source) closeTerminal()}
@@ -295,7 +415,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
                 if(view.hello!=observedHello || view.latestReceipt!=observedReceipts) {
                     observedHello=view.hello;observedReceipts=view.latestReceipt
                     refreshActions()
-                    shell?.takeIf {shellAdmitted(it)}?.let {loadShellInput(ShellCreateScope(it.selection,it.source,it.ticket))}
+                    shell?.takeIf {shellAdmitted(it)}?.let {loadShellInput(ShellControlScope(it.selection,it.source,it.ticket))}
                 }
             }
         }
@@ -307,8 +427,9 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {connection.notificationWakeups.collect {wakeup->
             val attentionForeground=foregroundGeneration
             if(foreground&&wakeup.syncRequired)try{
+                val expected=connection.state.value.hello[wakeup.host] ?: return@collect
                 var after:Uint?=null
-                do{if(!foreground||foregroundGeneration!==attentionForeground)break;after=connection.notificationsSync(wakeup.host,after).nextSequence}while(after!=null)
+                do{if(!foreground||foregroundGeneration!==attentionForeground)break;after=connection.notificationsSync(wakeup.host,expected,after).nextSequence}while(after!=null)
             }catch(cancel:CancellationException){throw cancel}catch(_:Exception){}
             val current=selection
             if(foreground && screen==Screen.Conversation && current?.host==wakeup.host && connection.state.value.sources[current.host]?.containsKey(current.target)==true) {
@@ -319,22 +440,26 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         }}
     }
     fun foreground(active: Boolean) {
+        val conversation=if(!active)selection?.let {connection.retireConversationSubscription(it.host,it.target)}else null
         if(active && foregroundGeneration==null) foregroundGeneration=ForegroundGeneration(runtime.newClaim(RuntimeClaimKind.Ui),CompletableDeferred())
         foreground = active
         if (!active) {
             closeAttentionInbox()
             // Admission guards change immediately, before queued native cleanup finishes.
             foreground = false
-            pauseArtifacts();closeAgentAlias();closeAgentTerminal();closeAgentSession();attachmentCleanup?.lease?.invalidate();attachmentCleanup=null;attachmentRecovery=null
+            closeSessionControls()
+            pauseArtifacts();closeAgentAlias();closeTerminalCreation();closeAgentSession();attachmentCleanup?.lease?.invalidate();attachmentCleanup=null;attachmentRecovery=null
             val stale=foregroundGeneration
+            if(stale!=null){pendingAttention=null;navigationTicket=Any();attentionRouteJob?.cancel()}
             val staleStartup=startup
             foregroundGeneration=null
             staleStartup?.cancel();operation?.cancel();closePairing();closeTerminal();closeShell();closeWorktrees();closeChanges();closeSkills();forms.values.forEach(FormMemory::clearSecrets);invalidateSeparateCreation()
             runtime.setVisibleConversation(null)
-            permissionRequestVisible=false
-            if(stale!=null) runtime.cleanupScope.launch {
+            permissionRequest=null;attentionRouteJob=null
+            if(stale!=null || conversation!=null) runtime.cleanupScope.launch {
                 try {staleStartup?.join()} catch(_:CancellationException) {}
-                try {runtime.release(stale.claim)} catch(_:Exception) {}
+                try {conversation?.let {connection.leave(it)}} catch(_:Exception) {}
+                if(stale!=null)try {runtime.release(stale.claim)} catch(_:Exception) {}
             }
         }
         lifecycle.trySend(active)
@@ -368,12 +493,15 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     private fun perform(failureNotice: (Exception) -> String = ::safeFailure, block: suspend () -> Unit) {
         if (busy) return
         busy = true; notice = null
-        operation = viewModelScope.launch {
+        val task=viewModelScope.launch(start=CoroutineStart.LAZY) {
+            val original=currentCoroutineContext()[Job]
             try { block() }
             catch (cancel: CancellationException) { throw cancel }
-            catch (error: Exception) { notice = failureNotice(error) }
-            finally { busy = false; refreshActions() }
+            catch (error: Exception) {if(operation===original)notice=failureNotice(error)}
+            finally {if(operation===original){busy=false;try{refreshActions()}finally{openPendingAttention()}}}
         }
+        operation=task
+        task.start()
     }
     private suspend fun refreshActions() {
         val currentHost=host ?: return
@@ -387,10 +515,6 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         if(host==currentHost && screen==currentScreen && actionAfter==after && currentFocus==focus) {
             actions=mapOf(currentHost to page);focusedAction=focused
             nextActionPage=page.takeIf {it.size==100}?.lastOrNull()?.metadata?.actionId
-            // Receipt refresh also refreshes the sheet's retained outcome, without clearing its latch.
-            val worktreeScope=worktreeCreationGate?.scope
-            if(worktreeScope!=null && worktreeScope.key.host==currentHost && runCatching {requireWorktreeCreationScope(worktreeScope)}.isSuccess) loadWorktreeCreation(worktreeScope)
-            shell?.takeIf {shellAdmitted(it)}?.let {loadShellCreation(ShellCreateScope(it.selection,it.source,it.ticket))}
         }
     }
     fun actionPage(first: Boolean=false) {
@@ -401,20 +525,22 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     fun sessions() { navigate(Screen.Sessions,null) }
     fun sessions(host: String) { navigate(Screen.Sessions,host) }
     fun settings(host: String? = null) { navigate(Screen.Settings,host) }
-    private fun navigate(next: Screen, nextHost: String?) {
+    private fun navigate(next: Screen, nextHost: String?,old:ConversationSubscription?=selection?.let {connection.retireConversationSubscription(it.host,it.target)}) {
+        navigationTicket=Any();pendingAttention=null;permissionRequest=null
+        attentionRouteJob?.cancel();attentionRouteJob=null
         closeAttentionInbox()
         closeArtifacts()
         closeAgentAlias()
-        val old = selection
         skillsFocusSignal=0L
-        closeAgentSession();closeAgentTerminal();closePairing(); closeTerminal(); closeShell(); closeWorktrees(); closeChanges();closeSkills(); forms.values.forEach(FormMemory::clear); forms.clear()
+        closeAgentSession();closeTerminalCreation();closePairing(); closeTerminal(); closeShell(); closeWorktrees(); closeChanges();closeSkills(); forms.values.forEach(FormMemory::clear); forms.clear()
+        closeSessionControls()
         selection = null; reservation = null; replacement = null; warningJob?.cancel(); invalidateSeparateCreation()
         runtime.setVisibleConversation(null)
         host = nextHost; screen = next
         actions=emptyMap();focusedAction=null;focusedId=null;actionAfter=null;nextActionPage=null
         if(nextHost!=null) viewModelScope.launch {try {refreshActions()} catch(error: Exception) {notice=safeFailure(error)}}
-        if (old != null) viewModelScope.launch {
-            try { connection.leave(old.host,old.target) }
+        if (old != null) runtime.cleanupScope.launch {
+            try {connection.leave(old)}
             catch (cancel: CancellationException) { throw cancel }
             catch (error: Exception) { notice = safeFailure(error) }
         }
@@ -487,39 +613,58 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Notification extras are lookup keys only. The stored event and live inventory must agree. */
     fun openNotification(host:String,eventId:String) {
-        pendingAttention=host to eventId
-        if(foreground) openPendingAttention()
+        val event=try {EndpointId(host);Uuid(eventId)}catch(_:Exception){return}
+        navigationTicket=Any();permissionRequest=null
+        attentionRouteJob?.cancel();attentionRouteJob=null
+        pendingAttention=PendingAttention(host,event,navigationTicket)
+        if(foreground)openPendingAttention()
     }
     private fun openPendingAttention() {
         val entry=pendingAttention ?: return
-        pendingAttention=null
+        val generation=foregroundGeneration ?: return
+        if(busy||!foreground||entry.navigation!==navigationTicket)return
+        fun admitted()=foreground&&foregroundGeneration===generation&&navigationTicket===entry.navigation
         perform {
-            val host=entry.first
-            val event=Uuid(entry.second)
-            EndpointId(host)
-            val generation=foregroundGeneration ?: return@perform
-            generation.ready.await()
+            if(!admitted()||pendingAttention!==entry)return@perform
+            // Busy keeps the lookup pending; an admitted attempt consumes only its own entry.
+            pendingAttention=null
+            var expected=connection.state.value.hello[entry.host]
+            fun original()=admitted()&&connection.state.value.hello[entry.host]===expected
             try {
-                connection.ensureConnectedIfNeeded(host)
-                val inventory=connection.snapshot(host)
+                generation.ready.await()
+                if(!admitted())return@perform
+                if(expected==null)expected=connection.state.value.hello[entry.host]
+                if(!original())return@perform
+                val connected=connection.ensureConnectedIfNeeded(entry.host)
+                if(expected==null)expected=connected
+                if(!original()||expected!==connected)return@perform
+                val inventory=connection.snapshot(entry.host)
+                if(!original())return@perform
                 var after:Uint?=null
-                do {after=connection.notificationsSync(host,after).nextSequence} while(after!=null)
-                val retained=store.notificationEvent(host,event) ?: throw StorePolicy(ErrorCode.NotFound)
+                do {after=connection.notificationsSync(entry.host,connected,after).nextSequence;if(!original())return@perform}while(after!=null)
+                val retained=store.notificationEvent(entry.host,entry.event) ?: throw StorePolicy(ErrorCode.NotFound)
+                if(!original())return@perform
                 val target=Target(retained.event.sessionId,retained.event.generation)
-                val current=inventory.sessions.firstOrNull {Target(it.sessionId,it.generation)==target && it.connectivity==SessionConnectivity.Ready}
-                if(current==null || connection.state.value.inventoryReady[host]!=true) {showStaleAttention(host,event);return@perform}
-                connection.open(host,target)
-                navigate(Screen.Conversation,host);selection=ConversationKey(host,target);runtime.setVisibleConversation(selection)
-            } catch(cancel:CancellationException) {throw cancel}
-            catch(_:Exception) {showStaleAttention(host,event)}
+                val current=inventory.sessions.firstOrNull {Target(it.sessionId,it.generation)==target&&it.connectivity==SessionConnectivity.Ready}
+                if(current==null||connection.state.value.inventoryReady[entry.host]!=true){showStaleAttention(entry,::original);return@perform}
+                val departing=selection?.let {connection.retireConversationSubscription(it.host,it.target)}
+                connection.open(entry.host,target,::original)
+                if(!original())return@perform
+                attentionRouteJob=null
+                navigate(Screen.Conversation,entry.host,departing);selection=ConversationKey(entry.host,target);runtime.setVisibleConversation(selection)
+            }catch(cancel:CancellationException){throw cancel}
+            catch(_:Exception){if(original())showStaleAttention(entry,::original)}
         }
+        attentionRouteJob=operation
     }
-    private suspend fun showStaleAttention(host:String,event:Uuid) {
-        val retained=try {store.notificationEvent(host,event)} catch(_:Exception) {null} ?: run {notice="This notification is no longer retained on this phone.";return}
+    private suspend fun showStaleAttention(entry:PendingAttention,admitted:()->Boolean) {
+        val retained=try {store.notificationEvent(entry.host,entry.event)}catch(cancel:CancellationException){throw cancel}catch(_:Exception){null}
+        if(!admitted())return
+        attentionRouteJob=null
+        if(retained==null){notice="This notification is no longer retained on this phone.";return}
         val target=Target(retained.event.sessionId,retained.event.generation)
-        // Never select a replacement generation from an old OS alert. Cached history remains read-only.
-        try {connection.leave(host,target)} catch(_:Exception) {}
-        navigate(Screen.Conversation,host);selection=ConversationKey(host,target)
+        // The existing navigation cleanup retires only the actually selected original viewer.
+        navigate(Screen.Conversation,entry.host);selection=ConversationKey(entry.host,target)
         notice="This notification refers to an older desktop session. Showing retained history only; reconnect or choose a current session before sending anything."
     }
     fun refresh() {
@@ -538,21 +683,20 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val source=connection.state.value.sources[key.host]?.get(key.target) ?: return
         val summary=connection.state.value.sessions[key.host]?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==key.target}==true}?.state?.summary ?: return
         if(!foreground || selection!=key || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.terminalRead) return
-        closeTerminal()
+        closeShell();closeTerminal()
         val ticket=terminalTicket
-        terminal=TerminalSnapshot(key,source,ticket,null,false,true,false)
+        terminal=TerminalSnapshot(key,source,ticket,null,true,false)
         terminalJob=viewModelScope.launch {
             try {
-                val result=connection.terminal(key.host,key.target,source)
-                if(terminal?.ticket==ticket && foreground && selection==key && screen==Screen.Conversation && connection.state.value.sources[key.host]?.get(key.target)==source) terminal=TerminalSnapshot(key,source,ticket,result.text,result.truncated,false,false)
-            } catch(timeout: TimeoutCancellationException) {
-                if(terminal?.ticket==ticket && foreground && selection==key && screen==Screen.Conversation && connection.state.value.sources[key.host]?.get(key.target)==source) terminal=TerminalSnapshot(key,source,ticket,null,false,false,true)
-            } catch(cancel: CancellationException) {throw cancel}
-            catch(_: Exception) {if(terminal?.ticket==ticket && foreground && selection==key && screen==Screen.Conversation && connection.state.value.sources[key.host]?.get(key.target)==source) terminal=TerminalSnapshot(key,source,ticket,null,false,false,true)}
+                connection.terminal(key.host,key.target,source){grid,lease->
+                    publishTerminalGrid(terminalState,key,source,ticket,foreground,selection,screen,
+                        connection.state.value.sources[key.host]?.get(key.target)==source,lease,grid)
+                }
+            } catch(cancel:CancellationException){throw cancel}
+            catch(_:Exception){if(terminal?.ticket==ticket)terminal=TerminalSnapshot(key,source,ticket,null,false,true)}
         }
     }
     fun closeTerminal() { terminalTicket+=1;terminal=null;terminalJob?.cancel();terminalJob=null }
-    fun refreshTerminal() { terminal?.key?.let(::openTerminal) }
     fun openWorktrees(key: ConversationKey) {
         val source=connection.state.value.sources[key.host]?.get(key.target) ?: return
         val summary=connection.state.value.sessions[key.host]?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==key.target}==true}?.state?.summary ?: return
@@ -563,49 +707,15 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         worktreesJob=viewModelScope.launch {
             try {
                 val result=connection.worktrees(key.host,key.target,source)
-                if(worktrees?.ticket==ticket && foreground && selection==key && screen==Screen.Conversation && connection.state.value.sources[key.host]?.get(key.target)==source) worktrees=WorktreesSnapshot(key,source,ticket,result.worktrees,false,false,result.creationScope)
+                if(worktrees?.ticket==ticket && foreground && selection==key && screen==Screen.Conversation && connection.state.value.sources[key.host]?.get(key.target)==source) worktrees=WorktreesSnapshot(key,source,ticket,result.worktrees,false,false)
             } catch(timeout: TimeoutCancellationException) {
                 if(worktrees?.ticket==ticket && foreground && selection==key && screen==Screen.Conversation && connection.state.value.sources[key.host]?.get(key.target)==source) worktrees=WorktreesSnapshot(key,source,ticket,null,false,true)
             } catch(cancel: CancellationException) {throw cancel}
             catch(_: Exception) {if(worktrees?.ticket==ticket && foreground && selection==key && screen==Screen.Conversation && connection.state.value.sources[key.host]?.get(key.target)==source) worktrees=WorktreesSnapshot(key,source,ticket,null,false,true)}
         }
     }
-    fun closeWorktrees() { closeAttachments(); closeWorktreeRemoval();worktreesTicket+=1;worktrees=null;worktreesJob?.cancel();worktreesJob=null }
+    fun closeWorktrees() { closeAttachments();worktreesTicket+=1;worktrees=null;worktreesJob?.cancel();worktreesJob=null }
     fun refreshWorktrees() { worktrees?.key?.let(::openWorktrees) }
-    internal fun closeWorktreeRemoval(){worktreeRemoval?.lease?.invalidate();worktreeRemoval=null;worktreeRemovalJob?.cancel();worktreeRemovalJob=null}
-    private fun requireWorktreeRemoval(scope:WorktreeRemovalState) {
-        val snapshot=worktrees ?: throw StorePolicy(ErrorCode.StaleSession)
-        val view=connection.state.value
-        val summary=view.sessions[scope.key.host]?.firstOrNull {it.state?.summary?.sessionId==scope.key.target.sessionId}?.state?.summary
-        if(worktreeRemoval!==scope || !foreground || selection!=scope.key || screen!=Screen.Conversation || snapshot.key!=scope.key || snapshot.source!=scope.source || snapshot.ticket!=scope.ticket || snapshot.loading || snapshot.error || view.sources[scope.key.host]?.get(scope.key.target)!=scope.source || view.inventoryReady[scope.key.host]!=true || summary?.generation!=scope.key.target.generation || summary.capabilities.worktreeRemove!=true || snapshot.worktrees?.none {it.candidateId==scope.candidate}!=false)throw StorePolicy(ErrorCode.StaleSession)
-    }
-    internal fun previewWorktreeRemoval(snapshot:WorktreesSnapshot,entry:WorktreeEntry) {
-        if(busy || worktrees!==snapshot)return
-        val candidate=entry.candidateId ?: return
-        closeWorktreeRemoval()
-        val scope=WorktreeRemovalState(snapshot.key,snapshot.source,snapshot.ticket,candidate,WorktreeRemovalLease())
-        worktreeRemoval=scope
-        if(runCatching {requireWorktreeRemoval(scope)}.isFailure){closeWorktreeRemoval();return}
-        worktreeRemovalJob=viewModelScope.launch {
-            try {
-                val context=connection.previewWorktreeRemoval(scope.key.host,scope.key.target,scope.source,candidate,scope.ticket,scope.lease)
-                requireWorktreeRemoval(scope)
-                worktreeRemoval=scope.copy(context=context,loading=false)
-                delay(25000)
-                worktreeRemoval?.takeIf {it.lease===scope.lease && it.submittedAction==null}?.let {closeWorktreeRemoval();notice="Removal preview expired. Open a fresh preview."}
-            }catch(cancel:CancellationException){throw cancel}
-            catch(_:Exception){if(worktreeRemoval===scope)worktreeRemoval=scope.copy(loading=false,error=true)}
-        }
-    }
-    internal fun confirmWorktreeRemoval(scope:WorktreeRemovalState)=perform {
-        requireWorktreeRemoval(scope)
-        val context=scope.context ?: throw StorePolicy(ErrorCode.NotReady)
-        if(scope.submittedAction!=null || !context.preview.removable || context.ticket!=scope.ticket)throw StorePolicy(ErrorCode.NotReady)
-        val boot=connection.state.value.hello[scope.key.host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
-        val action=Uuid.random();focusedId=action
-        worktreeRemoval=scope.copy(submittedAction=action)
-        connection.mutate(scope.key.host,Request(action,RequestBody.WorktreesRemove(WorktreesRemoveParams(boot,scope.key.target,scope.candidate,context.preview.previewId))),removal=context)
-    }
     private fun skillsAdmitted(snapshot:SkillsSnapshot):Boolean {
         val view=connection.state.value
         val summary=view.sessions[snapshot.key.host]?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==snapshot.key.target}==true}?.state?.summary
@@ -632,7 +742,8 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             catch(_:Exception) {if(skills?.ticket==snapshot.ticket && skillsAdmitted(snapshot)) skills=snapshot.copy(loading=false,error=true)}
         }
     }
-    fun closeSkills() {closeSkillsDocument();skillsTicket+=1;skills=null;skillsCatalogue=null;skillsJob?.cancel();skillsJob=null}
+    fun closeSkills() {skillsInvocationLease?.invalidate();skillsInvocationLease=null;closeSkillsDocument();skillsTicket+=1;skills=null;skillsCatalogue=null;skillsJob?.cancel();skillsJob=null}
+    internal fun invalidateSkillsInvocation(ticket:Long) {if(skills?.ticket==ticket)skillsInvocationLease?.invalidate()}
     /** Pure local projection. Typing never issues a native read or clears shared caches. */
     internal fun suggestedSkills(key:ConversationKey,draft:String):SkillsSuggestionsState? {
         if(skills!=null || composers[key].orEmpty()!=draft || !foreground || screen!=Screen.Conversation || selection!=key) return null
@@ -656,6 +767,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     }
     internal fun appendSuggestedSkill(value:SkillsSuggestionsState,entry:SkillEntry):Boolean {
         val catalogue=value.catalogue ?: return false
+        if(!composerEditable(catalogue.key))return false
         if(!suggestionAdmitted(value) || skillsCatalogue!==catalogue || !skillsAdmitted(catalogue) || entry !in value.entries || catalogue.catalogue?.skills?.contains(entry)!=true) return false
         val mention=entry.exactInsertText() ?: return false
         // No cursor is inferred: append only, leaving the visible trigger exactly as typed.
@@ -675,7 +787,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     fun closeSkillsDocument(){skillsDocumentJob?.cancel();skillsDocumentJob=null;skillsDocument=null}
     fun previewSkill(snapshot:SkillsSnapshot,entry:SkillEntry){
         val catalogue=snapshot.catalogue ?: return
-        if(skills!==snapshot||snapshot.loading||snapshot.error||!skillsAdmitted(snapshot)||catalogue.provider!=Provider.Omp||entry !in catalogue.skills)return
+        if(skills!==snapshot||snapshot.loading||snapshot.error||!skillsAdmitted(snapshot)||entry !in catalogue.skills)return
         val document=entry.documentRef ?: return;val foreground=foregroundGeneration ?: return;closeSkillsDocument()
         val shown=SkillsDocumentState(snapshot,entry,Any());skillsDocument=shown
         skillsDocumentJob=viewModelScope.launch{
@@ -686,7 +798,27 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    internal fun canInvokeSkill(snapshot:SkillsSnapshot,entry:SkillEntry):Boolean {
+        val catalogue=snapshot.catalogue ?: return false
+        val summary=connection.state.value.sessions[snapshot.key.host]?.firstOrNull {it.state?.summary?.let{s->Target(s.sessionId,s.generation)==snapshot.key.target}==true}?.state?.summary
+        return skills===snapshot && skillsInvocationLease?.active?.get()!=false && !snapshot.loading && !snapshot.error && skillsAdmitted(snapshot) && catalogue.provider==Provider.Codex && summary?.capabilities?.prompt==true && entry.enabled && entry.invocationRef!=null && catalogue.skills.any {it===entry}
+    }
+    internal fun invokeSkill(snapshot:SkillsSnapshot,entry:SkillEntry) {
+        if(!canInvokeSkill(snapshot,entry))return
+        val catalogue=snapshot.catalogue ?: return
+        val reference=entry.invocationRef ?: return
+        val foreground=foregroundGeneration
+        val lease=skillsInvocationLease ?: SkillInvocationLease().also {skillsInvocationLease=it}
+        perform {
+            val context=connection.skillInvocation(snapshot.key.host,catalogue,entry,lease){foregroundGeneration===foreground&&canInvokeSkill(snapshot,entry)}
+            val boot=connection.state.value.hello[snapshot.key.host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
+            val action=Uuid.random();focusedId=action
+            connection.mutate(snapshot.key.host,Request(action,RequestBody.PromptSubmit(PromptSubmitParams(boot,snapshot.key.target,PromptText(""),SkillSelector(catalogue.catalogueGeneration,reference)))),ordinaryComposer=false,skill=context)
+        }
+    }
+
     fun insertSkill(snapshot:SkillsSnapshot,entry:SkillEntry):Boolean {
+        if(!composerEditable(snapshot.key))return false
         val current=skills ?: return false
         if(current !== snapshot || current.ticket!=snapshot.ticket || current.loading || current.error || current.catalogue!=snapshot.catalogue || !skillsAdmitted(current) || current.catalogue?.skills?.contains(entry)!=true) return false
         val mention=entry.exactInsertText() ?: return false
@@ -717,6 +849,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshChanges() { changes?.key?.let(::openChanges) }
     /** Append one currently admitted Changes projection as plain draft text; this never uploads or sends anything. */
     internal fun insertChangesReference(snapshot: ChangesSnapshot, selection: ChangesReferenceSelection): Boolean {
+        if(!composerEditable(snapshot.key))return false
         val reference = changesReferenceAdmitted(snapshot, selection)
         if (reference == null) {
             notice = "This Changes snapshot cannot provide that reference. Refresh it before adding it to the draft."
@@ -781,9 +914,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val ticket=Any();shown.ticket=ticket;shown.loading=true;shown.error=null;shown.preview=null;shown.selected=null
         shown.job=viewModelScope.launch{
             try{val page=connection.artifactList(shown.context,parent,cursor);if(!artifactAdmitted(shown)||shown.ticket!==ticket)return@launch
-                val entries=if(append)(shown.entries+page.entries).distinctBy{it.reference}else page.entries
-                if(entries.size>1000)throw StorePolicy(ErrorCode.ResourceLimit)
-                shown.entries=entries;shown.cursor=page.nextCursor;shown.breadcrumbs=breadcrumbs
+                if(!shown.publishPage(ticket,page,cursor,breadcrumbs,append))return@launch
             }catch(cancel:CancellationException){throw cancel}catch(_:Exception){if(artifacts===shown)shown.error="Directory changed, expired, exceeded its bound or is unavailable. Refresh from this original source."}finally{if(artifacts===shown&&shown.ticket===ticket)shown.loading=false}
         }
     }
@@ -808,11 +939,19 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         shown.loading=true;shown.error=null;shown.preview=null;shown.selected=entry
         shown.job=viewModelScope.launch{var read:Uuid?=null;try{
             val opened=connection.artifactOpen(shown.context,entry.reference){read=it}
-            if(opened.previewKind!=ArtifactPreviewKind.Text||opened.size.value>1024L*1024||opened.size!=entry.size||opened.name!=entry.name)throw StorePolicy(ErrorCode.InvalidRequest)
-            val buffer=java.io.ByteArrayOutputStream(opened.size.value.toInt());consumeArtifact(shown,opened){bytes->buffer.write(bytes)}
-            val decoded=Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT).onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(buffer.toByteArray())).toString()
-            if(decoded.any{Character.isISOControl(it)&&it!='\t'&&it!='\r'&&it!='\n'})throw StorePolicy(ErrorCode.InvalidRequest)
-            if(artifactAdmitted(shown)&&shown.selected===entry)shown.preview=decoded
+            if(opened.size.value>1024L*1024||opened.size!=entry.size||opened.name!=entry.name)throw StorePolicy(ErrorCode.InvalidRequest)
+            when(opened.previewKind) {
+                ArtifactPreviewKind.Binary->{if(artifactAdmitted(shown))shown.error="This is binary content, not a text preview. Explicit export remains available.";return@launch}
+                ArtifactPreviewKind.Unavailable->{if(artifactAdmitted(shown))shown.error="Text preview is unavailable for this complete snapshot. Explicit export remains available.";return@launch}
+                ArtifactPreviewKind.Text->Unit
+            }
+            val buffer=ByteArray(opened.size.value.toInt());var position=0
+            try {
+                consumeArtifact(shown,opened){bytes->bytes.copyInto(buffer,position);position+=bytes.size}
+                val decoded=Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT).onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(buffer)).toString()
+                if(decoded.any{Character.isISOControl(it)&&it!='\t'&&it!='\r'&&it!='\n'})throw StorePolicy(ErrorCode.InvalidRequest)
+                if(artifactAdmitted(shown)&&shown.selected===entry)shown.preview=decoded
+            }finally{buffer.fill(0)}
         }catch(cancel:CancellationException){throw cancel}catch(_:Exception){if(artifacts===shown)shown.error="A complete verified text preview is unavailable. No partial text was displayed."}finally{releaseArtifact(shown,read);if(artifacts===shown)shown.loading=false}}
     }
     internal fun artifactExportName(name:String):String{val safe=StringBuilder();name.codePoints().forEachOrdered{code->if(code!=47&&code!=92&&!Character.isISOControl(code)){val text=String(Character.toChars(code));if(utf8Size(safe.toString())+utf8Size(text)<=128)safe.append(text)}};return safe.toString().takeIf{it.isNotBlank()&&it!="."&&it!=".."} ?: "artifact.bin"}
@@ -867,68 +1006,109 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             }
         };artifactExportJob=job;shown.job=job
     }
-    private val agentTerminalActions=mutableMapOf<ConversationKey,Uuid>()
-    internal fun closeAgentTerminal(){agentTerminalCreation?.context?.lease?.invalidate();agentTerminalCreation=null}
-    private fun agentTerminalAdmitted(shown:AgentTerminalCreation):Boolean {
-        val view=connection.state.value
-        val summary=view.sessions[shown.key.host]?.firstOrNull {it.state?.summary?.let {summary->Target(summary.sessionId,summary.generation)==shown.key.target}==true}?.state?.summary
-        return agentTerminalCreation===shown&&foreground&&foregroundGeneration===shown.foreground&&screen==Screen.Conversation&&selection==shown.key&&view.sources[shown.key.host]?.get(shown.key.target)==shown.source&&view.inventoryReady[shown.key.host]==true&&view.mutationReady[shown.key.host]==true&&summary?.capabilities?.terminalCreate==true
+    private val terminalCreationActions=mutableMapOf<String,Uuid>()
+    internal fun closeTerminalCreation(){
+        terminalCreation?.let {it.context.lease.invalidate();it.directories?.let(::closeCreationDirectories)}
+        terminalCreation=null
     }
-    internal fun beginAgentTerminal(key:ConversationKey){
-        closeAgentTerminal();val generation=foregroundGeneration ?: return
-        val view=connection.state.value;val source=view.sources[key.host]?.get(key.target) ?: return
-        val reducer=view.sessions[key.host]?.firstOrNull {it.state?.summary?.let {summary->Target(summary.sessionId,summary.generation)==key.target}==true} ?: return
-        if(!foreground||screen!=Screen.Conversation||selection!=key||view.inventoryReady[key.host]!=true||view.mutationReady[key.host]!=true||reducer.state?.summary?.capabilities?.terminalCreate!=true)return
-        try {val context=connection.captureAgentTerminal(key.host,key.target,source,reducer)
-            val shown=AgentTerminalCreation(key,source,generation,context);agentTerminalCreation=shown;loadAgentTerminal(shown)
-        }catch(_:Exception){notice="Agent process directory creation is unavailable for this original session."}
+    private fun terminalCreationAdmitted(shown:TerminalCreationState):Boolean {
+        if(terminalCreation!==shown||!foreground||foregroundGeneration!==shown.foreground||screen!=shown.originScreen||host!=shown.host)return false
+        val selected=when(val source=shown.source) {
+            is ArtifactSource.Session->screen==Screen.Conversation&&selection==ConversationKey(shown.host,source.target)
+            is ArtifactSource.Shell->screen==Screen.Terminals&&shell?.selection==ShellSelection(shown.host,source.target)
+            null->true
+        }
+        return selected&&connection.terminalCreationCurrent(shown.context)
     }
-    private suspend fun retainedAgentTerminals(key:ConversationKey):Pair<LocalAction?,Boolean>{
+    internal fun beginAgentTerminal(key:ConversationKey) {
+        val summary=connection.state.value.sessions[key.host]?.firstOrNull {it.state?.summary?.let {row->Target(row.sessionId,row.generation)==key.target}==true}?.state?.summary ?: return
+        if(selection!=key||summary.capabilities.terminalCreate!=true)return
+        beginTerminalCreation(key.host,summary.serverId,summary.workspaceId,ArtifactSource.Session(key.target))
+    }
+    internal fun beginTerminalCreation(host:String,server:Uuid,workspace:Id,source:ArtifactSource?=null) {
+        closeTerminalCreation();val generation=foregroundGeneration ?: return
+        if(!foreground||this.host!=host||screen !in listOf(Screen.Terminals,Screen.Conversation))return
+        try {
+            val context=connection.captureTerminalCreation(host,server,workspace,source)
+            val shown=TerminalCreationState(host,server,workspace,source,generation,screen,context)
+            terminalCreation=shown
+            shown.directories=CreationDirectoryBrowser(connection,viewModelScope,host,null,context){terminalCreationAdmitted(shown)}.also {creationDirectoriesBrowser=it}
+            loadTerminalCreation(shown)
+        }catch(_:Exception){notice="A current original native workspace is required. Configure an approved project and the local terminal-control grant on this desktop."}
+    }
+    internal fun selectTerminalProject(shown:TerminalCreationState,project:Uuid) {
+        if(!terminalCreationAdmitted(shown)||shown.pending||busy)return
+        if(connection.state.value.inventory[shown.host]?.projects?.none {it.projectId==project&&it.available}!=false)return
+        shown.project=project;shown.directories?.configure(shown.server,project)
+    }
+    private suspend fun retainedTerminals(host:String):Pair<LocalAction?,Boolean> {
         var after:Uuid?=null;var latest:LocalAction?=null;var pending=false
-        do {val page=store.localActions(key.host,after,100)
-            for(action in page.filter {it.metadata.method==ActionMethod.TerminalCreate&&it.metadata.target==key.target}){
-                if(latest==null||action.metadata.createdAt.value>latest.metadata.createdAt.value)latest=action
+        do {val page=store.localActions(host,after,100)
+            for(action in page.filter {it.metadata.method in listOf(ActionMethod.TerminalCreate,ActionMethod.ShellCreate)}) {
+                if(latest==null||action.metadata.createdAt.value>latest.metadata.createdAt.value
+                    ||action.metadata.createdAt==latest.metadata.createdAt&&action.metadata.actionId.value>latest.metadata.actionId.value)latest=action
                 if(action.receipt==null||action.receipt.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching))pending=true
-            };after=page.lastOrNull()?.metadata?.actionId
+            };after=if(page.size==100)page.last().metadata.actionId else null
         }while(after!=null)
         return latest to pending
     }
-    private fun loadAgentTerminal(shown:AgentTerminalCreation){val loading=Any();shown.loading=loading;shown.loaded=false;viewModelScope.launch {
-        try {val (prior,pending)=retainedAgentTerminals(shown.key)
-            if(!agentTerminalAdmitted(shown)||shown.loading!==loading)return@launch
+    private fun loadTerminalCreation(shown:TerminalCreationState) {
+        val loading=Any();shown.loading=loading;shown.loaded=false
+        viewModelScope.launch {try {
+            val (prior,pending)=retainedTerminals(shown.host)
+            if(!terminalCreationAdmitted(shown)||shown.loading!==loading)return@launch
             shown.prior=prior;shown.pending=pending;shown.loaded=true
             if(prior?.metadata?.actionId!=shown.separate)shown.separate=null
-        }catch(cancel:CancellationException){throw cancel}catch(_:Exception){if(agentTerminalCreation===shown){shown.pending=true;notice="Retained terminal actions could not be inspected."}}
-    }}
-    internal fun inspectAgentTerminal(shown:AgentTerminalCreation){if(!agentTerminalAdmitted(shown))return;viewModelScope.launch {
-        try {shown.prior?.metadata?.actionId?.let {action->if(connection.status(shown.key.host,action) is ActionStatusResult.Unknown)notice="The original terminal action is unknown. It is never retried; another terminal requires separate explicit consent."};if(agentTerminalAdmitted(shown))loadAgentTerminal(shown)}catch(cancel:CancellationException){throw cancel}catch(_:Exception){notice="Terminal receipt is unavailable. No creation was retried."}
-    }}
-    internal fun permitSeparateAgentTerminal(shown:AgentTerminalCreation,action:Uuid){if(!agentTerminalAdmitted(shown)||shown.pending)return
+        }catch(cancel:CancellationException){throw cancel}catch(_:Exception){if(terminalCreation===shown){shown.pending=true;notice="Retained terminal actions could not be inspected."}}}
+    }
+    internal fun inspectTerminalCreation(shown:TerminalCreationState) {
+        if(!terminalCreationAdmitted(shown))return
+        viewModelScope.launch {try {
+            shown.prior?.metadata?.actionId?.let {if(connection.status(shown.host,it) is ActionStatusResult.Unknown)notice="Original creation is unknown. Never replay it or adopt guessed resources."}
+            if(terminalCreationAdmitted(shown))loadTerminalCreation(shown)
+        }catch(cancel:CancellationException){throw cancel}catch(_:Exception){notice="Terminal receipt is unavailable; no creation was retried."}}
+    }
+    internal fun permitSeparateTerminal(shown:TerminalCreationState,action:Uuid) {
+        if(!terminalCreationAdmitted(shown)||shown.pending)return
         val prior=shown.prior ?: return
         if(prior.metadata.actionId==action&&prior.authoritative&&prior.outcomeShown&&prior.receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain))shown.separate=action
     }
-    internal fun agentTerminalAllowed(shown:AgentTerminalCreation):Boolean=agentTerminalAdmitted(shown)&&shown.loaded&&!shown.pending&&(shown.prior==null||shown.separate==shown.prior?.metadata?.actionId)&&(agentTerminalActions[shown.key]==null||agentTerminalActions[shown.key]==shown.prior?.metadata?.actionId)
-    internal fun agentTerminalCreatedAvailable(shown:AgentTerminalCreation):Boolean {
-        if(!agentTerminalAdmitted(shown))return false
-        val receipt=shown.prior?.takeIf {it.authoritative}?.receipt?.takeIf {it.state==ReceiptState.Succeeded&&it.target==shown.key.target} ?: return false
+    internal fun terminalCreationAllowed(shown:TerminalCreationState):Boolean {
+        if(!terminalCreationAdmitted(shown)||!shown.loaded||shown.pending||shown.project==null)return false
+        if(connection.state.value.mutationReady[shown.host]!=true)return false
+        if(shown.directories?.choice(shown.server,shown.project)==null)return false
+        return (shown.prior==null||shown.separate==shown.prior?.metadata?.actionId)
+            &&(terminalCreationActions[shown.host]==null||terminalCreationActions[shown.host]==shown.prior?.metadata?.actionId)
+    }
+    internal fun terminalCreatedAvailable(shown:TerminalCreationState):Boolean {
+        if(!terminalCreationAdmitted(shown))return false
+        val receipt=shown.prior?.takeIf {it.authoritative}?.receipt?.takeIf {it.state==ReceiptState.Succeeded} ?: return false
         val resources=(receipt.result as? ActionResultShellCreation)?.resources ?: return false
         val target=resources.createdTarget ?: return false
-        val inventory=connection.state.value.inventory[shown.key.host] ?: return false
-        return connection.state.value.inventoryReady[shown.key.host]==true&&inventory.shells.any {it.target==target&&it.connectivity==SessionConnectivity.Ready&&it.serverId==resources.serverId&&it.workspaceId==resources.workspaceId&&it.tabId==resources.tabId&&it.paneId==resources.paneId&&it.terminalId==resources.terminalId}
+        val inventory=connection.state.value.inventory[shown.host] ?: return false
+        return connection.state.value.inventoryReady[shown.host]==true&&inventory.shells.any {it.target==target&&it.connectivity==SessionConnectivity.Ready&&it.capabilities.read
+            &&it.serverId==resources.serverId&&it.workspaceId==resources.workspaceId&&it.tabId==resources.tabId&&it.paneId==resources.paneId&&it.terminalId==resources.terminalId}
     }
-    internal fun openCreatedAgentTerminal(shown:AgentTerminalCreation){if(!agentTerminalCreatedAvailable(shown))return
+    internal fun openCreatedTerminal(shown:TerminalCreationState) {
+        if(!terminalCreatedAvailable(shown))return
         val target=(shown.prior?.receipt?.result as? ActionResultShellCreation)?.resources?.createdTarget ?: return
-        val host=shown.key.host;closeAgentTerminal();openShell(host,target)
+        val host=shown.host;closeTerminalCreation();terminals(host);openShell(host,target)
     }
-    internal fun createAgentTerminal(shown:AgentTerminalCreation)=perform {
-        if(!agentTerminalAllowed(shown))throw StorePolicy(ErrorCode.NotReady)
-        val (prior,pending)=retainedAgentTerminals(shown.key)
-        if(!agentTerminalAllowed(shown)||pending||prior!=shown.prior)throw StorePolicy(ErrorCode.NotReady)
-        val boot=connection.state.value.hello[shown.key.host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
-        val action=Uuid.random();val previous=agentTerminalActions.put(shown.key,action);val permit=shown.separate;shown.separate=null;shown.pending=true;focusedId=action
-        try {connection.mutate(shown.key.host,Request(action,RequestBody.TerminalCreate(TerminalCreateParams(boot,shown.key.target))),terminal=shown.context)}
-        catch(error:Exception){if(withContext(NonCancellable){store.localAction(shown.key.host,action)}==null){if(previous==null)agentTerminalActions.remove(shown.key)else agentTerminalActions[shown.key]=previous;shown.separate=permit};throw error}
-        finally {if(agentTerminalAdmitted(shown))loadAgentTerminal(shown)}
+    internal fun createTerminal(shown:TerminalCreationState)=perform {
+        if(!terminalCreationAllowed(shown))throw StorePolicy(ErrorCode.NotReady)
+        val project=shown.project ?: throw StorePolicy(ErrorCode.NotReady)
+        val directory=shown.directories?.choice(shown.server,project) ?: throw StorePolicy(ErrorCode.NotReady)
+        val (prior,pending)=retainedTerminals(shown.host)
+        if(!terminalCreationAllowed(shown)||pending||prior!=shown.prior||shown.project!=project
+            ||shown.directories?.choice(shown.server,project)!=directory)throw StorePolicy(ErrorCode.NotReady)
+        val boot=connection.state.value.hello[shown.host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
+        val action=Uuid.random();val previous=terminalCreationActions.put(shown.host,action);val permit=shown.separate
+        shown.separate=null;shown.pending=true;focusedId=action
+        try {connection.mutate(shown.host,Request(action,RequestBody.TerminalCreate(TerminalCreateParams(boot,shown.server,shown.workspace,project,directory.reference,shown.source))),
+            terminal=shown.context,directories=directory.context)}
+        catch(error:Exception){if(withContext(NonCancellable){store.localAction(shown.host,action)}==null){
+            if(previous==null)terminalCreationActions.remove(shown.host)else terminalCreationActions[shown.host]=previous;shown.separate=permit};throw error}
+        finally {if(terminalCreationAdmitted(shown))loadTerminalCreation(shown)}
     }
     internal var agentAliasScope:AgentAliasScope?=null
         private set
@@ -1074,9 +1254,22 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         catch(_:Exception){transfer.unknown=true;transfer.paused=true;transfer.notice="Upload stopped. Inspect the original action and desktop offset; no automatic retry."}
         finally {transfer.working=false}
     }
-    private fun pauseAttachments(){attachmentTransfer?.let {it.paused=true;it.original.context.lease.invalidate();it.status=it.status?.copy(insertionReady=false)};attachmentPickerConsent?.takeUnless {attachmentPickerHold?.original===it}?.context?.lease?.invalidate()}
+    private fun pauseAttachments(){attachmentPreviewJob?.cancel();attachmentPreviewJob=null;attachmentTransfer?.let {it.preview=null;it.previewLoading=false;it.paused=true;it.original.context.lease.invalidate();it.status=it.status?.copy(insertionReady=false)};attachmentPickerConsent?.takeUnless {attachmentPickerHold?.original===it}?.context?.lease?.invalidate()}
     internal fun closeAttachments(){pauseAttachments();attachmentCleanup?.lease?.invalidate();attachmentCleanup=null;attachmentVisible=false}
     internal fun showAttachments(){attachmentTransfer?.let {attachmentVisible=true}}
+    internal fun previewAttachment(transfer:AttachmentTransfer) {
+        val prepared=transfer.prepared ?: return
+        if(!foreground||!attachmentVisible||attachmentTransfer!==transfer||transfer.previewLoading)return
+        attachmentPreviewJob?.cancel();transfer.preview=null;transfer.previewLoading=true;transfer.previewUnavailable=false
+        val generation=foregroundGeneration
+        attachmentPreviewJob=viewModelScope.launch {
+            try {
+                val preview=attachmentStaging.preview(prepared)
+                if(foreground&&foregroundGeneration===generation&&attachmentVisible&&attachmentTransfer===transfer){transfer.preview=preview;transfer.previewUnavailable=preview==null}
+            }catch(cancel:CancellationException){throw cancel}catch(_:Exception){if(attachmentTransfer===transfer)transfer.previewUnavailable=true}
+            finally {if(attachmentTransfer===transfer)transfer.previewLoading=false}
+        }
+    }
     internal fun inspectAttachment(transfer:AttachmentTransfer){if(transfer.working)return;val observation=Any();val action=transfer.record.actionId;transfer.inspection=observation;transfer.inspectedAction=null;viewModelScope.launch {
         try {
             if(action!=null){when(val outcome=connection.status(transfer.record.host,action)){is ActionStatusResult.Known->transfer.receipt=outcome.value.receipt;is ActionStatusResult.Unknown->{transfer.receipt=null;transfer.unknown=true}}}
@@ -1109,6 +1302,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     internal fun attachmentDraftCurrent(transfer:AttachmentTransfer):Boolean=transfer.reviewedDraft==((composerRevisions[transfer.original.key] ?: 0L) to composerCursors[transfer.original.key])
     internal fun reviewAttachmentDraft(transfer:AttachmentTransfer){if(attachmentAdmitted(transfer.ticket)){val cursor=composerCursors[transfer.original.key] ?: return;transfer.reviewedDraft=(composerRevisions[transfer.original.key] ?: 0L) to cursor;transfer.notice="Review the current draft. The next Append path adds a new line without sending."}}
     internal fun insertAttachment(transfer:AttachmentTransfer){
+        if(!composerEditable(transfer.original.key))return
         val status=transfer.status ?: return;val path=status.progress.providerPath ?: return
         if(!status.insertionReady||status.state!=AttachmentUploadState.Complete||!attachmentAdmitted(transfer.ticket)||!attachmentDraftCurrent(transfer)||!connection.attachmentStatusCurrent(transfer.original.context,status))return
         val current=composers[transfer.original.key].orEmpty();val appended=if(current.isEmpty())path else current+"\n"+path
@@ -1157,8 +1351,225 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             if(record.forgetPending||record.discarded||System.currentTimeMillis()>=local.expiresAt){if(attachmentStaging.discard(local.prepared())){val cleared=record.copy(local=null);store.saveAttachment(cleared);if(record.forgetPending)store.removeAttachment(cleared)else store.retireAttachment(cleared)}}
         }
     }
-    fun composer(text: String) { val key = selection ?: return;if(composers[key]!=text)composerRevisions[key]=(composerRevisions[key] ?: 0L).let {if(it==Long.MAX_VALUE)it else it+1}; composers[key] = text; reserve(text) }
+    private fun composerEditable(key:ConversationKey):Boolean {
+        if(!submittedComposer(key))return true
+        notice="This submitted snapshot is read-only. Choose New message, or explicitly copy it with the duplicate-work warning."
+        return false
+    }
+    fun composer(text: String) { val key = selection ?: return;if(!composerEditable(key))return;if(composers[key]!=text){composerRevisions[key]=(composerRevisions[key] ?: 0L).let {if(it==Long.MAX_VALUE)it else it+1};composerCursors[key]=text.length to text.length}; composers[key] = text; reserve(text) }
     internal fun composerCursor(start:Int,end:Int){val key=selection ?: return;val length=composers[key].orEmpty().length;if(start in 0..length&&end in 0..length)composerCursors[key]=start to end}
+    internal fun composerSelection(key:ConversationKey):Pair<Int,Int> {val length=composers[key].orEmpty().length;val cursor=composerCursors[key] ?: return length to length;return if(cursor.first in 0..length&&cursor.second in 0..length)cursor else cursor.first.coerceIn(0,length) to cursor.second.coerceIn(0,length)}
+    internal fun initializeComposerSelection(key:ConversationKey){if(selection!=key)return;val current=composerSelection(key);if(composerCursors[key]!=current)composerCursors[key]=current}
+    internal fun clearComposerDraft(key:ConversationKey):Boolean {
+        if(selection!=key||!foreground||busy||!composerEditable(key))return false
+        composerUploads.remove(key);composerDeliveries.remove(key)
+        composer("");composerCursors[key]=0 to 0
+        return true
+    }
+    internal fun readerPosition(key:ConversationKey,identity:ConversationReaderIdentity?):ConversationReaderPosition {
+        val previous=readerPositions[key]
+        if(previous!=null&&(identity==null||previous.identity==identity))return previous
+        previous?.retire()
+        val position=ConversationReaderPosition(identity);readerPositions[key]=position
+        while(readerPositions.size>64)readerPositions.remove(readerPositions.keys.first())?.retire()
+        return position
+    }
+    internal fun composerOptions(key:ConversationKey):ComposerOptions {
+        val delivery=composerDeliveries[key]
+        return ComposerOptions(composerUploads[key]?.map {it.record.uploadId}?.takeIf {it.isNotEmpty()},delivery?.first,delivery?.second)
+    }
+    internal fun submittedComposer(key:ConversationKey):Boolean=sentText.values.any {it.key==key}
+    internal fun newComposerMessage(key:ConversationKey,copy:Boolean=false,duplicateWarningAccepted:Boolean=false) {
+        if(selection!=key||!foreground||busy||copy&&!duplicateWarningAccepted)return
+        val submitted=sentText.values.lastOrNull {it.key==key} ?: return
+        sentText.keys.filter {sentText[it]?.key==key}.forEach(sentText::remove)
+        reservation=null;replacement=null;warningJob?.cancel()
+        if(!copy){composers[key]="";composerUploads.remove(key);composerDeliveries.remove(key)}
+        else {
+            composers[key]=submitted.text
+            composerDeliveries[key]=submitted.options.delivery?.let {it to submitted.options.nativeTurnId} ?: (PromptDelivery.Native to null)
+            val original=composerUploads[key].orEmpty()
+            composerUploads[key]=original.filter {it.record.uploadId in submitted.options.images.orEmpty()}
+            if(composerUploads[key]?.size!=submitted.options.images.orEmpty().size)notice="Original image references are inspection-only. Explicitly select current completed uploads again."
+        }
+        composerRevisions[key]=(composerRevisions[key] ?: 0)+1
+        val draftLength=composers[key].orEmpty().length;composerCursors[key]=draftLength to draftLength
+        reserve(composers[key].orEmpty())
+    }
+    internal fun removeComposerImage(key:ConversationKey,upload:Uuid) {
+        if(selection!=key||submittedComposer(key)||busy)return
+        composerUploads[key]=composerUploads[key].orEmpty().filterNot {it.record.uploadId==upload}
+        composerRevisions[key]=(composerRevisions[key] ?: 0)+1;reserve(composers[key].orEmpty())
+    }
+    internal fun attachNativeImage(transfer:AttachmentTransfer) {
+        val key=transfer.original.key;val status=transfer.status ?: return
+        if(submittedComposer(key)||transfer.working||!attachmentAdmitted(transfer.ticket)||!attachmentDraftCurrent(transfer)
+            ||status.state!=AttachmentUploadState.Complete||!status.insertionReady||!connection.attachmentStatusCurrent(transfer.original.context,status))return
+        val record=transfer.record
+        if(record.host!=key.host||record.target!=key.target||status.target!=key.target
+            ||status.progress.uploadId!=record.uploadId||status.size.value!=record.size)return
+        val previous=composerUploads[key].orEmpty()
+        val index=previous.indexOfFirst {it.record.uploadId==record.uploadId}
+        if(index<0&&previous.size>=4||previous.sumOf {it.record.size}-(previous.getOrNull(index)?.record?.size ?: 0)+record.size>8L*1024*1024){transfer.notice="Image inputs are limited to four completed uploads and 8 MiB total.";return}
+        val selected=ComposerImageInput(record,key,transfer.original.source)
+        composerUploads[key]=previous.toMutableList().apply {if(index<0)add(selected)else set(index,selected)}
+        composerRevisions[key]=(composerRevisions[key] ?: 0)+1;transfer.reviewedDraft=null
+        transfer.notice="Image input attached to the original draft, not sent. Send checks the actual native model and file type."
+        reserve(composers[key].orEmpty())
+    }
+    internal fun controlsAdmitted(shown:SessionControlsState):Boolean {
+        if(sessionControls!==shown||!foreground||foregroundGeneration!==shown.foreground||selection!=shown.key||screen!=Screen.Conversation||!shown.lease.active.get())return false
+        val view=connection.state.value
+        val reducer=view.sessions[shown.key.host]?.singleOrNull {it.state?.summary?.let {summary->Target(summary.sessionId,summary.generation)==shown.key.target}==true} ?: return false
+        return view.sources[shown.key.host]?.get(shown.key.target)==shown.source&&view.inventoryReady[shown.key.host]==true
+            &&view.mutationReady[shown.key.host]==true&&reducer.mutationsEnabled&&reducer.state?.summary?.capabilities?.controls==true
+    }
+    internal fun openSessionControls(key:ConversationKey) {
+        val view=connection.state.value;val source=view.sources[key.host]?.get(key.target) ?: return
+        val generation=foregroundGeneration ?: return
+        closeSessionControls()
+        val shown=SessionControlsState(key,source,generation);sessionControls=shown
+        if(!controlsAdmitted(shown)){closeSessionControls();notice="Native controls require this current original session and its local grant.";return}
+        refreshSessionControls(shown)
+    }
+    internal fun closeSessionControls() {
+        sessionControls?.retire();sessionControls=null
+        controlsReadJob?.cancel();controlsReadJob=null;queueReadJob?.cancel();queueReadJob=null
+    }
+    private fun servicePendingNativeReads(shown:SessionControlsState) {
+        if(!controlsAdmitted(shown))return
+        val reducer=connection.state.value.sessions[shown.key.host]?.firstOrNull {it.state?.summary?.sessionId==shown.key.target.sessionId} ?: return
+        shown.observeRevisions(reducer.controlsRevision,reducer.queueRevision)
+        if(shown.controlsRefreshNeeded)refreshSessionControls(shown)
+        if(shown.queueRefreshNeeded)openNativeQueue(shown)
+    }
+    internal fun refreshSessionControls(shown:SessionControlsState) {
+        if(!controlsAdmitted(shown))return
+        val revision=connection.state.value.sessions[shown.key.host]?.firstOrNull {it.state?.summary?.sessionId==shown.key.target.sessionId}?.controlsRevision ?: return
+        if(!shown.beginControlsRead(revision))return
+        controlsReadJob?.cancel();shown.catalogue=null;shown.error=null
+        controlsReadJob=viewModelScope.launch {
+            try {
+                val catalogue=connection.nativeControls(shown.key.host,shown.key.target,shown.source,shown.lease){controlsAdmitted(shown)}
+                if(!controlsAdmitted(shown)||!shown.controlsReadCurrent(revision))return@launch
+                shown.catalogue=catalogue;shown.model=catalogue.current.modelRef;shown.effort=catalogue.current.effort;shown.mode=catalogue.current.mode
+            }catch(cancel:CancellationException){throw cancel}catch(error:Exception){if(sessionControls===shown)shown.error="Native controls unavailable: ${safeFailure(error)}"}
+            finally {if(sessionControls===shown){controlsReadJob=null;shown.settleControlsRead();servicePendingNativeReads(shown)}}
+        }
+    }
+    internal fun sessionControlsApplyAllowed(shown:SessionControlsState):Boolean {
+        val boot=connection.state.value.hello[shown.key.host]?.bootId ?: return false
+        val params=shown.changes(boot) ?: return false
+        val catalogue=shown.catalogue ?: return false
+        val selected=catalogue.models.singleOrNull {it.reference==(params.modelRef?:catalogue.current.modelRef)}
+        return controlsAdmitted(shown)&&!shown.pending&&!shown.loading
+            &&(params.effort==null||selected?.efforts?.contains(params.effort)==true)
+            &&(params.mode==null||params.mode in catalogue.modes&&selected!=null)
+    }
+    internal fun applySessionControls(shown:SessionControlsState) {
+        if(!sessionControlsApplyAllowed(shown))return
+        val boot=connection.state.value.hello[shown.key.host]?.bootId ?: return
+        val params=shown.changes(boot) ?: return
+        val catalogue=shown.catalogue ?: return
+        shown.pending=true;shown.error=null;shown.receipt=null
+        viewModelScope.launch {
+            try {
+                val context=connection.controlsMutation(shown.key.host,catalogue,shown.lease){controlsAdmitted(shown)}
+                if(!controlsAdmitted(shown))return@launch
+                val receipt=connection.mutate(shown.key.host,Request(Uuid.random(),RequestBody.SessionControlsApply(params)),controls=context)
+                if(sessionControls===shown)shown.receipt=receipt
+                refreshActions()
+            }catch(cancel:CancellationException){throw cancel}catch(error:Exception){if(sessionControls===shown)shown.error="Apply outcome unavailable; inspect receipts. ${safeFailure(error)}"}
+            finally {if(sessionControls===shown){shown.pending=false;if(controlsAdmitted(shown)){refreshSessionControls(shown);servicePendingNativeReads(shown)}}}
+        }
+    }
+    internal fun selectPromptDelivery(shown:SessionControlsState,delivery:PromptDelivery) {
+        val catalogue=shown.catalogue ?: return
+        if(!controlsAdmitted(shown)||shown.pending||shown.loading||delivery !in catalogue.deliveries||submittedComposer(shown.key))return
+        val summary=connection.state.value.sessions[shown.key.host]?.firstOrNull {it.state?.summary?.sessionId==shown.key.target.sessionId}?.state ?: return
+        val expected=if(delivery==PromptDelivery.Steer&&summary.summary.provider==Provider.Codex)summary.nativeTurnId ?: return else null
+        if(delivery==PromptDelivery.Native)composerDeliveries.remove(shown.key)else composerDeliveries[shown.key]=delivery to expected
+        reserve(composers[shown.key].orEmpty())
+    }
+    internal fun openNativeQueue(shown:SessionControlsState) {
+        if(!controlsAdmitted(shown)||shown.pending||shown.queueLoading||shown.catalogue?.queueAvailable!=true)return
+        queueReadJob?.cancel();shown.queueOpen=true;shown.queueEntries=emptyList();shown.queueText=emptyMap();shown.next=null;shown.queueLoaded=false
+        readNativeQueue(shown,null)
+    }
+    internal fun moreNativeQueue(shown:SessionControlsState) {
+        val cursor=shown.next ?: return
+        if(!controlsAdmitted(shown)||shown.queueLoading||shown.pending||!shown.queueLoaded)return
+        readNativeQueue(shown,cursor)
+    }
+    private fun readNativeQueue(shown:SessionControlsState,cursor:Id?) {
+        val revision=connection.state.value.sessions[shown.key.host]?.firstOrNull {it.state?.summary?.sessionId==shown.key.target.sessionId}?.queueRevision ?: return
+        val readCursor=nativeQueueReadCursor(shown,revision,cursor)
+        if(!shown.beginQueueRead(revision))return
+        shown.queueError=null
+        queueReadJob=viewModelScope.launch {
+            try {
+                val result=connection.nativeQueue(shown.key.host,shown.key.target,shown.source,readCursor,shown.lease){controlsAdmitted(shown)&&shown.queueOpen}
+                val texts=LinkedHashMap(shown.queueText)
+                for(entry in result.entries) {
+                    val text=when(val content=entry.text) {
+                        is ContentText->content.text.value
+                        is ContentUnavailable->"[Native content unavailable: ${content.reason}]"
+                        is ContentRef-> {
+                            if(content.byteLength.value>256L*1024)throw StorePolicy(ErrorCode.ResourceLimit)
+                            val output=java.io.ByteArrayOutputStream(content.byteLength.value.toInt());var offset=0L
+                            while(offset<content.byteLength.value) {
+                                if(!controlsAdmitted(shown)||!shown.queueReadCurrent(revision))throw StorePolicy(ErrorCode.StaleSession)
+                                val chunk=connection.content(shown.key.host,shown.source,ContentReadParams(shown.key.target,content.handle,Uint(offset),Uint(minOf(65536L,content.byteLength.value-offset))))
+                                val bytes=java.util.Base64.getDecoder().decode(chunk.bytes.value)
+                                if(bytes.isEmpty()||chunk.nextOffsetBytes.value!=offset+bytes.size||chunk.nextOffsetBytes.value>content.byteLength.value||chunk.eof!=(chunk.nextOffsetBytes.value==content.byteLength.value))throw StorePolicy(ErrorCode.InvalidRequest)
+                                output.write(bytes);bytes.fill(0);offset=chunk.nextOffsetBytes.value
+                            }
+                            val bytes=output.toByteArray()
+                            try {Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString()}finally {bytes.fill(0)}
+                        }
+                    }
+                    texts[entry.id]=text
+                }
+                if(!controlsAdmitted(shown)||!shown.queueReadCurrent(revision))return@launch
+                shown.queueEntries=shown.queueEntries+result.entries;shown.queueText=texts;shown.next=result.nextCursor;shown.queueLoaded=true
+            }catch(cancel:CancellationException){throw cancel}catch(error:Exception){if(sessionControls===shown){shown.queueLoaded=false;shown.queueError="Native queue unavailable: ${safeFailure(error)}"}}
+            finally {if(sessionControls===shown){queueReadJob=null;shown.settleQueueRead();servicePendingNativeReads(shown)}}
+        }
+    }
+    private fun mutateQueue(shown:SessionControlsState,body:(Uuid)->RequestBody) {
+        if(!controlsAdmitted(shown)||shown.pending||shown.queueLoading||!shown.queueLoaded)return
+        val boot=connection.state.value.hello[shown.key.host]?.bootId ?: return
+        shown.pending=true;shown.queueReceipt=null;shown.queueError=null
+        viewModelScope.launch {
+            try {
+                val context=connection.queueMutation(shown.key.host,shown.key.target,shown.source,shown.lease){controlsAdmitted(shown)&&shown.queueOpen}
+                if(!controlsAdmitted(shown))return@launch
+                val receipt=connection.mutate(shown.key.host,Request(Uuid.random(),body(boot)),queue=context)
+                if(sessionControls===shown)shown.queueReceipt=receipt
+                refreshActions()
+            }catch(cancel:CancellationException){throw cancel}catch(error:Exception){if(sessionControls===shown)shown.queueError="Queue outcome unavailable; inspect receipts. ${safeFailure(error)}"}
+            finally {if(sessionControls===shown){shown.pending=false;if(controlsAdmitted(shown)){openNativeQueue(shown);servicePendingNativeReads(shown)}}}
+        }
+    }
+    internal fun updateQueueEntry(shown:SessionControlsState,id:Id,text:String) {
+        if(shown.queueEntries.none {it.id==id&&it.editable})return
+        val prompt=try {PromptText(text).also {require(text.isNotEmpty())}}catch(_:Exception){return}
+        mutateQueue(shown){RequestBody.SessionQueueUpdate(SessionQueueUpdateParams(it,shown.key.target,id,prompt))}
+    }
+    internal fun deleteQueueEntry(shown:SessionControlsState,id:Id) {
+        if(shown.queueEntries.none {it.id==id})return
+        mutateQueue(shown){RequestBody.SessionQueueDelete(SessionQueueDeleteParams(it,shown.key.target,id))}
+    }
+    internal fun startQueueEntry(shown:SessionControlsState,id:Id) {
+        if(shown.queueEntries.none {it.id==id})return
+        mutateQueue(shown){RequestBody.SessionQueueStart(SessionQueueStartParams(it,shown.key.target,id))}
+    }
+    internal fun moveQueueEntryUp(shown:SessionControlsState,id:Id) {
+        if(!shown.queueLoaded||shown.next!=null)return
+        val ids=shown.queueEntries.map {it.id}.toMutableList();val index=ids.indexOf(id);if(index<=0)return
+        java.util.Collections.swap(ids,index,index-1)
+        mutateQueue(shown){RequestBody.SessionQueueReorder(SessionQueueReorderParams(it,shown.key.target,ids))}
+    }
 
     /** Saving hints is local-only and deliberately does not reconnect or replace a live attempt. */
     fun saveHostRoutes(host: String, revision: Long, direct: List<String>, relay: String?, onSaved: (SavedHostRoutes) -> Unit, onFinished: () -> Unit) {
@@ -1186,6 +1597,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Append only to the exact selection captured by the picker; this never sends or creates a receipt. */
     fun insertSnippet(key: ConversationKey, id: Uuid): Boolean {
+        if(!composerEditable(key))return false
         if (selection != key || store.state.value.hosts.none { it.hostId == key.host }) {
             notice = "Snippet insertion needs the original paired conversation still selected."
             return false
@@ -1211,13 +1623,15 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     private fun reserve(text: String) {
         warningJob?.cancel(); reservation = null; replacement = null
         val key = selection ?: return
-        if (text.isEmpty()) return
+        if(submittedComposer(key))return
+        val options=composerOptions(key)
+        if (text.isEmpty()&&options.images==null) return
         val action = Uuid.random()
         warningJob = viewModelScope.launch {
             delay(150)
             try {
-                val warning = store.recoveryWarning(key.host,action,PromptText(text))
-                if (selection == key && composers[key].orEmpty() == text) reservation = SendReservation(key,action,text,warning)
+                val warning = store.recoveryWarning(key.host,action,PromptText(text),options)
+                if (selection == key && !submittedComposer(key)&&composers[key].orEmpty() == text&&composerOptions(key)==options) reservation = SendReservation(key,action,text,warning,options)
             } catch (error: Exception) { notice = safeFailure(error) }
         }
     }
@@ -1234,14 +1648,18 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     }
     private fun send(prepared: SendReservation) = perform {
         check(foreground && selection == prepared.key && reservation == prepared)
+        check(composerOptions(prepared.key)==prepared.options&&!submittedComposer(prepared.key))
+        val source=connection.state.value.sources[prepared.key.host]?.get(prepared.key.target)
+        check(composerUploads[prepared.key].orEmpty().all {it.current(prepared.key,source)})
         val boot = connection.state.value.hello[prepared.key.host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
         // Consume this UUID once. An uncertain result remains status-only, never replayed.
         reservation = null
-        sentText[RecoveryIdentity(prepared.key.host,prepared.action)] = prepared.key to prepared.text
+        sentText[RecoveryIdentity(prepared.key.host,prepared.action)] = SubmittedComposer(prepared.key,prepared.text,prepared.options,prepared.action)
         focusedId=prepared.action
-        try {connection.mutate(prepared.key.host,Request(prepared.action,RequestBody.PromptSubmit(PromptSubmitParams(boot,prepared.key.target,PromptText(prepared.text)))),true,RecoveryApproval(prepared.warning.replace,prepared.warning.futureExpiry))}
+        try {connection.mutate(prepared.key.host,Request(prepared.action,RequestBody.PromptSubmit(PromptSubmitParams(boot,prepared.key.target,PromptText(prepared.text),delivery=prepared.options.delivery,nativeTurnId=prepared.options.nativeTurnId,images=prepared.options.images))),true,RecoveryApproval(prepared.warning.replace,prepared.warning.futureExpiry))}
         catch(error: RecoveryApprovalRequired) {
             // No pre-send commit/native request occurred. Prepare a NEW visible notice, not a replay.
+            sentText.remove(RecoveryIdentity(prepared.key.host,prepared.action))
             if(selection==prepared.key && composers[prepared.key]===prepared.text) reserve(prepared.text)
             throw error
         }
@@ -1267,7 +1685,23 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             connection.mutate(key.host,Request(action,RequestBody.RequestRespond(RequestRespondParams(boot,key.target,request.requestKey,answer))))
         }
     }
-    internal fun closeAgentSession(){agentSessionCreation?.context?.lease?.invalidate();agentSessionCreation?.memory?.clear();agentSessionCreation=null}
+    internal fun creationBrowser(host:String,agent:AgentSessionMutationContext?=null,viewCurrent:()->Boolean={true}):CreationDirectoryBrowser {
+        val generation=foregroundGeneration;val originalScreen=screen;val originalSelection=selection;val originalHost=this.host
+        creationDirectoriesBrowser?.let(::closeCreationDirectories)
+        return CreationDirectoryBrowser(connection,viewModelScope,host,agent) {
+            generation!=null&&foreground&&foregroundGeneration===generation&&screen==originalScreen
+                &&selection==originalSelection&&this.host==originalHost&&viewCurrent()
+        }.also {creationDirectoriesBrowser=it}
+    }
+    internal fun closeCreationDirectories(browser:CreationDirectoryBrowser) {
+        browser.close()
+        if(creationDirectoriesBrowser===browser)creationDirectoriesBrowser=null
+    }
+    internal fun closeAgentSession(shown:AgentSessionCreation?=null){
+        val current=agentSessionCreation ?: return
+        if(shown!=null&&shown!==current)return
+        current.context.lease.invalidate();current.directories?.let(::closeCreationDirectories);current.memory.clear();agentSessionCreation=null
+    }
     private fun agentSessionAdmitted(shown:AgentSessionCreation):Boolean {
         val view=connection.state.value
         return agentSessionCreation===shown&&foreground&&foregroundGeneration===shown.foreground&&screen==Screen.Conversation&&selection==shown.key&&store.state.value.hosts.any {it.hostId==shown.key.host}&&view.sources[shown.key.host]?.get(shown.key.target)==shown.source&&connection.agentSessionCurrent(shown.context)
@@ -1283,6 +1717,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             val shown=AgentSessionCreation(key,source,generation,summary.serverId,summary.provider,context)
             agentSessionCreation=shown
             if(!agentSessionAdmitted(shown)){closeAgentSession();return}
+            shown.directories=creationBrowser(key.host,context){agentSessionAdmitted(shown)}
             loadAgentSession(shown)
         }catch(_:Exception){notice="New session needs this original conversation and current desktop inventory."}
     }
@@ -1321,129 +1756,36 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         creationActions.remove(shown.key.host);shown.confirming=null;shown.separate=action;shown.submitted=null
         shown.memory.clear();shown.memory.text["server"]=shown.server.value;shown.memory.text["provider"]=shown.provider.name
     }
-    internal fun createAgentSession(shown:AgentSessionCreation,project:Uuid,name:String)=perform {
+    internal fun createAgentSession(shown:AgentSessionCreation,choice:SessionCreationChoice)=perform {
         if(!agentSessionAllowed(shown))throw StorePolicy(ErrorCode.NotReady)
         val (prior,pending)=retainedAgentSession(shown)
         if(!agentSessionAllowed(shown)||pending||prior!=shown.prior)throw StorePolicy(ErrorCode.NotReady)
+        val directory=choice.directory ?: throw StorePolicy(ErrorCode.NotReady)
+        if(shown.directories?.context!==directory.context||!shown.directories!!.current())throw StorePolicy(ErrorCode.StaleSession)
         val view=connection.state.value
-        if(view.inventory[shown.key.host]?.projects?.none {it.projectId==project&&it.available}!=false)throw StorePolicy(ErrorCode.NotReady)
+        if(view.inventory[shown.key.host]?.projects?.none {it.projectId==choice.project&&it.available}!=false)throw StorePolicy(ErrorCode.NotReady)
         val boot=view.hello[shown.key.host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
         val action=Uuid.random();val previous=creationActions.put(shown.key.host,action);val permit=shown.separate
         shown.submitted=action;shown.separate=null;shown.pending=true;focusedId=action
-        try {connection.mutate(shown.key.host,Request(action,RequestBody.SessionCreate(SessionCreateParams(boot,shown.server,project,shown.provider,Label(name)))),agentCreation=shown.context)}
+        try {connection.mutate(shown.key.host,Request(action,RequestBody.SessionCreate(SessionCreateParams(
+            boot,choice.server,choice.project,choice.provider,Label(choice.name),directory.reference,choice.placement,
+        ))),agentCreation=shown.context,directories=directory.context)}
         catch(error:Exception){if(withContext(NonCancellable){store.localAction(shown.key.host,action)}==null){if(previous==null)creationActions.remove(shown.key.host)else creationActions[shown.key.host]=previous;shown.submitted=null;shown.separate=permit;shown.memory.text.remove("submitted")};throw error}
         finally {if(agentSessionAdmitted(shown))loadAgentSession(shown)}
     }
-    fun create(server: Uuid,project: Uuid,provider: Provider,name: String) = perform {
+    internal fun create(choice:SessionCreationChoice) = perform {
         val host = host ?: return@perform; check(foreground)
+        val directory=choice.directory ?: throw StorePolicy(ErrorCode.NotReady)
+        if(creationDirectoriesBrowser?.context!==directory.context||creationDirectoriesBrowser?.current()!=true||choice.placement!=null)throw StorePolicy(ErrorCode.StaleSession)
         val boot = connection.state.value.hello[host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
         val action=Uuid.random();creationActions[host]=action;focusedId=action
-        try {connection.mutate(host,Request(action,RequestBody.SessionCreate(SessionCreateParams(boot,server,project,provider,Label(name)))))}
+        try {connection.mutate(host,Request(action,RequestBody.SessionCreate(SessionCreateParams(
+            boot,choice.server,choice.project,choice.provider,Label(choice.name),directory.reference,null,
+        ))),directories=directory.context)}
         catch(error: Exception) {
             if(withContext(NonCancellable) {store.localAction(host,action)}==null) {creationActions.remove(host);creationForms[host]?.text?.remove("submitted")}
             throw error
         }
-    }
-    private fun requireWorktreeCreationScope(scope: WorktreeCreationRequestScope) {
-        check(foreground && selection==scope.key && screen==Screen.Conversation)
-        val listing=worktrees ?: throw StorePolicy(ErrorCode.NotReady)
-        if(listing.key!=scope.key || listing.source!=scope.source || listing.ticket!=scope.ticket || listing.loading || listing.error
-            || connection.state.value.sources[scope.key.host]?.get(scope.key.target)!=scope.source) throw StorePolicy(ErrorCode.StaleSession)
-    }
-    private suspend fun retainedWorktreeCreation(scope: WorktreeCreationRequestScope): Pair<LocalAction?,Boolean> {
-        requireWorktreeCreationScope(scope)
-        var after: Uuid?=null;var latest:LocalAction?=null;var pinned:LocalAction?=null;var pending=false
-        val pinnedId=creationActions[scope.key.host]
-        do {
-            val page=store.localActions(scope.key.host,after,100)
-            requireWorktreeCreationScope(scope)
-            page.filter {it.metadata.method==ActionMethod.SessionCreate}.forEach {action->
-                if(action.metadata.actionId==pinnedId) pinned=action
-                if(latest==null || action.metadata.createdAt.value>latest!!.metadata.createdAt.value || (action.metadata.createdAt==latest!!.metadata.createdAt && action.metadata.actionId.value>latest!!.metadata.actionId.value)) latest=action
-                if(action.receipt==null || action.receipt.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching)) pending=true
-            }
-            after=page.takeIf {it.size==100}?.lastOrNull()?.metadata?.actionId
-        } while(after!=null)
-        if(pinnedId!=null && pinned==null) throw StorePolicy(ErrorCode.NotReady)
-        return (pinned ?: latest) to pending
-    }
-    fun loadWorktreeCreation(scope: WorktreeCreationRequestScope) {
-        val generation=++worktreeGateGeneration
-        worktreeCreationGate=WorktreeCreationGate(scope,false,null,true)
-        viewModelScope.launch {
-            try {
-                val (prior,pending)=retainedWorktreeCreation(scope)
-                requireWorktreeCreationScope(scope)
-                if(worktreeGateGeneration==generation) {
-                    if(prior!=null && worktreeSeparatePermit!=(scope to prior.metadata.actionId)) creationActions[scope.key.host]=prior.metadata.actionId
-                    worktreeCreationGate=WorktreeCreationGate(scope,true,prior,pending)
-                }
-            } catch(cancel: CancellationException) {throw cancel}
-            catch(error: Exception) {if(worktreeGateGeneration==generation) {worktreeCreationGate=null;notice=safeFailure(error)}}
-        }
-    }
-    fun worktreeCreationAllowed(scope: WorktreeCreationRequestScope):Boolean {
-        val gate=worktreeCreationGate?.takeIf {it.scope==scope && it.loaded && !it.pending} ?: return false
-        return !creationActions.containsKey(scope.key.host) && (gate.prior==null || worktreeSeparatePermit==(scope to gate.prior.metadata.actionId))
-    }
-    /** One captured scope owns one durable action. Unknown outcomes never become another UUID. */
-    fun createInWorktree(key: ConversationKey, source: Uuid, ticket: Long, project: Uuid, provider: Provider, name: String, existing: Boolean, branchInput: String, baseInput: String) = perform {
-        val scope=WorktreeCreationRequestScope(key,source,ticket)
-        requireWorktreeCreationScope(scope)
-        val (prior,pending)=retainedWorktreeCreation(scope)
-        requireWorktreeCreationScope(scope)
-        if(pending || creationActions.containsKey(key.host) || (prior!=null && worktreeSeparatePermit!=(scope to prior.metadata.actionId))) {
-            prior?.let {creationActions[key.host]=it.metadata.actionId;focusedId=it.metadata.actionId}
-            worktreeCreationGate=WorktreeCreationGate(scope,true,prior,pending)
-            throw StorePolicy(ErrorCode.NotReady)
-        }
-        val listing=worktrees ?: throw StorePolicy(ErrorCode.NotReady)
-        if(listing.creationScope?.projectId!=project || listing.creationScope?.canCreate!=true) throw StorePolicy(ErrorCode.NotReady)
-        val host=key.host;val view=connection.state.value
-        val summary=view.sessions[host]?.firstOrNull {it.state?.summary?.let {summary->Target(summary.sessionId,summary.generation)==key.target}==true}?.state?.summary ?: throw StorePolicy(ErrorCode.StaleSession)
-        if(summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.worktreeCreate || view.mutationReady[host]!=true || view.inventoryReady[host]!=true) throw StorePolicy(ErrorCode.NotReady)
-        val server=view.inventory[host]?.servers?.singleOrNull {it.serverId==summary.serverId} ?: throw StorePolicy(ErrorCode.NotReady)
-        if(!(if(provider==Provider.Omp) server.canCreate.omp else server.canCreate.codex)) throw StorePolicy(ErrorCode.NotReady)
-        val boot=view.hello[host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
-        val action=Uuid.random();val branch=branchInput.trim().ifEmpty {"worktree/${action.value}"}
-        val checkout=if(existing) {if(branchInput.isBlank()) throw StorePolicy(ErrorCode.InvalidRequest);CreationCheckout.Existing(branch)} else CreationCheckout.New(branch,baseInput.trim().ifEmpty {"HEAD"})
-        val permit=worktreeSeparatePermit;worktreeSeparatePermit=null
-        creationActions[host]=action;focusedId=action
-        worktreeCreationGate=WorktreeCreationGate(scope,false,null,true)
-        try {connection.mutate(host,Request(action,RequestBody.SessionCreate(SessionCreateParams(boot,summary.serverId,project,provider,Label(name),key.target,checkout))))}
-        catch(error:Exception) {
-            if(withContext(NonCancellable) {store.localAction(host,action)}==null) {creationActions.remove(host);worktreeSeparatePermit=permit}
-            throw error
-        } finally {
-            if(foreground && selection==key && screen==Screen.Conversation && connection.state.value.sources[host]?.get(key.target)==source) loadWorktreeCreation(scope)
-        }
-    }
-    private fun validateSeparateWorktree(scope:WorktreeCreationRequestScope,action:Uuid,generation:Long,confirmation:Boolean,current:LocalAction?=null):LocalAction {
-        requireWorktreeCreationScope(scope);check(generation==separateCreationGeneration)
-        if(confirmation) check(separateCreationAction==action && separateWorktreeScope==scope)
-        val displayed=worktreeCreationGate?.takeIf {it.scope==scope && it.loaded}?.prior?.takeIf {it.metadata.actionId==action} ?: throw StorePolicy(ErrorCode.NotReady)
-        if(current!=null) check(displayed==current)
-        check(displayed.authoritative && displayed.outcomeShown && displayed.receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain))
-        creationActions[scope.key.host]?.let {check(it==action)}
-        return displayed
-    }
-    fun prepareSeparateWorktree(scope:WorktreeCreationRequestScope,action:Uuid)=perform {
-        invalidateSeparateCreation();val generation=separateCreationGeneration
-        validateSeparateWorktree(scope,action,generation,false)
-        check(!otherPendingCreation(scope.key.host,action) {requireWorktreeCreationScope(scope)})
-        val current=store.localAction(scope.key.host,action) ?: throw StorePolicy(ErrorCode.NotReady)
-        validateSeparateWorktree(scope,action,generation,false,current)
-        separateCreationAction=action;separateWorktreeScope=scope
-    }
-    fun confirmSeparateWorktree(scope:WorktreeCreationRequestScope,action:Uuid,onConfirmed:()->Unit)=perform {
-        val generation=separateCreationGeneration
-        validateSeparateWorktree(scope,action,generation,true)
-        check(!otherPendingCreation(scope.key.host,action) {requireWorktreeCreationScope(scope)})
-        val current=store.localAction(scope.key.host,action) ?: throw StorePolicy(ErrorCode.NotReady)
-        validateSeparateWorktree(scope,action,generation,true,current)
-        creationActions.remove(scope.key.host)
-        worktreeSeparatePermit=scope to action
-        invalidateSeparateCreation(false);loadWorktreeCreation(scope);onConfirmed()
     }
     fun prepareSeparateCreation(host: String, action: Uuid) = perform {
         invalidateSeparateCreation()
@@ -1492,24 +1834,31 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     fun inspect(host: String,action: Uuid) = perform {
         focusedId=action
         if(foreground && connection.state.value.hello.containsKey(host) && connection.status(host,action) is ActionStatusResult.Unknown) notice="Host outcome is unknown/expired. Retained historical metadata is inspection only; never replay or retarget this UUID."
-        shell?.takeIf {it.selection.host==host && shellAdmitted(it)}?.let {loadShellInput(ShellCreateScope(it.selection,it.source,it.ticket))}
+        shell?.takeIf {it.selection.host==host && shellAdmitted(it)}?.let {loadShellInput(ShellControlScope(it.selection,it.source,it.ticket))}
     }
     fun displayed(host: String,receipt: Receipt) { viewModelScope.launch {
         try {
             store.outcomeShown(host,receipt.actionId,receipt)
-            if(receipt.method==ActionMethod.ShellInput && receipt.state==ReceiptState.Succeeded) shellSubmittedDrafts.remove(receipt.actionId)?.let {(key,revision)->shellInputDrafts[key]?.takeIf {it.revision==revision}?.let {shellInputDrafts[key]=it.copy(value=androidx.compose.ui.text.input.TextFieldValue(),revision=it.revision+1)}}
-            worktreeCreationGate?.takeIf {it.scope.key.host==host && it.prior?.metadata?.actionId==receipt.actionId}?.let {if(foreground && selection==it.scope.key && screen==Screen.Conversation) loadWorktreeCreation(it.scope)}
-            if(receipt.state==ReceiptState.Dispatched || receipt.state==ReceiptState.Succeeded) {
-                sentText.remove(RecoveryIdentity(host,receipt.actionId))?.let {(key,text)->if(composers[key]===text && reservation?.key!=key) composers.remove(key)}
+            completeShellInputSnapshot(receipt)
+            val identity=RecoveryIdentity(host,receipt.actionId)
+            val submitted=sentText[identity]
+            if(receipt.state==ReceiptState.Succeeded&&submitted?.options?.images==null) {
+                sentText.remove(identity)?.let {snapshot->if(composers[snapshot.key]===snapshot.text&&reservation?.key!=snapshot.key){composers.remove(snapshot.key);composerUploads.remove(snapshot.key);composerDeliveries.remove(snapshot.key)}}
+            }else if(receipt.state==ReceiptState.Failed) {
+                sentText.remove(identity)
             }
             refreshActions()
             agentSessionCreation?.takeIf {it.key.host==host&&it.prior?.metadata?.actionId==receipt.actionId&&agentSessionAdmitted(it)}?.let {loadAgentSession(it)}
-            agentTerminalCreation?.takeIf {it.key.host==host&&it.prior?.metadata?.actionId==receipt.actionId&&agentTerminalAdmitted(it)}?.let {loadAgentTerminal(it)}
-            shell?.takeIf {it.selection.host==host && shellAdmitted(it)}?.let {loadShellInput(ShellCreateScope(it.selection,it.source,it.ticket))}
-            shell?.let {shown->if(host==shown.selection.host && shellAdmitted(shown)) loadShellCreation(ShellCreateScope(shown.selection,shown.source,shown.ticket))}
+            terminalCreation?.takeIf {it.host==host&&it.prior?.metadata?.actionId==receipt.actionId&&terminalCreationAdmitted(it)}?.let {loadTerminalCreation(it)}
+            shell?.takeIf {it.selection.host==host && shellAdmitted(it)}?.let {loadShellInput(ShellControlScope(it.selection,it.source,it.ticket))}
         } catch (error: Exception) { notice = safeFailure(error) }
     } }
-    fun discard(host: String,action: Uuid) = perform { store.discardRecovery(host,action,true) }
+    fun discard(host: String,action: Uuid) = perform {
+        store.discardRecovery(host,action,true)
+        sentText.remove(RecoveryIdentity(host,action))?.let {snapshot->
+            if(composers[snapshot.key].orEmpty()==snapshot.text&&composerOptions(snapshot.key)==snapshot.options){composers.remove(snapshot.key);composerUploads.remove(snapshot.key);composerDeliveries.remove(snapshot.key)}
+        }
+    }
     fun forget(host: String) = perform {
         artifacts?.takeIf{it.host==host}?.let{closeArtifacts()}
         attachmentPickerHold?.takeIf {it.original.key.host==host}?.let {finishAttachmentPicker(it.ticket)}
@@ -1529,17 +1878,23 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     }
     private fun clearHostMemory(host: String) {
         recentlyOpenedSessions=recentlyOpenedSessions.filter {it.host!=host}
+        sessionFilters.forgetHost(host)
+        readerPositions.keys.filter {it.host==host}.forEach {readerPositions.remove(it)?.retire()}
+        composerCursors.keys.filter {it.host==host}.forEach(composerCursors::remove)
+        composerRevisions.keys.filter {it.host==host}.forEach(composerRevisions::remove)
         if(attentionInbox?.host==host) closeAttentionInbox()
         if(shell?.selection?.host==host) closeShell()
         shellInputDrafts.keys.filter {it.host==host}.forEach(shellInputDrafts::remove)
         shellInputActions.keys.filter {it.host==host}.forEach(shellInputActions::remove)
-        shellSubmittedDrafts.keys.filter {shellSubmittedDrafts[it]?.first?.host==host}.forEach(shellSubmittedDrafts::remove)
-        shellCreationActions.remove(host)
+        shellSubmittedInputs.keys.filter {shellSubmittedInputs[it]?.selection?.host==host}.forEach(shellSubmittedInputs::remove)
+        terminalCreationActions.remove(host)
         if(terminal?.key?.host==host) closeTerminal()
         if(worktrees?.key?.host==host) closeWorktrees()
         if(skills?.key?.host==host || skillsCatalogue?.key?.host==host) closeSkills()
         if(changes?.key?.host==host) closeChanges()
         composers.keys.filter {it.host==host}.forEach(composers::remove)
+        composerUploads.keys.filter {it.host==host}.forEach(composerUploads::remove)
+        composerDeliveries.keys.filter {it.host==host}.forEach(composerDeliveries::remove)
         sentText.keys.filter {it.hostId==host}.forEach(sentText::remove)
         creationForms.remove(host)?.clear();creationActions.remove(host);invalidateSeparateCreation()
     }
@@ -1547,16 +1902,16 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     internal fun pushLabel(host:String):String {deliveryPreferenceRevision;return runtime.push.label(host)}
     internal fun ntfyAvailable():Boolean=runtime.push.ntfyInstalled()
     internal fun selectNtfy(host:String,repair:Boolean=false){
-        val generation=foregroundGeneration ?: return
-        fun active()=foreground&&foregroundGeneration===generation&&this.host==host&&screen==Screen.Settings&&store.state.value.hosts.any{it.hostId==host}
+        val visible=deliveryVisibleGuard() ?: return
+        val paired=store.state.value.hosts.singleOrNull {it.hostId==host} ?: return
+        fun active()=visible()&&this.host==host&&store.state.value.hosts.any {it.hostId==host&&it.deviceId==paired.deviceId}
         if(!active())return
         viewModelScope.launch{try{
             runtime.push.selectNtfy(host,repair,::active)
             if(active()){
                 runtime.notifications.setHostEnabled(host,true)
-                if(!deliveryPreferences.requiresKeeper(host,runtime.push.verified(host)))return@launch
-                if(deliveryPreferences.canPostNotifications())DeliveryService.startFromUser(getApplication())
-                else{deliveryPreferences.setServiceRequested(true);permissionRequestVisible=true;notificationPermissionRequest++}
+                if(!active()||!deliveryPreferences.requiresKeeper(host,runtime.push.verified(host)))return@launch
+                requestDeliveryStart(::active)
             }
         }catch(cancel:CancellationException){throw cancel}catch(_:ProtectedKeyUnavailable){notice="Protected push material is unavailable. Restore key access or explicitly Forget this desktop; repair never replaces retained keys."}catch(_:Exception){notice="ntfy registration needs repair. Pairing and the selected delivery mode were preserved."}}
     }
@@ -1565,8 +1920,10 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch{try{runtime.push.selectPersistent(host);notice="Socket delivery selected. Start it while this screen is visible."}catch(cancel:CancellationException){throw cancel}catch(_:Exception){notice="Socket selection could not complete; inspect delivery settings."}}
     }
     fun setPersistentDelivery(host:String,enabled:Boolean) {
+        val visible=deliveryVisibleGuard() ?: return
+        val device=store.state.value.hosts.singleOrNull{it.hostId==host}?.deviceId ?: return
         viewModelScope.launch {
-            try { runtime.notifications.setHostEnabled(host,enabled);if(!enabled&&deliveryPreferences.mode(host)==DeliveryMode.Ntfy)runtime.push.disable(host)else if(enabled&&deliveryPreferences.mode(host)==DeliveryMode.Ntfy)selectNtfy(host) }
+            try {runtime.notifications.setHostEnabled(host,enabled);if(!enabled&&deliveryPreferences.mode(host)==DeliveryMode.Ntfy)runtime.push.disable(host)else if(enabled&&visible()&&store.state.value.hosts.any{it.hostId==host&&it.deviceId==device}&&deliveryPreferences.mode(host)==DeliveryMode.Ntfy)selectNtfy(host)}
             catch(_:Exception) { notice="Delivery preference could not be applied." }
             if(!deliveryPreferences.anyEnabled()) DeliveryService.stopFromUser(getApplication())
         }
@@ -1574,18 +1931,43 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     fun setCompletionDelivery(host:String,enabled:Boolean) {
         viewModelScope.launch {try {runtime.notifications.setCompleted(host,enabled)} catch(_:Exception) {notice="Delivery preference could not be applied."}}
     }
-    fun startPersistentDelivery() {
-        if(!deliveryPreferences.anyEnabled()) {notice="Choose at least one paired desktop before starting persistent delivery.";return}
-        if(store.state.value.hosts.none{deliveryPreferences.requiresKeeper(it.hostId,runtime.push.verified(it.hostId))}){notice="Selected ntfy registrations are verified. No foreground socket is required.";return}
-        deliveryPreferences.setServiceRequested(true)
-        if(!deliveryPreferences.canPostNotifications()) {permissionRequestVisible=foreground;notificationPermissionRequest++;return}
-        DeliveryService.startFromUser(getApplication())
+    private fun deliveryVisibleGuard():(()->Boolean)? {
+        val generation=foregroundGeneration ?: return null
+        if(!foreground||screen!=Screen.Settings)return null
+        val navigation=navigationTicket;val selectedHost=host
+        return {foreground&&foregroundGeneration===generation&&navigationTicket===navigation&&screen==Screen.Settings&&host==selectedHost}
     }
-    fun stopPersistentDelivery() {DeliveryService.stopFromUser(getApplication())}
+    private fun requestDeliveryStart(admitted:()->Boolean) {
+        if(!admitted())return
+        if(!deliveryPreferences.canPostNotifications()) {
+            deliveryPreferences.setServiceRequested(true)
+            if(permissionRequest?.second?.invoke()==true)return
+            notificationPermissionRequest++
+            permissionRequest=notificationPermissionRequest to admitted
+            return
+        }
+        DeliveryService.startFromUser(getApplication(),admitted)
+    }
+    fun startPersistentDelivery() {
+        val admitted=deliveryVisibleGuard() ?: return
+        if(!deliveryPreferences.anyEnabled()) {notice="Choose at least one paired desktop before starting persistent delivery.";return}
+        if(store.state.value.hosts.none{deliveryPreferences.requiresKeeper(it.hostId,runtime.push.verified(it.hostId))}){notice="Selected ntfy registrations need no foreground keeper. Their last/current registration verification is shown separately.";return}
+        requestDeliveryStart(admitted)
+    }
+    fun stopPersistentDelivery() {permissionRequest=null;DeliveryService.stopFromUser(getApplication())}
+    internal fun beginNotificationPermissionRequest(request:Long):Boolean {
+        val original=permissionRequest ?: return false
+        if(notificationPermissionLaunch!=null||original.first!=request||!original.second())return false
+        notificationPermissionLaunch=request
+        return true
+    }
     fun notificationPermissionResult() {
-        val admitted=permissionRequestVisible && foreground
-        permissionRequestVisible=false
-        if(admitted && deliveryPreferences.canPostNotifications() && deliveryPreferences.serviceRequested()) DeliveryService.startFromUser(getApplication())
+        val launched=notificationPermissionLaunch ?: return
+        notificationPermissionLaunch=null
+        val original=permissionRequest ?: return
+        if(original.first!=launched)return
+        permissionRequest=null
+        if(original.second()&&deliveryPreferences.canPostNotifications()&&deliveryPreferences.serviceRequested())DeliveryService.startFromUser(getApplication(),original.second)
     }
     fun deliveryEnabled(host:String):Boolean {deliveryPreferenceRevision;return deliveryPreferences.hostEnabled(host)}
     fun deliveryCompleted(host:String):Boolean {deliveryPreferenceRevision;return deliveryPreferences.notifyCompleted(host)}
@@ -1593,13 +1975,15 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     fun deliveryLabel(host:String):String {
         deliveryPreferenceRevision
         return when {
+            !deliveryPreferences.hostEnabled(host) -> "Off"
             !deliveryPreferences.canPostNotifications() -> "Permission required"
-            DeliveryService.isReconnecting(host) -> "Reconnecting"
-            delivery.running && deliveryPreferences.serviceRequested() && deliveryPreferences.hostEnabled(host) -> "Running"
-            else -> "Stopped"
+            !deliveryPreferences.requiresKeeper(host,runtime.push.verified(host)) -> "No socket keeper required · ntfy registration"
+            !deliveryPreferences.serviceRequested()||!delivery.running -> "Socket keeper stopped"
+            DeliveryService.isReconnecting(host)||connection.state.value.hello[host]==null||connection.state.value.inventoryReady[host]!=true -> "Socket keeper reconnecting"
+            else -> "Socket keeper connected"
         }
     }
-    private fun invalidateSeparateCreation(clearPermit:Boolean=true) { separateCreationAction=null;separateWorktreeScope=null;separateCreationGeneration++;if(clearPermit) worktreeSeparatePermit=null }
+    private fun invalidateSeparateCreation() { separateCreationAction=null;separateCreationGeneration++ }
     suspend fun loadContent(key: ConversationKey,source: Uuid?,reference: ContentRef,completed: Boolean): String {
         if (source == null) return store.offlineContent(key.host,key.target,reference.handle) ?: throw StorePolicy(ErrorCode.ContentExpired)
         if(completed) connection.cachedContent(key.host,key.target,source,reference)?.let {return it}
@@ -1615,21 +1999,24 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun viewed(key: ConversationKey) {
         if (!foreground || selection != key || screen != Screen.Conversation) return
         val source=connection.state.value.sources[key.host]?.get(key.target) ?: return
+        val expected=connection.state.value.hello[key.host] ?: return
         store.viewing(key.host,key.target.sessionId)
         var after: Uint? = null
         do {
-            val sync = connection.notificationsSync(key.host,after)
+            val sync=connection.notificationsSync(key.host,expected,after)
             if (!foreground || selection != key || screen != Screen.Conversation || connection.state.value.sources[key.host]?.get(key.target)!=source) return
-            sync.events.lastOrNull {it.sessionId==key.target.sessionId}?.let {event->if(sync.read.none {it.sessionId==event.sessionId && it.throughSequence.value>=event.sequence.value}) connection.markRead(key.host,event.sessionId,event.sequence)}
+            sync.events.lastOrNull {it.sessionId==key.target.sessionId}?.let {event->if(sync.read.none {it.sessionId==event.sessionId&&it.throughSequence.value>=event.sequence.value})connection.markRead(key.host,expected,event.sessionId,event.sequence)}
             after = sync.nextSequence
         } while (after != null)
         // The persisted watermark is authoritative; this only drains already-admitted OS alerts.
         runtime.notifications.reconcile(key.host)
     }
     override fun onCleared() {
-        closeAttentionInbox();closeAgentSession()
+        closeAttentionInbox();closeAgentSession();closeTerminalCreation()
+        closeSessionControls()
         closeArtifacts();finishAttachmentPicker(null)
         closePairing(); closeTerminal(); closeWorktrees(); closeChanges();closeSkills(); closeShell(); forms.values.forEach(FormMemory::clear); creationForms.values.forEach(FormMemory::clear); composers.clear(); sentText.clear(); lifecycle.close()
+        composerCursors.clear();composerRevisions.clear();readerPositions.values.forEach(ConversationReaderPosition::retire);readerPositions.clear();sessionFilters.clearFilters();sessionFilters.query=""
         // Runtime ownership outlives this presentation instance; it may still serve the user-selected service.
         val stale=foregroundGeneration; val staleStartup=startup; foregroundGeneration=null; staleStartup?.cancel()
         if(stale!=null) runtime.cleanupScope.launch {
@@ -1638,237 +2025,343 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun terminals(host:String) {navigate(Screen.Terminals,host)}
+    private fun shellRetained(snapshot:ShellSnapshot):Boolean {
+        val view=connection.state.value;val inventory=view.inventory[snapshot.selection.host] ?: return false
+        val graph=inventory.hierarchy.singleOrNull {it.serverId==snapshot.summary.serverId} ?: return false
+        return foreground&&screen==Screen.Terminals&&host==snapshot.selection.host&&snapshot.selection.host in view.hello&&
+            store.state.value.hosts.any {it.hostId==snapshot.selection.host}&&snapshot.originalHello===view.hello[snapshot.selection.host]&&
+            snapshot.incarnation!=null&&graph.serverIncarnation==snapshot.incarnation&&graph.freshness!=NativeFreshness.Unavailable&&
+            inventory.servers.singleOrNull {it.serverId==snapshot.summary.serverId}?.connectivity==ServerConnectivity.Online&&
+            inventory.shells.any {it.sameLogicalIdentity(snapshot.summary)}
+    }
     private fun shellAdmitted(snapshot:ShellSnapshot):Boolean {
-        val view=connection.state.value
-        val inventory=view.inventory[snapshot.selection.host] ?: return false
-        return foreground && screen==Screen.Terminals && host==snapshot.selection.host &&
-            store.state.value.hosts.any {it.hostId==snapshot.selection.host} && view.inventoryReady[snapshot.selection.host]==true &&
-            inventory.subscription==snapshot.source && snapshot.selection.host in view.hello && inventory.shells.any {it==snapshot.summary && it.target==snapshot.selection.target && it.connectivity==SessionConnectivity.Ready && it.capabilities.read}
+        if(!shellRetained(snapshot))return false
+        val view=connection.state.value;val inventory=view.inventory[snapshot.selection.host] ?: return false
+        return view.inventoryReady[snapshot.selection.host]==true&&
+            inventory.hierarchy.singleOrNull {it.serverId==snapshot.summary.serverId}?.freshness==NativeFreshness.Current&&
+            inventory.shells.any {it.sameLogicalIdentity(snapshot.summary)&&it.connectivity==SessionConnectivity.Ready&&it.capabilities.read}
     }
     fun openShell(host:String,target:ShellTarget) {
         val view=connection.state.value;val inventory=view.inventory[host] ?: return
         val summary=inventory.shells.singleOrNull {it.target==target} ?: return
-        if(!foreground || screen!=Screen.Terminals || this.host!=host || view.inventoryReady[host]!=true || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.read) return
-        closeShell()
-        shellMutationLease=ShellMutationLease()
+        val graph=inventory.hierarchy.singleOrNull {it.serverId==summary.serverId&&it.freshness==NativeFreshness.Current} ?: return
+        if(!foreground||screen!=Screen.Terminals||this.host!=host||view.inventoryReady[host]!=true||summary.connectivity!=SessionConnectivity.Ready||!summary.capabilities.read)return
+        closeTerminal();closeShell();shellMutationLease=ShellMutationLease()
+        terminalInputPause=null
         val selected=ShellSelection(host,target);val source=inventory.subscription;val ticket=shellTicket
-        shell=ShellSnapshot(selected,source,ticket,summary,null,false,true,false)
-        loadShellCreation(ShellCreateScope(selected,source,ticket))
-        loadShellInput(ShellCreateScope(selected,source,ticket))
+        // Opening/dismissing is metadata-only. No native frontend exists before Begin confirmation.
+        shell=ShellSnapshot(selected,source,ticket,summary,null,false,false,incarnation=graph.serverIncarnation,originalHello=view.hello[host])
+        if(summary.capabilities.input)loadShellInput(ShellControlScope(selected,source,ticket))
+    }
+    fun shellControlAllowed(scope:ShellControlScope):Boolean =
+        shell?.let {it.selection==scope.selection&&it.source==scope.source&&it.ticket==scope.ticket&&shellAdmitted(it)&&it.summary.capabilities.grid}==true
+    fun beginShellControl(scope:ShellControlScope) {
+        val shown=shell?.takeIf {shellControlAllowed(scope)&&!it.controlBegun} ?: return
+        val selected=shown.selection;val source=shown.source;val ticket=shown.ticket
+        val currentSource=connection.state.value.inventory[selected.host]?.subscription ?: return
+        shell=shown.copy(controlBegun=true,loading=true,error=false)
         shellJob=viewModelScope.launch {
-            try {
-                val result=connection.shell(host,target,source)
-                val current=shell?.takeIf {it.ticket==ticket && it.selection==selected && it.source==source} ?: return@launch
-                if(shellAdmitted(current) && result.target==target) shell=current.copy(text=result.text,truncated=result.truncated,loading=false,error=false)
-            } catch(cancel:CancellationException){throw cancel}
-            catch(_:Exception){shell?.takeIf {it.ticket==ticket && shellAdmitted(it)}?.let {shell=it.copy(text=null,loading=false,error=true)}}
+            try {connection.shell(selected.host,selected.target,currentSource){grid,lease->
+                val admitted=shell?.let {shellAdmitted(it)&&it.controlBegun}==true
+                publishShellGrid(shellState,selected,source,ticket,admitted,lease,grid)
+                if(!lease.active())terminalInputOwner?.unavailable()
+            }}catch(cancel:CancellationException){throw cancel}
+            catch(_:Exception){shell?.takeIf {it.ticket==ticket&&shellRetained(it)}?.let {shell=it.copy(grid=null,loading=false,error=true)}}
         }
     }
-    fun closeShell() {shellInputDrafts.keys.toList().forEach {key->shellInputDrafts[key]?.let {shellInputDrafts[key]=it.copy(modifiers=TerminalModifierState())}};clearShellDraftHost=null;shellInputGate=null;shellInputObservedStatus=null;shellInputSeparateStatus=null;shellInputPermitStatus=null;shellInputObserved=null;separateShellInput=null;shellInputPermit=null;shellInputGeneration++;shellMutationLease?.invalidate();shellMutationLease=null;shellTicket++;shellGateGeneration++;shell=null;shellJob?.cancel();shellJob=null;shellCreationGate=null;separateShellCreation=null;shellSeparatePermit=null}
-    fun refreshShell(){shell?.selection?.let {openShell(it.host,it.target)}}
+    fun releaseShellControl(scope:ShellControlScope) {
+        val shown=shell?.takeIf {it.selection==scope.selection&&it.source==scope.source&&it.ticket==scope.ticket} ?: return
+        stopTerminalInput()
+        shellJob?.cancel();shellJob=null;shellMutationLease?.invalidate();shellMutationLease=ShellMutationLease();shellTicket++
+        shell=shown.copy(ticket=shellTicket,grid=null,controlBegun=false,loading=false,error=false)
+        shellInputDrafts[shown.selection]?.let {shellInputDrafts[shown.selection]=it.copy(modifiers=TerminalModifierState())}
+    }
+    fun resizeShell(scope:ShellControlScope,columns:Long,rows:Long)=perform {
+        if(!shellControlAllowed(scope)||connection.state.value.mutationReady[scope.selection.host]!=true)throw StorePolicy(ErrorCode.NotReady)
+        val shown=shell ?: throw StorePolicy(ErrorCode.NotReady)
+        if(!shown.controlBegun||shown.grid==null||shown.grid.begin.popupBlocked)throw StorePolicy(ErrorCode.NotReady)
+        val lease=shellMutationLease ?: throw StorePolicy(ErrorCode.NotReady)
+        val currentSource=connection.state.value.inventory[scope.selection.host]?.subscription ?: throw StorePolicy(ErrorCode.NotReady)
+        val original=connection.captureShellMutation(scope.selection.host,scope.selection.target,currentSource,lease,ShellMutationPurpose.Resize)
+        if(!shellControlAllowed(scope)||shellMutationLease!==lease)throw StorePolicy(ErrorCode.StaleSession)
+        val boot=connection.state.value.hello[scope.selection.host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
+        val params=ShellResizeParams(boot,scope.selection.target,original.gridSubscription ?: throw StorePolicy(ErrorCode.NotReady),Uint(columns),Uint(rows));params.validate()
+        connection.mutate(scope.selection.host,Request(Uuid.random(),RequestBody.ShellResize(params)),shell=original)
+        refreshActions()
+    }
+    fun closeShell() {
+        stopTerminalInput()
+        shellInputDrafts.keys.toList().forEach {key->shellInputDrafts[key]?.let {shellInputDrafts[key]=it.copy(modifiers=TerminalModifierState())}}
+        clearShellDraftHost=null;shellInputGate=null;shellInputObservedStatus=null;shellInputSeparateStatus=null;shellInputPermitStatus=null
+        shellInputObserved=null;separateShellInput=null;shellInputPermit=null;shellInputGeneration++
+        shellMutationLease?.invalidate();shellMutationLease=null;shellTicket++;shell=null;shellJob?.cancel();shellJob=null
+    }
     fun refreshTerminals() {
         val originalHost=host ?: return
         if(screen!=Screen.Terminals) return
         closeShell()
         perform(::connectionFailureNotice){if(foreground && screen==Screen.Terminals && host==originalHost) connection.snapshot(originalHost)}
     }
-    private fun requireShellScope(scope:ShellCreateScope):ShellSnapshot {
-        val shown=shell?.takeIf {it.selection==scope.selection && it.source==scope.source && it.ticket==scope.ticket} ?: throw StorePolicy(ErrorCode.NotReady)
-        if(!shellAdmitted(shown) || !shown.summary.capabilities.create || connection.state.value.mutationReady[scope.selection.host]!=true) throw StorePolicy(ErrorCode.NotReady)
+    private fun requireShellDraftScope(scope:ShellControlScope):ShellSnapshot {
+        val shown=shell?.takeIf {it.selection==scope.selection&&it.source==scope.source&&it.ticket==scope.ticket} ?: throw StorePolicy(ErrorCode.NotReady)
+        if(!shellRetained(shown))throw StorePolicy(ErrorCode.NotReady)
         return shown
     }
-
-    private fun requireShellInputScope(scope:ShellCreateScope):ShellSnapshot {
-        val shown=shell?.takeIf {it.selection==scope.selection && it.source==scope.source && it.ticket==scope.ticket} ?: throw StorePolicy(ErrorCode.NotReady)
-        if(!shellAdmitted(shown) || !shown.summary.capabilities.input || connection.state.value.mutationReady[scope.selection.host]!=true) throw StorePolicy(ErrorCode.NotReady)
+    private fun requireShellInputOwnerScope(scope:ShellControlScope):ShellSnapshot {
+        val shown=requireShellDraftScope(scope)
+        if(!shown.controlBegun||shown.error||shellJob?.isActive!=true)throw StorePolicy(ErrorCode.NotReady)
+        val inventory=connection.state.value.inventory[scope.selection.host] ?: throw StorePolicy(ErrorCode.StaleSession)
+        val graph=inventory.hierarchy.singleOrNull {it.serverId==shown.summary.serverId} ?: throw StorePolicy(ErrorCode.StaleSession)
+        val current=inventory.shells.singleOrNull {it.sameLogicalIdentity(shown.summary)} ?: throw StorePolicy(ErrorCode.StaleSession)
+        if(graph.freshness==NativeFreshness.Current&&(current.connectivity!=SessionConnectivity.Ready
+            ||!current.capabilities.read||!current.capabilities.grid||!current.capabilities.input))throw StorePolicy(ErrorCode.StaleSession)
+        return shown
+    }
+    private fun requireShellInputScope(scope:ShellControlScope):ShellSnapshot {
+        val shown=requireShellDraftScope(scope)
+        if(!shellAdmitted(shown)||!shown.summary.capabilities.input||!shown.controlBegun||shown.error
+            ||shown.grid==null||shown.grid.begin.popupBlocked||connection.state.value.mutationReady[scope.selection.host]!=true)throw StorePolicy(ErrorCode.NotReady)
         return shown
     }
     fun shellDraft(selection:ShellSelection)=shellInputDrafts[selection] ?: ShellInputDraft()
-    fun editShellDraft(scope:ShellCreateScope,value:androidx.compose.ui.text.input.TextFieldValue) {
-        if(runCatching {requireShellInputScope(scope)}.isFailure)return
-        val old=shellDraft(scope.selection)
-        if(value.text.toByteArray(Charsets.UTF_8).size>16384){notice="Terminal draft is limited to 16 KiB.";return}
-        if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16){notice="Keep or explicitly clear an existing terminal draft before opening another.";return}
-        shellInputDrafts[scope.selection]=old.copy(value=value,revision=old.revision+1)
+    fun editShellDraft(scope:ShellControlScope,value:androidx.compose.ui.text.input.TextFieldValue) {
+        if(runCatching {requireShellDraftScope(scope)}.isFailure)return
+        if(scope.selection !in shellInputDrafts&&shellInputDrafts.size>=16){notice="Keep or explicitly clear an existing terminal draft first.";return}
+        val size=utf8Size(value.text);val pending=terminalOwner(scope)?.pendingTextBytes ?: 0
+        if(size>65536||terminalOwner(scope)!=null&&size+pending>49152){notice="Draft/recovery limit reached. Active input reserves16KiB for one refused commit inside64KiB.";return}
+        val old=shellDraft(scope.selection);shellInputDrafts[scope.selection]=old.copy(value=value,revision=old.revision+1)
     }
     fun requestClearShellDrafts(selectedHost:String) {
-        if(foreground && screen==Screen.Terminals && host==selectedHost && store.state.value.hosts.any {it.hostId==selectedHost})clearShellDraftHost=selectedHost
+        if(foreground&&screen==Screen.Terminals&&host==selectedHost&&store.state.value.hosts.any {it.hostId==selectedHost})clearShellDraftHost=selectedHost
     }
     fun cancelClearShellDrafts(){clearShellDraftHost=null}
     fun confirmClearShellDrafts() {
         val selectedHost=clearShellDraftHost ?: return
-        if(!foreground || screen!=Screen.Terminals || host!=selectedHost || store.state.value.hosts.none {it.hostId==selectedHost}){clearShellDraftHost=null;return}
-        // Local text/mode only. Original receipt latches and admitted jobs survive.
+        if(!foreground||screen!=Screen.Terminals||host!=selectedHost||store.state.value.hosts.none {it.hostId==selectedHost}){clearShellDraftHost=null;return}
+        if(terminalInputScope?.selection?.host==selectedHost)stopTerminalInput(discard=true)
         shellInputDrafts.keys.filter {it.host==selectedHost}.forEach(shellInputDrafts::remove)
-        shellSubmittedDrafts.keys.filter {shellSubmittedDrafts[it]?.first?.host==selectedHost}.forEach(shellSubmittedDrafts::remove)
+        shellSubmittedInputs.keys.filter {shellSubmittedInputs[it]?.selection?.host==selectedHost}.forEach(shellSubmittedInputs::remove)
         clearShellDraftHost=null
     }
-    fun clearShellDraft(scope:ShellCreateScope){if(runCatching {requireShellInputScope(scope)}.isFailure)return;shellSubmittedDrafts.keys.filter {shellSubmittedDrafts[it]?.first==scope.selection}.forEach(shellSubmittedDrafts::remove);shellInputDrafts.remove(scope.selection)}
-    fun shellInputMode(scope:ShellCreateScope,keys:Boolean){if(runCatching {requireShellInputScope(scope)}.isFailure)return;if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16){notice="Terminal draft limit reached.";return};shellInputDrafts[scope.selection]=shellDraft(scope.selection).copy(keys=keys,modifiers=TerminalModifierState())}
-    fun shellInputModifier(scope:ShellCreateScope,modifier:TerminalModifier,lock:Boolean) {
-        if(busy || !shellInputAllowed(scope))return
-        if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16)return
-        val draft=shellDraft(scope.selection)
-        shellInputDrafts[scope.selection]=draft.copy(modifiers=draft.modifiers.toggle(modifier,lock))
+    fun clearShellDraft(scope:ShellControlScope) {
+        if(runCatching {requireShellDraftScope(scope)}.isFailure)return
+        if(terminalInputScope==scope)stopTerminalInput(discard=true)
+        shellSubmittedInputs.keys.filter {shellSubmittedInputs[it]?.selection==scope.selection}.forEach(shellSubmittedInputs::remove)
+        shellInputDrafts.remove(scope.selection)
     }
-    fun shellInputModifierTap(scope:ShellCreateScope,modifier:TerminalModifier,at:Long,doubleTapWindow:Long) {
-        if(busy || !shellInputAllowed(scope))return
-        if(scope.selection !in shellInputDrafts && shellInputDrafts.size>=16)return
-        val draft=shellDraft(scope.selection)
-        shellInputDrafts[scope.selection]=draft.copy(modifiers=draft.modifiers.tap(modifier,at,doubleTapWindow))
+    fun shellInputMode(scope:ShellControlScope,direct:Boolean) {
+        if(runCatching {requireShellDraftScope(scope)}.isFailure)return
+        if(scope.selection !in shellInputDrafts&&shellInputDrafts.size>=16){notice="Terminal draft limit reached.";return}
+        shellInputDrafts[scope.selection]=shellDraft(scope.selection).copy(direct=direct,modifiers=TerminalModifierState())
     }
-    private suspend fun retainedShellInput(scope:ShellCreateScope):LocalAction? {
-        requireShellInputScope(scope);var after:Uuid?=null;var prior:LocalAction?=null;var latched:LocalAction?=null
-        do {val page=store.localActions(scope.selection.host,after,100);requireShellInputScope(scope)
-            for(action in page)if(action.metadata.method==ActionMethod.ShellInput && action.metadata.shellTarget==scope.selection.target){if(action.metadata.actionId==shellInputActions[scope.selection])latched=action;if(prior==null || action.metadata.createdAt.value>prior.metadata.createdAt.value || action.metadata.createdAt==prior.metadata.createdAt && action.metadata.actionId.value>prior.metadata.actionId.value)prior=action}
+    fun shellInputModifier(scope:ShellControlScope,modifier:TerminalModifier,lock:Boolean) {
+        if(!shellInputAllowed(scope))return
+        val draft=shellDraft(scope.selection);shellInputDrafts[scope.selection]=draft.copy(modifiers=draft.modifiers.toggle(modifier,lock))
+    }
+    fun shellInputModifierTap(scope:ShellControlScope,modifier:TerminalModifier,at:Long,doubleTapWindow:Long) {
+        if(!shellInputAllowed(scope))return
+        val draft=shellDraft(scope.selection);shellInputDrafts[scope.selection]=draft.copy(modifiers=draft.modifiers.tap(modifier,at,doubleTapWindow))
+    }
+    private suspend fun retainedShellInput(scope:ShellControlScope):LocalAction? {
+        requireShellDraftScope(scope)
+        shellInputActions[scope.selection]?.let {return store.localAction(scope.selection.host,it) ?: throw StorePolicy(ErrorCode.NotReady)}
+        var after:Uuid?=null;var prior:LocalAction?=null
+        do {val page=store.localActions(scope.selection.host,after,100);requireShellDraftScope(scope)
+            for(action in page)if(action.metadata.method==ActionMethod.ShellInput&&action.metadata.shellTarget==scope.selection.target
+                &&(prior==null||action.metadata.createdAt.value>prior.metadata.createdAt.value
+                    ||action.metadata.createdAt==prior.metadata.createdAt&&action.metadata.actionId.value>prior.metadata.actionId.value))prior=action
             after=if(page.size==100)page.last().metadata.actionId else null
         }while(after!=null)
-        return latched ?: prior
+        return prior
     }
-    fun loadShellInput(scope:ShellCreateScope) {
+    fun loadShellInput(scope:ShellControlScope) {
         val generation=++shellInputGeneration;shellInputGate=ShellInputGate(scope,false,null,true)
-        viewModelScope.launch {try {val prior=retainedShellInput(scope);requireShellInputScope(scope)
-            if(generation==shellInputGeneration){val observation=prior?.let {connection.state.value.shellInputStatus[scope.selection.host]?.get(it.metadata.actionId)};val pending=prior!=null && (observation==null || !observation.unknown && prior.receipt?.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching));shellInputGate=ShellInputGate(scope,true,prior,pending,observation)}
-        }catch(_:Exception){if(generation==shellInputGeneration)shellInputGate=null}}
+        viewModelScope.launch {try {
+            val prior=retainedShellInput(scope);requireShellDraftScope(scope)
+            if(generation==shellInputGeneration) {
+                val observation=prior?.let {connection.state.value.shellInputStatus[scope.selection.host]?.get(it.metadata.actionId)}
+                val pending=prior!=null&&(observation==null||!observation.unknown&&prior.receipt?.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching))
+                shellInputGate=ShellInputGate(scope,true,prior,pending,observation)
+            }
+        }catch(cancel:CancellationException){throw cancel}catch(_:Exception){if(generation==shellInputGeneration)shellInputGate=null}}
     }
-    fun shellInputAllowed(scope:ShellCreateScope):Boolean {
+    private fun inputConsentAllowed(scope:ShellControlScope):Boolean {
         if(runCatching {requireShellInputScope(scope)}.isFailure)return false
-        val gate=shellInputGate?.takeIf {it.scope==scope && it.loaded && !it.pending} ?: return false
+        val gate=shellInputGate?.takeIf {it.scope==scope&&it.loaded&&!it.pending} ?: return false
         val prior=gate.prior ?: return shellInputActions[scope.selection]==null
-        if(shellInputActions[scope.selection]!=null && shellInputActions[scope.selection]!=prior.metadata.actionId)return false
-        // Historical success is inspection only without a current retained status.
+        if(shellInputActions[scope.selection]!=null&&shellInputActions[scope.selection]!=prior.metadata.actionId)return false
         val observation=connection.state.value.shellInputStatus[scope.selection.host]?.get(prior.metadata.actionId) ?: return false
         if(gate.observation!=observation)return false
-        return (!observation.unknown && prior.authoritative && prior.outcomeShown && prior.receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed)) || (shellInputPermit==(scope to prior.metadata.actionId) && shellInputPermitStatus==observation && shellInputObserved==(scope.selection to prior.metadata.actionId) && shellInputObservedStatus==observation)
+        val settled=prior.receipt?.shellDispatched()==true||prior.outcomeShown&&prior.receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed)
+        return !observation.unknown&&prior.authoritative&&settled
+            ||shellInputPermit==(scope to prior.metadata.actionId)&&shellInputPermitStatus==observation
+                &&shellInputObserved==(scope.selection to prior.metadata.actionId)&&shellInputObservedStatus==observation
     }
-    fun shellInputDisplayed(scope:ShellCreateScope,action:LocalAction) {
-        if(runCatching {requireShellInputScope(scope)}.isFailure || shellInputGate?.prior!=action)return
-        val observation=connection.state.value.shellInputStatus[scope.selection.host]?.get(action.metadata.actionId) ?: return
-        if(shellInputGate?.observation!=observation)return
-        shellInputObservedStatus=observation
-        shellInputObserved=scope.selection to action.metadata.actionId
-        if(!observation.unknown && action.authoritative && action.receipt!=null && !action.outcomeShown)displayed(scope.selection.host,action.receipt)
+    internal fun terminalOwner(scope:ShellControlScope):TerminalInputOwner? =
+        terminalInputOwner?.takeIf {terminalInputScope==scope&&runCatching {requireShellInputOwnerScope(scope)}.isSuccess}
+    fun shellInputAllowed(scope:ShellControlScope)=terminalOwner(scope)?.accepting()==true
+    internal fun shellDraftSendAllowed(scope:ShellControlScope):Boolean {
+        val draft=shellDraft(scope.selection)
+        return shellInputAllowed(scope)&&draft.queuedRevision!=draft.revision&&draft.value.text.isNotEmpty()&&utf8Size(draft.value.text)<=16384
     }
-    fun shellKeyCharacter(scope:ShellCreateScope,value:String){if(runCatching {requireShellInputScope(scope)}.isFailure)return;if(value.toByteArray().size>4 || scope.selection !in shellInputDrafts && shellInputDrafts.size>=16)return;shellInputDrafts[scope.selection]=shellDraft(scope.selection).copy(keyCharacter=value)}
-    private fun clearShellModifiers(scope:ShellCreateScope) {
+    internal fun prepareTerminalInput(scope:ShellControlScope) {
+        if(terminalInputToken!=null||!inputConsentAllowed(scope))return
+        if(scope.selection !in shellInputDrafts&&shellInputDrafts.size>=16){notice="Keep or explicitly clear an existing terminal draft first.";return}
+        if(utf8Size(shellDraft(scope.selection).value.text)>49152){notice="Reduce the draft before direct input;16KiB recovery reserve stays inside64KiB.";return}
+        if(scope.selection !in shellInputDrafts)shellInputDrafts[scope.selection]=ShellInputDraft()
+        val lease=shellMutationLease ?: return
+        val prior=shellInputGate?.prior
+        val observation=prior?.let {action->connection.state.value.shellInputStatus[scope.selection.host]?.get(action.metadata.actionId)?.let {action.metadata.actionId to it.token}}
+        if(prior!=null&&observation==null)return
+        val token=Any();terminalInputToken=token;terminalInputPause=null
+        terminalInputPreparation=viewModelScope.launch {try {
+            requireShellInputScope(scope)
+            val currentSource=connection.state.value.inventory[scope.selection.host]?.subscription ?: throw StorePolicy(ErrorCode.NotReady)
+            val original=connection.captureShellMutation(scope.selection.host,scope.selection.target,currentSource,lease,ShellMutationPurpose.Input,observation)
+            requireShellInputScope(scope)
+            if(terminalInputToken!==token||shellMutationLease!==lease||!inputConsentAllowed(scope))throw StorePolicy(ErrorCode.StaleSession)
+            var last:Receipt?=null
+            fun retained()=terminalInputToken===token&&shellMutationLease===lease&&lease.active.get()&&runCatching {requireShellInputOwnerScope(scope)}.isSuccess
+            fun ready()=retained()&&runCatching {requireShellInputScope(scope)}.isSuccess
+            val owner=TerminalInputOwner(viewModelScope,
+                current=::retained,ready=::ready,
+                awaitReady={combine(connection.state,snapshotFlow {shell}){_,_->Unit}.first {!retained()||ready()}},
+                draftBytes={utf8Size(shellDraft(scope.selection).value.text)},
+                write={input,revision->sendQueuedShellInput(scope,original,last,input,revision).also {if(it.shellDispatched())last=it}},
+                completed={_,receipt->completeShellInputSnapshot(receipt)},
+                retain={items->retainUnsentTerminalText(scope.selection,items)},
+                stopped={reason->if(terminalInputToken===token){
+                    terminalInputToken=null;terminalInputOwner=null;terminalInputScope=null
+                    clearShellModifiers(scope);terminalInputPause=reason
+                    notice=when(reason){TerminalInputPause.Capacity->"Input paused at its reserved capacity. Known-unsent text is in this original terminal’s draft."
+                        TerminalInputPause.Limit->"Input paused. Each committed text/send must fit16KiB; nothing was truncated or sent."
+                        TerminalInputPause.Unsupported->"Input paused: this SDK key/composition is not representable. Use an explicit draft/IME gesture."
+                        TerminalInputPause.Uncertain->"Input outcome uncertain. Inspect its receipt and retained attempted text; queued keys are not replayed."
+                        TerminalInputPause.Refused->"Input was refused. Inspect its receipt before another explicit gesture."
+                        TerminalInputPause.SourceLost->"Original input lease lost. Known-unsent text is retained; no reconnect replay."
+                        TerminalInputPause.Closed->notice}
+                    if(reason!=TerminalInputPause.Closed&&shell?.let {it.selection==scope.selection&&it.source==scope.source&&it.ticket==scope.ticket}==true)releaseShellControl(scope)
+                }})
+            if(terminalInputToken!==token){owner.retire();return@launch}
+            terminalInputScope=scope;terminalInputOwner=owner
+        }catch(cancel:CancellationException){throw cancel}catch(_:Exception){if(terminalInputToken===token){
+            terminalInputToken=null;terminalInputOwner=null;terminalInputScope=null;terminalInputPause=TerminalInputPause.SourceLost;clearShellModifiers(scope)
+        }}}
+    }
+    private fun stopTerminalInput(discard:Boolean=false) {
+        val owner=terminalInputOwner;val scope=terminalInputScope
+        val held=owner?.hardwareOutstanding()==true
+        terminalInputToken=null;terminalInputOwner=null;terminalInputScope=null
+        terminalInputPreparation?.cancel();terminalInputPreparation=null
+        owner?.retire(discard)
+        if(discard&&held&&scope!=null)releaseShellControl(scope)
+    }
+    private fun retainUnsentTerminalText(selection:ShellSelection,items:List<TerminalPendingText>) {
+        if(items.isEmpty())return
+        var draft=shellDraft(selection)
+        // An in-flight snapshot is NOT unsent. Move only an unchanged staged snapshot
+        // to its existing receipt owner before recovery; never strip a newer edit.
+        if(shellSubmittedInputs.values.any {it.selection==selection&&it.revision==draft.revision&&it.text==draft.value.text}) {
+            draft=draft.copy(value=androidx.compose.ui.text.input.TextFieldValue(),revision=draft.revision+1)
+        }
+        val text=StringBuilder(draft.value.text)
+        for(item in items)if(item.draftRevision!=draft.revision||item.text!=draft.value.text)text.append(item.text)
+        val recovered=text.toString();check(utf8Size(recovered)<=65536) {"terminal recovery reservation exceeded"}
+        shellInputDrafts[selection]=draft.copy(value=androidx.compose.ui.text.input.TextFieldValue(recovered),revision=draft.revision+1,direct=false,queuedRevision=null,modifiers=TerminalModifierState())
+    }
+    private fun completeShellInputSnapshot(receipt:Receipt) {
+        if(!receipt.shellDispatched())return
+        val submitted=shellSubmittedInputs.remove(receipt.actionId) ?: return
+        shellInputDrafts[submitted.selection]?.takeIf {submitted.revision!=null&&it.revision==submitted.revision&&it.value.text==submitted.text}?.let {
+            shellInputDrafts[submitted.selection]=it.copy(value=androidx.compose.ui.text.input.TextFieldValue(),revision=it.revision+1,queuedRevision=null)
+        }
+    }
+    internal fun attemptedShellText(selection:ShellSelection):Pair<Uuid,String>? =
+        shellSubmittedInputs.entries.lastOrNull {it.value.selection==selection}?.let {it.key to it.value.text}
+    fun forgetAttemptedShellText(scope:ShellControlScope,action:Uuid) {
+        if(runCatching {requireShellDraftScope(scope)}.isFailure)return
+        if(shellSubmittedInputs[action]?.selection==scope.selection)shellSubmittedInputs.remove(action)
+    }
+    private suspend fun sendQueuedShellInput(scope:ShellControlScope,initial:ShellMutationContext,last:Receipt?,input:ShellInput,revision:Long?):Receipt {
+        input.validate()
+        val action=Uuid.random();val host=scope.selection.host
+        input.terminalTextSnapshot()?.let {shellSubmittedInputs[action]=ShellSubmittedInput(scope.selection,revision,it)}
+        val oldAction=shellInputActions[scope.selection];val permit=shellInputPermit;val permitStatus=shellInputPermitStatus
+        try {
+            val shown=requireShellInputScope(scope)
+            val original=if(last==null)initial else {
+                if(!last.shellDispatched())throw StorePolicy(ErrorCode.NotReady)
+                val observation=connection.state.value.shellInputStatus[host]?.get(last.actionId)?.takeUnless {it.unknown} ?: throw StorePolicy(ErrorCode.NotReady)
+                val currentSource=connection.state.value.inventory[host]?.subscription ?: throw StorePolicy(ErrorCode.NotReady)
+                connection.captureShellMutation(host,scope.selection.target,currentSource,initial.lease,ShellMutationPurpose.Input,last.actionId to observation.token)
+            }
+            requireShellInputScope(scope)
+            if(original.grid!==initial.grid||original.gridSubscription!=initial.gridSubscription||shellMutationLease!==initial.lease||!initial.lease.active.get())throw StorePolicy(ErrorCode.StaleSession)
+            val boot=shown.originalHello?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
+            shellInputPermit=null;shellInputPermitStatus=null;shellInputActions[scope.selection]=action
+            shellInputGate=ShellInputGate(scope,false,shellInputGate?.prior,true)
+            val receipt=connection.mutate(host,Request(action,RequestBody.ShellInput(ShellInputParams(boot,scope.selection.target,
+                original.gridSubscription ?: throw StorePolicy(ErrorCode.NotReady),input))),ordinaryComposer=false,shell=original)
+            val canonical=store.localAction(host,action)
+            if(runCatching {requireShellDraftScope(scope)}.isSuccess){
+                val observed=connection.state.value.shellInputStatus[host]?.get(action)
+                shellInputGate=ShellInputGate(scope,true,canonical,false,observed)
+            }
+            return receipt
+        }catch(error:Exception){
+            if(withContext(NonCancellable){store.localAction(host,action)}==null) {
+                if(oldAction==null)shellInputActions.remove(scope.selection)else shellInputActions[scope.selection]=oldAction
+                shellInputPermit=permit;shellInputPermitStatus=permitStatus
+            }
+            throw error
+        }
+    }
+    private fun enqueueShellInput(scope:ShellControlScope,input:ShellInput,revision:Long?=null) {
+        val owner=terminalOwner(scope) ?: return
+        try {if(owner.offer(input,revision))shellInputDrafts[scope.selection]?.let {
+            shellInputDrafts[scope.selection]=it.copy(queuedRevision=if(revision!=null&&it.revision==revision)revision else it.queuedRevision,
+                modifiers=if(input is ShellInput.Keys)it.modifiers.afterKey()else TerminalModifierState())
+        }}catch(_:ProtocolFailure){owner.limit()}
+    }
+    fun sendShellCharacter(scope:ShellControlScope){val draft=shellDraft(scope.selection);enqueueShellInput(scope,ShellInput.Keys(listOf(ShellKeyEvent(ShellKey(ShellKeyName.Character,draft.keyCharacter),draft.modifiers.wire(),ShellKeyPhase.Press))))}
+    fun sendShellText(scope:ShellControlScope){if(!shellDraftSendAllowed(scope))return;val draft=shellDraft(scope.selection);enqueueShellInput(scope,ShellInput.Text(draft.value.text),draft.revision)}
+    fun sendShellKey(scope:ShellControlScope,key:ShellKeyName){val draft=shellDraft(scope.selection);enqueueShellInput(scope,ShellInput.Keys(listOf(ShellKeyEvent(ShellKey(key),draft.modifiers.wire(),ShellKeyPhase.Press))))}
+    fun shellKeyCharacter(scope:ShellControlScope,value:String) {
+        if(runCatching {requireShellDraftScope(scope)}.isFailure||value.length>2||utf8Size(value)>4)return
+        shellInputDrafts[scope.selection]=shellDraft(scope.selection).copy(keyCharacter=value)
+    }
+    private fun clearShellModifiers(scope:ShellControlScope) {
         val shown=shell ?: return
-        if(shown.selection!=scope.selection || shown.source!=scope.source || shown.ticket!=scope.ticket)return
+        if(shown.selection!=scope.selection||shown.source!=scope.source||shown.ticket!=scope.ticket)return
         shellInputDrafts[scope.selection]?.let {shellInputDrafts[scope.selection]=it.copy(modifiers=TerminalModifierState())}
     }
-    private fun consumeShellKeyDraft(scope:ShellCreateScope):ShellInputDraft? {
-        if(runCatching {requireShellInputScope(scope)}.isFailure){clearShellModifiers(scope);return null}
-        if(busy || !shellInputAllowed(scope))return null
-        val draft=shellDraft(scope.selection)
-        // Capture the exact current key state first; only one-shot bits are consumed.
-        shellInputDrafts[scope.selection]?.let {shellInputDrafts[scope.selection]=it.copy(modifiers=it.modifiers.afterKey())}
-        return draft
+    fun shellInputDisplayed(scope:ShellControlScope,action:LocalAction) {
+        if(runCatching {requireShellDraftScope(scope)}.isFailure||shellInputGate?.prior!=action)return
+        val observation=connection.state.value.shellInputStatus[scope.selection.host]?.get(action.metadata.actionId) ?: return
+        if(shellInputGate?.observation!=observation)return
+        shellInputObservedStatus=observation;shellInputObserved=scope.selection to action.metadata.actionId
+        if(!observation.unknown&&action.authoritative&&action.receipt!=null&&!action.outcomeShown)displayed(scope.selection.host,action.receipt)
     }
-    fun sendShellCharacter(scope:ShellCreateScope){val draft=consumeShellKeyDraft(scope) ?: return;sendShellInput(scope,ShellInput.Keys(listOf(ShellKeyEvent(ShellKey(ShellKeyName.Character,draft.keyCharacter),draft.modifiers.wire()))),null)}
-    fun sendShellText(scope:ShellCreateScope){val draft=shellDraft(scope.selection);clearShellModifiers(scope);sendShellInput(scope,ShellInput.Text(draft.value.text),draft.revision)}
-    fun sendShellKey(scope:ShellCreateScope,key:ShellKeyName){val draft=consumeShellKeyDraft(scope) ?: return;sendShellInput(scope,ShellInput.Keys(listOf(ShellKeyEvent(ShellKey(key),draft.modifiers.wire()))),null)}
-    private fun sendShellInput(scope:ShellCreateScope,input:ShellInput,revision:Long?)=perform {
-        requireShellInputScope(scope);input.validate()
-        if(!shellInputAllowed(scope))throw StorePolicy(ErrorCode.NotReady)
-        val prior=retainedShellInput(scope);requireShellInputScope(scope)
-        if(prior!=shellInputGate?.prior || !shellInputAllowed(scope))throw StorePolicy(ErrorCode.NotReady)
-        val lease=shellMutationLease ?: throw StorePolicy(ErrorCode.NotReady)
-        val inputObservation=prior?.let {action->connection.state.value.shellInputStatus[scope.selection.host]?.get(action.metadata.actionId)?.let {action.metadata.actionId to it.token}}
-        if(prior!=null && inputObservation==null)throw StorePolicy(ErrorCode.NotReady)
-        val original=connection.captureShellMutation(scope.selection.host,scope.selection.target,scope.source,lease,ShellMutationPurpose.Input,inputObservation)
-        requireShellInputScope(scope)
-        if(shellMutationLease!==lease || !lease.active.get() || !shellInputAllowed(scope))throw StorePolicy(ErrorCode.StaleSession)
-        val action=Uuid.random();val host=scope.selection.host;val boot=connection.state.value.hello[host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
-        val oldAction=shellInputActions[scope.selection];val permit=shellInputPermit;val permitStatus=shellInputPermitStatus;shellInputPermit=null;shellInputPermitStatus=null;shellInputActions[scope.selection]=action
-        if(revision!=null)shellSubmittedDrafts[action]=scope.selection to revision
-        shellInputDrafts[scope.selection]?.let {shellInputDrafts[scope.selection]=it.copy(modifiers=if(input is ShellInput.Keys) it.modifiers.afterKey() else TerminalModifierState())}
-        shellInputGate=ShellInputGate(scope,false,prior,true)
-        try {connection.mutate(host,Request(action,RequestBody.ShellInput(ShellInputParams(boot,scope.selection.target,input))),ordinaryComposer=false,shell=original)}
-        catch(error:Exception){if(withContext(NonCancellable){store.localAction(host,action)}==null){if(oldAction==null)shellInputActions.remove(scope.selection)else shellInputActions[scope.selection]=oldAction;shellInputPermit=permit;shellInputPermitStatus=permitStatus;shellSubmittedDrafts.remove(action)};throw error}
-        finally {shell?.takeIf {shellAdmitted(it)}?.let {loadShellInput(ShellCreateScope(it.selection,it.source,it.ticket))}}
-    }
-    fun requestSeparateShellInput(scope:ShellCreateScope,action:Uuid) {
+    fun requestSeparateShellInput(scope:ShellControlScope,action:Uuid) {
         if(runCatching {requireShellInputScope(scope)}.isFailure)return
-        val gate=shellInputGate?.takeIf {it.scope==scope && it.loaded} ?: return
+        val gate=shellInputGate?.takeIf {it.scope==scope&&it.loaded} ?: return
         val prior=gate.prior ?: return
         val observation=connection.state.value.shellInputStatus[scope.selection.host]?.get(action) ?: return
-        if(prior.metadata.actionId==action && gate.observation==observation && shellInputObservedStatus==observation && shellInputObserved==(scope.selection to action) && (observation.unknown || prior.receipt?.state==ReceiptState.Uncertain)) {shellInputSeparateStatus=observation;separateShellInput=scope to action}
+        if(prior.metadata.actionId==action&&gate.observation==observation&&shellInputObservedStatus==observation
+            &&shellInputObserved==(scope.selection to action)&&(observation.unknown||prior.receipt?.state==ReceiptState.Uncertain)){
+            shellInputSeparateStatus=observation;separateShellInput=scope to action
+        }
     }
     fun cancelSeparateShellInput(){separateShellInput=null;shellInputSeparateStatus=null}
     fun confirmSeparateShellInput()=perform {
         val (scope,action)=separateShellInput ?: throw StorePolicy(ErrorCode.NotReady);requireShellInputScope(scope)
         val prior=retainedShellInput(scope) ?: throw StorePolicy(ErrorCode.NotReady)
         val observation=connection.state.value.shellInputStatus[scope.selection.host]?.get(action) ?: throw StorePolicy(ErrorCode.NotReady)
-        if(separateShellInput!=(scope to action) || prior.metadata.actionId!=action || shellInputGate?.prior!=prior || shellInputGate?.observation!=observation || shellInputSeparateStatus!=observation || shellInputObservedStatus!=observation || shellInputObserved!=(scope.selection to action) || !observation.unknown && prior.receipt?.state!=ReceiptState.Uncertain)throw StorePolicy(ErrorCode.NotReady)
-        shellInputPermitStatus=observation;shellInputPermit=scope to action;separateShellInput=null;shellInputSeparateStatus=null;shellInputActions[scope.selection]=action;loadShellInput(scope)
-    }
-    private suspend fun retainedShellCreation(scope:ShellCreateScope,exclude:Uuid?=null):Pair<LocalAction?,Boolean> {
-        requireShellScope(scope)
-        var after:Uuid?=null;var prior:LocalAction?=null;var pending=false
-        do {
-            val page=store.localActions(scope.selection.host,after,100);requireShellScope(scope)
-            for(action in page) {
-                if(action.metadata.method==ActionMethod.ShellCreate && (prior==null || action.metadata.createdAt.value>prior.metadata.createdAt.value)) prior=action
-                if(action.metadata.actionId!=exclude && action.metadata.method in listOf(ActionMethod.ShellCreate,ActionMethod.SessionCreate) && (action.receipt==null || action.receipt.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching))) pending=true
-            }
-            after=page.lastOrNull()?.metadata?.actionId
-        }while(after!=null)
-        return prior to pending
-    }
-    fun loadShellCreation(scope:ShellCreateScope) {
-        val generation=++shellGateGeneration
-        shellCreationGate=ShellCreationGate(scope,false,null,true)
-        viewModelScope.launch {
-            try {
-                val (prior,pending)=retainedShellCreation(scope);requireShellScope(scope)
-                if(shellGateGeneration==generation){
-                    if(prior!=null && shellSeparatePermit!=(scope to prior.metadata.actionId)) shellCreationActions[scope.selection.host]=prior.metadata.actionId
-                    shellCreationGate=ShellCreationGate(scope,true,prior,pending)
-                }
-            }catch(cancel:CancellationException){throw cancel}
-            catch(_:Exception){if(shellGateGeneration==generation) shellCreationGate=null}
-        }
-    }
-    fun shellCreationAllowed(scope:ShellCreateScope):Boolean {
-        if(runCatching {requireShellScope(scope)}.isFailure) return false
-        val gate=shellCreationGate?.takeIf {it.scope==scope && it.loaded && !it.pending} ?: return false
-        return !shellCreationActions.containsKey(scope.selection.host) && (gate.prior==null || shellSeparatePermit==(scope to gate.prior.metadata.actionId))
-    }
-    fun createShell(scope:ShellCreateScope)=perform {
-        requireShellScope(scope)
-        val (prior,pending)=retainedShellCreation(scope);requireShellScope(scope)
-        if(pending || shellCreationActions.containsKey(scope.selection.host) || prior!=null && shellSeparatePermit!=(scope to prior.metadata.actionId)) {loadShellCreation(scope);throw StorePolicy(ErrorCode.NotReady)}
-        val host=scope.selection.host;val boot=connection.state.value.hello[host]?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
-        val lease=shellMutationLease ?: throw StorePolicy(ErrorCode.NotReady)
-        val original=connection.captureShellMutation(host,scope.selection.target,scope.source,lease)
-        requireShellScope(scope)
-        if(shellMutationLease!==lease || !lease.active.get()) throw StorePolicy(ErrorCode.StaleSession)
-        val action=Uuid.random();val permit=shellSeparatePermit;shellSeparatePermit=null
-        shellCreationActions[host]=action;focusedId=action;shellCreationGate=ShellCreationGate(scope,false,null,true)
-        try {connection.mutate(host,Request(action,RequestBody.ShellCreate(ShellCreateParams(boot,scope.selection.target))),shell=original)}
-        catch(error:Exception){if(withContext(NonCancellable){store.localAction(host,action)}==null){shellCreationActions.remove(host);shellSeparatePermit=permit};throw error}
-        finally {shell?.takeIf {shellAdmitted(it)}?.let {loadShellCreation(ShellCreateScope(it.selection,it.source,it.ticket))}}
-    }
-    private fun displayedShellAction(scope:ShellCreateScope,action:Uuid):LocalAction {
-        requireShellScope(scope)
-        val prior=shellCreationGate?.takeIf {it.scope==scope && it.loaded}?.prior?.takeIf {it.metadata.actionId==action} ?: throw StorePolicy(ErrorCode.NotReady)
-        if(!prior.authoritative || !prior.outcomeShown || prior.receipt?.state !in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain) || shellCreationActions[scope.selection.host]!=action) throw StorePolicy(ErrorCode.NotReady)
-        return prior
-    }
-    fun prepareSeparateShell(scope:ShellCreateScope,action:Uuid)=perform {
-        val original=displayedShellAction(scope,action)
-        if(retainedShellCreation(scope,action).second) throw StorePolicy(ErrorCode.NotReady)
-        val current=store.localAction(scope.selection.host,action) ?: throw StorePolicy(ErrorCode.NotReady)
-        if(current!=original || displayedShellAction(scope,action)!=original) throw StorePolicy(ErrorCode.NotReady)
-        separateShellCreation=scope to action
-    }
-    fun cancelSeparateShell(){separateShellCreation=null}
-    fun confirmSeparateShell()=perform {
-        val (scope,action)=separateShellCreation ?: throw StorePolicy(ErrorCode.NotReady)
-        val original=displayedShellAction(scope,action)
-        if(retainedShellCreation(scope,action).second) throw StorePolicy(ErrorCode.NotReady)
-        val current=store.localAction(scope.selection.host,action) ?: throw StorePolicy(ErrorCode.NotReady)
-        if(current!=original || displayedShellAction(scope,action)!=original || separateShellCreation!=(scope to action)) throw StorePolicy(ErrorCode.NotReady)
-        shellCreationActions.remove(scope.selection.host);shellSeparatePermit=scope to action;separateShellCreation=null;loadShellCreation(scope)
+        if(separateShellInput!=(scope to action)||prior.metadata.actionId!=action||shellInputGate?.prior!=prior||shellInputGate?.observation!=observation
+            ||shellInputSeparateStatus!=observation||shellInputObservedStatus!=observation||shellInputObserved!=(scope.selection to action)
+            ||!observation.unknown&&prior.receipt?.state!=ReceiptState.Uncertain)throw StorePolicy(ErrorCode.NotReady)
+        shellInputPermitStatus=observation;shellInputPermit=scope to action;separateShellInput=null;shellInputSeparateStatus=null
+        shellInputActions[scope.selection]=action;loadShellInput(scope)
     }
 
     private companion object {

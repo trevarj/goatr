@@ -19,6 +19,7 @@ import androidx.compose.ui.window.SecureFlagPolicy
 @Composable
 internal fun SkillsPicker(snapshot:SkillsSnapshot,model:GoatrViewModel,connectionStatus:String,compactConnectionStatus:String) {
     var query by remember(snapshot.ticket) {mutableStateOf("")}
+    DisposableEffect(snapshot.ticket) {onDispose {model.invalidateSkillsInvocation(snapshot.ticket)}}
     Dialog(onDismissRequest=model::dismissSkills,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
         Surface(Modifier.fillMaxWidth().fillMaxHeight(.9f).padding(16.dp),shape=MaterialTheme.shapes.large) {
             Column(Modifier.fillMaxSize().imePadding().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -31,6 +32,7 @@ internal fun SkillsPicker(snapshot:SkillsSnapshot,model:GoatrViewModel,connectio
                     item {Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
                         UiText(if(omp)"Enabled skill commands in this OMP session" else "Available skills for this thread directory",style=MaterialTheme.typography.bodySmall)
                         UiText("Insert adds draft text only. It never sends a message or invokes a skill.",style=MaterialTheme.typography.bodySmall)
+                        if(!omp)UiText("Invoke requests this native skill without sending your draft. Acknowledgement is admission, not execution.",style=MaterialTheme.typography.bodySmall)
                     }}
                     when {
                         snapshot.loading -> item {UiText("Loading catalogue…")}
@@ -55,11 +57,10 @@ internal fun SkillsPicker(snapshot:SkillsSnapshot,model:GoatrViewModel,connectio
                                         val mention=entry.exactInsertText()
                                         if(!entry.enabled) UiText("Disabled by native settings",style=MaterialTheme.typography.bodySmall)
                                         else if(mention==null) UiText("This native name or path cannot be represented as an exact draft reference.",style=MaterialTheme.typography.bodySmall)
-                                        if(omp){
-                                            if(entry.documentRef!=null)TextButton(onClick={model.previewSkill(snapshot,entry)},modifier=Modifier.heightIn(min=48.dp).testTag("skills_view_content")){IconLabel(MaterialGlyph.Visibility,"View content")}
-                                            else UiText("Document preview is unavailable for this native resource.",style=MaterialTheme.typography.bodySmall)
-                                        }
+                                        if(entry.enabled&&entry.documentRef!=null)TextButton(onClick={model.previewSkill(snapshot,entry)},modifier=Modifier.heightIn(min=48.dp).testTag("skills_view_content")){IconLabel(MaterialGlyph.Visibility,"View complete content")}
+                                        else UiText("Preview requires an exact enabled document under a locally granted Skill document root.",style=MaterialTheme.typography.bodySmall)
                                         TextButton(onClick={model.insertSkill(snapshot,entry)},enabled=mention!=null,modifier=Modifier.heightIn(min=48.dp).testTag("skills_insert")) {IconLabel(MaterialGlyph.Add,if(omp)"Insert command text" else "Insert")}
+                                        if(!omp)TextButton(onClick={model.invokeSkill(snapshot,entry)},enabled=!model.busy&&model.canInvokeSkill(snapshot,entry),modifier=Modifier.heightIn(min=48.dp).testTag("skills_invoke")) {UiText("Invoke")}
                                     }
                                 }
                             }
@@ -68,7 +69,7 @@ internal fun SkillsPicker(snapshot:SkillsSnapshot,model:GoatrViewModel,connectio
                             }
                         }
                     }
-                    item {UiText(if(omp)"User-authorized read-only preview. Native skill invocation is unavailable; local snippets are separate." else "Permission-preserving Codex document preview is unavailable. Local snippets are separate.",style=MaterialTheme.typography.bodySmall)}
+                    item {UiText("Document reading is independently granted on this desktop, not by model tool approval. Native OMP Skill invocation is unavailable; insertion never sends. Local snippets are separate.",style=MaterialTheme.typography.bodySmall)}
                 }
                 TextButton(onClick=model::refreshSkills,enabled=!snapshot.loading,modifier=Modifier.heightIn(min=48.dp).testTag("skills_refresh")) {IconLabel(MaterialGlyph.Refresh,"Refresh")}
             }

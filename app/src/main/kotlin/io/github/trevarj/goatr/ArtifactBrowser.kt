@@ -22,6 +22,9 @@ import androidx.compose.ui.window.SecureFlagPolicy
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
+internal const val PROJECT_FILE_READ_REQUIREMENT="Files need a current original source and an explicit desktop project-read grant. Terminal-control permission is separate."
+internal const val PROJECT_GIT_READ_REQUIREMENT="Read-only Git review needs a current original source, an explicitly granted project and the qualified confined Git runtime. Configure these on the desktop."
+
 /** Opaque original Live ownership; contains neither paths nor persistence. */
 internal class ArtifactReadContext internal constructor(internal val original:Any){internal val active=AtomicBoolean(true);internal fun invalidate(){active.set(false)}}
 internal class ArtifactBrowserState(val host:String,val source:ArtifactSource,val context:ArtifactReadContext,val origin:Screen,val conversation:ConversationKey?,var foreground:Any){
@@ -32,6 +35,20 @@ internal class ArtifactBrowserState(val host:String,val source:ArtifactSource,va
  var selected by mutableStateOf<ArtifactEntry?>(null);var exporting by mutableStateOf(false)
  var progress by mutableStateOf(0L);var exportConfirmation by mutableStateOf<ArtifactEntry?>(null)
  var ticket:Any=Any();var job:kotlinx.coroutines.Job?=null
+ fun publishPage(request:Any,page:ArtifactsListResult,requestedCursor:Uuid?,path:List<Pair<Uuid,String>>,append:Boolean):Boolean {
+  if(ticket!==request||!context.active.get()||paused)return false
+  page.validate()
+  if(page.source!=source)throw StorePolicy(ErrorCode.StaleSession)
+  if(append&&(requestedCursor==null||requestedCursor!=cursor||page.nextCursor==requestedCursor))throw StorePolicy(ErrorCode.InvalidRequest)
+  val total=(if(append)entries.size else 0)+page.entries.size
+  if(total>1000)throw StorePolicy(ErrorCode.ResourceLimit)
+  val references=HashSet<Uuid>(total)
+  if(append&&!entries.all {references.add(it.reference)}||!page.entries.all {references.add(it.reference)})throw StorePolicy(ErrorCode.InvalidRequest)
+  val next=if(append)entries+page.entries else page.entries
+  entries=next;cursor=page.nextCursor;breadcrumbs=path
+  return true
+ }
+
  override fun toString()="ArtifactBrowserState(redacted)"
 }
 internal class ArtifactPickerTicket(val browser:ArtifactBrowserState,val entry:ArtifactEntry,val token:Any)
@@ -51,14 +68,14 @@ internal fun ArtifactBrowser(shown:ArtifactBrowserState,model:GoatrViewModel,con
     },actions={
      IconButton(onClick={model.refreshArtifacts(shown)},enabled=!shown.paused&&!shown.loading&&!shown.exporting,modifier=Modifier.size(48.dp)){GoatrIcon(MaterialGlyph.Refresh,"Refresh directory")}
     })
-    UiText("Read-only · original process directory",style=MaterialTheme.typography.bodySmall)
+    UiText("Read-only · Authorized project root",style=MaterialTheme.typography.bodySmall)
     if(shown.breadcrumbs.isNotEmpty()) {
      Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {UiText(shown.breadcrumbs.joinToString(" › ") {it.second},style=MaterialTheme.typography.bodyMedium)}
      TextButton(onClick={model.artifactUp(shown)},enabled=!shown.paused&&!shown.loading&&!shown.exporting,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Back,"Up one directory")}
     }
     shown.error?.let{UiText(it,color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodyMedium)}
     if(shown.exporting)UiText("Exported ${shown.progress} bytes",style=MaterialTheme.typography.bodySmall)
-    UiText("Text preview up to 1 MiB · export up to 32 MiB. No file is opened without your explicit action.",style=MaterialTheme.typography.bodySmall)
+    UiText("Text preview up to 1 MiB · export up to 32 MiB. Contents are read only after Preview or a confirmed export destination.",style=MaterialTheme.typography.bodySmall)
     if(shown.preview!=null){
      UiText(shown.selected?.name ?: "Verified text preview",style=MaterialTheme.typography.titleMedium)
      UiText(shown.selected?.size?.let {"${it.value} bytes"} ?: "Size not supplied",style=MaterialTheme.typography.bodySmall)
@@ -70,12 +87,13 @@ internal fun ArtifactBrowser(shown:ArtifactBrowserState,model:GoatrViewModel,con
       UiText(entry.name,style=MaterialTheme.typography.titleMedium)
       UiText(if(entry.kind==ArtifactKind.Directory)"Directory" else entry.size?.let {"${it.value} bytes"} ?: "Size not supplied",style=MaterialTheme.typography.bodySmall)
       FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)){
-       if(entry.kind==ArtifactKind.Directory)TextButton(onClick={model.openArtifactDirectory(shown,entry)},enabled=!shown.paused&&!shown.loading&&!shown.exporting,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Folder,"Open")}
+       if(entry.kind==ArtifactKind.Directory)TextButton(onClick={model.openArtifactDirectory(shown,entry)},enabled=!shown.paused&&!shown.loading&&!shown.exporting&&shown.breadcrumbs.size<16,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Folder,"Open")}
        else{
         if((entry.size?.value ?: Long.MAX_VALUE)<=1024L*1024)TextButton(onClick={model.previewArtifact(shown,entry)},enabled=!shown.paused&&!shown.loading&&!shown.exporting,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Visibility,"Preview text")}
         TextButton(onClick={shown.exportConfirmation=entry},enabled=!shown.paused&&!shown.loading&&!shown.exporting&&(entry.size?.value ?: Long.MAX_VALUE)<=32L*1024*1024,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Save,"Export…")}
        }
       }
+      if(entry.kind==ArtifactKind.Directory&&shown.breadcrumbs.size>=16)UiText("Directory navigation is limited to 16 levels.",style=MaterialTheme.typography.bodySmall)
      }}
      if(shown.cursor!=null)item{TextButton(onClick={model.moreArtifacts(shown)},enabled=!shown.paused&&!shown.loading&&!shown.exporting,modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.ExpandMore,"More files")}}
     }

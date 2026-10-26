@@ -61,6 +61,41 @@ class SessionDirectoryTest {
         assertEquals(inventory.sessions,projectSessionDirectory("host",inventory.copy(hierarchy=listOf(graph,graph.copy(serverIncarnation=Uuid.random()))),true,inventory.sessions).standalone)
     }
 
+    @Test fun pendingReplacementRetainsOnlyIdenticalAcceptedPresentation() {
+        val original=fixture()
+        val accepted=presentSessionDirectory(null,"host",original,true,original.sessions)
+        val pending=presentSessionDirectory(accepted,"host",original,false,original.sessions)
+        assertSame(accepted,pending)
+        val replacement=original.copy(subscription=Uuid.random())
+        assertSame(accepted,presentSessionDirectory(pending,"host",replacement,true,replacement.sessions))
+        assertEquals(original.sessions,projectSessionDirectory("host",original,false,original.sessions).standalone)
+        assertTrue(presentSessionDirectory(accepted,"other-host",original,false,original.sessions).directory.workspaces.isEmpty())
+
+        val graph=original.hierarchy.single()
+        val changed=listOf(
+            original.copy(sessions=emptyList()),
+            original.copy(sessions=original.sessions.map {it.copy(generation=Uuid.random())}),
+            original.copy(sessions=original.sessions.map {it.copy(title="Renamed immediately")}),
+            original.copy(sessions=original.sessions.map {it.copy(capabilities=it.capabilities.copy(prompt=false))}),
+            original.copy(hierarchy=listOf(graph.copy(serverIncarnation=Uuid.random()))),
+            original.copy(hierarchy=listOf(graph.copy(freshness=NativeFreshness.Unavailable,reason=NativeUnavailableReason.SourceUnavailable,workspaces=emptyList(),tabs=emptyList(),panes=emptyList()))),
+            original.copy(servers=original.servers.map {it.copy(connectivity=ServerConnectivity.Offline)}),
+        )
+        for(snapshot in changed) {
+            val withheld=presentSessionDirectory(accepted,"host",snapshot,false,snapshot.sessions)
+            assertNull(withheld.inventory)
+            assertTrue(withheld.directory.workspaces.isEmpty())
+            assertEquals(snapshot.sessions,withheld.directory.standalone)
+            val authoritative=presentSessionDirectory(accepted,"host",snapshot,true,snapshot.sessions)
+            assertEquals(projectSessionDirectory("host",snapshot,true,snapshot.sessions),authoritative.directory)
+        }
+        val missing=presentSessionDirectory(accepted,"host",null,false,emptyList())
+        assertTrue(missing.directory.workspaces.isEmpty())
+        assertTrue(missing.directory.standalone.isEmpty())
+        assertTrue(presentSessionDirectory(missing,"host",original,false,original.sessions).directory.workspaces.isEmpty())
+        assertTrue(presentSessionDirectory(null,"host",original,false,original.sessions).directory.workspaces.isEmpty())
+    }
+
     @Test fun narrowedDirectoryDoesNotInventAnEmptyWorkspaceMatch() {
         val inventory=fixture()
         assertEquals(1,projectSessionDirectory("host",inventory,true,emptyList()).workspaces.size)

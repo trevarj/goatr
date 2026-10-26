@@ -40,8 +40,9 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
- * Test-package-only UI observer for an already running Goatr debug process.
- * It never starts, owns, or calls into the product process.
+ * Test-package-only native UI owner. Ordinary observer actions never start the product.
+ * Delivery helpers use the admitted instrumentation to click one existing owned OS alert;
+ * they never substitute a direct component start for that native user interaction.
  */
 public final class OwnedUiAutomationRunner extends Instrumentation {
     private Bundle runnerArguments = new Bundle();
@@ -89,7 +90,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             stage.stage = Stage.OBSERVATION;
             if (request.action == Action.BACKGROUND_OWNED_APP || request.action == Action.OPEN_TERMINAL || request.action == Action.OPEN_WORKTREES || request.action == Action.OPEN_CHANGES) {
                 exactConversationWindow(automation, request.sessionId, request.sessionGeneration, deadline);
-            } else if (request.action == Action.REFRESH_TERMINAL || request.action == Action.CLOSE_TERMINAL || request.action == Action.OBSERVE_TERMINAL) {
+            } else if (request.action == Action.CLOSE_TERMINAL || request.action == Action.OBSERVE_TERMINAL) {
                 terminalTargetWindow(automation, request.sessionId, request.sessionGeneration, deadline);
             } else if (request.action == Action.REFRESH_WORKTREES || request.action == Action.CLOSE_WORKTREES || request.action == Action.OBSERVE_WORKTREES) {
                 worktreesTargetWindow(automation, request.sessionId, request.sessionGeneration, deadline);
@@ -162,8 +163,6 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
                 result = dismissComposerKeyboard(automation, request.sessionId, request.sessionGeneration, deadline, acknowledgement, stage);
             } else if (request.action == Action.OPEN_TERMINAL) {
                 result = openTerminal(automation, request.sessionId, request.sessionGeneration, deadline, acknowledgement, stage);
-            } else if (request.action == Action.REFRESH_TERMINAL) {
-                result = refreshTerminal(automation, request.sessionId, request.sessionGeneration, deadline, acknowledgement, stage);
             } else if (request.action == Action.CLOSE_TERMINAL) {
                 result = closeTerminal(automation, request.sessionId, request.sessionGeneration, deadline, acknowledgement, stage);
             } else if (request.action == Action.OPEN_WORKTREES) {
@@ -411,7 +410,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         return result;
     }
 
-    private void requireEligible(Context test, Context ownTarget) throws PackageManager.NameNotFoundException {
+    private static void requireEligible(Context test, Context ownTarget) throws PackageManager.NameNotFoundException {
         requireCondition(TEST_PACKAGE.equals(test.getPackageName()) && TEST_PACKAGE.equals(ownTarget.getPackageName()), "test_package");
         requireCondition(Build.VERSION.SDK_INT >= MIN_API && Build.VERSION.SDK_INT <= MAX_API, "api_bounds");
         ApplicationInfo testInfo = test.getPackageManager().getApplicationInfo(TEST_PACKAGE, 0);
@@ -423,8 +422,263 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         requireCondition(testSigners.size() == 1 && testSigners.equals(productSigners), "signer_mismatch");
     }
 
+    /** Same admitted test process, not a new runner command or an app-start shortcut. */
+    private static UiAutomation deliveryAutomation(Instrumentation instrumentation) throws PackageManager.NameNotFoundException {
+        requireCondition(instrumentation instanceof OwnedInstrumentationRunner, "delivery_instrumentation");
+        requireCondition(((OwnedInstrumentationRunner) instrumentation).controlIdentity().length == 65, "delivery_instrumentation");
+        requireCondition(PRODUCT_PACKAGE.equals(instrumentation.getTargetContext().getPackageName()), "product_package");
+        requireEligible(instrumentation.getContext(), instrumentation.getContext());
+        requireCondition(Build.VERSION.SDK_INT == 34, "api_bounds");
+        return instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+    }
+
+    private static String deliveryHomePackage(Instrumentation instrumentation) {
+        android.content.pm.ResolveInfo home = instrumentation.getContext().getPackageManager().resolveActivity(
+                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_DEFAULT_ONLY);
+        requireCondition(home != null && home.activityInfo != null && home.activityInfo.packageName != null
+                && !PRODUCT_PACKAGE.equals(home.activityInfo.packageName), "home_resolution_invalid");
+        return home.activityInfo.packageName;
+    }
+
+    /** Identifier-only scan, retaining the existing secret/terminal/document subtree boundary. */
+    private static boolean deliveryScene(AccessibilityNodeInfo root, String first, String second, long deadline) {
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(AccessibilityNodeInfo.obtain(root));
+        int discovered = 1, firstCount = 0, secondCount = 0;
+        try {
+            while (!queue.isEmpty()) {
+                AccessibilityNodeInfo node = queue.removeFirst();
+                try {
+                    requireBeforeDeadline(deadline);
+                    requireCondition(node.getWindowId() == root.getWindowId(), "ui_root_changed");
+                    if (isSensitiveContent(node)) continue;
+                    if (node.isVisibleToUser()) {
+                        if (first.equals(node.getViewIdResourceName())) firstCount++;
+                        if (second != null && second.equals(node.getViewIdResourceName())) secondCount++;
+                    }
+                    for (int i = 0; i < node.getChildCount(); i++) {
+                        requireCondition(discovered++ < MAX_NODES, "ui_node_bound");
+                        AccessibilityNodeInfo child = node.getChild(i);
+                        requireCondition(child != null, "ui_child_missing");
+                        queue.addLast(child);
+                    }
+                } finally { node.recycle(); }
+            }
+            return firstCount == 1 && (second == null || secondCount == 1);
+        } finally { recycleQueue(queue); }
+    }
+
+    static void backgroundOwnedDeliveryConversation(Instrumentation instrumentation, String session, String generation) throws PackageManager.NameNotFoundException {
+        long deadline = SystemClock.elapsedRealtime() + TIMEOUT_MILLIS;
+        UiAutomation automation = deliveryAutomation(instrumentation);
+        InteractiveWindowsService windows = enableInteractiveWindows(automation);
+        try {
+            AccessibilityNodeInfo original = currentProductRoot(automation, deadline);
+            try {
+                requireCondition(deliveryScene(original, CONVERSATION_LIST_TAG, CONVERSATION_TARGET_TAG_PREFIX + session + "_" + generation, deadline), "conversation_target_mismatch");
+                AccessibilityNodeInfo current = currentProductRoot(automation, deadline);
+                try { requireCondition(current.equals(original) && original.refresh()
+                        && deliveryScene(current, CONVERSATION_LIST_TAG, CONVERSATION_TARGET_TAG_PREFIX + session + "_" + generation, deadline), "ui_root_changed"); }
+                finally { current.recycle(); }
+                requireBeforeDeadline(deadline);
+                requireCondition(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME), "ui_global_action_acknowledgement");
+            } finally { original.recycle(); }
+            String home = deliveryHomePackage(instrumentation);
+            while (SystemClock.elapsedRealtime() < deadline) {
+                AccessibilityNodeInfo root = automation.getRootInActiveWindow();
+                if (root != null) {
+                    try {
+                        if (home.contentEquals(root.getPackageName())) return;
+                        requireCondition(PRODUCT_PACKAGE.contentEquals(root.getPackageName()), "ui_root_foreign");
+                    } finally { root.recycle(); }
+                }
+                SystemClock.sleep(POLL_MILLIS);
+            }
+            throw new Blocked("expected_screen_timeout");
+        } finally { restoreInteractiveWindows(automation, windows); }
+    }
+
+    private static void requireSingleDeliveryAlert(android.app.NotificationManager manager, android.service.notification.StatusBarNotification selected, String host, String event) {
+        requireCondition(host != null && host.matches("[0-9a-f]{64}") && event != null && UUID.fromString(event).toString().equals(event), "notification_identity");
+        String tag = "goatr.attention." + host + "." + event;
+        requireCondition(PRODUCT_PACKAGE.equals(selected.getPackageName()) && tag.equals(selected.getTag())
+                && selected.getUid() == Process.myUid() && selected.getNotification().contentIntent != null, "notification_identity");
+        int count = 0, exact = 0;
+        for (android.service.notification.StatusBarNotification current : manager.getActiveNotifications()) {
+            if (current.getTag() == null || !current.getTag().startsWith("goatr.attention.")) continue;
+            count++;
+            if (current.getKey().equals(selected.getKey()) && tag.equals(current.getTag())
+                    && current.getUid() == selected.getUid() && current.getId() == selected.getId()) exact++;
+        }
+        requireCondition(count == 1 && exact == 1, "notification_ambiguous");
+    }
+
+    /** Reads only public app-name fields, then the one proved-owned row's closed generic title. */
+    private static boolean deliveryRowMatches(AccessibilityNodeInfo row, String appLabel, String title, long deadline) {
+        int labels = 0, owned = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+            queue.add(AccessibilityNodeInfo.obtain(row));
+            int discovered = 1, titles = 0;
+            try {
+                while (!queue.isEmpty()) {
+                    AccessibilityNodeInfo node = queue.removeFirst();
+                    try {
+                        requireBeforeDeadline(deadline);
+                        requireCondition(node.getWindowId() == row.getWindowId(), "ui_root_changed");
+                        if (isSensitiveContent(node)) continue;
+                        String id = node.getViewIdResourceName();
+                        if (node.isVisibleToUser() && ("android:id/app_name_text".equals(id) || "com.android.systemui:id/app_name_text".equals(id)) && pass == 0) {
+                            labels++;
+                            if (node.getText() != null && appLabel.contentEquals(node.getText())) owned++;
+                        }
+                        if (pass == 1 && node.isVisibleToUser() && "android:id/title".equals(id) && node.getText() != null && title.contentEquals(node.getText())) titles++;
+                        for (int i = 0; i < node.getChildCount(); i++) {
+                            requireCondition(discovered++ < MAX_NODES, "ui_node_bound");
+                            AccessibilityNodeInfo child = node.getChild(i);
+                            requireCondition(child != null, "ui_child_missing");
+                            queue.addLast(child);
+                        }
+                    } finally { node.recycle(); }
+                }
+            } finally { recycleQueue(queue); }
+            if (pass == 0 && (labels != 1 || owned != 1)) return false;
+            if (pass == 1) return titles == 1;
+        }
+        return false;
+    }
+
+    private static NodeRef uniqueDeliveryRow(AccessibilityNodeInfo root, String appLabel, String title, long deadline) {
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(AccessibilityNodeInfo.obtain(root));
+        AccessibilityNodeInfo selected = null;
+        int discovered = 1;
+        try {
+            while (!queue.isEmpty()) {
+                AccessibilityNodeInfo node = queue.removeFirst();
+                try {
+                    requireBeforeDeadline(deadline);
+                    requireCondition(node.getWindowId() == root.getWindowId(), "ui_root_changed");
+                    if (isSensitiveContent(node)) continue;
+                    String id = node.getViewIdResourceName();
+                    if (node.isVisibleToUser() && ("android:id/app_name_text".equals(id) || "com.android.systemui:id/app_name_text".equals(id)) && node.getText() != null && appLabel.contentEquals(node.getText())) {
+                        AccessibilityNodeInfo ancestor = AccessibilityNodeInfo.obtain(node);
+                        try {
+                            for (int depth = 0; ancestor != null && depth < MAX_RECEIPT_ANCESTORS; depth++) {
+                                NodeMetadata facts = metadata(ancestor);
+                                if (facts.windowId != root.getWindowId()) throw new Blocked("ui_root_changed");
+                                if (facts.visible && facts.enabled && facts.clickable && deliveryRowMatches(ancestor, appLabel, title, deadline)) {
+                                    requireCondition(selected == null || selected.equals(ancestor), "notification_ambiguous");
+                                    if (selected == null) selected = AccessibilityNodeInfo.obtain(ancestor);
+                                    break;
+                                }
+                                AccessibilityNodeInfo parent = ancestor.getParent();
+                                ancestor.recycle(); ancestor = parent;
+                            }
+                        } finally { if (ancestor != null) ancestor.recycle(); }
+                    }
+                    for (int i = 0; i < node.getChildCount(); i++) {
+                        requireCondition(discovered++ < MAX_NODES, "ui_node_bound");
+                        AccessibilityNodeInfo child = node.getChild(i);
+                        requireCondition(child != null, "ui_child_missing");
+                        queue.addLast(child);
+                    }
+                } finally { node.recycle(); }
+            }
+            requireCondition(selected != null, "notification_row_unavailable");
+            NodeRef result = new NodeRef(selected, root.getWindowId()); selected = null; return result;
+        } finally { recycleQueue(queue); if (selected != null) selected.recycle(); }
+    }
+
+    static void tapOwnedDeliveryNotification(Instrumentation instrumentation, android.app.NotificationManager manager,
+            android.service.notification.StatusBarNotification selected, String host, String event) throws PackageManager.NameNotFoundException {
+        long deadline = SystemClock.elapsedRealtime() + TIMEOUT_MILLIS;
+        UiAutomation automation = deliveryAutomation(instrumentation);
+        requireSingleDeliveryAlert(manager, selected, host, event);
+        CharSequence raw = selected.getNotification().extras.getCharSequence(android.app.Notification.EXTRA_TITLE);
+        requireCondition(raw != null && Arrays.asList("Work finished on desktop", "Desktop needs attention", "Agent finished", "Agent needs attention").contains(raw.toString()), "notification_title_unavailable");
+        String title = raw.toString();
+        String appLabel = instrumentation.getTargetContext().getApplicationInfo().loadLabel(instrumentation.getTargetContext().getPackageManager()).toString();
+        String home = deliveryHomePackage(instrumentation);
+        InteractiveWindowsService windows = enableInteractiveWindows(automation);
+        AccessibilityNodeInfo originalShade = null;
+        try {
+            AccessibilityNodeInfo before = automation.getRootInActiveWindow();
+            requireCondition(before != null, "ui_root_missing");
+            int homeWindow;
+            try {
+                homeWindow = before.getWindowId();
+                boolean shade = "com.android.systemui".contentEquals(before.getPackageName())
+                        && deliveryScene(before, "com.android.systemui:id/notification_stack_scroller", null, deadline);
+                requireCondition(home.contentEquals(before.getPackageName()) || shade, "ui_root_foreign");
+                if (shade) originalShade = AccessibilityNodeInfo.obtain(before);
+                requireBeforeDeadline(deadline);
+                if (!shade) requireCondition(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS), "ui_global_action_acknowledgement");
+            } finally { before.recycle(); }
+            while (SystemClock.elapsedRealtime() < deadline) {
+                AccessibilityNodeInfo root = automation.getRootInActiveWindow();
+                if (root == null) { SystemClock.sleep(POLL_MILLIS); continue; }
+                try {
+                    if (originalShade == null && home.contentEquals(root.getPackageName()) && root.getWindowId() == homeWindow) { SystemClock.sleep(POLL_MILLIS); continue; }
+                    requireCondition("com.android.systemui".contentEquals(root.getPackageName())
+                            && deliveryScene(root, "com.android.systemui:id/notification_stack_scroller", null, deadline), "ui_root_foreign");
+                    if (originalShade == null) originalShade = AccessibilityNodeInfo.obtain(root);
+                    else requireCondition(originalShade.equals(root), "ui_root_changed");
+                    NodeRef row;
+                    try { row = uniqueDeliveryRow(root, appLabel, title, deadline); }
+                    catch (Blocked unavailable) {
+                        if (!"notification_row_unavailable".equals(unavailable.code)) throw unavailable;
+                        SystemClock.sleep(POLL_MILLIS); continue; // Observation only, same original shade.
+                    }
+                    try {
+                        requireSingleDeliveryAlert(manager, selected, host, event);
+                        AccessibilityNodeInfo current = automation.getRootInActiveWindow();
+                        requireCondition(current != null, "ui_root_missing");
+                        try {
+                            requireCondition(current.equals(root) && current.getWindowId() == row.windowId && "com.android.systemui".contentEquals(current.getPackageName()), "ui_root_changed");
+                            NodeRef same = uniqueDeliveryRow(current, appLabel, title, deadline);
+                            try { requireCondition(same.node.equals(row.node) && row.node.refresh(), "ui_revalidation"); }
+                            finally { same.node.recycle(); }
+                        } finally { current.recycle(); }
+                        NodeMetadata facts = metadata(row.node);
+                        requireCondition(facts.visible && facts.enabled && facts.clickable && facts.windowId == root.getWindowId(), "ui_revalidation");
+                        requireSingleDeliveryAlert(manager, selected, host, event);
+                        requireCondition(deliveryRowMatches(row.node, appLabel, title, deadline), "ui_revalidation");
+                        AccessibilityNodeInfo finalRoot = automation.getRootInActiveWindow();
+                        requireCondition(finalRoot != null, "ui_root_missing");
+                        try { requireCondition(finalRoot.equals(originalShade) && finalRoot.getWindowId() == row.windowId, "ui_root_changed"); }
+                        finally { finalRoot.recycle(); }
+                        requireBeforeDeadline(deadline);
+                        requireCondition(row.node.performAction(AccessibilityNodeInfo.ACTION_CLICK), "ui_click_acknowledgement");
+                        return; // Never retry or substitute an entered click.
+                    } finally { row.node.recycle(); }
+                } finally { root.recycle(); }
+            }
+            throw new Blocked("expected_screen_timeout");
+        } finally { if (originalShade != null) originalShade.recycle(); restoreInteractiveWindows(automation, windows); }
+    }
+
     private ActionResult clickAndObserve(UiAutomation automation, Action action, long deadline, Acknowledgement acknowledgement, StageTracker stage) {
         if (action.tag == null) throw new Blocked("action_tag");
+        if (action == Action.NAV_HOSTS || action == Action.NAV_SESSIONS || action == Action.OPEN_SESSION_LIST_SETTINGS) {
+            stage.stage = Stage.SELECTION;
+            NodeRef menu = uniqueClickableTag(automation, "navigation_menu", deadline);
+            boolean menuAccepted;
+            try {
+                stage.stage = Stage.CLICK;
+                requireCondition(revalidate(automation, menu, "navigation_menu", deadline), "ui_revalidation");
+                requireBeforeDeadline(deadline);
+                menuAccepted = menu.node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            } finally {
+                menu.node.recycle();
+            }
+            requireCondition(menuAccepted, "ui_click_acknowledgement");
+            stage.stage = Stage.POSTCONDITION;
+            while (!tagPresent(automation, action.tag, deadline)) {
+                requireBeforeDeadline(deadline);
+                SystemClock.sleep(POLL_MILLIS);
+            }
+        }
         stage.stage = Stage.SELECTION;
         NodeRef node = uniqueClickableTag(automation, action.tag, deadline);
         boolean clickAccepted;
@@ -882,25 +1136,6 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         return new ActionResult(true, true, awaitTerminalDialog(automation, sessionId, sessionGeneration, deadline));
     }
 
-    private ActionResult refreshTerminal(UiAutomation automation, String sessionId, String sessionGeneration, long deadline, Acknowledgement acknowledgement, StageTracker stage) {
-        stage.stage = Stage.SELECTION;
-        int dialogWindow = terminalTargetWindow(automation, sessionId, sessionGeneration, deadline);
-        NodeRef dialog = uniqueVisibleTag(automation, TERMINAL_DIALOG_TAG, deadline, dialogWindow);
-        NodeRef node = uniqueDialogAction(dialog.node, dialog.windowId, TERMINAL_REFRESH_TAG, deadline);
-        boolean accepted;
-        try {
-            stage.stage = Stage.CLICK;
-            requireCondition(revalidateTerminalDialogAction(automation, node, TERMINAL_REFRESH_TAG, sessionId, sessionGeneration, deadline), "ui_revalidation");
-            requireBeforeDeadline(deadline);
-            accepted = node.node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-        } finally {
-            node.node.recycle();
-        }
-        requireCondition(accepted, "ui_click_acknowledgement");
-        acknowledgement.value = true;
-        stage.stage = Stage.POSTCONDITION;
-        return new ActionResult(true, true, awaitTerminalDialog(automation, sessionId, sessionGeneration, deadline));
-    }
 
     private ActionResult closeTerminal(UiAutomation automation, String sessionId, String sessionGeneration, long deadline, Acknowledgement acknowledgement, StageTracker stage) {
         stage.stage = Stage.SELECTION;
@@ -2503,7 +2738,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         }
     }
 
-    private InteractiveWindowsService enableInteractiveWindows(UiAutomation automation) {
+    private static InteractiveWindowsService enableInteractiveWindows(UiAutomation automation) {
         AccessibilityServiceInfo serviceInfo = automation.getServiceInfo();
         if (serviceInfo == null) throw new Blocked("interactive_windows_unavailable");
         int originalFlags = serviceInfo.flags;
@@ -2512,7 +2747,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         return new InteractiveWindowsService(serviceInfo, originalFlags);
     }
 
-    private void restoreInteractiveWindows(UiAutomation automation, InteractiveWindowsService service) {
+    private static void restoreInteractiveWindows(UiAutomation automation, InteractiveWindowsService service) {
         service.serviceInfo.flags = service.originalFlags;
         automation.setServiceInfo(service.serviceInfo);
     }
@@ -3080,10 +3315,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         boolean terminalDialog = false;
         boolean terminalOutput = false;
         boolean terminalLoading = false;
-        boolean terminalEmpty = false;
         boolean terminalError = false;
-        boolean terminalTruncated = false;
-        boolean terminalRefreshEnabled = false;
         boolean terminalCloseEnabled = false;
         int worktreesDialogs = 0;
         int changesDialogs = 0;
@@ -3174,10 +3406,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
                     if (INVENTORY_REFRESH_TAG.equals(metadata.viewId)) inventoryRefresh++;
                     if (TERMINAL_DIALOG_TAG.equals(metadata.viewId)) terminalDialog = true;
                     if (TERMINAL_LOADING_TAG.equals(metadata.viewId)) terminalLoading = true;
-                    if (TERMINAL_EMPTY_TAG.equals(metadata.viewId)) terminalEmpty = true;
                     if (TERMINAL_ERROR_TAG.equals(metadata.viewId)) terminalError = true;
-                    if (TERMINAL_TRUNCATED_TAG.equals(metadata.viewId)) terminalTruncated = true;
-                    if (TERMINAL_REFRESH_TAG.equals(metadata.viewId)) terminalRefreshEnabled = metadata.enabled && metadata.clickable;
                     if (TERMINAL_CLOSE_TAG.equals(metadata.viewId)) terminalCloseEnabled = metadata.enabled && metadata.clickable;
                     CharSequence text = node.getText();
                     if (text != null) {
@@ -3232,8 +3461,8 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         if (hostSettingsPanels > 1) throw new Blocked("ui_duplicate");
         int appearanceControls = appearanceSystem + appearanceLight + appearanceDark;
         if (appearanceControls != 0 && (appearanceControls != UiAppearance.values().length || selectedAppearances != 1)) selectedAppearance = "error";
-        String terminalState = !terminalDialog ? "hidden" : terminalLoading ? "loading" : terminalError ? "error" : terminalEmpty ? "empty" : terminalOutput ? "ready" : "error";
-        Observation result = new Observation(windowId, hosts == 1, sessions == 1, conversations == 1, appearanceSystem == 1, selectedAppearance, newSession == 1, inventoryRefresh == 1, connectedDirect, connectedRelay, offline, creationNames == 1, creationNameEmpty, creationDetailsShown, creationActions == 1, selectedProvider, creationBlocker, null, "none", receipts, terminalDialog, terminalState, terminalTruncated, terminalRefreshEnabled, terminalCloseEnabled, worktreesDialogs == 1, changesDialogs == 1);
+        String terminalState = !terminalDialog ? "hidden" : terminalLoading ? "loading" : terminalError ? "error" : terminalOutput ? "ready" : "error";
+        Observation result = new Observation(windowId, hosts == 1, sessions == 1, conversations == 1, appearanceSystem == 1, selectedAppearance, newSession == 1, inventoryRefresh == 1, connectedDirect, connectedRelay, offline, creationNames == 1, creationNameEmpty, creationDetailsShown, creationActions == 1, selectedProvider, creationBlocker, null, "none", receipts, terminalDialog, terminalState, terminalCloseEnabled, worktreesDialogs == 1, changesDialogs == 1);
         result.snippetState = snippetScopes == 0 && snippetDeletes == 0 ? "unavailable" : snippetState;
         result.snippetId = snippetId;
         result.snippetDraft = snippetScopes == 1 ? snippetDraft : "unavailable";
@@ -3271,7 +3500,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
     }
 
     /** Final click validation never waits for a new root or retries an action. */
-    private AccessibilityNodeInfo currentProductRoot(UiAutomation automation, long deadline) {
+    private static AccessibilityNodeInfo currentProductRoot(UiAutomation automation, long deadline) {
         requireBeforeDeadline(deadline);
         AccessibilityNodeInfo root = automation.getRootInActiveWindow();
         requireBeforeDeadline(deadline);
@@ -3492,7 +3721,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         return "other";
     }
 
-    private NodeMetadata metadata(AccessibilityNodeInfo node) {
+    private static NodeMetadata metadata(AccessibilityNodeInfo node) {
         CharSequence packageName = node.getPackageName();
         boolean clickable = false;
         boolean setText = false;
@@ -3526,24 +3755,24 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
     }
 
     /** This tag is a hard privacy boundary: only its identifier is inspected. */
-    private boolean isTerminalOutput(AccessibilityNodeInfo node) {
+    private static boolean isTerminalOutput(AccessibilityNodeInfo node) {
         return TERMINAL_OUTPUT_TAG.equals(node.getViewIdResourceName());
     }
 
     /** Worktree values are repository-derived and are never read by automation. */
-    private boolean isWorktreesSensitive(AccessibilityNodeInfo node) {
+    private static boolean isWorktreesSensitive(AccessibilityNodeInfo node) {
         String tag = node.getViewIdResourceName();
         return WORKTREES_LIST_TAG.equals(tag) || WORKTREES_ENTRY_TAG.equals(tag);
     }
 
     /** Changes contain paths, revision names and patches; automation never reads their subtree. */
-    private boolean isChangesSensitive(AccessibilityNodeInfo node) {
+    private static boolean isChangesSensitive(AccessibilityNodeInfo node) {
         String tag = node.getViewIdResourceName();
         return CHANGES_BODY_TAG.equals(tag) || CHANGES_ENTRY_TAG.equals(tag) || CHANGES_STAGED_PATCH_TAG.equals(tag) || CHANGES_UNSTAGED_PATCH_TAG.equals(tag);
     }
 
     /** Shared privacy boundary for every walker that could otherwise read descendants. */
-    private boolean isSensitiveContent(AccessibilityNodeInfo node) {
+    private static boolean isSensitiveContent(AccessibilityNodeInfo node) {
         return node.isPassword()
                 || PAIRING_SCENE_TAGS.contains(node.getViewIdResourceName())
                 || isTerminalOutput(node)
@@ -3552,7 +3781,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
     }
 
     @SuppressWarnings("deprecation")
-    private Set<String> signerDigests(Context context, String packageName) throws PackageManager.NameNotFoundException {
+    private static Set<String> signerDigests(Context context, String packageName) throws PackageManager.NameNotFoundException {
         android.content.pm.PackageInfo info = context.getPackageManager().getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
         Set<String> digests = new HashSet<>();
         if (info.signatures != null) {
@@ -3575,7 +3804,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         return new RunnerIdentity(pid, start);
     }
 
-    private void requireBeforeDeadline(long deadline) {
+    private static void requireBeforeDeadline(long deadline) {
         if (SystemClock.elapsedRealtime() >= deadline) throw new Blocked("deadline");
     }
 
@@ -3686,7 +3915,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         return ErrorFamily.OTHER;
     }
 
-    private String digest(byte[] bytes) {
+    private static String digest(byte[] bytes) {
         try {
             byte[] value = MessageDigest.getInstance("SHA-256").digest(bytes);
             StringBuilder result = new StringBuilder(value.length * 2);
@@ -3859,8 +4088,6 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         final Map<String, ReceiptEvidence> receipts;
         final boolean terminalDialog;
         final String terminalState;
-        final boolean terminalTruncated;
-        final boolean terminalRefreshEnabled;
         final boolean terminalCloseEnabled;
         final boolean worktreesDialog;
         final boolean changesDialog;
@@ -3890,7 +4117,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         boolean sessionListGroupByStatus;
         boolean sessionListWorkspaceContext;
         boolean sessionListHostContext;
-        Observation(int windowId, boolean hosts, boolean sessions, boolean conversation, boolean appearanceSystem, String selectedAppearance, boolean newSession, boolean inventoryRefresh, boolean connectedDirect, boolean connectedRelay, boolean offline, boolean creationName, boolean creationNameEmpty, boolean creationDetailsShown, boolean creationActionAvailable, String selectedProvider, String creationBlocker, String receiptId, String receiptState, Map<String, ReceiptEvidence> receipts, boolean terminalDialog, String terminalState, boolean terminalTruncated, boolean terminalRefreshEnabled, boolean terminalCloseEnabled, boolean worktreesDialog, boolean changesDialog) {
+        Observation(int windowId, boolean hosts, boolean sessions, boolean conversation, boolean appearanceSystem, String selectedAppearance, boolean newSession, boolean inventoryRefresh, boolean connectedDirect, boolean connectedRelay, boolean offline, boolean creationName, boolean creationNameEmpty, boolean creationDetailsShown, boolean creationActionAvailable, String selectedProvider, String creationBlocker, String receiptId, String receiptState, Map<String, ReceiptEvidence> receipts, boolean terminalDialog, String terminalState, boolean terminalCloseEnabled, boolean worktreesDialog, boolean changesDialog) {
             this.windowId = windowId;
             this.hosts = hosts;
             this.sessions = sessions;
@@ -3913,8 +4140,6 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             this.receipts = receipts;
             this.terminalDialog = terminalDialog;
             this.terminalState = terminalState;
-            this.terminalTruncated = terminalTruncated;
-            this.terminalRefreshEnabled = terminalRefreshEnabled;
             this.terminalCloseEnabled = terminalCloseEnabled;
             this.worktreesDialog = worktreesDialog;
             this.changesDialog = changesDialog;
@@ -3945,8 +4170,8 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             this.sessionListWorkspaceContext = false;
             this.sessionListHostContext = false;
         }
-        static Observation empty() { return new Observation(NO_WINDOW, false, false, false, false, "unavailable", false, false, false, false, false, false, false, false, false, "none", "none", null, "none", new HashMap<String, ReceiptEvidence>(), false, "hidden", false, false, false, false, false); }
-        Observation withReceipt(String receiptId, String receiptState) { Observation result = new Observation(windowId, hosts, sessions, conversation, appearanceSystem, selectedAppearance, newSession, inventoryRefresh, connectedDirect, connectedRelay, offline, creationName, creationNameEmpty, creationDetailsShown, creationActionAvailable, selectedProvider, creationBlocker, receiptId, receiptState, receipts, terminalDialog, terminalState, terminalTruncated, terminalRefreshEnabled, terminalCloseEnabled, worktreesDialog, changesDialog); result.hostSettingsPanel=hostSettingsPanel; result.creationServerSelected=creationServerSelected; result.creationProjectSelected=creationProjectSelected; result.creationPickerTraversalComplete=creationPickerTraversalComplete; result.creationPickerProductWindowCount=creationPickerProductWindowCount; result.creationCloseTotal=creationCloseTotal; result.creationCloseVisible=creationCloseVisible; result.creationCloseEnabled=creationCloseEnabled; result.creationServerTotal=creationServerTotal; result.creationServerVisible=creationServerVisible; result.creationServerOptionTotal=creationServerOptionTotal; result.creationServerOptionVisible=creationServerOptionVisible; result.creationServerOptionEnabled=creationServerOptionEnabled; result.creationServerOptionClickSupported=creationServerOptionClickSupported; result.creationServerOptionExpectedLabelCount=creationServerOptionExpectedLabelCount; result.creationServerOptionExpectedLabel=creationServerOptionExpectedLabel; result.creationSheetAndOptionDifferentWindows=creationSheetAndOptionDifferentWindows; result.snippetState=snippetState; result.snippetId=snippetId; result.snippetDraft=snippetDraft; result.snippetSaveState=snippetSaveState; result.homeObserved=homeObserved; result.productForeground=productForeground; result.sessionListPreferencesObserved=sessionListPreferencesObserved; result.sessionListGroupByStatus=sessionListGroupByStatus; result.sessionListWorkspaceContext=sessionListWorkspaceContext; result.sessionListHostContext=sessionListHostContext; return result; }
+        static Observation empty() { return new Observation(NO_WINDOW, false, false, false, false, "unavailable", false, false, false, false, false, false, false, false, false, "none", "none", null, "none", new HashMap<String, ReceiptEvidence>(), false, "hidden", false, false, false); }
+        Observation withReceipt(String receiptId, String receiptState) { Observation result = new Observation(windowId, hosts, sessions, conversation, appearanceSystem, selectedAppearance, newSession, inventoryRefresh, connectedDirect, connectedRelay, offline, creationName, creationNameEmpty, creationDetailsShown, creationActionAvailable, selectedProvider, creationBlocker, receiptId, receiptState, receipts, terminalDialog, terminalState, terminalCloseEnabled, worktreesDialog, changesDialog); result.hostSettingsPanel=hostSettingsPanel; result.creationServerSelected=creationServerSelected; result.creationProjectSelected=creationProjectSelected; result.creationPickerTraversalComplete=creationPickerTraversalComplete; result.creationPickerProductWindowCount=creationPickerProductWindowCount; result.creationCloseTotal=creationCloseTotal; result.creationCloseVisible=creationCloseVisible; result.creationCloseEnabled=creationCloseEnabled; result.creationServerTotal=creationServerTotal; result.creationServerVisible=creationServerVisible; result.creationServerOptionTotal=creationServerOptionTotal; result.creationServerOptionVisible=creationServerOptionVisible; result.creationServerOptionEnabled=creationServerOptionEnabled; result.creationServerOptionClickSupported=creationServerOptionClickSupported; result.creationServerOptionExpectedLabelCount=creationServerOptionExpectedLabelCount; result.creationServerOptionExpectedLabel=creationServerOptionExpectedLabel; result.creationSheetAndOptionDifferentWindows=creationSheetAndOptionDifferentWindows; result.snippetState=snippetState; result.snippetId=snippetId; result.snippetDraft=snippetDraft; result.snippetSaveState=snippetSaveState; result.homeObserved=homeObserved; result.productForeground=productForeground; result.sessionListPreferencesObserved=sessionListPreferencesObserved; result.sessionListGroupByStatus=sessionListGroupByStatus; result.sessionListWorkspaceContext=sessionListWorkspaceContext; result.sessionListHostContext=sessionListHostContext; return result; }
         Observation withHomeObservation(boolean homeObserved, boolean productForeground) { this.homeObserved = homeObserved; this.productForeground = productForeground; return this; }
         Observation withSessionListPreferences(boolean groupByStatus, boolean workspaceContext, boolean hostContext) { this.sessionListPreferencesObserved = true; this.sessionListGroupByStatus = groupByStatus; this.sessionListWorkspaceContext = workspaceContext; this.sessionListHostContext = hostContext; return this; }
         int visibleTagCount(String tag) {
@@ -3992,7 +4217,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             String actionValue = action == null ? "null" : "\"" + action.wire + "\"";
             String receipt = observation.receiptId == null ? "null" : "\"" + observation.receiptId + "\"";
             String snippet = observation.snippetId == null ? "null" : "\"" + observation.snippetId + "\"";
-            return "{\"runId\":" + run + ",\"action\":" + actionValue + ",\"outcome\":\"" + outcome + "\",\"guard\":\"" + guard + "\",\"stage\":\"" + stage.wire + "\",\"errorFamily\":\"" + errorFamily.wire + "\",\"acknowledged\":" + acknowledged + ",\"expectedScreenObserved\":" + expectedScreenObserved + ",\"selectedAppearance\":\"" + observation.selectedAppearance + "\",\"snippetState\":\"" + observation.snippetState + "\",\"snippetId\":" + snippet + ",\"snippetDraft\":\"" + observation.snippetDraft + "\",\"snippetSaveState\":\"" + observation.snippetSaveState + "\",\"hosts\":" + observation.hosts + ",\"sessions\":" + observation.sessions + ",\"newSession\":" + observation.newSession + ",\"connectedDirect\":" + observation.connectedDirect + ",\"connectedRelay\":" + observation.connectedRelay + ",\"offline\":" + observation.offline + ",\"creationName\":" + observation.creationName + ",\"creationNameEmpty\":" + observation.creationNameEmpty + ",\"creationDetailsShown\":" + observation.creationDetailsShown + ",\"creationActionAvailable\":" + observation.creationActionAvailable + ",\"creationServerSelected\":" + observation.creationServerSelected + ",\"creationProjectSelected\":" + observation.creationProjectSelected + ",\"creationPickerTraversalComplete\":" + observation.creationPickerTraversalComplete + ",\"creationPickerProductWindowCount\":" + observation.creationPickerProductWindowCount + ",\"creationCloseTotal\":" + observation.creationCloseTotal + ",\"creationCloseVisible\":" + observation.creationCloseVisible + ",\"creationCloseEnabled\":" + observation.creationCloseEnabled + ",\"creationServerTotal\":" + observation.creationServerTotal + ",\"creationServerVisible\":" + observation.creationServerVisible + ",\"creationServerOptionTotal\":" + observation.creationServerOptionTotal + ",\"creationServerOptionVisible\":" + observation.creationServerOptionVisible + ",\"creationServerOptionEnabled\":" + observation.creationServerOptionEnabled + ",\"creationServerOptionClickSupported\":" + observation.creationServerOptionClickSupported + ",\"creationServerOptionExpectedLabelCount\":" + observation.creationServerOptionExpectedLabelCount + ",\"creationServerOptionExpectedLabel\":" + observation.creationServerOptionExpectedLabel + ",\"creationSheetAndOptionDifferentWindows\":" + observation.creationSheetAndOptionDifferentWindows + ",\"selectedProvider\":\"" + observation.selectedProvider + "\",\"creationBlocker\":\"" + observation.creationBlocker + "\",\"receiptId\":" + receipt + ",\"receiptState\":\"" + observation.receiptState + "\",\"terminalDialog\":" + observation.terminalDialog + ",\"terminalState\":\"" + observation.terminalState + "\",\"terminalTruncated\":" + observation.terminalTruncated + ",\"terminalRefreshEnabled\":" + observation.terminalRefreshEnabled + ",\"terminalCloseEnabled\":" + observation.terminalCloseEnabled + ",\"worktreesDialog\":" + observation.worktreesDialog + ",\"changesDialog\":" + observation.changesDialog + ",\"homeObserved\":" + observation.homeObserved + ",\"productForeground\":" + observation.productForeground + ",\"sessionListPreferencesObserved\":" + observation.sessionListPreferencesObserved + ",\"sessionListGroupByStatus\":" + observation.sessionListGroupByStatus + ",\"sessionListWorkspaceContext\":" + observation.sessionListWorkspaceContext + ",\"sessionListHostContext\":" + observation.sessionListHostContext + ",\"hostRouteScope\":" + observation.hostRouteScope + ",\"routeDirectOwned\":" + observation.routeDirectOwned + ",\"routeSaved\":" + observation.routeSaved + ",\"routeReconnectAttempted\":" + observation.routeReconnectAttempted + ",\"runnerPid\":" + self.pid + ",\"runnerStart\":" + self.start + "}";
+            return "{\"runId\":" + run + ",\"action\":" + actionValue + ",\"outcome\":\"" + outcome + "\",\"guard\":\"" + guard + "\",\"stage\":\"" + stage.wire + "\",\"errorFamily\":\"" + errorFamily.wire + "\",\"acknowledged\":" + acknowledged + ",\"expectedScreenObserved\":" + expectedScreenObserved + ",\"selectedAppearance\":\"" + observation.selectedAppearance + "\",\"snippetState\":\"" + observation.snippetState + "\",\"snippetId\":" + snippet + ",\"snippetDraft\":\"" + observation.snippetDraft + "\",\"snippetSaveState\":\"" + observation.snippetSaveState + "\",\"hosts\":" + observation.hosts + ",\"sessions\":" + observation.sessions + ",\"newSession\":" + observation.newSession + ",\"connectedDirect\":" + observation.connectedDirect + ",\"connectedRelay\":" + observation.connectedRelay + ",\"offline\":" + observation.offline + ",\"creationName\":" + observation.creationName + ",\"creationNameEmpty\":" + observation.creationNameEmpty + ",\"creationDetailsShown\":" + observation.creationDetailsShown + ",\"creationActionAvailable\":" + observation.creationActionAvailable + ",\"creationServerSelected\":" + observation.creationServerSelected + ",\"creationProjectSelected\":" + observation.creationProjectSelected + ",\"creationPickerTraversalComplete\":" + observation.creationPickerTraversalComplete + ",\"creationPickerProductWindowCount\":" + observation.creationPickerProductWindowCount + ",\"creationCloseTotal\":" + observation.creationCloseTotal + ",\"creationCloseVisible\":" + observation.creationCloseVisible + ",\"creationCloseEnabled\":" + observation.creationCloseEnabled + ",\"creationServerTotal\":" + observation.creationServerTotal + ",\"creationServerVisible\":" + observation.creationServerVisible + ",\"creationServerOptionTotal\":" + observation.creationServerOptionTotal + ",\"creationServerOptionVisible\":" + observation.creationServerOptionVisible + ",\"creationServerOptionEnabled\":" + observation.creationServerOptionEnabled + ",\"creationServerOptionClickSupported\":" + observation.creationServerOptionClickSupported + ",\"creationServerOptionExpectedLabelCount\":" + observation.creationServerOptionExpectedLabelCount + ",\"creationServerOptionExpectedLabel\":" + observation.creationServerOptionExpectedLabel + ",\"creationSheetAndOptionDifferentWindows\":" + observation.creationSheetAndOptionDifferentWindows + ",\"selectedProvider\":\"" + observation.selectedProvider + "\",\"creationBlocker\":\"" + observation.creationBlocker + "\",\"receiptId\":" + receipt + ",\"receiptState\":\"" + observation.receiptState + "\",\"terminalDialog\":" + observation.terminalDialog + ",\"terminalState\":\"" + observation.terminalState + "\",\"terminalCloseEnabled\":" + observation.terminalCloseEnabled + ",\"worktreesDialog\":" + observation.worktreesDialog + ",\"changesDialog\":" + observation.changesDialog + ",\"homeObserved\":" + observation.homeObserved + ",\"productForeground\":" + observation.productForeground + ",\"sessionListPreferencesObserved\":" + observation.sessionListPreferencesObserved + ",\"sessionListGroupByStatus\":" + observation.sessionListGroupByStatus + ",\"sessionListWorkspaceContext\":" + observation.sessionListWorkspaceContext + ",\"sessionListHostContext\":" + observation.sessionListHostContext + ",\"hostRouteScope\":" + observation.hostRouteScope + ",\"routeDirectOwned\":" + observation.routeDirectOwned + ",\"routeSaved\":" + observation.routeSaved + ",\"routeReconnectAttempted\":" + observation.routeReconnectAttempted + ",\"runnerPid\":" + self.pid + ",\"runnerStart\":" + self.start + "}";
         }
     }
 
@@ -4057,7 +4282,6 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         FOCUS_COMPOSER("FocusComposer", null, null),
         DISMISS_COMPOSER_KEYBOARD("DismissComposerKeyboard", null, null),
         OPEN_TERMINAL("OpenTerminal", null, null),
-        REFRESH_TERMINAL("RefreshTerminal", null, null),
         CLOSE_TERMINAL("CloseTerminal", null, null),
         OBSERVE_TERMINAL("ObserveTerminal", null, null),
         OPEN_WORKTREES("OpenWorktrees", null, null),
@@ -4110,10 +4334,10 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             return this == SELECT_APPEARANCE;
         }
         boolean requiresSessionId() {
-            return this == OPEN_SESSION || this == BACKGROUND_OWNED_APP || this == SET_COMPOSER || this == SUBMIT_PROMPT || this == OPEN_HISTORY_DETAILS || this == CLOSE_HISTORY_DETAILS || this == OPEN_SNIPPETS || this == CLOSE_SNIPPETS || this == OPEN_SWITCHER || this == CLOSE_SWITCHER || this == REFRESH_CONVERSATION || this == SCROLL_HISTORY_BACKWARD || this == FOCUS_COMPOSER || this == DISMISS_COMPOSER_KEYBOARD || this == OPEN_TERMINAL || this == REFRESH_TERMINAL || this == CLOSE_TERMINAL || this == OBSERVE_TERMINAL || this == OPEN_WORKTREES || this == REFRESH_WORKTREES || this == CLOSE_WORKTREES || this == OBSERVE_WORKTREES || this == OPEN_CHANGES || this == REFRESH_CHANGES || this == CLOSE_CHANGES || this == OBSERVE_CHANGES || isSnippetAction();
+            return this == OPEN_SESSION || this == BACKGROUND_OWNED_APP || this == SET_COMPOSER || this == SUBMIT_PROMPT || this == OPEN_HISTORY_DETAILS || this == CLOSE_HISTORY_DETAILS || this == OPEN_SNIPPETS || this == CLOSE_SNIPPETS || this == OPEN_SWITCHER || this == CLOSE_SWITCHER || this == REFRESH_CONVERSATION || this == SCROLL_HISTORY_BACKWARD || this == FOCUS_COMPOSER || this == DISMISS_COMPOSER_KEYBOARD || this == OPEN_TERMINAL || this == CLOSE_TERMINAL || this == OBSERVE_TERMINAL || this == OPEN_WORKTREES || this == REFRESH_WORKTREES || this == CLOSE_WORKTREES || this == OBSERVE_WORKTREES || this == OPEN_CHANGES || this == REFRESH_CHANGES || this == CLOSE_CHANGES || this == OBSERVE_CHANGES || isSnippetAction();
         }
         boolean requiresSessionGeneration() {
-            return this == OPEN_SESSION || this == BACKGROUND_OWNED_APP || this == SET_COMPOSER || this == SUBMIT_PROMPT || this == OPEN_HISTORY_DETAILS || this == CLOSE_HISTORY_DETAILS || this == OPEN_SNIPPETS || this == CLOSE_SNIPPETS || this == OPEN_SWITCHER || this == CLOSE_SWITCHER || this == REFRESH_CONVERSATION || this == SCROLL_HISTORY_BACKWARD || this == FOCUS_COMPOSER || this == DISMISS_COMPOSER_KEYBOARD || this == OPEN_TERMINAL || this == REFRESH_TERMINAL || this == CLOSE_TERMINAL || this == OBSERVE_TERMINAL || this == OPEN_WORKTREES || this == REFRESH_WORKTREES || this == CLOSE_WORKTREES || this == OBSERVE_WORKTREES || this == OPEN_CHANGES || this == REFRESH_CHANGES || this == CLOSE_CHANGES || this == OBSERVE_CHANGES || isSnippetAction();
+            return this == OPEN_SESSION || this == BACKGROUND_OWNED_APP || this == SET_COMPOSER || this == SUBMIT_PROMPT || this == OPEN_HISTORY_DETAILS || this == CLOSE_HISTORY_DETAILS || this == OPEN_SNIPPETS || this == CLOSE_SNIPPETS || this == OPEN_SWITCHER || this == CLOSE_SWITCHER || this == REFRESH_CONVERSATION || this == SCROLL_HISTORY_BACKWARD || this == FOCUS_COMPOSER || this == DISMISS_COMPOSER_KEYBOARD || this == OPEN_TERMINAL || this == CLOSE_TERMINAL || this == OBSERVE_TERMINAL || this == OPEN_WORKTREES || this == REFRESH_WORKTREES || this == CLOSE_WORKTREES || this == OBSERVE_WORKTREES || this == OPEN_CHANGES || this == REFRESH_CHANGES || this == CLOSE_CHANGES || this == OBSERVE_CHANGES || isSnippetAction();
         }
         boolean requiresHistoryRecordId() {
             return this == OPEN_HISTORY_DETAILS || this == CLOSE_HISTORY_DETAILS;
@@ -4229,9 +4453,9 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
     private static final int MAX_EXCLUDED_RECEIPTS = 100;
     private static final int MAX_RECEIPT_ANCESTORS = 32;
     private static final int NO_WINDOW = -1;
-    private static final String NAV_SESSIONS_TAG = "nav_sessions";
-    private static final String NAV_HOSTS_TAG = "nav_hosts";
-    private static final String NAV_SETTINGS_TAG = "nav_settings";
+    private static final String NAV_SESSIONS_TAG = "navigation_sessions_menu";
+    private static final String NAV_HOSTS_TAG = "navigation_hosts_menu";
+    private static final String NAV_SETTINGS_TAG = "navigation_settings_menu";
     private static final String SESSION_LIST_GROUP_BY_STATUS_TAG = "settings_session_list_group_by_status";
     private static final String SESSION_LIST_WORKSPACE_CONTEXT_TAG = "settings_session_list_workspace_context";
     private static final String SESSION_LIST_HOST_CONTEXT_TAG = "settings_session_list_host_context";
@@ -4279,13 +4503,10 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
     private static final String TERMINAL_OPEN_TAG = "terminal_open";
     private static final String TERMINAL_DIALOG_TAG = "terminal_dialog";
     private static final String TERMINAL_TARGET_TAG_PREFIX = "terminal_target_";
-    private static final String TERMINAL_OUTPUT_TAG = "terminal_output";
+    private static final String TERMINAL_OUTPUT_TAG = "terminal_grid";
     private static final String TERMINAL_CLOSE_TAG = "terminal_close";
-    private static final String TERMINAL_REFRESH_TAG = "terminal_refresh";
     private static final String TERMINAL_LOADING_TAG = "terminal_loading";
-    private static final String TERMINAL_EMPTY_TAG = "terminal_empty";
     private static final String TERMINAL_ERROR_TAG = "terminal_error";
-    private static final String TERMINAL_TRUNCATED_TAG = "terminal_truncated";
     private static final String WORKTREES_OPEN_TAG = "worktrees_open";
     private static final String WORKTREES_DIALOG_TAG = "worktrees_dialog";
     private static final String WORKTREES_TARGET_TAG_PREFIX = "worktrees_target_";

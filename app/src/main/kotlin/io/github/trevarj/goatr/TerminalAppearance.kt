@@ -73,37 +73,6 @@ internal fun TerminalAppearancePicker(state: TerminalAppearanceState) {
     }
 }
 
-/** Styles the existing secure, bounded reader without changing its load or lifecycle behavior. */
-@Composable
-internal fun TerminalSnapshotText(text: String, appearance: TerminalAppearance) {
-    val palette = terminalSnapshotPalette(appearance)
-    Surface(
-        modifier = Modifier.fillMaxWidth().testTag("shell_visible_reader"),
-        color = palette.background,
-        contentColor = palette.foreground,
-        shape = MaterialTheme.shapes.small,
-    ) {
-        Text(
-            text = text,
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodyMedium,
-            softWrap = true,
-            modifier = Modifier.fillMaxWidth().padding(16.dp).testTag("shell_visible_text"),
-        )
-    }
-}
-
-private data class TerminalSnapshotPalette(val background: Color, val foreground: Color)
-
-@Composable
-private fun terminalSnapshotPalette(appearance: TerminalAppearance): TerminalSnapshotPalette = when (appearance) {
-    TerminalAppearance.FollowApp -> TerminalSnapshotPalette(
-        MaterialTheme.colorScheme.surfaceVariant,
-        MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    TerminalAppearance.Light -> TerminalSnapshotPalette(Color(0xFFF7F7F2), Color(0xFF1B1C19))
-    TerminalAppearance.Dark -> TerminalSnapshotPalette(Color(0xFF111513), Color(0xFFE3E5DE))
-}
 
 internal class TerminalAppearancePreferences(applicationContext: Context) {
     private val preferences = applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)

@@ -105,23 +105,20 @@ fn state(provider: Provider) -> SessionState {
             title: "synthetic provider-data fixture".into(),
             status: SessionStatus::Idle,
             connectivity: SessionConnectivity::Ready,
-            capabilities: Capabilities { terminal_create:false,artifacts:false, attachments:false, worktree_create: false,
-                history: true,
-                prompt: true,
-                cancel: true,
-                respond: true,
-                prompt_mode: PromptMode::SubmitOrSteer,
-                cancel_mode: if provider == Provider::Omp {
-                    CancelMode::CurrentWork
-                } else {
-                    CancelMode::NativeTurn
-                },
-                terminal_read: false,
-                worktrees_read: false,
-                changes_read: false,
-                workspace_rename: false, agent_rename: false, worktree_remove:false,
-                skills_read: false,
+            capabilities: Capabilities { controls: false, terminal_create:false,artifacts:false, attachments:false, history: true,
+            prompt: true,
+            cancel: true,
+            respond: true,
+            prompt_mode: PromptMode::SubmitOrSteer,
+            cancel_mode: if provider == Provider::Omp {
+                CancelMode::CurrentWork
+            } else {
+                CancelMode::NativeTurn
             },
+            terminal_read: false,
+            worktrees_read: false,
+            changes_read: false,
+            workspace_rename: false, agent_rename: false, skills_read: false, },
             skills_generation: None,
             history_coverage: HistoryCoverage {
                 scope: if provider == Provider::Omp {
@@ -178,6 +175,7 @@ struct EmulatorLease {
     owner_uid: u32,
     root: PathBuf,
     avd_name: String,
+    adb_client_home: PathBuf,
     process_identity: ProcessIdentity,
 }
 #[derive(Deserialize)]
@@ -188,12 +186,12 @@ struct ProcessIdentity {
     start_ticks: String,
     executable: PathBuf,
 }
-async fn adb(serial: &str, args: &[&str]) -> io::Result<String> {
+async fn adb(lease: &EmulatorLease, args: &[&str]) -> io::Result<String> {
+    let mut command=tokio::process::Command::new("adb");
+    super::live::configure_adb_client_home(&mut command,&lease.root,&lease.adb_client_home)?;
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio::process::Command::new("adb")
-            .arg("-s")
-            .arg(serial)
+        command.arg("-s").arg(&lease.serial)
             .args(args)
             .kill_on_drop(true)
             .output(),
@@ -265,13 +263,13 @@ pub async fn run() -> io::Result<bool> {
             "emulator lease is outside its canonical private root",
         ));
     }
-    let avd = adb(&lease.serial, &["emu", "avd", "name"]).await?;
+    let avd = adb(&lease, &["emu", "avd", "name"]).await?;
     if avd.lines().next() != Some(lease.avd_name.as_str()) {
         return Err(failure(
             "selected serial AVD does not match ownership lease",
         ));
     }
-    if adb(&lease.serial, &["get-state"]).await?.trim() != "device" {
+    if adb(&lease, &["get-state"]).await?.trim() != "device" {
         return Err(failure("owned emulator is not ready"));
     }
     let evidence = std::path::absolute(
@@ -314,7 +312,7 @@ pub async fn run() -> io::Result<bool> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let port = listener.local_addr()?.port();
     let mapping = format!("tcp:{port}");
-    let previous = adb(&lease.serial, &["reverse", "--list"]).await?;
+    let previous = adb(&lease, &["reverse", "--list"]).await?;
     if previous
         .lines()
         .any(|line| line.split_whitespace().any(|field| field == mapping))
@@ -330,7 +328,7 @@ pub async fn run() -> io::Result<bool> {
         }),
     )?;
     adb(
-        &lease.serial,
+        &lease,
         &["reverse", "--no-rebind", &mapping, &mapping],
     )
     .await?;
@@ -610,11 +608,9 @@ pub async fn run() -> io::Result<bool> {
                         .ok_or_else(|| failure("receipt before authorization refused"))?;
                     let request = Request {
                         id: action.clone(),
-                        body: RequestBody::PromptSubmit(PromptSubmitParams {
-                            boot_id: boot.clone(),
-                            target: target(&current),
-                            text: PromptText("synthetic retained action".into()),
-                        }),
+                        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot.clone(),
+                        target: target(&current),
+                        text: PromptText("synthetic retained action".into()), }),
                     };
                     security
                         .storage
@@ -675,13 +671,13 @@ pub async fn run() -> io::Result<bool> {
         .map_err(|_| failure("fixture transport task failed"));
     let settled = security.shutdown().await;
     let closed = goatr::close_endpoint(&endpoint).await;
-    let mapping_list = adb(&lease.serial, &["reverse", "--list"]).await;
+    let mapping_list = adb(&lease, &["reverse", "--list"]).await;
     let cleanup = if lease_matches(&lease)
         && mapping_list
             .as_ref()
             .is_ok_and(|list| mapping_present(list, &mapping, &mapping))
     {
-        adb(&lease.serial, &["reverse", "--remove", &mapping])
+        adb(&lease, &["reverse", "--remove", &mapping])
             .await
             .map(|_| ())
     } else {

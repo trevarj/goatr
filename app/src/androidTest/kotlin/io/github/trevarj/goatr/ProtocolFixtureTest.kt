@@ -25,4 +25,7 @@ class ProtocolFixtureTest {
     @Test fun hierarchyFreshnessAndIndependentSelection() = checks().hierarchyRecoveryKeepsIndependentPhoneSelection()
     @Test fun browseViewsPreserveSeparateOrderAndRejectStaleResponses() = checks().browseViewsRejectStalePagesAndPreserveTheirOrderDomain()
     @Test fun hierarchyOverflowPreservesSourceUnavailability() = checks().hierarchyOverflowKeepsSourceUnavailability()
+    @Test fun gridCommitAndUncertainBoundaries()=checks().gridCommitOwnsPixelsAndRejectsUncertainBoundaries()
+    @Test fun gridViewportWideEdgeAndQuietBlink()=checks().gridViewportUsesWideExtentAndOnlyVisibleBlinkingContent()
+    @Test fun gridMainDeliveryBarrier()=kotlinx.coroutines.runBlocking {checks().gridMainDeliveryCannotResurrectDismissedOrReplacedViewers()}
 }

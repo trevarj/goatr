@@ -171,6 +171,28 @@ fn actual_cli_decline_cancel_and_nonterminal_have_zero_publication_effects() {
     assert!(!r.0.join("absent").exists());
 }
 
+#[test]
+fn actual_setup_project_consent_preserves_explicit_deny_all_and_exact_selfhost_origins() {
+    for policy in [Vec::<String>::new(), vec!["https://push.example:8443".into()]] {
+        let root = Root::new();
+        let path = root.0.join("config.toml");
+        let mut configured = root.config();
+        configured.push_allowed_origins = policy.clone();
+        fs::write(&path, configured.serialized().unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(setup_terminal(&path, &root, Some("yes\n"), false).success());
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(saved.push_allowed_origins, policy);
+        assert_eq!(saved.runtime_dir, configured.runtime_dir);
+        assert_eq!(saved.runtime_dir_agent, configured.runtime_dir_agent);
+        assert_eq!(saved.projects.len(), 1);
+        assert_eq!(saved.projects[0].path, root.0);
+        assert!(!saved.projects[0].allow_read_tools);
+        assert!(!saved.allow_attachments && !saved.allow_terminal_control && !saved.allow_omp_controls);
+        assert!(!root.0.join(".serve-unit.json").exists());
+    }
+}
+
 #[tokio::test]
 async fn owned_bound_listener_requires_exact_source_fd_socket_and_never_rebinds_or_closes_original()
 {

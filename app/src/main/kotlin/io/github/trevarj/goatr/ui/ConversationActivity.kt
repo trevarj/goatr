@@ -10,10 +10,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.res.painterResource
 import androidx.annotation.DrawableRes
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 
 /** Only native-success tool-only records are routine; no inferred turn or semantic grouping.
@@ -27,11 +29,11 @@ internal fun isRoutineToolRecord(record: HistoryRecord, activeToolRecordId: Id?)
 @Composable
 internal fun ToolActivitySummary(count: Int, expanded: Boolean, onToggle: ()->Unit) {
     if(count==0) return
-    Surface(color=MaterialTheme.colorScheme.surface,shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth()) {
-        TextButton(onClick=onToggle,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("tool_activity_summary")) {
-            GoatrIcon(MaterialGlyph.ExpandMore,null)
+    Surface(color=MaterialTheme.colorScheme.background,shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth()) {
+        TextButton(onClick=onToggle,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("tool_activity_summary").semantics {stateDescription=if(expanded) "Routine activity expanded" else "Routine activity collapsed"},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.onSurfaceVariant)) {
+            GoatrIcon(MaterialGlyph.ExpandMore,null,Modifier.rotate(if(expanded) 180f else 0f))
             Spacer(Modifier.width(8.dp))
-            UiText("$count completed ${if(count==1) "tool" else "tools"} · ${if(expanded) "Hide routine activity" else "Show routine activity"}",modifier=Modifier.weight(1f))
+            UiText("$count completed ${if(count==1) "tool" else "tools"} · ${if(expanded) "Hide routine activity" else "Show routine activity"}",style=MaterialTheme.typography.bodySmall,modifier=Modifier.weight(1f))
         }
     }
 }
@@ -39,8 +41,8 @@ internal fun ToolActivitySummary(count: Int, expanded: Boolean, onToggle: ()->Un
 /** A single scrollable control rail reserves Stop outside its horizontal viewport. */
 @Composable
 internal fun ConversationControlRail(stopEnabled: Boolean, stopDisabledReason: String, onStop: ()->Unit, onMore: ()->Unit, controls: @Composable RowScope.()->Unit) {
-    Surface(color=MaterialTheme.colorScheme.surface,shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth().testTag("composer_overflow")) {
-        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+    Surface(color=MaterialTheme.colorScheme.surfaceVariant,modifier=Modifier.fillMaxWidth().testTag("composer_overflow")) {
+        Row(Modifier.fillMaxWidth().padding(horizontal=4.dp),verticalAlignment=Alignment.CenterVertically) {
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically,content=controls)
             TextButton(onClick=onMore,modifier=Modifier.heightIn(min=48.dp).testTag("conversation_more"),contentPadding=PaddingValues(horizontal=8.dp)) {
                 GoatrIcon(MaterialGlyph.Menu,null)

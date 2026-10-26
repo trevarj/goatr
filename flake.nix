@@ -51,8 +51,10 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
+          # One locked derivation serves the product and every development shell.
+          readGit = pkgs.git;
           tools = [
-            pkgs.git
+            readGit
             pkgs.gnumake
             pkgs.nixfmt
             pkgs.cargo-ndk
@@ -121,23 +123,129 @@
                 \( -iname '*license*' -o -iname '*notice*' -o -iname 'copying*' -o -iname '*copyright*' \) -print0)
             done
           '';
-          goatrManifest = pkgs.writeText "goatr-manifest.json" (
-            builtins.toJSON {
-              schema = 1;
-              kind = "direct-rust";
-              lockSha256 = builtins.hashFile "sha256" ./companion/Cargo.lock;
-              coreRevision = ffiIdentity.coreRevision;
-              sharedProvenance = companionProvenance;
-              nixpkgsRevision = nixpkgs.rev;
-              inherit (ffiIdentity) advisoryDatabase advisoryExclusions;
-              systemSQLite = {
-                version = pkgs.sqlite.version;
-                source = pkgs.sqlite.src.url;
-                hash = pkgs.sqlite.src.outputHash;
-                use = "System SQLite selected for rusqlite storage; no bundled SQLite";
-              };
-            }
-          );
+          goatrManifest =
+            pkgs.runCommand "goatr-manifest"
+              {
+                __structuredAttrs = true;
+                nativeBuildInputs = [
+                  pkgs.coreutils
+                  pkgs.findutils
+                  pkgs.gnutar
+                  pkgs.xz
+                  pkgs.jq
+                ]
+                ++ lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.patchelf;
+                exportReferencesGraph.readGitClosure = [ readGit ];
+                manifestBase = {
+                  schema = 1;
+                  kind = "direct-rust";
+                  lockSha256 = builtins.hashFile "sha256" ./companion/Cargo.lock;
+                  coreRevision = ffiIdentity.coreRevision;
+                  sharedProvenance = companionProvenance;
+                  nixpkgsRevision = nixpkgs.rev;
+                  inherit (ffiIdentity) advisoryDatabase advisoryExclusions;
+                  systemSQLite = {
+                    version = pkgs.sqlite.version;
+                    source = pkgs.sqlite.src.url;
+                    hash = pkgs.sqlite.src.outputHash;
+                    use = "System SQLite selected for rusqlite storage; no bundled SQLite";
+                  };
+                  readGit = {
+                    schema = 1;
+                    system = system;
+                    package = {
+                      output = "${readGit}";
+                      derivation = readGit.drvPath;
+                      version = readGit.version;
+                      source = {
+                        url = readGit.src.url;
+                        hash = readGit.src.outputHash;
+                      };
+                      patches = map toString readGit.patches;
+                      configureFlags = readGit.configureFlags;
+                      makeFlags = readGit.makeFlags;
+                      licenses = map (license: license.spdxId or license.shortName) (lib.toList readGit.meta.license);
+                    };
+                    nixpkgsSource = "${nixpkgs.outPath}";
+                    nixpkgsNarHash = (builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.nixpkgs.locked.narHash;
+                    recipe = "${nixpkgs.outPath}/pkgs/by-name/gi/git/package.nix";
+                    executable = "${readGit}/bin/git";
+                    execPath = "${readGit}/libexec/git-core";
+                    systemConfig = "/etc/gitconfig";
+                    policy = "direct immutable Git ELF only; approved-root reads; no writes, network or helper exec; no PATH/runtime-env override";
+                  };
+                };
+              }
+              ''
+                out=''${outputs[out]}
+                mkdir -p "$out/licenses/git" "$out/licenses/runtime"
+                jq '.readGitClosure' "$NIX_ATTRS_JSON_FILE" > "$out/runtime-closure.json"
+                jq -r '.readGitClosure[].path' "$NIX_ATTRS_JSON_FILE" > "$out/runtime-closure.store-paths"
+                jq -r '.readGitClosure | map([.path,.narHash,.narSize,"",(.references|length)]+.references) | add | .[]' \
+                  "$NIX_ATTRS_JSON_FILE" > "$out/runtime-closure.registration"
+                jq '.manifestBase' "$NIX_ATTRS_JSON_FILE" > "$TMPDIR/manifest-base.json"
+                available=false
+                reason=unsupported_platform
+                executable=${lib.escapeShellArg "${readGit}/bin/git"}
+                interpreter=
+                interpreterRequest=
+                executableSha256=
+                interpreterSha256=
+                if ${if pkgs.stdenv.hostPlatform.isLinux then "true" else "false"}; then
+                  reason=git_not_direct_elf
+                  read -r byte0 byte1 byte2 byte3 < <(od -An -N4 -tx1 "$executable")
+                  if [[ "$byte0 $byte1 $byte2 $byte3" == "7f 45 4c 46" \
+                    && "$(realpath -- "$executable")" == "$executable" ]]; then
+                    reason=interpreter_unproved
+                    interpreterRequest=$(patchelf --print-interpreter "$executable" 2>/dev/null || true)
+                    if [[ "$interpreterRequest" == /nix/store/* && -f "$interpreterRequest" ]]; then
+                      interpreter=$(realpath -- "$interpreterRequest")
+                      read -r executableSha256 _ < <(sha256sum -- "$executable")
+                      read -r interpreterSha256 _ < <(sha256sum -- "$interpreter")
+                      available=true
+                      reason=qualified_direct_layout
+                    fi
+                  fi
+                fi
+                if ! tar -xOf ${readGit.src} ${lib.escapeShellArg "git-${readGit.version}/COPYING"} \
+                  > "$out/licenses/git/COPYING"; then
+                  available=false
+                  reason=license_unavailable
+                fi
+                : > "$TMPDIR/runtime-notices.jsonl"
+                while IFS= read -r member; do
+                  while IFS= read -r -d "" notice; do
+                    relative="''${notice#"$member"/}"
+                    if [[ "$relative" == "$notice" ]]; then relative="''${notice##*/}"; fi
+                    destination="$out/licenses/runtime/''${member##*/}/$relative"
+                    mkdir -p "$(dirname -- "$destination")"
+                    cp -- "$notice" "$destination"
+                    read -r noticeHash _ < <(sha256sum -- "$notice")
+                    jq -cn --arg member "$member" --arg path "$notice" --arg retained "$destination" \
+                      --arg sha256 "$noticeHash" '{member:$member,path:$path,retained:$retained,sha256:$sha256}' \
+                      >> "$TMPDIR/runtime-notices.jsonl"
+                  done < <(find "$member" -type f \
+                    \( -iname '*license*' -o -iname '*notice*' -o -iname 'copying*' -o -iname '*copyright*' \) -print0)
+                done < "$out/runtime-closure.store-paths"
+                read -r closureSha256 _ < <(sha256sum -- "$out/runtime-closure.store-paths")
+                read -r registrationSha256 _ < <(sha256sum -- "$out/runtime-closure.registration")
+                jq -s '.' "$TMPDIR/runtime-notices.jsonl" > "$TMPDIR/runtime-notices.json"
+                jq --argjson available "$available" --arg reason "$reason" \
+                  --arg executable "$executable" --arg executableSha256 "$executableSha256" \
+                  --arg interpreterRequest "$interpreterRequest" --arg interpreter "$interpreter" \
+                  --arg interpreterSha256 "$interpreterSha256" --arg root "$out" \
+                  --arg closureSha256 "$closureSha256" --arg registrationSha256 "$registrationSha256" \
+                  --slurpfile runtimeNotices "$TMPDIR/runtime-notices.json" \
+                  '.readGit += {available:$available,reason:$reason,executable:$executable,
+                    executableSha256:$executableSha256,interpreterRequest:$interpreterRequest,
+                    interpreter:$interpreter,interpreterSha256:$interpreterSha256,
+                    closureList:($root+"/runtime-closure.store-paths"),closureSha256:$closureSha256,
+                    registration:($root+"/runtime-closure.registration"),registrationSha256:$registrationSha256,
+                    closureGraph:($root+"/runtime-closure.json"),gitLicense:($root+"/licenses/git/COPYING"),
+                    runtimeNotices:$runtimeNotices[0],
+                    licenseProvenance:"Actual Git source COPYING and packaged runtime notices; exact Nixpkgs recipes/derivation and closure NAR graph retained separately from Cargo notices"}' \
+                  "$TMPDIR/manifest-base.json" > "$out/manifest.json"
+              '';
           goatr =
             assert
               (builtins.fromJSON (builtins.readFile ./companion/dependencies.json)).lockSha256
@@ -155,11 +263,14 @@
                 pkgs.jq
               ];
               buildInputs = [ pkgs.sqlite ];
+              GOATR_READ_GIT_MANIFEST = "${goatrManifest}/manifest.json";
               postPatch = checkCoreSource companionDeps;
               doCheck = false;
               postInstall = ''
                 mkdir -p "$out/share/goatr" "$out/share/licenses/goatr"
-                cp ${goatrManifest} "$out/share/goatr/manifest.json"
+                cp ${goatrManifest}/manifest.json "$out/share/goatr/manifest.json"
+                ln -s ${goatrManifest} "$out/share/goatr/read-git-provenance"
+                ln -s ${goatrManifest}/licenses "$out/share/licenses/goatr/read-git"
                 cp ${./companion/Cargo.lock} ${./companion/dependencies.json} "$out/share/goatr/"
                 cp ${./LICENSE} ${./NOTICE} "$out/share/licenses/goatr/"
                 ${installLicenses companionDeps}
@@ -296,6 +407,7 @@
                   GOATR_IROH_ANDROID = "${irohAndroid}";
                   GOATR_IROH_FFI_SOURCE = "${patchedSource}";
                   GOATR_ADVISORY_DB = "${advisoryDb}";
+                  GOATR_READ_GIT_MANIFEST = "${goatrManifest}/manifest.json";
                   GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${root}/build-tools/36.0.0/aapt2";
                 };
             in
@@ -330,9 +442,10 @@
             android
             ;
           coreShell = pkgs.mkShell {
-            packages = tools ++ [ rust ];
+            packages = tools ++ [ rust pkgs.zsh ];
             buildInputs = [ pkgs.sqlite ];
             GOATR_ADVISORY_DB = "${advisoryDb}";
+            GOATR_READ_GIT_MANIFEST = "${goatrManifest}/manifest.json";
           };
         }
       );

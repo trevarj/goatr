@@ -22,6 +22,10 @@ class SessionReducer {
         private set
     var viewId: Uuid? = null
         private set
+    var controlsRevision:Long=0
+        private set
+    var queueRevision:Long=0
+        private set
     private var browseRevision = 0L
     private var subscription: Uuid? = null
     private var applied = 0L
@@ -44,6 +48,7 @@ class SessionReducer {
         pending = snapshot.pendingRequests
         subscription = snapshot.subscription
         applied = 0
+        controlsRevision=0;queueRevision=0
         browseRevision++
         viewId = null
         nextCursor = null
@@ -63,6 +68,14 @@ class SessionReducer {
         if (event.seq.value != applied + 1 || event.body is EventBody.SyncRequired) { disconnected(); return Decision.Resnapshot }
         val current = state ?: return Decision.Resnapshot
         when (val body = event.body) {
+            is EventBody.ControlsChanged->{
+                if(body.data.target.sessionId!=current.summary.sessionId||body.data.target.generation!=current.summary.generation) {disconnected();return Decision.Resnapshot}
+                controlsRevision=event.seq.value
+            }
+            is EventBody.QueueChanged->{
+                if(body.data.target.sessionId!=current.summary.sessionId||body.data.target.generation!=current.summary.generation) {disconnected();return Decision.Resnapshot}
+                queueRevision=event.seq.value
+            }
             is EventBody.SessionState -> {
                 if (body.data.state.summary.sessionId != current.summary.sessionId || body.data.state.summary.generation != current.summary.generation) { disconnected(); return Decision.Resnapshot }
                 state = body.data.state
@@ -157,6 +170,12 @@ fun mergeDisplayHistory(provider: Provider, old: HistoryRecord, newer: HistoryRe
     return incoming
 }
 
+/** Shared source freshness predicate; display-only overflow is not source loss. */
+internal fun hostSourceCurrent(ready:Boolean,inventory:HostSnapshotResult?,server:Uuid):Boolean = ready && inventory?.let {snapshot->
+    snapshot.servers.none {it.serverId==server && it.connectivity!=ServerConnectivity.Online} &&
+        snapshot.hierarchy.none {it.serverId==server && (it.freshness==NativeFreshness.Stale || it.reason==NativeUnavailableReason.SourceUnavailable)}
+}==true
+
 /** One host subscription, durable notification sequence remains separate from this sequence. */
 class HostReducer {
     var inventory: HostSnapshotResult? = null
@@ -167,10 +186,7 @@ class HostReducer {
     fun snapshot(snapshot: HostSnapshotResult) { snapshot.validate(); inventory = snapshot; applied = 0; ready = true }
     fun disconnected() { ready = false }
     /** Display overflow is not source loss and must not disable supported native controls. */
-    internal fun sourceCurrent(server: Uuid): Boolean = ready && inventory?.let { snapshot ->
-        snapshot.servers.none { it.serverId == server && it.connectivity != ServerConnectivity.Online } &&
-            snapshot.hierarchy.none { it.serverId == server && (it.freshness == NativeFreshness.Stale || it.reason == NativeUnavailableReason.SourceUnavailable) }
-    } == true
+    internal fun sourceCurrent(server: Uuid): Boolean = hostSourceCurrent(ready,inventory,server)
     fun event(event: Event): SessionReducer.Decision {
         if (!ready || inventory?.subscription != event.subscription || event.seq.value==0L) { ready = false; return SessionReducer.Decision.Resnapshot }
         if (event.seq.value <= applied) return SessionReducer.Decision.Duplicate

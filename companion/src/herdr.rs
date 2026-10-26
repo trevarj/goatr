@@ -35,17 +35,32 @@ use tokio::{
     sync::watch,
 };
 mod worktree_creation;
-mod worktree_removal;
 pub(crate) mod shells;
-mod agent_terminals;
+pub(crate) mod grid;
+pub(crate) mod endpoint;
 pub mod artifacts;
-pub(crate) use agent_terminals::{AgentTerminalContext,agent_terminal_available};
-mod skills;
-pub(crate) use skills::SkillsScopeContext;
+pub(crate) mod creation_directories;
+pub(crate) use creation_directories::CreationSelection;
+pub(crate) mod skills;
 pub use shells::ShellProof;
 use shells::{NativeShellInfo, ShellBinding};
 pub use worktree_creation::ExecutionCheckout;
-use worktree_creation::{BoundCheckoutAdmission, NativeSourceProof};
+/// One-shot observation prepared before any fixed shell-query input. The original
+/// process-info/idle proof moves here rather than being repeated by the consumer.
+pub(crate) struct PreparedShell<'a> {
+    action:&'a Uuid,
+    params:&'a SessionCreateParams,
+    selection:&'a CreationSelection,
+    deadline:tokio::time::Instant,
+    resources:CreationResources,
+    focus:Id,
+    source:Source,
+    info:PaneProcessInfo,
+    shell:ProcessEvidence,
+    original_reporter:ProcessEvidence,
+    executable:PathBuf,
+    dialect:ShellDialect,
+}
 
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bounded OMP creation and post-Ready offline diagnostics. Callers supply only closed
@@ -72,6 +87,89 @@ struct ClosedReport {
     code: Option<ErrorCode>,
     io: &'static str,
     frame: &'static str,
+    probe_deadline:Option<(&'static str,ProbeObservation,&'static str)>,
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
+enum ProbeObservation {NotRead,EmptyOnly,PartialSeen,CompleteSeen}
+impl ProbeObservation {
+    fn observe(&mut self,bytes:&[u8]) {
+        let observed=if bytes.ends_with(b"\n"){Self::CompleteSeen}else if bytes.is_empty(){Self::EmptyOnly}else{Self::PartialSeen};
+        if observed>*self {*self=observed;}
+    }
+    fn as_str(self)->&'static str {
+        match self {Self::NotRead=>"not_read",Self::EmptyOnly=>"empty_only",Self::PartialSeen=>"partial_seen",Self::CompleteSeen=>"complete_seen"}
+    }
+}
+fn probe_entry_budget(now:tokio::time::Instant,deadline:tokio::time::Instant)->&'static str {
+    if now>=deadline {"expired"}
+    else {let remaining=deadline-now;if remaining<=Duration::from_secs(1){"le_1s"}else if remaining<=Duration::from_secs(5){"le_5s"}else{"gt_5s"}}
+}
+/// Closed observations from the existing coarse traversal; never retain native values.
+#[derive(Clone, Copy)]
+enum CoarseShellGuard {
+    ConsentAbsent,
+    SourceLookup,
+    ReporterProcess,
+    Connect,
+    PeerIdentity,
+    ProcessInfo,
+    ShellAbsent,
+    ReportedProcess,
+    ShellExecutable,
+    SourceRecheck,
+    NoCandidate,
+    RecordAbsent,
+    Installed,
+}
+impl CoarseShellGuard {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ConsentAbsent => "consent_absent",
+            Self::SourceLookup => "source_lookup",
+            Self::ReporterProcess => "reporter_process",
+            Self::Connect => "connect",
+            Self::PeerIdentity => "peer_identity",
+            Self::ProcessInfo => "process_info",
+            Self::ShellAbsent => "shell_absent",
+            Self::ReportedProcess => "reported_process",
+            Self::ShellExecutable => "shell_executable",
+            Self::SourceRecheck => "source_recheck",
+            Self::NoCandidate => "no_candidate",
+            Self::RecordAbsent => "record_absent",
+            Self::Installed => "installed",
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct CoarseShellFailure {
+    guard: CoarseShellGuard,
+    code: ErrorCode,
+    io: &'static str,
+}
+impl CoarseShellFailure {
+    fn new(guard: CoarseShellGuard) -> Self {
+        Self { guard, code: ErrorCode::NotReady, io: "none" }
+    }
+    fn io(guard: CoarseShellGuard, error: &io::Error) -> Self {
+        let kind = match error.kind() {
+            io::ErrorKind::NotFound => "not_found",
+            io::ErrorKind::PermissionDenied => "permission_denied",
+            io::ErrorKind::ConnectionRefused => "connection_refused",
+            io::ErrorKind::ConnectionReset => "connection_reset",
+            io::ErrorKind::ConnectionAborted => "connection_aborted",
+            io::ErrorKind::NotConnected => "not_connected",
+            io::ErrorKind::BrokenPipe => "broken_pipe",
+            io::ErrorKind::TimedOut => "timed_out",
+            io::ErrorKind::UnexpectedEof => "unexpected_eof",
+            io::ErrorKind::InvalidData => "invalid_data",
+            _ => "other",
+        };
+        Self {
+            guard,
+            code: if error.kind() == io::ErrorKind::OutOfMemory { ErrorCode::ResourceLimit } else { ErrorCode::NotReady },
+            io: kind,
+        }
+    }
 }
 #[derive(Clone, Copy)]
 enum BackendPriority {
@@ -175,6 +273,7 @@ struct OmpCreationState {
     progress_lines: u8,
     backend_launch_emitted: bool,
     backend_readiness_emitted: bool,
+    coarse_shell_settled: bool,
     seen: HashSet<(&'static str, &'static str)>,
     agent_start_seen: bool,
     launch_preflight_seen: bool,
@@ -210,6 +309,7 @@ impl OmpCreationReporter {
             progress_lines: 0,
             backend_launch_emitted: false,
             backend_readiness_emitted: false,
+            coarse_shell_settled: false,
             seen: HashSet::new(),
             agent_start_seen: false,
             launch_preflight_seen: false,
@@ -243,6 +343,7 @@ impl OmpCreationReporter {
                 code,
                 io,
                 frame: "none",
+                probe_deadline:None,
             },
             ack,
         );
@@ -268,6 +369,10 @@ impl OmpCreationReporter {
         {
             return;
         }
+        let coarse_shell = phase == "coarse_shell";
+        if coarse_shell && state.mode != OmpReporterMode::Backend {
+            return;
+        }
         let creation_terminal = creation_terminal_readiness(phase, guard);
         if state.mode == OmpReporterMode::Creation {
             if creation_transient_native_report(phase, guard) {
@@ -281,6 +386,7 @@ impl OmpCreationReporter {
         }
         let backend_priority = backend_priority(phase, guard);
         if state.mode == OmpReporterMode::Backend
+            && !coarse_shell
             && !(phase == "shell_probe" && metadata.code.is_some())
             && !backend_report_admits(state, backend_priority)
         {
@@ -288,7 +394,9 @@ impl OmpCreationReporter {
         }
         // Keep room for the first native admission or connection failure even if normal
         // launch/output observations arrive before it.
+        let reserved = u8::from(!state.backend_launch_emitted) + u8::from(!state.backend_readiness_emitted);
         if state.lines >= 8
+            || (coarse_shell && state.mode == OmpReporterMode::Backend && state.lines.saturating_add(reserved) >= 8)
             || (progress && state.progress_lines >= 3)
             || !state.seen.insert((phase, guard))
         {
@@ -315,8 +423,11 @@ impl OmpCreationReporter {
         let code = metadata
             .code
             .map_or("none".to_owned(), |code| format!("{code:?}"));
+        // Retiring a diagnostic receiver must not change the native action's outcome.
+        use std::io::Write as _;
         if let Some((name, kind, pane, terminal, workspace, argv)) = ack {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "goatr_omp_first_guard phase={phase} guard={guard} code={code} io={} frame={} name={} kind={} pane={} terminal={} workspace={} argv={}",
                 metadata.io,
                 metadata.frame,
@@ -327,13 +438,30 @@ impl OmpCreationReporter {
                 u8::from(workspace),
                 u8::from(argv),
             );
+        } else if let Some((site,observation,budget))=metadata.probe_deadline {
+            let _=writeln!(std::io::stderr().lock(),
+                "goatr_omp_first_guard phase={phase} guard={guard} code={code} io={} frame={} deadlineSite={site} observation={} entryBudget={budget}",
+                metadata.io,metadata.frame,observation.as_str());
         } else {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "goatr_omp_first_guard phase={phase} guard={guard} code={code} io={} frame={}",
                 metadata.io, metadata.frame
             );
         }
     }
+    /// One Backend-only settlement from the unchanged startup traversal. Creation,
+    /// Offline and ordinary runs retain their existing capture budgets and stay silent.
+    fn report_coarse_shell(&self, guard: CoarseShellGuard, code: Option<ErrorCode>, io: &'static str) {
+        let mut state = self.0.lock().expect("OMP first-guard reporter mutex");
+        if state.mode != OmpReporterMode::Backend || state.coarse_shell_settled
+        {
+            return;
+        }
+        state.coarse_shell_settled = true;
+        Self::emit(&mut state, "coarse_shell", guard.name(), code, io, None);
+    }
+
     /// Buffer only the retrying source-not-ready observation. Other topology guards remain
     /// immediate because they can return before the failed-settlement summary is reached.
     pub(crate) fn defer_creation_topology_not_ready(&self) {
@@ -442,6 +570,19 @@ impl OmpCreationReporter {
             Self::emit(&mut state, "shell_probe", guard, Some(code), io, None);
         }
     }
+    fn backend_capture(&self)->bool {
+        self.0.lock().expect("OMP first-guard reporter mutex").mode==OmpReporterMode::Backend
+    }
+    fn report_probe_deadline(&self,site:&'static str,detail:Option<(ProbeObservation,&'static str)>) {
+        let Some((observation,budget))=detail else {
+            self.report_shell_probe("result_deadline",ErrorCode::Timeout,"none");return;
+        };
+        let mut state=self.0.lock().expect("OMP first-guard reporter mutex");
+        if state.mode==OmpReporterMode::Backend {
+            Self::emit_with_frame(&mut state,"shell_probe","result_deadline",
+                ClosedReport{code:Some(ErrorCode::Timeout),io:"none",frame:"none",probe_deadline:Some((site,observation,budget))},None);
+        }
+    }
     pub(crate) fn report_agent(&self, guard: &'static str, code: Option<ErrorCode>) {
         let mut state = self.0.lock().expect("OMP first-guard reporter mutex");
         if !matches!(
@@ -541,7 +682,7 @@ impl OmpCreationReporter {
                     &mut state,
                     "transport",
                     guard,
-                    ClosedReport { code, io, frame },
+                    ClosedReport { code, io, frame, probe_deadline:None },
                     None,
                 );
             }
@@ -607,6 +748,7 @@ impl OmpCreationReporter {
                         code: failure.code,
                         io: failure.io,
                         frame: failure.frame,
+                        probe_deadline:None,
                     },
                     None,
                 );
@@ -624,6 +766,7 @@ impl OmpCreationReporter {
                     code: failure.code,
                     io: failure.io,
                     frame: failure.frame,
+                    probe_deadline:None,
                 },
                 None,
             );
@@ -1443,69 +1586,6 @@ pub struct WorktreeReadScope {
     pub tab_id: Id,
     pub read_identity: PaneReadIdentity,
 }
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct BoundWorktreeInfo {
-    #[serde(default)]pub candidate_id:Option<Uuid>,
-    #[serde(default)]pub managed_workspace_id:Option<Id>,
-    pub path: String,
-    pub label: String,
-    pub branch: Option<String>,
-    pub head: Option<String>,
-    pub is_bare: bool,
-    pub is_detached: bool,
-    pub is_locked: bool,
-    pub is_prunable: bool,
-    pub is_linked_worktree: Option<bool>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct WorktreeListBoundResult {
-    pub scope: WorktreeReadScope,
-    #[serde(default)]
-    pub source: Option<NativeSourceProof>,
-    pub worktrees: Vec<BoundWorktreeInfo>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BoundChangeSubmodule { pub commit_changed: bool, pub tracked_dirty: bool, pub untracked_dirty: bool }
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BoundChangeEntry {
-    Tracked { path: String, original_path: Option<String>, index: ChangeState, worktree: ChangeState, submodule: Option<BoundChangeSubmodule>, staged_binary: bool, unstaged_binary: bool },
-    Untracked { path: String },
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ChangesReadBoundResult { pub scope: WorktreeReadScope, pub changes: BoundChangesInfo }
-#[derive(Debug, Deserialize)]
-#[serde(rename_all="snake_case",deny_unknown_fields)]
-pub struct AgentRenameBoundResult {#[serde(rename="type")] pub result_type:String,pub scope:WorktreeReadScope,pub name:String}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct WorkspaceRenameBoundResult {
-    #[serde(rename = "type")]
-    pub result_type: String,
-    pub scope: WorktreeReadScope,
-    pub label: String,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct BoundChangesInfo {
-    #[serde(default,deserialize_with="bound_context_optional")] pub repository_context:Option<BoundChangesRepositoryContext>,
-    pub branch: Option<String>, pub head: Option<String>, pub detached: bool, pub entries: Vec<BoundChangeEntry>, pub staged_patch: String, pub unstaged_patch: String }
-#[derive(Debug, Deserialize)]
-pub struct BoundChangesRepositoryContext {pub unborn:bool,#[serde(default,deserialize_with="bound_context_optional")]pub upstream:Option<BoundChangesUpstream>,#[serde(default,deserialize_with="bound_context_optional")]pub latest_commit:Option<BoundChangesLatestCommit>}
-#[derive(Debug, Deserialize)]
-pub struct BoundChangesUpstream {pub name:String,#[serde(default,deserialize_with="bound_context_optional")]pub ahead:Option<u64>,#[serde(default,deserialize_with="bound_context_optional")]pub behind:Option<u64>}
-#[derive(Debug, Deserialize)]
-pub struct BoundChangesLatestCommit {pub oid:String,pub subject:String}
-fn bound_context_optional<'de,D:serde::Deserializer<'de>,T:serde::Deserialize<'de>>(deserializer:D)->Result<Option<T>,D::Error> {T::deserialize(deserializer).map(Some)}
-impl BoundChangesRepositoryContext {
-    fn public(&self)->ChangesRepositoryContext {
-        ChangesRepositoryContext {unborn:self.unborn,upstream:self.upstream.as_ref().map(|upstream|ChangesUpstream {name:upstream.name.clone(),ahead:upstream.ahead.map(Uint),behind:upstream.behind.map(Uint)}),latest_commit:self.latest_commit.as_ref().map(|commit|ChangesLatestCommit {oid:commit.oid.clone(),subject:commit.subject.clone()})}
-    }
-}
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Agent {
     pub terminal_id: Id,
@@ -1541,30 +1621,29 @@ fn agent_shell_capability<'de,D:serde::Deserializer<'de>>(deserializer:D)->Resul
 fn optional_artifact_shell_scope<'de,D:serde::Deserializer<'de>>(deserializer:D)->Result<Option<artifacts::NativeArtifactScope>,D::Error>{let value=Value::deserialize(deserializer)?;Ok(serde_json::from_value::<artifacts::NativeArtifactScope>(value).ok().filter(|scope|scope.validate().is_ok()))}
 fn agent_shell_epoch<'de,D:serde::Deserializer<'de>>(deserializer:D)->Result<Option<u64>,D::Error>{let value=Value::deserialize(deserializer)?;Ok(value.as_u64().filter(|epoch|*epoch>0))}
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct NativeLayout {
+    pub workspace_id: Id,
+    pub tab_id: Id,
+    pub area: endpoint::Rect,
+    pub focused_pane_id: Id,
+    pub panes: Vec<NativeLayoutPane>,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct NativeLayoutPane {
+    pub pane_id: Id,
+    pub rect: endpoint::Rect,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Snapshot {
+    // Read-only qualification for the explicitly private legacy smoke mode, never stock authority.
+    #[serde(default)] pub pane_grid_subscribe_bound: bool,
+    #[serde(default)] pub shell_grid_subscribe_bound: bool,
     #[serde(default,deserialize_with="agent_shell_capability")]pub artifact_read_bound:bool,
     #[serde(default,deserialize_with="agent_shell_epoch")]pub artifact_permission_epoch:Option<u64>,
     pub version: String,
     pub protocol: u32,
     #[serde(default)]
-    pub worktree_list_bound: bool,
-    #[serde(default)]
-    pub worktree_create_bound: bool,
-    #[serde(default)]pub worktree_remove_bound:bool,
-    #[serde(default)]
     pub shell_read_bound: bool,
-    #[serde(default)]
-    pub shell_create_bound: bool,
-    #[serde(default,deserialize_with="agent_shell_capability")]pub omp_skills_preview_bound:bool,
-    #[serde(default,deserialize_with="agent_shell_epoch")]pub omp_skills_permission_epoch:Option<u64>,
-    #[serde(default,deserialize_with="agent_shell_capability")]pub agent_shell_create_bound:bool,
-    #[serde(default,deserialize_with="agent_shell_epoch")]pub agent_shell_permission_epoch:Option<u64>,
-    #[serde(default)]
-    pub changes_read_bound: bool,
-    #[serde(default)]
-    pub workspace_rename_bound: bool,
-    #[serde(default)]
-    pub agent_rename_bound: bool,
     pub focused_workspace_id: Option<Id>,
     pub focused_tab_id: Option<Id>,
     pub focused_pane_id: Option<Id>,
@@ -1572,6 +1651,8 @@ pub struct Snapshot {
     pub tabs: Vec<Tab>,
     pub panes: Vec<Pane>,
     pub agents: Vec<Agent>,
+    #[serde(default)]
+    pub layouts: Vec<NativeLayout>,
 }
 impl Snapshot {
     pub fn validate(&self) -> io::Result<()> {
@@ -1671,6 +1752,36 @@ impl Snapshot {
             .iter()
             .find(|p| &p.pane_id == id)
             .ok_or_else(|| invalid("pane absent"))
+    }
+    /// Optional terminal geometry never gates structured agents or ordinary inventory.
+    pub(crate) fn layout_seed(&self, selected:&Pane)->io::Result<(u16,u16)> {
+        if self.layouts.len()>512 {return Err(limit());}
+        let tabs:HashMap<_,_>=self.tabs.iter().map(|tab|(&tab.tab_id,&tab.workspace_id)).collect();
+        let panes:HashMap<_,_>=self.panes.iter().map(|pane|(&pane.pane_id,pane)).collect();
+        let mut layout_tabs=HashSet::new();
+        let mut layout_panes=0usize;
+        let mut seed=None;
+        for layout in &self.layouts {
+            if tabs.get(&layout.tab_id)!=Some(&&layout.workspace_id)||!layout_tabs.insert(&layout.tab_id)
+                ||layout.area.width>4096||layout.area.height>4096
+                ||usize::from(layout.area.width)*usize::from(layout.area.height)>1_000_000
+            {return Err(invalid("invalid native layout"));}
+            layout_panes=layout_panes.checked_add(layout.panes.len()).ok_or_else(limit)?;
+            if layout_panes>512 {return Err(limit());}
+            let mut members=HashSet::new();
+            for member in &layout.panes {
+                let pane=panes.get(&member.pane_id).ok_or_else(||invalid("layout pane absent"))?;
+                if pane.tab_id!=layout.tab_id||pane.workspace_id!=layout.workspace_id
+                    ||!members.insert(&member.pane_id)||!layout.area.contains(member.rect)
+                {return Err(invalid("layout pane routing/geometry changed"));}
+            }
+            if !members.contains(&layout.focused_pane_id) {return Err(invalid("focused layout pane absent"));}
+            if layout.tab_id==selected.tab_id&&layout.workspace_id==selected.workspace_id&&members.contains(&selected.pane_id) {
+                if layout.area.width==0||layout.area.height==0 {return Err(invalid("initial terminal geometry unavailable"));}
+                seed=Some((layout.area.width,layout.area.height));
+            }
+        }
+        seed.ok_or_else(||invalid("initial terminal layout unavailable"))
     }
     pub fn no_focus(&self) -> io::Result<()> {
         if self.focused_workspace_id.is_none() {
@@ -2210,75 +2321,15 @@ impl Client {
         }
         Ok(read)
     }
-    /// List only the repository already admitted by Herdr for this exact pane identity. Native
-    /// epochs remain in this host-local request and are never projected onto the phone wire.
-    pub async fn worktree_list_bound(
-        self,
-        pane: &Id,
-        terminal: &Id,
-        identity: &PaneReadIdentity,
-    ) -> Result<WorktreeListBoundResult, ErrorCode> {
-        let mut result = self
-            .request(
-                "worktree.list_bound",
-                json!({
-                    "pane_id": pane,
-                    "expected_terminal_id": terminal,
-                    "expected_read_identity": {
-                        "herdr_incarnation": identity.herdr_incarnation,
-                        "runtime_epoch": identity.runtime_epoch,
-                        "binding_epoch": identity.binding_epoch,
-                    },
-                }),
-                "worktree_list_bound",
-            )
-            .await
-            .map_err(worktree_error_code)?;
-        let read: WorktreeListBoundResult = serde_json::from_value(result.take())
-            .map_err(|_| ErrorCode::NotReady)?;
-        if read.scope.pane_id != *pane
-            || read.scope.terminal_id != *terminal
-            || read.scope.read_identity != *identity
-            || read.worktrees.len() > 128
-            || read.worktrees.iter().any(|entry| !valid_bound_worktree(entry))
-        {
-            return Err(ErrorCode::NotReady);
-        }
-        Ok(read)
+    pub async fn agent_rename(self,pane:&Id,name:&AgentName)->Result<Agent,ApiError> {
+        let mut result=self.request("agent.rename",json!({"target":pane,"name":name.0}),"agent_info").await?;
+        let agent=result.get_mut("agent").ok_or_else(||ApiError::Unavailable(invalid("native agent result absent")))?.take();
+        serde_json::from_value(agent).map_err(|_|ApiError::Unavailable(invalid("invalid native agent result")))
     }
-    /// Reads repository changes only for the exact original pane identity. The native API owns
-    /// every checkout decision, while the companion retains the original admission context.
-    pub async fn changes_read_bound(
-        self, pane: &Id, terminal: &Id, identity: &PaneReadIdentity,
-    ) -> Result<ChangesReadBoundResult, ErrorCode> {
-        let mut result = self.request(
-            "changes.read_bound",
-            json!({"pane_id": pane, "expected_terminal_id": terminal, "expected_read_identity": {
-                "herdr_incarnation": identity.herdr_incarnation, "runtime_epoch": identity.runtime_epoch, "binding_epoch": identity.binding_epoch,
-            }}),
-            "changes_read_bound",
-        ).await.map_err(changes_error_code)?;
-        let read: ChangesReadBoundResult = serde_json::from_value(result.take()).map_err(|_| ErrorCode::NotReady)?;
-        if read.scope.pane_id != *pane || read.scope.terminal_id != *terminal || read.scope.read_identity != *identity
-            || !valid_bound_changes(&read.changes) { return Err(ErrorCode::NotReady); }
-        Ok(read)
-    }
-    pub async fn agent_rename_bound(self,pane:&Id,terminal:&Id,identity:&PaneReadIdentity,name:&AgentName)->Result<AgentRenameBoundResult,ApiError> {
-        let result=self.request("agent.rename_bound",json!({"pane_id":pane,"expected_terminal_id":terminal,"expected_read_identity":identity,"name":name.0}),"agent_rename_bound").await?;
-        decode_agent_rename_bound(result)
-    }
-    /// Rename a workspace only through the original bound pane identity.
-    pub async fn workspace_rename_bound(
-        self, pane: &Id, terminal: &Id, identity: &PaneReadIdentity, label: &Label,
-    ) -> Result<WorkspaceRenameBoundResult, ApiError> {
-        let mut result = self.request(
-            "workspace.rename_bound",
-            json!({"pane_id": pane, "expected_terminal_id": terminal, "expected_read_identity": {
-                "herdr_incarnation": identity.herdr_incarnation, "runtime_epoch": identity.runtime_epoch, "binding_epoch": identity.binding_epoch,
-            }, "label": label.0}),
-            "workspace_rename_bound",
-        ).await?;
-        decode_workspace_rename_bound(result.take())
+    pub async fn workspace_rename(self,workspace:&Id,label:&Label)->Result<Workspace,ApiError> {
+        let mut result=self.request("workspace.rename",json!({"workspace_id":workspace,"label":label.0}),"workspace_info").await?;
+        let workspace=result.get_mut("workspace").ok_or_else(||ApiError::Unavailable(invalid("native workspace result absent")))?.take();
+        serde_json::from_value(workspace).map_err(|_|ApiError::Unavailable(invalid("invalid native workspace result")))
     }
     /// Public reported PIDs remain in Herdr's namespace; callers must prove translation
     /// using actual kernel peer/process evidence before treating them as proc pathnames.
@@ -2306,102 +2357,6 @@ impl Client {
             return Err(invalid("pane process mismatch/limit"));
         }
         Ok(info)
-    }
-}
-fn valid_bound_worktree_text(value: &str, limit: usize, absolute: bool) -> bool {
-    !value.is_empty()
-        && value.len() <= limit
-        && !value.chars().any(char::is_control)
-        && (!absolute || value.starts_with('/'))
-}
-fn valid_bound_worktree(entry: &BoundWorktreeInfo) -> bool {
-    valid_bound_worktree_text(&entry.path, 4096, true)
-        && valid_bound_worktree_text(&entry.label, 1024, false)
-        && entry.branch.as_deref().is_none_or(|value| valid_bound_worktree_text(value, 1024, false))
-        && entry.head.as_deref().is_none_or(|value| valid_bound_worktree_text(value, 1024, false))
-}
-fn valid_bound_patch(value: &str) -> bool {
-    value.len() <= 256 * 1024 && value.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
-}
-fn valid_bound_change_entry(entry: &BoundChangeEntry) -> bool {
-    match entry {
-        BoundChangeEntry::Tracked { path, original_path, index, worktree, submodule: _, staged_binary: _, unstaged_binary: _ } => {
-            let renamed = matches!(index, ChangeState::Renamed | ChangeState::Copied) || matches!(worktree, ChangeState::Renamed | ChangeState::Copied);
-            valid_bound_worktree_text(path, 4096, false)
-                && original_path.as_deref().is_none_or(|value| valid_bound_worktree_text(value, 4096, false))
-                && (renamed == original_path.is_some())
-        }
-        BoundChangeEntry::Untracked { path } => valid_bound_worktree_text(path, 4096, false),
-    }
-}
-fn valid_bound_changes(changes: &BoundChangesInfo) -> bool {
-    let mut paths = HashSet::new();
-    changes.repository_context.as_ref().is_none_or(|context| {
-        let context=context.public();
-        context.validate().is_ok() && (!changes.detached || context.upstream.is_none()) && (if context.unborn { !changes.detached && changes.branch.is_some() && changes.head.is_none() && context.latest_commit.is_none() && context.upstream.as_ref().is_none_or(|upstream|upstream.ahead.is_none() && upstream.behind.is_none()) } else { context.latest_commit.as_ref().is_some_and(|commit|changes.head.as_ref()==Some(&commit.oid)) })
-    })
-        && changes.entries.len() <= 128
-        && (!changes.detached || changes.branch.is_none())
-        && changes.branch.as_deref().is_none_or(|v| valid_bound_worktree_text(v, 1024, false))
-        && changes.head.as_deref().is_none_or(|v| valid_bound_worktree_text(v, 1024, false))
-        && valid_bound_patch(&changes.staged_patch) && valid_bound_patch(&changes.unstaged_patch)
-        && changes.entries.iter().all(|entry| {
-            let path = match entry { BoundChangeEntry::Tracked { path, .. } | BoundChangeEntry::Untracked { path } => path };
-            paths.insert(path) && valid_bound_change_entry(entry)
-        })
-}
-fn worktree_error_code(error: ApiError) -> ErrorCode {
-    match error {
-        ApiError::Rejected(code) => match code.as_str() {
-            "worktree_list_bound_mismatch" => ErrorCode::StaleSession,
-            "worktree_list_bound_not_repository" => ErrorCode::NotFound,
-            "worktree_list_bound_resource_limit" => ErrorCode::ResourceLimit,
-            "worktree_list_bound_timeout" => ErrorCode::Timeout,
-            "worktree_list_bound_failed" => ErrorCode::NotReady,
-            _ => ErrorCode::NotReady,
-        },
-        ApiError::Changed(_) => ErrorCode::StaleSession,
-        ApiError::Unavailable(error) => policy(error),
-    }
-}
-fn changes_error_code(error: ApiError) -> ErrorCode {
-    match error {
-        ApiError::Rejected(code) => match code.as_str() {
-            "changes_read_bound_mismatch" => ErrorCode::StaleSession,
-            "changes_read_bound_not_repository" => ErrorCode::NotFound,
-            "changes_read_bound_resource_limit" => ErrorCode::ResourceLimit,
-            "changes_read_bound_timeout" => ErrorCode::Timeout,
-            "changes_read_bound_failed" => ErrorCode::NotReady,
-            _ => ErrorCode::NotReady,
-        },
-        ApiError::Changed(_) => ErrorCode::StaleSession,
-        ApiError::Unavailable(error) => policy(error),
-    }
-}
-pub(crate) fn decode_agent_rename_bound(result:Value)->Result<AgentRenameBoundResult,ApiError> {
-    let decoded:AgentRenameBoundResult=serde_json::from_value(result).map_err(|_|ApiError::Unavailable(invalid("invalid bound alias response")))?;
-    if decoded.result_type!="agent_rename_bound" {return Err(ApiError::Unavailable(invalid("invalid bound alias type")))}Ok(decoded)
-}
-pub(crate) fn decode_workspace_rename_bound(result: Value) -> Result<WorkspaceRenameBoundResult, ApiError> {
-    let decoded: WorkspaceRenameBoundResult = serde_json::from_value(result)
-        .map_err(|_| ApiError::Unavailable(invalid("invalid workspace rename result")))?;
-    if decoded.result_type != "workspace_rename_bound" {
-        return Err(ApiError::Unavailable(invalid("invalid workspace rename result type")));
-    }
-    Ok(decoded)
-}
-pub(crate) fn workspace_rename_error_code(error: ApiError) -> ErrorCode {
-    match error {
-        ApiError::Rejected(code) => match code.as_str() {
-            "workspace_rename_bound_mismatch" => ErrorCode::StaleSession,
-            "workspace_rename_bound_not_found" => ErrorCode::NotFound,
-            "workspace_rename_bound_resource_limit" => ErrorCode::ResourceLimit,
-            "workspace_rename_bound_timeout" => ErrorCode::Timeout,
-            "workspace_rename_bound_failed" => ErrorCode::NotReady,
-            _ => ErrorCode::NotReady,
-        },
-        ApiError::Changed(_) => ErrorCode::StaleSession,
-        ApiError::Unavailable(error) => policy(error),
     }
 }
 fn api_io(error: ApiError) -> io::Error {
@@ -3135,28 +3090,10 @@ struct Binding {
     herdr_report: Option<(Option<String>, Option<NativeSession>)>,
     terminal_read_pin: Option<PaneReadIdentity>,
 }
-/// Private native worktree admission retained across the one bound native call. It never enters
-/// the Goatr protocol: host-local epochs and topology IDs remain only in this completion fence.
+/// Original logical rename scope; document/read grants are independent.
 #[derive(Clone)]
-pub(crate) struct WorktreeReadContext {
-    pub(crate) source_epoch: Uuid,
-    pub(crate) pane: Id,
-    pub(crate) terminal: Id,
-    pub(crate) workspace: Id,
-    pub(crate) tab: Id,
-    pub(crate) read_identity: PaneReadIdentity,
-    creation: Option<BoundCheckoutAdmission>,
-}
-/// Native-only fence retained across one changes read; no host topology identity is sent to a
-/// paired phone.
-#[derive(Clone)]
-pub(crate) struct ChangesReadContext {
-    source_epoch: Uuid,
-    pane: Id,
-    terminal: Id,
-    workspace: Id,
-    tab: Id,
-    read_identity: PaneReadIdentity,
+pub(crate) struct RenameContext {
+    source_epoch:Uuid,pane:Id,terminal:Id,workspace:Id,tab:Id,
 }
 /// Measured in the actual pane shell, including aliases/functions; not a remote/config flag.
 /// The caller supplies the captured absolute result of shell resolution, never executes the
@@ -3237,9 +3174,6 @@ struct Inner {
     bindings: HashMap<Uuid, Binding>,
     shell_bindings: HashMap<Uuid, ShellBinding>,
     proofs: Vec<WrapperProof>,
-    worktree_admissions: HashMap<Uuid, BoundCheckoutAdmission>,
-    removal_previews:HashMap<Uuid,worktree_removal::RemoveAdmission>,
-    execution_checkouts: HashMap<Uuid, ExecutionCheckout>,
     unbound_ids: HashMap<(Uuid, Uuid, Id, Provider), Uuid>,
     unbound_reasons: HashMap<(Uuid, Uuid, Id, Provider), (UnboundState, String)>,
 }
@@ -3250,6 +3184,13 @@ pub struct Topology {
     state: Arc<State>,
     host_id: EndpointId,
     artifact_leases:Mutex<artifacts::ArtifactLeases>,
+    creation_roots:HashMap<Uuid,Option<Arc<crate::project_read::Root>>>,
+    pub(crate) skill_documents:Arc<skills::Documents>,
+    terminal_jobs:Mutex<tokio::task::JoinSet<()>>,
+    terminal_slots:Arc<tokio::sync::Semaphore>,
+    terminal_stopping:AtomicBool,
+    terminal_safety:SecurityResult<()>,
+    terminal_unproved_servers:HashSet<Uuid>,
     inner: Mutex<Inner>,
     // ponytail: serialize the short cross-owner identity commit, never native readiness/I/O.
     updates: tokio::sync::Mutex<()>,
@@ -3270,20 +3211,38 @@ impl Topology {
             .call(|s| Ok((s.persisted_servers()?, s.persisted_sessions()?,s.persisted_shells()?)))
             .await
             .map_err(pairing::store_error)?;
+        let restored_fences=storage.call(|store|store.creation_shell_fences()).await;
+        let (terminal_safety,terminal_unproved_servers)=match restored_fences {
+            Ok((fences,unproved))=>{for(peer,action,fence)in fences{state.creation_shell_fence(peer,action,Some(fence));}(Ok(()),unproved)}
+            Err(error)=>(Err(pairing::store_error(error)),HashSet::new()),
+        };
+        // Hold project objects once; creation, terminal and read grants stay independent.
+        // An unavailable root disables only operations using that project, never chat.
+        let creation_roots=config.projects.iter().map(|project| {
+            let root=if config.allow_scoped_shell_probe||config.allow_terminal_control||project.allow_read_tools {
+                crate::project_read::Root::open(&project.path,std::time::Instant::now()+Duration::from_secs(5)).ok().map(Arc::new)
+            } else { None };
+            (project.id.clone(),root)
+        }).collect();
+        let skill_documents=skills::Documents::new(&config);
         let owner = Arc::new(Self {
             config,
             storage,
             state,
             host_id,
             artifact_leases:Mutex::new(artifacts::ArtifactLeases::default()),
+            creation_roots,
+            skill_documents,
+            terminal_jobs:Mutex::new(tokio::task::JoinSet::new()),
+            terminal_slots:Arc::new(tokio::sync::Semaphore::new(shells::CREATION_JOBS as usize)),
+            terminal_stopping:AtomicBool::new(false),
+            terminal_safety,
+            terminal_unproved_servers,
             inner: Mutex::new(Inner {
                 servers: HashMap::new(),
                 bindings: HashMap::new(),
                 shell_bindings: HashMap::new(),
                 proofs: Vec::new(),
-                worktree_admissions: HashMap::new(),
-                removal_previews:HashMap::new(),
-                execution_checkouts: HashMap::new(),
                 unbound_ids: HashMap::new(),
                 unbound_reasons: HashMap::new(),
             }),
@@ -3349,7 +3308,7 @@ impl Topology {
         // One weak maintenance owner bounds idle metadata retention without a
         // Topology -> provider Runtime -> Topology lifetime cycle.
         let artifact_owner=Arc::downgrade(&owner);
-        tokio::spawn(async move{loop{tokio::time::sleep(Duration::from_secs(1)).await;let Some(owner)=artifact_owner.upgrade()else{break};owner.artifact_leases.lock().expect("artifact leases").maintain();drop(owner);}});
+        tokio::spawn(async move{loop{tokio::time::sleep(Duration::from_secs(1)).await;let Some(owner)=artifact_owner.upgrade()else{break};owner.artifact_leases.lock().expect("artifact leases").maintain();owner.state.prune_creation_directories();drop(owner);}});
         owner.publish()?;
         Ok(owner)
     }
@@ -3361,8 +3320,8 @@ impl Topology {
             *current = Some(reporter);
         }
     }
-    /// The OMP runtime installs this one-run reporter before its first native
-    /// binding. It remains inert until the runtime arms one completed Ready target.
+    /// The OMP runtime installs this one-run reporter before topology startup.
+    /// Only Backend reports coarse settlement; Offline awaits one Ready target.
     pub(crate) fn set_omp_offline_reporter(&self, reporter: OmpCreationReporter) {
         if let Ok(mut current) = self.omp_offline_reporter.lock()
             && current.is_none()
@@ -3510,436 +3469,66 @@ impl Topology {
             .filter(|s| s.recheck().is_ok())
             .collect()
     }
-    /// Read visible text only after the binding's original native identity has been pinned.
-    /// The native call is intentionally outside the topology/update and authorization locks.
-    pub async fn terminal_read(
-        &self,
-        target: &Target,
-    ) -> SecurityResult<(Uuid, TerminalReadResult)> {
-        let (source, epoch, pane, terminal, workspace, tab, pin) = {
-            let _update = self.updates.lock().await;
-            let (server, epoch, pin) = {
-                let inner = self.inner.lock().expect("topology mutex");
-                let binding = inner
-                    .bindings
-                    .get(&target.session_id)
-                    .filter(|binding| binding.target == *target)
-                    .ok_or(ErrorCode::StaleSession)?;
-                (
-                    binding.key.server_id.clone(),
-                    binding.source_epoch.clone(),
-                    binding.terminal_read_pin.clone().ok_or(ErrorCode::NotReady)?,
-                )
-            };
-            let source = self.source(&server)?;
-            let state = self.state.session_state(target, &epoch)?;
-            if state.summary.connectivity != SessionConnectivity::Ready
-                || !state.summary.capabilities.terminal_read
-            {
-                return Err(ErrorCode::NotReady);
-            }
-            let inventory_pane = source
-                .snapshot
-                .pane(&state.summary.pane_id)
-                .map_err(policy)?;
-            if inventory_pane.terminal_id != state.summary.terminal_id
-                || inventory_pane.workspace_id != state.summary.workspace_id
-                || inventory_pane.read_identity.as_ref() != Some(&pin)
-            {
-                return Err(ErrorCode::StaleSession);
-            }
-            source.recheck().map_err(policy)?;
-            let tab = inventory_pane.tab_id.clone();
-            (
-                source,
-                epoch,
-                state.summary.pane_id,
-                state.summary.terminal_id,
-                state.summary.workspace_id,
-                tab,
-                pin,
-            )
+
+
+    fn logical_rename_context(&self,target:&Target)->SecurityResult<(Source,RenameContext,SessionSummary)> {
+        let (server,incarnation,terminal,epoch)={
+            let inner=self.inner.lock().expect("topology mutex");
+            let binding=inner.bindings.get(&target.session_id).filter(|binding|binding.target==*target).ok_or(ErrorCode::StaleSession)?;
+            (binding.key.server_id.clone(),binding.key.server_incarnation.clone(),binding.key.terminal_id.clone(),binding.source_epoch.clone())
         };
-        let client = Client::connect(&source.socket_path).await.map_err(policy)?;
-        let read = client.read_bound(&pane, &terminal, &pin).await.map_err(policy)?;
-        if read.workspace_id != workspace || read.tab_id != tab {
+        let source=self.source(&server)?;
+        if source.incarnation!=incarnation{return Err(ErrorCode::StaleSession)}
+        let state=self.state.session_state(target,&epoch)?;
+        if state.summary.connectivity!=SessionConnectivity::Ready{return Err(ErrorCode::NotReady)}
+        let pane=source.snapshot.pane(&state.summary.pane_id).map_err(policy)?;
+        if state.summary.server_id!=server||pane.terminal_id!=terminal
+            ||pane.terminal_id!=state.summary.terminal_id||pane.workspace_id!=state.summary.workspace_id {
             return Err(ErrorCode::StaleSession);
         }
-        Ok((
-            epoch,
-            TerminalReadResult {
-                target: target.clone(),
-                text: read.text,
-                truncated: read.truncated,
-            },
-        ))
-    }
-    /// Serialized after-I/O admission: source/pin validation and response enqueue share this
-    /// topology commit, so a replacement cannot publish a late terminal snapshot.
-    pub async fn enqueue_terminal_read(
-        &self,
-        connection: &Uuid,
-        response_id: Uuid,
-        source_epoch: &Uuid,
-        result: TerminalReadResult,
-    ) -> SecurityResult<()> {
-        let _update = self.updates.lock().await;
-        let (server, pin) = {
-            let inner = self.inner.lock().expect("topology mutex");
-            let binding = inner
-                .bindings
-                .get(&result.target.session_id)
-                .filter(|binding| binding.target == result.target && &binding.source_epoch == source_epoch)
-                .ok_or(ErrorCode::StaleSession)?;
-            if binding.terminal_read_pin.is_none() {
-                return Err(ErrorCode::NotReady);
-            }
-            (
-                binding.key.server_id.clone(),
-                binding.terminal_read_pin.clone().ok_or(ErrorCode::NotReady)?,
-            )
-        };
-        let source = self.source(&server)?;
-        let state = self.state.session_state(&result.target, source_epoch)?;
-        if state.summary.connectivity != SessionConnectivity::Ready
-            || !state.summary.capabilities.terminal_read
-        {
-            return Err(ErrorCode::NotReady);
-        }
-        let pane = source
-            .snapshot
-            .pane(&state.summary.pane_id)
-            .map_err(policy)?;
-        if pane.terminal_id != state.summary.terminal_id
-            || pane.workspace_id != state.summary.workspace_id
-            || pane.read_identity.as_ref() != Some(&pin)
-        {
-            return Err(ErrorCode::StaleSession);
-        }
+        let context=RenameContext{source_epoch:epoch,pane:pane.pane_id.clone(),terminal:pane.terminal_id.clone(),
+            workspace:pane.workspace_id.clone(),tab:pane.tab_id.clone()};
         source.recheck().map_err(policy)?;
-        let target = result.target.clone();
-        self.state
-            .terminal_read_response(connection, &target, source_epoch, response_id, result)
+        Ok((source,context,state.summary))
     }
-
-    /// Read a native worktree inventory only through the original binding's immutable pane
-    /// identity. The single public call is outside locks; both dispatch and final publication
-    /// fence the original source, Target and native scope.
-    pub(crate) async fn worktrees_list(
-        &self,
-        target: &Target,
-    ) -> SecurityResult<(WorktreeReadContext, WorktreesListResult)> {
-        let (source, mut context) = {
-            let _update = self.updates.lock().await;
-            let (server, epoch, pin) = {
-                let inner = self.inner.lock().expect("topology mutex");
-                let binding = inner
-                    .bindings
-                    .get(&target.session_id)
-                    .filter(|binding| binding.target == *target)
-                    .ok_or(ErrorCode::StaleSession)?;
-                (
-                    binding.key.server_id.clone(),
-                    binding.source_epoch.clone(),
-                    binding.terminal_read_pin.clone().ok_or(ErrorCode::NotReady)?,
-                )
-            };
-            let source = self.source(&server)?;
-            let state = self.state.session_state(target, &epoch)?;
-            if state.summary.connectivity != SessionConnectivity::Ready
-                || !state.summary.capabilities.worktrees_read
-                || !source.snapshot.worktree_list_bound
-            {
-                return Err(ErrorCode::NotReady);
-            }
-            let inventory_pane = source
-                .snapshot
-                .pane(&state.summary.pane_id)
-                .map_err(policy)?;
-            if inventory_pane.terminal_id != state.summary.terminal_id
-                || inventory_pane.workspace_id != state.summary.workspace_id
-                || inventory_pane.read_identity.as_ref() != Some(&pin)
-            {
-                return Err(ErrorCode::StaleSession);
-            }
-            source.recheck().map_err(policy)?;
-            let context = WorktreeReadContext {
-                source_epoch: epoch,
-                pane: state.summary.pane_id,
-                terminal: state.summary.terminal_id,
-                workspace: state.summary.workspace_id,
-                tab: inventory_pane.tab_id.clone(),
-                read_identity: pin,
-                creation: None,
-            };
-            (source, context)
-        };
-        let bound = Client::connect(&source.socket_path)
-            .await
-            .map_err(policy)?
-            .worktree_list_bound(&context.pane, &context.terminal, &context.read_identity)
-            .await?;
-        if bound.scope.pane_id != context.pane
-            || bound.scope.terminal_id != context.terminal
-            || bound.scope.workspace_id != context.workspace
-            || bound.scope.tab_id != context.tab
-            || bound.scope.read_identity != context.read_identity
-        {
-            return Err(ErrorCode::StaleSession);
-        }
-        context.creation = self.make_bound_checkout_admission(target, &source, &context, bound.source.as_ref())?;
-        let creation_scope = context.creation.as_ref().map(|admission| WorktreeCreationScope { project_id: admission.project_id.clone(), can_create: self.creation_reason(&source.server_id,Provider::Omp,Some(&admission.project_id)).is_empty() || self.creation_reason(&source.server_id,Provider::Codex,Some(&admission.project_id)).is_empty() });
-        Ok((
-            context,
-            WorktreesListResult {
-                creation_scope,
-                target: target.clone(),
-                worktrees: bound
-                    .worktrees
-                    .into_iter()
-                    .map(|entry| WorktreeEntry {
-                        candidate_id:entry.candidate_id,managed_workspace_id:entry.managed_workspace_id,
-                        path: entry.path,
-                        label: entry.label,
-                        branch: entry.branch,
-                        head: entry.head,
-                        is_bare: entry.is_bare,
-                        is_detached: entry.is_detached,
-                        is_locked: entry.is_locked,
-                        is_prunable: entry.is_prunable,
-                        is_linked_worktree: entry.is_linked_worktree,
-                    })
-                    .collect(),
-            },
-        ))
-    }
-
-    /// The topology and state locks meet only for the final admission and response enqueue,
-    /// preventing an old inventory from reaching a replacement native binding.
-    pub(crate) async fn enqueue_worktrees_list(
-        &self,
-        connection: &Uuid,
-        response_id: Uuid,
-        context: &WorktreeReadContext,
-        result: WorktreesListResult,
-    ) -> SecurityResult<()> {
-        let _update = self.updates.lock().await;
-        let server = {
-            let inner = self.inner.lock().expect("topology mutex");
-            let binding = inner
-                .bindings
-                .get(&result.target.session_id)
-                .filter(|binding| {
-                    binding.target == result.target
-                        && binding.source_epoch == context.source_epoch
-                        && binding.key.terminal_id == context.terminal
-                        && binding.terminal_read_pin.as_ref() == Some(&context.read_identity)
-                })
-                .ok_or(ErrorCode::StaleSession)?;
-            binding.key.server_id.clone()
-        };
-        let source = self.source(&server)?;
-        let state = self
-            .state
-            .session_state(&result.target, &context.source_epoch)?;
-        if state.summary.connectivity != SessionConnectivity::Ready
-            || !state.summary.capabilities.worktrees_read
-            || !source.snapshot.worktree_list_bound
-        {
-            return Err(ErrorCode::NotReady);
-        }
-        let pane = source
-            .snapshot
-            .pane(&context.pane)
-            .map_err(policy)?;
-        if state.summary.pane_id != context.pane
-            || state.summary.terminal_id != context.terminal
-            || state.summary.workspace_id != context.workspace
-            || pane.terminal_id != context.terminal
-            || pane.workspace_id != context.workspace
-            || pane.tab_id != context.tab
-            || pane.read_identity.as_ref() != Some(&context.read_identity)
-        {
-            return Err(ErrorCode::StaleSession);
-        }
-        source.recheck().map_err(policy)?;
-        if let Some(admission) = &context.creation {
-            self.recheck_bound_checkout_admission(admission)?;
-            let mut inner=self.inner.lock().expect("topology mutex");
-            if inner.worktree_admissions.len()>=512 && !inner.worktree_admissions.contains_key(&result.target.session_id) {return Err(ErrorCode::ResourceLimit)}
-            inner.worktree_admissions.insert(result.target.session_id.clone(), admission.clone());
-        } else {
-            self.inner.lock().expect("topology mutex").worktree_admissions.remove(&result.target.session_id);
-        }
-        let target = result.target.clone();
-        self.state
-            .worktrees_list_response(connection, &target, &context.source_epoch, response_id, result)
-    }
-
-    /// Reads only the original native binding's changes. The single native request runs without
-    /// topology locks; its original scope is then re-admitted before the response is queued.
-    pub(crate) async fn changes_read(
-        &self,
-        target: &Target,
-    ) -> SecurityResult<(ChangesReadContext, ChangesReadResult)> {
-        let (source, context) = {
-            let _update = self.updates.lock().await;
-            let (server, epoch, pin) = {
-                let inner = self.inner.lock().expect("topology mutex");
-                let binding = inner.bindings.get(&target.session_id)
-                    .filter(|binding| binding.target == *target).ok_or(ErrorCode::StaleSession)?;
-                (binding.key.server_id.clone(), binding.source_epoch.clone(), binding.terminal_read_pin.clone().ok_or(ErrorCode::NotReady)?)
-            };
-            let source = self.source(&server)?;
-            let state = self.state.session_state(target, &epoch)?;
-            if state.summary.connectivity != SessionConnectivity::Ready
-                || !state.summary.capabilities.changes_read || !source.snapshot.changes_read_bound { return Err(ErrorCode::NotReady); }
-            let inventory_pane = source.snapshot.pane(&state.summary.pane_id).map_err(policy)?;
-            if inventory_pane.terminal_id != state.summary.terminal_id || inventory_pane.workspace_id != state.summary.workspace_id
-                || inventory_pane.read_identity.as_ref() != Some(&pin) { return Err(ErrorCode::StaleSession); }
-            source.recheck().map_err(policy)?;
-            let context = ChangesReadContext { source_epoch: epoch, pane: state.summary.pane_id, terminal: state.summary.terminal_id,
-                workspace: state.summary.workspace_id, tab: inventory_pane.tab_id.clone(), read_identity: pin };
-            (source, context)
-        };
-        let bound = Client::connect(&source.socket_path).await.map_err(policy)?
-            .changes_read_bound(&context.pane, &context.terminal, &context.read_identity).await?;
-        if bound.scope.pane_id != context.pane || bound.scope.terminal_id != context.terminal
-            || bound.scope.workspace_id != context.workspace || bound.scope.tab_id != context.tab
-            || bound.scope.read_identity != context.read_identity { return Err(ErrorCode::StaleSession); }
-        let changes = bound.changes;
-        Ok((context, ChangesReadResult {
-            target: target.clone(), changes: ChangesInfo { repository_context:changes.repository_context.as_ref().map(BoundChangesRepositoryContext::public), branch: changes.branch, head: changes.head, detached: changes.detached,
-            entries: changes.entries.into_iter().map(|entry| match entry {
-                BoundChangeEntry::Tracked { path, original_path, index, worktree, submodule, staged_binary, unstaged_binary } => ChangeEntry::Tracked {
-                    path, original_path, index, worktree,
-                    submodule: submodule.map(|s| ChangeSubmodule { commit_changed: s.commit_changed, tracked_dirty: s.tracked_dirty, untracked_dirty: s.untracked_dirty }),
-                    staged_binary, unstaged_binary,
-                },
-                BoundChangeEntry::Untracked { path } => ChangeEntry::Untracked { path },
-            }).collect(), staged_patch: changes.staged_patch, unstaged_patch: changes.unstaged_patch },
-        }))
-    }
-
-    /// The final changes admission checks the exact original source, hierarchy and native pin in
-    /// one serialized topology section before State queues its response under its own lock.
-    pub(crate) async fn enqueue_changes_read(
-        &self, connection: &Uuid, response_id: Uuid, context: &ChangesReadContext, result: ChangesReadResult,
-    ) -> SecurityResult<()> {
-        let _update = self.updates.lock().await;
-        let server = {
-            let inner = self.inner.lock().expect("topology mutex");
-            let binding = inner.bindings.get(&result.target.session_id).filter(|binding| {
-                binding.target == result.target && binding.source_epoch == context.source_epoch
-                    && binding.key.terminal_id == context.terminal
-                    && binding.terminal_read_pin.as_ref() == Some(&context.read_identity)
+    fn validate_logical_rename_context(&self,target:&Target,original:&Source,context:&RenameContext,ack:bool)->SecurityResult<(Source,SessionSummary)> {
+        original.recheck_identity().map_err(policy)?;
+        let source={
+            let inner=self.inner.lock().expect("topology mutex");
+            let binding=inner.bindings.get(&target.session_id).filter(|binding| {
+                binding.target==*target&&binding.source_epoch==context.source_epoch
+                    &&binding.key.server_id==original.server_id&&binding.key.server_incarnation==original.incarnation
+                    &&binding.key.terminal_id==context.terminal
             }).ok_or(ErrorCode::StaleSession)?;
-            binding.key.server_id.clone()
+            let current=inner.servers.get(&binding.key.server_id).and_then(|record|record.source.as_ref()).ok_or(ErrorCode::NotReady)?;
+            if !original.same_physical_identity(current){return Err(ErrorCode::StaleSession)}
+            current.clone()
         };
-        let source = self.source(&server)?;
-        let state = self.state.session_state(&result.target, &context.source_epoch)?;
-        if state.summary.connectivity != SessionConnectivity::Ready || !state.summary.capabilities.changes_read
-            || !source.snapshot.changes_read_bound { return Err(ErrorCode::NotReady); }
-        let pane = source.snapshot.pane(&context.pane).map_err(policy)?;
-        if state.summary.pane_id != context.pane || state.summary.terminal_id != context.terminal
-            || state.summary.workspace_id != context.workspace || pane.terminal_id != context.terminal
-            || pane.workspace_id != context.workspace || pane.tab_id != context.tab
-            || pane.read_identity.as_ref() != Some(&context.read_identity) { return Err(ErrorCode::StaleSession); }
-        source.recheck().map_err(policy)?;
-        let target = result.target.clone();
-        self.state.changes_read_response(connection, &target, &context.source_epoch, response_id, result)
+        let state=self.state.session_state(target,&context.source_epoch)?;
+        let pane=source.snapshot.pane(&context.pane).map_err(policy)?;
+        if state.summary.pane_id!=context.pane||state.summary.terminal_id!=context.terminal
+            ||state.summary.workspace_id!=context.workspace||state.summary.server_id!=source.server_id
+            ||pane.terminal_id!=context.terminal||pane.workspace_id!=context.workspace||pane.tab_id!=context.tab {
+            return Err(ErrorCode::StaleSession);
+        }
+        if !ack {
+            original.recheck().map_err(policy)?;
+            source.recheck().map_err(policy)?;
+            if state.summary.connectivity!=SessionConnectivity::Ready{return Err(ErrorCode::NotReady)}
+        }
+        Ok((source,state.summary))
     }
-
-    /// Capture only the original binding and source for one rename. No repository or CWD
-    /// admission applies: the native actor will compare this identity immediately before write.
-    pub(crate) async fn workspace_rename_context(
-        &self,
-        target: &Target,
-    ) -> SecurityResult<(Source, WorktreeReadContext)> {
-        let _update = self.updates.lock().await;
-        let (server, epoch, pin) = {
-            let inner = self.inner.lock().expect("topology mutex");
-            let binding = inner.bindings.get(&target.session_id)
-                .filter(|binding| binding.target == *target)
-                .ok_or(ErrorCode::StaleSession)?;
-            (binding.key.server_id.clone(), binding.source_epoch.clone(),
-                binding.terminal_read_pin.clone().ok_or(ErrorCode::NotReady)?)
-        };
-        let source = self.source(&server)?;
-        let state = self.state.session_state(target, &epoch)?;
-        if state.summary.connectivity != SessionConnectivity::Ready
-            || !state.summary.capabilities.workspace_rename
-            || !source.snapshot.workspace_rename_bound { return Err(ErrorCode::NotReady); }
-        let pane = source.snapshot.pane(&state.summary.pane_id).map_err(policy)?;
-        if pane.terminal_id != state.summary.terminal_id
-            || pane.workspace_id != state.summary.workspace_id
-            || pane.read_identity.as_ref() != Some(&pin) { return Err(ErrorCode::StaleSession); }
-        source.recheck().map_err(policy)?;
-        let context = WorktreeReadContext {
-            source_epoch: epoch, pane: state.summary.pane_id, terminal: state.summary.terminal_id,
-            workspace: state.summary.workspace_id, tab: pane.tab_id.clone(), read_identity: pin, creation: None,
-        };
-        Ok((source, context))
+    pub(crate) async fn workspace_rename_context(&self,target:&Target)->SecurityResult<(Source,RenameContext)> {
+        let _update=self.updates.lock().await;
+        let (source,context,summary)=self.logical_rename_context(target)?;
+        if !summary.capabilities.workspace_rename{return Err(ErrorCode::NotReady)}
+        Ok((source,context))
     }
-    /// Re-admit the exact original source/binding before Security starts the native write.
-    pub(crate) async fn validate_workspace_rename_context(
-        &self, target: &Target, expected_source: &Source, context: &WorktreeReadContext,
-    ) -> SecurityResult<()> {
-        let _update = self.updates.lock().await;
-        let server = {
-            let inner = self.inner.lock().expect("topology mutex");
-            let binding = inner.bindings.get(&target.session_id).filter(|binding| {
-                binding.target == *target && binding.source_epoch == context.source_epoch
-                    && binding.key.server_id == expected_source.server_id
-                    && binding.key.terminal_id == context.terminal
-                    && binding.terminal_read_pin.as_ref() == Some(&context.read_identity)
-            }).ok_or(ErrorCode::StaleSession)?;
-            binding.key.server_id.clone()
-        };
-        let source = self.source(&server)?;
-        if source.incarnation != expected_source.incarnation || source.evidence != expected_source.evidence
-            || source.socket_path != expected_source.socket_path { return Err(ErrorCode::StaleSession); }
-        let state = self.state.session_state(target, &context.source_epoch)?;
-        if state.summary.connectivity != SessionConnectivity::Ready
-            || !state.summary.capabilities.workspace_rename
-            || !source.snapshot.workspace_rename_bound { return Err(ErrorCode::NotReady); }
-        let pane = source.snapshot.pane(&context.pane).map_err(policy)?;
-        if state.summary.pane_id != context.pane || state.summary.terminal_id != context.terminal
-            || state.summary.workspace_id != context.workspace || pane.terminal_id != context.terminal
-            || pane.workspace_id != context.workspace || pane.tab_id != context.tab
-            || pane.read_identity.as_ref() != Some(&context.read_identity) { return Err(ErrorCode::StaleSession); }
-        source.recheck().map_err(policy)
-    }
-
-    /// Same identity-only predicate for the live Security boundary. `try_lock` makes a
-    /// concurrent topology turn a definitive pre-start denial rather than widening admission.
-    pub(crate) fn validate_workspace_rename_context_now(
-        &self, target: &Target, expected_source: &Source, context: &WorktreeReadContext,
-    ) -> SecurityResult<()> {
-        let _update = self.updates.try_lock().map_err(|_| ErrorCode::Busy)?;
-        let server = {
-            let inner = self.inner.lock().expect("topology mutex");
-            let binding = inner.bindings.get(&target.session_id).filter(|binding| {
-                binding.target == *target && binding.source_epoch == context.source_epoch
-                    && binding.key.server_id == expected_source.server_id
-                    && binding.key.terminal_id == context.terminal
-                    && binding.terminal_read_pin.as_ref() == Some(&context.read_identity)
-            }).ok_or(ErrorCode::StaleSession)?;
-            binding.key.server_id.clone()
-        };
-        let source = self.source(&server)?;
-        if source.incarnation != expected_source.incarnation || source.evidence != expected_source.evidence
-            || source.socket_path != expected_source.socket_path { return Err(ErrorCode::StaleSession); }
-        let state = self.state.session_state(target, &context.source_epoch)?;
-        if state.summary.connectivity != SessionConnectivity::Ready
-            || !state.summary.capabilities.workspace_rename
-            || !source.snapshot.workspace_rename_bound { return Err(ErrorCode::NotReady); }
-        let pane = source.snapshot.pane(&context.pane).map_err(policy)?;
-        if state.summary.pane_id != context.pane || state.summary.terminal_id != context.terminal
-            || state.summary.workspace_id != context.workspace || pane.terminal_id != context.terminal
-            || pane.workspace_id != context.workspace || pane.tab_id != context.tab
-            || pane.read_identity.as_ref() != Some(&context.read_identity) { return Err(ErrorCode::StaleSession); }
-        source.recheck().map_err(policy)
+    pub(crate) fn validate_workspace_rename_context_now(&self,target:&Target,source:&Source,context:&RenameContext)->SecurityResult<()> {
+        let _update=self.updates.try_lock().map_err(|_|ErrorCode::Busy)?;
+        let (_,summary)=self.validate_logical_rename_context(target,source,context,false)?;
+        if !summary.capabilities.workspace_rename{return Err(ErrorCode::NotReady)}
+        Ok(())
     }
 
     pub fn creation_reason(
@@ -3977,8 +3566,8 @@ impl Topology {
             .iter()
             .filter(|p| project.is_none_or(|id| &p.id == id))
             .any(|p| {
-                self.validate_coarse(&source, coarse, provider, &p.id)
-                    .is_ok()
+                self.creation_roots.get(&p.id).is_some_and(Option::is_some)
+                    && self.validate_coarse(&source, coarse, provider, &p.id).is_ok()
             });
         if !available {
             return "Creation disabled: configured project/wrapper/runtime object views or shell epoch are unavailable".into();
@@ -4042,7 +3631,7 @@ impl Topology {
             return Err(ErrorCode::InvalidRequest);
         };
         self.config.project(&params.project_id)?;
-        self.validate_bound_checkout_request(params)?;
+        self.validate_placement(params)?;
         let source = self.source(&params.server_id)?;
         self.validate_topology_stage(&source, params, None)
     }
@@ -4195,11 +3784,7 @@ impl Topology {
         params: &SessionCreateParams,
         root: Option<(&CreationResources, &Uuid)>,
     ) -> Result<(), (ErrorCode, &'static str, &'static str)> {
-        if let Some((_,action))=root.filter(|_|params.checkout.is_some()) {
-            self.execution_directory(action,params).map_err(|code|(code,"execution_checkout","none"))?;
-        } else {
-            self.validate_bound_checkout_request(params).map_err(|code|(code,"bound_checkout_source","none"))?;
-        }
+        self.validate_placement(params).map_err(|code|(code,"creation_placement","none"))?;
         let current = self
             .source(&params.server_id)
             .map_err(|code| (code, "topology_source", "none"))?;
@@ -4350,35 +3935,90 @@ impl Topology {
         }
         source.recheck().map_err(policy)
     }
-    async fn refresh_coarse(&self, server: &Uuid) {
+    async fn refresh_coarse(&self, server: &Uuid, revision: u64, invalidation: &Arc<AtomicU64>) {
+        // Only the helper's one explicitly configured socket owns this settlement.
+        // Other session-list discoveries must not consume its first-observation latch.
+        let selected_capture_source = self.config.herdr_sockets.len() == 1
+            && self.inner.lock().ok().and_then(|inner| inner.servers.get(server).map(|record| record.path == self.config.herdr_sockets[0])).unwrap_or(false);
+        let capture = if selected_capture_source {
+            self.omp_offline_reporter.lock().ok().and_then(|current| current.clone())
+        } else {
+            None
+        };
+        let report = |guard, code, io| {
+            if let Some(capture) = &capture {
+                capture.report_coarse_shell(guard, code, io);
+            }
+        };
         if !self.config.allow_scoped_shell_probe {
+            report(CoarseShellGuard::ConsentAbsent, Some(ErrorCode::NotReady), "none");
             return;
         }
-        let Ok(source) = self.source(server) else {
+        // The existing authoritative recovery cadence may heal a failed coarse probe.
+        // A retained proof needs no additional native calls on an unchanged observation.
+        if self.inner.lock().expect("topology mutex").servers.get(server)
+            .is_some_and(|record| record.coarse_shell.is_some())
+        {
             return;
+        }
+        let source = match self.source(server) {
+            Ok(source) => source,
+            Err(code) => {
+                report(CoarseShellGuard::SourceLookup, Some(code), "none");
+                return;
+            }
         };
-        let Ok(reporter) = process_evidence(source.evidence.pid) else {
+        if source.revision != revision || !Arc::ptr_eq(&source.invalidation, invalidation) {
             return;
+        }
+        let reporter = match process_evidence(source.evidence.pid) {
+            Ok(reporter) => reporter,
+            Err(error) => {
+                let failure = CoarseShellFailure::io(CoarseShellGuard::ReporterProcess, &error);
+                report(failure.guard, Some(failure.code), failure.io);
+                return;
+            }
         };
         let mut found = None;
+        // Keep only the first closed rejection until all existing candidate attempts settle.
+        // A later accepted pane makes earlier candidate rejections irrelevant.
+        let mut rejected = None;
         for pane in source.snapshot.panes.iter().take(8) {
-            let Ok(client) = Client::connect(&source.socket_path).await else {
-                continue;
+            let client = match Client::connect(&source.socket_path).await {
+                Ok(client) => client,
+                Err(error) => {
+                    rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::Connect, &error));
+                    continue;
+                }
             };
             if client.evidence != source.evidence {
+                rejected.get_or_insert(CoarseShellFailure::new(CoarseShellGuard::PeerIdentity));
                 break;
             }
-            let Ok(info) = client.process_info(&pane.pane_id).await else {
-                continue;
+            let info = match client.process_info(&pane.pane_id).await {
+                Ok(info) => info,
+                Err(error) => {
+                    rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::ProcessInfo, &error));
+                    continue;
+                }
             };
             let Some(pid) = info.shell_pid else {
+                rejected.get_or_insert(CoarseShellFailure::new(CoarseShellGuard::ShellAbsent));
                 continue;
             };
-            let Ok(shell) = reported_process(&reporter, pid) else {
-                continue;
+            let shell = match reported_process(&reporter, pid) {
+                Ok(shell) => shell,
+                Err(error) => {
+                    rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::ReportedProcess, &error));
+                    continue;
+                }
             };
-            let Ok((executable, dialect)) = shell_executable(&shell) else {
-                continue;
+            let (executable, dialect) = match shell_executable(&shell) {
+                Ok(executable) => executable,
+                Err(error) => {
+                    rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::ShellExecutable, &error));
+                    continue;
+                }
             };
             found = Some(CoarseShell {
                 shell,
@@ -4389,14 +4029,41 @@ impl Topology {
             });
             break;
         }
-        if source.recheck().is_err() {
+        // Native I/O stays outside the owner lock. Commit only into this exact captured
+        // observation; an equal replacement can have a different recovery owner/snapshot.
+        let _update = self.updates.lock().await;
+        if let Err(error) = source.recheck() {
+            let failure = CoarseShellFailure::io(CoarseShellGuard::SourceRecheck, &error);
+            report(failure.guard, Some(failure.code), failure.io);
             return;
         }
-        {
+        let installed = {
             let mut inner = self.inner.lock().expect("topology mutex");
             if let Some(record) = inner.servers.get_mut(server) {
+                let current = record.source.as_ref();
+                if !source.revision_current() || record.coarse_shell.is_some()
+                    || !current.is_some_and(|current| {
+                        source.same_physical_identity(current)
+                            && current.revision == source.revision
+                            && Arc::ptr_eq(&current.snapshot, &source.snapshot)
+                    })
+                {
+                    return;
+                }
+                let installed = found.is_some();
                 record.coarse_shell = found;
+                Some(installed)
+            } else {
+                None
             }
+        };
+        match installed {
+            Some(true) => report(CoarseShellGuard::Installed, None, "none"),
+            Some(false) => {
+                let failure = rejected.unwrap_or_else(|| CoarseShellFailure::new(CoarseShellGuard::NoCandidate));
+                report(failure.guard, Some(failure.code), failure.io);
+            }
+            None => report(CoarseShellGuard::RecordAbsent, Some(ErrorCode::NotReady), "none"),
         }
         let _ = self.publish();
     }
@@ -4546,28 +4213,24 @@ impl Topology {
         Ok((shell, reporter, executable, dialect))
     }
     /// Exactly one fixed query in this receipt's new root; ACK is enqueue, not execution.
-    pub async fn shell_probe_once(
+    pub(crate) async fn shell_probe_once(
         &self,
-        security: &Security,
-        auth: &Authorized,
-        action: &Uuid,
-        params: &SessionCreateParams,
-        deadline: tokio::time::Instant,
-    ) -> SecurityResult<Receipt> {
-        self.shell_probe_once_reported(security, auth, action, params, deadline, None)
-            .await
+        security:&Security,
+        auth:&Authorized,
+        prepared:PreparedShell<'_>,
+    )->SecurityResult<Receipt> {
+        self.shell_probe_once_reported(security,auth,prepared,None).await
     }
     /// The reported form is used only by the already-authorized OMP creation job.  It observes
     /// existing pre-intent failures and maps them back to the exact public result.
-    pub(crate) async fn shell_probe_once_reported(
+    pub(crate) async fn prepare_created_shell<'a>(
         &self,
-        security: &Security,
-        auth: &Authorized,
-        action: &Uuid,
-        params: &SessionCreateParams,
-        deadline: tokio::time::Instant,
-        reporter: Option<&OmpCreationReporter>,
-    ) -> SecurityResult<Receipt> {
+        security:&Security,
+        auth:&Authorized,
+        (action,params,selection):(&'a Uuid,&'a SessionCreateParams,&'a CreationSelection),
+        deadline:tokio::time::Instant,
+        reporter:Option<&OmpCreationReporter>,
+    )->SecurityResult<Option<PreparedShell<'a>>> {
         if tokio::time::Instant::now() >= deadline {
             if let Some(reporter) = reporter {
                 reporter.report_shell_probe("deadline", ErrorCode::Timeout, "none");
@@ -4582,7 +4245,6 @@ impl Topology {
                     reporter.report_shell_probe("receipt", *code, "none");
                 }
             })?;
-        self.execution_directory(action,params)?;
         let Some(progress) = current.creation.as_ref() else {
             if let Some(reporter) = reporter {
                 reporter.report_shell_probe("receipt_progress", ErrorCode::InvalidRequest, "none");
@@ -4616,7 +4278,7 @@ impl Topology {
             .iter()
             .any(|s| s.intent.workspace_operation == WorkspaceOperation::ShellProbe)
         {
-            return Ok(current);
+            return Ok(None);
         }
         if current.state != ReceiptState::Dispatching
             || progress.stage != CreationStage::Workspace
@@ -5064,6 +4726,36 @@ impl Topology {
                     return Err(code);
                 }
             };
+        // This is independent kernel-cwd object proof, not a snapshot cwd or the
+        // input-sending wrapper-resolution query. Failure cannot admit that query.
+        selection.validate(self,params).and_then(|_|selection.retain_shell(shell.clone())).inspect_err(|code| {
+            if let Some(reporter)=reporter {reporter.report_shell_probe("creation_directory",*code,"none");}
+        })?;
+        Ok(Some(PreparedShell{action,params,selection,deadline,resources,focus,source,info,
+            shell,original_reporter,executable,dialect}))
+    }
+    pub(crate) async fn uncertain_creation(&self,auth:&Authorized,action:&Uuid,code:ErrorCode)->SecurityResult<Receipt> {
+        let proof=auth.proof.clone();let id=action.clone();
+        self.storage.call(move|store| {
+            let current=store.status(&proof,&id,pairing::now_ms())?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
+            if !matches!(current.state,ReceiptState::Reserved|ReceiptState::Dispatching){return Ok(current)}
+            if current.creation.as_ref().is_none_or(|creation|creation.resources.workspace_id.is_none()) {
+                return Err(StorageError::Policy(code));
+            }
+            store.transition(&proof,&id,ReceiptTransition{state:ReceiptState::Uncertain,
+                proof:TransitionProof::LostOutcome,result:None,error:Some(crate::transport::wire_error(code)),at:pairing::now_ms()})
+        }).await.map_err(pairing::store_error)
+    }
+    pub(crate) async fn shell_probe_once_reported(
+        &self,
+        security:&Security,
+        auth:&Authorized,
+        prepared:PreparedShell<'_>,
+        reporter:Option<&OmpCreationReporter>,
+    )->SecurityResult<Receipt> {
+        let PreparedShell{action,params,selection,deadline,resources,focus,source,info,
+            shell,original_reporter,executable,dialect}=prepared;
+        let pane=source.snapshot.pane(resources.pane_id.as_ref().ok_or(ErrorCode::NotReady)?).map_err(policy)?;
         let attempt = Uuid::random();
         let mut artifact = match ProbeArtifact::create(&self.config, &attempt, &shell) {
             Ok(artifact) => artifact,
@@ -5195,7 +4887,7 @@ impl Topology {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(ErrorCode::Timeout.into());
                     }
-                    self.execution_directory(action,params).map_err(|code| CreationAdmissionFailure::guarded(code, CreationAdmissionGuard::Root))?;
+                    selection.validate(self,params).map_err(|code| CreationAdmissionFailure::guarded(code, CreationAdmissionGuard::Directory))?;
                     self.fresh_creation_root(&source, &resources, &focus)
                         .map_err(|code| {
                             CreationAdmissionFailure::guarded(code, CreationAdmissionGuard::Root)
@@ -5347,10 +5039,16 @@ impl Topology {
         {
             return Ok(submitted);
         }
+        let capture_deadline=reporter.is_some_and(OmpCreationReporter::backend_capture);
+        let mut deadline_detail=None;
         let matched = loop {
-            if tokio::time::Instant::now() >= deadline {
+            let loop_now=tokio::time::Instant::now();
+            if capture_deadline&&deadline_detail.is_none() {
+                deadline_detail=Some((ProbeObservation::NotRead,probe_entry_budget(loop_now,deadline)));
+            }
+            if loop_now >= deadline {
                 if let Some(reporter) = reporter {
-                    reporter.report_shell_probe("result_deadline", ErrorCode::Timeout, "none");
+                    reporter.report_probe_deadline("loop_check",deadline_detail);
                 }
                 self.report_codex_shell_probe(
                     params.provider,
@@ -5375,7 +5073,7 @@ impl Topology {
             }
             if tokio::time::Instant::now() >= deadline {
                 if let Some(reporter) = reporter {
-                    reporter.report_shell_probe("result_deadline", ErrorCode::Timeout, "none");
+                    reporter.report_probe_deadline("after_authorization",deadline_detail);
                 }
                 self.report_codex_shell_probe(
                     params.provider,
@@ -5436,10 +5134,11 @@ impl Topology {
                     break None;
                 }
             };
+            if let Some((observation,_))=&mut deadline_detail {observation.observe(&bytes);}
             if bytes.ends_with(b"\n") {
                 if tokio::time::Instant::now() >= deadline {
                     if let Some(reporter) = reporter {
-                        reporter.report_shell_probe("result_deadline", ErrorCode::Timeout, "none");
+                        reporter.report_probe_deadline("complete_before_parse",deadline_detail);
                     }
                     self.report_codex_shell_probe(
                         params.provider,
@@ -5530,7 +5229,7 @@ impl Topology {
         };
         let matched = if matched == Some(true) && tokio::time::Instant::now() >= deadline {
             if let Some(reporter) = reporter {
-                reporter.report_shell_probe("result_deadline", ErrorCode::Timeout, "none");
+                reporter.report_probe_deadline("parsed_success",deadline_detail);
             }
             self.report_codex_shell_probe(
                 params.provider,
@@ -5570,7 +5269,7 @@ impl Topology {
             ErrorCode::StaleSession
         };
         let final_scope = || -> SecurityResult<Source> {
-            self.execution_directory(action,params)?;
+            selection.validate(self,params)?;
             let refreshed = self
                 .fresh_creation_root_classified(&source, &resources, &focus)
                 .inspect_err(|(code, guard)| {
@@ -5750,7 +5449,7 @@ impl Topology {
                 &params.server_id,
                 params.provider,
                 ShellMeasurement {
-                    execution_directory: self.execution_directory(action,params)?,
+                    execution_directory: self.execution_directory(selection, params)?,
                     server_incarnation: refreshed.incarnation,
                     pane_id: probe.pane_id,
                     shell,
@@ -5794,12 +5493,13 @@ impl Topology {
     }
     /// Called by the native5 job after its real creation preflight/reservation. The actual
     /// socket is opened before admission; its effect future stays unpolled until the fence.
-    pub async fn workspace_once(
+    pub(crate) async fn workspace_once(
         &self,
         security: &Security,
         auth: &Authorized,
         action: &Uuid,
         params: &SessionCreateParams,
+        selection:&CreationSelection,
     ) -> SecurityResult<Receipt> {
         let current = self.receipt(security, auth, action).await?;
         let progress = current.creation.as_ref().ok_or(ErrorCode::InvalidRequest)?;
@@ -5815,10 +5515,10 @@ impl Topology {
         {
             return Err(ErrorCode::InvalidRequest);
         }
-        if params.checkout.is_some() { return self.bound_workspace_once(security,auth,action,params,current).await; }
-        let source = self.source(&params.server_id)?;
+        let source = selection.validate(self,params)?;
         self.validate_topology_stage(&source, params, None)?;
-        let project = self.config.project(&params.project_id)?.path.clone();
+        let project = selection.directory(params)?;
+        let placement=selection.workspace().cloned();
         let client = Client::connect(&source.socket_path).await.map_err(policy)?;
         if client.evidence != source.evidence {
             return Err(ErrorCode::StaleSession);
@@ -5827,31 +5527,39 @@ impl Topology {
         let mut metadata = client.metadata();
         metadata.socket_epoch = Some(source.incarnation.clone());
         metadata.focused_workspace_id = source.snapshot.focused_workspace_id.clone();
-        let effect_metadata = metadata.clone();
+        metadata.placement_workspace_id=placement.clone();
+        let mut effect_metadata = metadata.clone();
         let label = params.name.clone();
-        security
+        self.begin_creation_shell_fence(auth,action,&source).await?;
+        let entered=security
             .creation_boundary(
                 auth,
                 action.clone(),
                 (CreationStage::Workspace, metadata),
-                || self.validate_topology_stage(&source, params, None),
+                || {
+                    // Re-resolve the stable authorized pathname at the final write fence;
+                    // this does not promise atomic native check-and-chdir.
+                    selection.validate(self,params)?;
+                    self.validate_topology_stage(&source, params, None)
+                },
                 fd,
                 async move {
                     let mut resources = empty_resources();
-                    let result = client
-                        .request(
-                            "workspace.create",
-                            json!({"cwd":project,"label":label,"focus":false}),
-                            "workspace_created",
-                        )
-                        .await;
+                    let (method,expected,arguments)=match &placement {
+                        Some(workspace)=>("tab.create","tab_created",
+                            json!({"workspace_id":workspace,"cwd":project,"label":label,"focus":false})),
+                        None=>("workspace.create","workspace_created",
+                            json!({"cwd":project,"label":label,"focus":false})),
+                    };
+                    let result=client.request(method,arguments,expected).await;
                     let mut state = StageState::Uncertain;
                     let mut definitive = None;
                     match result {
                         Ok(value) => {
-                            let (known, complete) = workspace_resources(&value);
+                            let (known,tab,complete) = workspace_resources(&value,placement.as_ref());
+                            effect_metadata.created_tab_id=tab.clone();
                             resources = known;
-                            if complete {
+                            if complete&&tab.is_some_and(|tab|selection.retain_created(&resources,tab).is_ok()) {
                                 state = StageState::Confirmed;
                                 definitive = Some(
                                     Id::new("correlated complete workspace/root response")
@@ -5860,7 +5568,9 @@ impl Topology {
                             }
                         }
                         Err(ApiError::Changed(value)) => {
-                            resources = workspace_resources(&value).0;
+                            let (known,tab,_)=workspace_resources(&value,placement.as_ref());
+                            resources=known;
+                            effect_metadata.created_tab_id=tab;
                         }
                         Err(ApiError::Rejected(code))
                             if matches!(
@@ -5870,7 +5580,7 @@ impl Topology {
                         {
                             state = StageState::Failed;
                             definitive = Some(
-                                Id::new("Herdr rejected workspace before creation")
+                                Id::new("Herdr rejected creation before effect")
                                     .expect("constant ID"),
                             );
                         }
@@ -5885,8 +5595,24 @@ impl Topology {
                     }
                 },
             )
-            .await?;
+            .await;
         let receipt = self.receipt(security, auth, action).await?;
+        if let Err(code)=entered {
+            if matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Failed)
+                &&receipt.creation.as_ref().is_some_and(|progress|progress.resources.workspace_id.is_none()
+                    &&progress.resources.pane_id.is_none()&&progress.resources.terminal_id.is_none())
+            {let _=self.release_creation_shell_fence(auth,action).await;}
+            return Err(code);
+        }
+        if let Some(progress)=&receipt.creation {
+            if progress.stage_state==StageState::Confirmed {
+                if let (Some(pane),Some(terminal))=(&progress.resources.pane_id,&progress.resources.terminal_id) {
+                    self.narrow_creation_shell_fence(auth,action,pane,terminal).await?;
+                }
+            }else if progress.stage_state==StageState::Failed&&progress.resources.workspace_id.is_none()
+                &&progress.resources.pane_id.is_none()&&progress.resources.terminal_id.is_none()
+            {self.release_creation_shell_fence(auth,action).await?;}
+        }
         if receipt
             .creation
             .as_ref()
@@ -5899,7 +5625,7 @@ impl Topology {
                 .resources;
             // Read-only confirmation is deliberately outside the10s write/revoke boundary.
             if self
-                .confirm_workspace(&source, resources, params.provider)
+                .confirm_workspace(&source, resources, params.provider, selection)
                 .await
                 .is_err()
             {
@@ -5931,6 +5657,7 @@ impl Topology {
         source: &Source,
         resources: &CreationResources,
         provider: Provider,
+        selection:&CreationSelection,
     ) -> io::Result<()> {
         let client = match Client::connect(&source.socket_path).await {
             Ok(client) => client,
@@ -6033,20 +5760,26 @@ impl Topology {
             );
             return Err(error);
         }
+        if !selection.matches_created(pane) {
+            let error=invalid("authoritative created tab membership changed");
+            self.report_codex_shell_probe_error(provider,"workspace_confirm_tab",ErrorCode::StaleSession,&error);
+            return Err(error);
+        }
         Ok(())
     }
     /// Kind/name/pane/args/timeout only. Herdr acknowledges submitted argv, not readiness.
     /// Provider5 supplies already confirmed native resources and performs later read-only
     /// native readiness polling outside this bounded launch/write fence.
-    pub async fn launch_once(
+    pub(crate) async fn launch_once(
         &self,
         security: &Security,
         auth: &Authorized,
         action: &Uuid,
         params: &SessionCreateParams,
+        selection:&CreationSelection,
         args: Vec<String>,
     ) -> SecurityResult<Receipt> {
-        self.launch_once_reported(security, auth, action, params, args, None)
+        self.launch_once_reported(security, auth, action, (params,selection), args, None)
             .await
     }
     fn codex_startup_terminal_reporter(&self) -> Result<Option<CodexInvalidationReporter>, ErrorCode> {
@@ -6127,7 +5860,7 @@ impl Topology {
         security: &Security,
         auth: &Authorized,
         action: &Uuid,
-        params: &SessionCreateParams,
+        (params,selection):(&SessionCreateParams,&CreationSelection),
         args: Vec<String>,
         reporter: Option<OmpCreationReporter>,
     ) -> SecurityResult<Receipt> {
@@ -6271,22 +6004,21 @@ impl Topology {
         metadata.socket_epoch = Some(source.incarnation.clone());
         let effect_metadata = metadata.clone();
         let prior = resources.clone();
-        if params.provider == Provider::Codex {
-            if let Some(capture) = self.codex_startup_terminal_reporter()? {
-                if let Err(error) = self.retain_codex_startup_terminal_pin(action, &source, &resources) {
-                    let (io, errno) = codex_invalidation_io(&error);
-                    let code = policy(error);
-                    capture.startup_terminal("startup_terminal_pin", code, io, errno);
-                    return Err(code);
-                }
-            }
+        if params.provider == Provider::Codex
+            && let Some(capture) = self.codex_startup_terminal_reporter()?
+            && let Err(error) = self.retain_codex_startup_terminal_pin(action, &source, &resources)
+        {
+            let (io, errno) = codex_invalidation_io(&error);
+            let code = policy(error);
+            capture.startup_terminal("startup_terminal_pin", code, io, errno);
+            return Err(code);
         }
         let kind = match params.provider {
             Provider::Omp => "omp",
             Provider::Codex => "codex",
         };
         let preflight_reporter = reporter.clone();
-        security.creation_boundary(auth, action.clone(), (CreationStage::Launch, metadata), || {
+        security.creation_boundary_guarded(auth, action.clone(), (CreationStage::Launch, metadata), || { selection.validate(self, params).map_err(|code| CreationAdmissionFailure::guarded(code, CreationAdmissionGuard::Directory))?; let checked: SecurityResult<()> = (|| {
             let current = match self.fresh_creation_root(&source, &resources, &probe.focused_workspace_id) {
                 Ok(current) => current,
                 Err(code) => {
@@ -6328,7 +6060,7 @@ impl Topology {
                     Err(code)
                 }
             }
-        }, fd, async move {
+        })(); checked.map_err(Into::into) }, fd, async move {
             let result = client.request_reported("agent.start", json!({"name":local.alias,"kind":kind,"pane_id":pane,"args":args,"timeout_ms":30000}), "agent_started", reporter.clone()).await;
             let (state, definitive) = match result {
                 Ok(value) => {
@@ -6438,20 +6170,10 @@ impl Topology {
         }
         // A pin is captured only at installation. Later topology refreshes never replace it.
         let terminal_read_pin = pane.read_identity.clone();
-        state.summary.capabilities.terminal_read = terminal_read_pin.is_some();
-        state.summary.capabilities.artifacts &= terminal_read_pin.is_some() && source.snapshot.artifact_read_bound && source.snapshot.artifact_permission_epoch.is_some_and(|epoch|epoch>0);
-        state.summary.capabilities.terminal_create &= terminal_read_pin.is_some() && source.snapshot.agent_shell_create_bound && source.snapshot.agent_shell_permission_epoch.is_some_and(|epoch|epoch>0);
-        // Worktree browsing needs the same installed identity plus Herdr's explicit bound-list
-        // advertisement. A terminal pin, version string, or live transport alone is insufficient.
-        state.summary.capabilities.worktrees_read =
-            terminal_read_pin.is_some() && source.snapshot.worktree_list_bound;
-        state.summary.capabilities.worktree_remove=terminal_read_pin.is_some() && source.snapshot.worktree_remove_bound;
-        state.summary.capabilities.worktree_create = terminal_read_pin.is_some() && source.snapshot.worktree_create_bound;
-        state.summary.capabilities.changes_read =
-            terminal_read_pin.is_some() && source.snapshot.changes_read_bound;
-        state.summary.capabilities.workspace_rename =
-            terminal_read_pin.is_some() && source.snapshot.workspace_rename_bound;
-        state.summary.capabilities.agent_rename = terminal_read_pin.is_some() && source.snapshot.agent_rename_bound && positive_agent_alias(&source.snapshot,pane,state.summary.provider);
+        state.summary.capabilities.terminal_read = false;
+        state.summary.capabilities.terminal_create = self.terminal_creation_available(&source,&state.summary.workspace_id);
+        state.summary.capabilities.workspace_rename = true;
+        state.summary.capabilities.agent_rename = positive_agent_alias(&source.snapshot,pane,state.summary.provider);
         let proven = key.clone();
         let target = self
             .storage
@@ -6991,6 +6713,7 @@ impl Topology {
             record.coarse_shell = None;
         }
         let current = self.source(server)?;
+        self.state.reconcile_grid_source(&current);
         let bindings: Vec<_> = self
             .inner
             .lock()
@@ -7298,6 +7021,11 @@ impl Topology {
             }
             tokio::select! { _ = stop.changed() => {}, _ = tokio::time::sleep(Duration::from_secs(5)) => {} }
         };
+        self.terminal_stopping.store(true,Ordering::Release);
+        // A permit covers precommit registration AND the actual job. Late SQLite callbacks
+        // cannot escape shutdown merely because their original transport waiter disappeared.
+        let _all_terminal_jobs=self.terminal_slots.clone().acquire_many_owned(shells::CREATION_JOBS).await.map_err(|_|limit())?;
+        {let mut terminal_jobs=self.terminal_jobs.lock().expect("terminal creation jobs");while terminal_jobs.try_join_next().is_some(){}}
         for (_, (job, _)) in jobs {
             job.abort();
             let _ = job.await;
@@ -7489,7 +7217,7 @@ impl Topology {
                     pane_ids = required;
                     break Ok(());
                 }
-                let (applied_revision, replaced) = match self
+                let (applied_revision, _) = match self
                     .apply_snapshot(
                         server,
                         evidence.clone(),
@@ -7517,9 +7245,9 @@ impl Topology {
                         });
                     }
                 };
-                if replaced {
-                    self.refresh_coarse(server).await;
-                }
+                // Missing proof can recover on the existing healthy discovery refresh,
+                // even when apply_snapshot preserves the unchanged Source and bindings.
+                self.refresh_coarse(server, applied_revision, &invalidation).await;
                 if invalidation.load(Ordering::Acquire) != applied_revision {
                     continue;
                 }
@@ -7613,7 +7341,7 @@ pub fn empty_resources() -> CreationResources {
 }
 /// Validate known returned IDs independently, retaining partial resources on malformed/change
 /// outcomes. Complete routing is required for a confirmed workspace stage.
-fn workspace_resources(value: &Value) -> (CreationResources, bool) {
+fn workspace_resources(value: &Value,placement:Option<&Id>) -> (CreationResources,Option<Id>,bool) {
     let extract = |pointer: &str| {
         value
             .pointer(pointer)
@@ -7621,23 +7349,433 @@ fn workspace_resources(value: &Value) -> (CreationResources, bool) {
             .and_then(|s| Id::new(s).ok())
     };
     let mut resources = empty_resources();
-    resources.workspace_id = extract("/workspace/workspace_id");
+    let workspace=extract("/workspace/workspace_id");
+    let root_workspace=extract("/root_pane/workspace_id");
+    let tab_workspace=extract("/tab/workspace_id");
+    let tab=extract("/tab/tab_id");
+    let root_tab=extract("/root_pane/tab_id");
+    let routed_workspace=if placement.is_some(){root_workspace.as_ref().or(tab_workspace.as_ref())}else{workspace.as_ref()};
     resources.pane_id = extract("/root_pane/pane_id");
     resources.terminal_id = extract("/root_pane/terminal_id");
-    let complete = resources.workspace_id.is_some()
+    let complete = routed_workspace.is_some()
         && resources.pane_id.is_some()
         && resources.terminal_id.is_some()
-        && extract("/root_pane/workspace_id") == resources.workspace_id
-        && extract("/tab/workspace_id") == resources.workspace_id
-        && extract("/tab/tab_id").is_some()
-        && extract("/tab/tab_id") == extract("/root_pane/tab_id");
-    (resources, complete)
+        && root_workspace.as_ref()==routed_workspace
+        && tab_workspace.as_ref()==routed_workspace
+        && placement.is_none_or(|expected|routed_workspace==Some(expected))
+        && tab.is_some()&&tab==root_tab;
+    resources.workspace_id=if placement.is_some(){root_workspace.or(tab_workspace)}else{workspace};
+    // A partial returned ID is a retained fact only. Admission still requires all
+    // independent routing fields above, including the exact captured placement.
+    (resources,tab.or(root_tab),complete)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn probe_deadline_observation_is_monotone_and_entry_budget_uses_exact_boundaries() {
+        let mut observation=ProbeObservation::NotRead;
+        for (bytes,expected) in [
+            (b"" as &[u8],ProbeObservation::EmptyOnly),
+            (b"partial" as &[u8],ProbeObservation::PartialSeen),
+            (b"" as &[u8],ProbeObservation::PartialSeen),
+            (b"complete\n" as &[u8],ProbeObservation::CompleteSeen),
+            (b"partial" as &[u8],ProbeObservation::CompleteSeen),
+            (b"" as &[u8],ProbeObservation::CompleteSeen),
+        ] {observation.observe(bytes);assert_eq!(observation,expected);}
+        let now=tokio::time::Instant::now();
+        for (remaining,expected) in [
+            (Duration::ZERO,"expired"),(Duration::from_secs(1),"le_1s"),
+            (Duration::from_secs(1)+Duration::from_nanos(1),"le_5s"),
+            (Duration::from_secs(5),"le_5s"),(Duration::from_secs(5)+Duration::from_nanos(1),"gt_5s"),
+        ] {assert_eq!(probe_entry_budget(now,now+remaining),expected);}
+        let reporter=OmpCreationReporter::new_backend();
+        reporter.report_probe_deadline("loop_check",Some((ProbeObservation::NotRead,"expired")));
+        reporter.report_probe_deadline("parsed_success",Some((ProbeObservation::CompleteSeen,"gt_5s")));
+        assert_eq!(reporter.0.lock().unwrap().lines,1,"detail must not create another terminal line or dedupe key");
+    }
+
+    async fn native_once_authorized()->(iroh::Endpoint,iroh::Endpoint,Arc<Security>,Arc<Authorized>) {
+        let host=crate::endpoint_builder(iroh::SecretKey::from_bytes(&[31;32]))
+            .relay_mode(iroh::RelayMode::Disabled).clear_address_lookup().bind().await.unwrap();
+        let phone=crate::endpoint_builder(iroh::SecretKey::from_bytes(&[32;32]))
+            .relay_mode(iroh::RelayMode::Disabled).clear_address_lookup().bind().await.unwrap();
+        let mut storage=Storage::memory([9;32],pairing::now_ms()).unwrap();
+        let device=PairedDevice{device_id:Uuid::random(),endpoint_id:EndpointId(phone.id().to_string()),
+            device_name:Label::new("phone").unwrap(),paired_at:Uint(pairing::now_ms()),last_seen_at:None};
+        storage.pair_device(&device).unwrap();
+        let boot=storage.boot_id.clone();
+        let security=Security::new(StorageOwner::new(storage).unwrap(),Arc::new(State::default()),
+            EndpointId(host.id().to_string()),boot,vec![]);
+        let endpoint=host.clone();
+        let incoming=tokio::spawn(async move{endpoint.accept().await.unwrap().await.unwrap()});
+        let connection=phone.connect(host.addr(),crate::ALPN).await.unwrap();
+        let server=incoming.await.unwrap();assert_eq!(server.remote_id(),phone.id());
+        let auth=Arc::new(security.hello(EndpointId(server.remote_id().to_string()),
+            HelloParams{app_version:"test".into(),device_name:Label::new("phone").unwrap()},server).await.unwrap());
+        drop(connection);
+        (host,phone,security,auth)
+    }
+
+#[tokio::test]
+async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_without_native_ready_claims()
+{
+    use serde_json::{Value, json};
+    use std::{
+        os::unix::fs::PermissionsExt,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::{
+        io::BufReader,
+        net::UnixListener,
+        sync::{Mutex, watch},
+        task::JoinSet,
+    };
+    let (host, phone, security, auth) = native_once_authorized().await;
+    let root = PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join(format!(".gc-{}", &Uuid::random().0[..8]));
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = root.join("h.sock");
+    let wrapper = root.join("omp");
+    let herdr = root.join("herdr");
+    let interpreter = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|p| p.join("bash"))
+        .find(|p| p.is_file())
+        .expect("owned GNU Bash fixture is required");
+    fs::write(&wrapper, format!("#!{}\nexit 99\n", interpreter.display())).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let listing = json!({"sessions":[{"name":"owned","default":false,"running":true,"socket_path":socket,"session_dir":root}]});
+    fs::write(
+        &herdr,
+        format!(
+            "#!{}\nprintf '%s\\n' '{}'\n",
+            interpreter.display(),
+            listing
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let registry = root.join("r");
+    fs::create_dir(&registry).unwrap();
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
+    let project = Uuid::random();
+    let config=Config::parse(&format!("version=1\nruntime_dir={root:?}\nruntime_dir_agent={root:?}\nallow_scoped_shell_probe=true\nomp_registry_dir={registry:?}\nomp_session_roots=[{root:?}]\n[executables]\nherdr={herdr:?}\nomp={wrapper:?}\n[[projects]]\nid={:?}\nlabel=\"owned\"\npath={root:?}\n",project.0)).unwrap();
+    fn shell(executable: &std::path::Path, root: &std::path::Path) -> tokio::process::Child {
+        tokio::process::Command::new(executable)
+            .args(["--noprofile", "--norc", "-i"])
+            .current_dir(root)
+            .env("PATH", root)
+            .env("HOME", root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
+    let mut old_shell = shell(&interpreter, &root);
+    let mut new_shell = shell(&interpreter, &root);
+    let old_pid = old_shell.id().unwrap();
+    let new_pid = new_shell.id().unwrap();
+    let stdin = Arc::new(Mutex::new(new_shell.stdin.take().unwrap()));
+    let snapshot = Arc::new(Mutex::new(
+        json!({"version":"0.9.1","protocol":22,"focused_workspace_id":"desktop","workspaces":[{"workspace_id":"desktop","number":1,"label":"Desktop","focused":true,"active_tab_id":"desktop-tab","agent_status":"unknown"}],"tabs":[{"tab_id":"desktop-tab","workspace_id":"desktop","number":1,"label":"Desktop tab","focused":true,"agent_status":"unknown"}],"panes":[{"pane_id":"desktop-pane","terminal_id":"desktop-terminal","workspace_id":"desktop","tab_id":"desktop-tab","focused":false,"agent_status":"unknown"}],"agents":[]}),
+    ));
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let workspaces = Arc::new(AtomicUsize::new(0));
+    let launches = Arc::new(AtomicUsize::new(0));
+    let probes = Arc::new(AtomicUsize::new(0));
+    let (event, event_rx) = watch::channel(None::<Value>);
+    let (view, writes, starts, queries, input, project_path) = (
+        snapshot.clone(),
+        workspaces.clone(),
+        launches.clone(),
+        probes.clone(),
+        stdin.clone(),
+        root.clone(),
+    );
+    let fixture = tokio::spawn(async move {
+        let mut clients = JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (view, writes, starts, queries, input, project_path) = (
+                view.clone(),
+                writes.clone(),
+                starts.clone(),
+                queries.clone(),
+                input.clone(),
+                project_path.clone(),
+            );
+            let mut events = event_rx.clone();
+            clients.spawn(async move {
+                let mut reader=BufReader::new(stream);let request:Value=serde_json::from_slice(&read_line(&mut reader).await.unwrap()).unwrap();let id=request["id"].clone();let p=&request["params"];
+                let result=match request["method"].as_str().unwrap() {
+                    "events.subscribe"=>{reader.get_mut().write_all(format!("{}\n",json!({"id":id,"result":{"type":"subscription_started"}})).as_bytes()).await.unwrap();loop{if events.changed().await.is_err(){return;}let value=events.borrow().clone();if let Some(value)=value&&reader.get_mut().write_all(format!("{value}\n").as_bytes()).await.is_err(){return;}}}
+                    "session.snapshot"=>json!({"type":"session_snapshot","snapshot":view.lock().await.clone()}),
+                    "pane.process_info"=>{let pid=if p["pane_id"]=="created-pane"{new_pid}else{old_pid};json!({"type":"pane_process_info","process_info":{"pane_id":p["pane_id"],"shell_pid":pid,"foreground_process_group_id":pid,"foreground_processes":[{"pid":pid,"name":"bash"}]}})}
+                    "workspace.create"=>{writes.fetch_add(1,Ordering::SeqCst);assert_eq!(p["focus"],false);assert_eq!(p["cwd"],json!(project_path));let root_pane=json!({"pane_id":"created-pane","terminal_id":"created-terminal","workspace_id":"created-workspace","tab_id":"created-tab","focused":false,"agent_status":"unknown"});let workspace=json!({"workspace_id":"created-workspace","number":2,"label":"Created workspace","focused":false,"active_tab_id":"created-tab","agent_status":"unknown"});let tab=json!({"tab_id":"created-tab","workspace_id":"created-workspace","number":1,"label":"Created tab","focused":false,"agent_status":"unknown"});let mut view=view.lock().await;view["workspaces"].as_array_mut().unwrap().push(workspace.clone());view["tabs"].as_array_mut().unwrap().push(tab.clone());view["panes"].as_array_mut().unwrap().push(root_pane.clone());assert_eq!(view["focused_workspace_id"],"desktop");json!({"type":"workspace_created","workspace":workspace,"tab":tab,"root_pane":root_pane})}
+                    "pane.send_input"=>{queries.fetch_add(1,Ordering::SeqCst);assert_eq!(p["pane_id"],"created-pane");assert_eq!(p["keys"],json!(["Enter"]));let text=p["text"].as_str().unwrap();assert!(text.len()<=8192&&!text.chars().any(char::is_control));let mut input=input.lock().await;input.write_all(text.as_bytes()).await.unwrap();input.write_all(b"\n").await.unwrap();input.flush().await.unwrap();json!({"type":"ok"})}
+                    "agent.start"=>{starts.fetch_add(1,Ordering::SeqCst);assert_eq!(p["kind"],"omp");assert_eq!(p["pane_id"],"created-pane");assert_eq!(p["timeout_ms"],30000);assert!(p.get("executable").is_none());let alias=p["name"].as_str().unwrap();assert!(alias.starts_with("goatr-omp-")&&alias.len()<=32);let mut argv=vec![json!("omp")];argv.extend(p["args"].as_array().unwrap().iter().cloned());json!({"type":"agent_started","agent":{"pane_id":"created-pane","terminal_id":"created-terminal","workspace_id":"created-workspace","tab_id":"created-tab","agent":"omp","name":alias,"launch_pending":true,"interactive_ready":false},"argv":argv})}
+                    method=>panic!("unexpected native fixture method {method}")
+                };
+                reader.get_mut().write_all(format!("{}\n",json!({"id":id,"result":result})).as_bytes()).await.unwrap();
+            });
+        }
+    });
+    let relay = crate::backends::omp::Relay::bind(0).await.unwrap();
+    let overlay = crate::backends::omp::overlay(&config, relay.port()).unwrap();
+    let owner = Topology::new(
+        config,
+        security.storage.clone(),
+        security.state.clone(),
+        security.host.clone(),
+    )
+    .await
+    .unwrap();
+    let (stop, rx) = watch::channel(false);
+    let relay_job = tokio::spawn(relay.run(stop.subscribe()));
+    owner.omp_availability(None).unwrap();
+    let job = tokio::spawn(owner.clone().run(rx));
+    let server = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let request = Uuid::random();
+            security
+                .state
+                .host_snapshot(&auth.connection_id, request.clone())
+                .unwrap();
+            let snapshot = loop {
+                let (Some(bytes), closed) = security.state.pop_output(&auth.connection_id).unwrap()
+                else {
+                    panic!("host.snapshot response required")
+                };
+                assert!(!closed);
+                if let Envelope::Response(response) =
+                    decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
+                    && response.id == request
+                {
+                    let Ok(ResultBody::HostSnapshot(snapshot)) = response.outcome else {
+                        panic!("host.snapshot result required")
+                    };
+                    break snapshot;
+                }
+            };
+            assert!(
+                snapshot.sessions.is_empty(),
+                "creation eligibility is not native readiness"
+            );
+            if let Some(server) = snapshot.servers.iter().find(|server| {
+                server.connectivity == ServerConnectivity::Online && server.can_create.omp
+            }) {
+                assert!(
+                    snapshot
+                        .projects
+                        .iter()
+                        .any(|row| row.project_id == project && row.available)
+                );
+                break server.server_id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("actual coarse shell/object-view preflight must settle");
+    let params = SessionCreateParams { directory_ref: None, placement: None, boot_id: security.boot.clone(),
+    server_id: server.clone(),
+    project_id: project,
+    provider: Provider::Omp,
+    name: Label::new("new desktop").unwrap(), };
+    let request = Request {
+        id: Uuid::random(),
+        body: RequestBody::SessionCreate(params.clone()),
+    };
+    // The original registered owner captures real selected-root authority before reserve.
+    let selection=owner.capture_creation(&auth,&params).await.unwrap();
+    let validator=owner.clone();
+    let validated_selection=selection.clone();
+    security
+        .reserve(&auth, request.clone(), move |request| {
+            validator.validate_create(request)?;
+            let RequestBody::SessionCreate(params)=&request.body else{return Err(ErrorCode::InvalidRequest)};
+            validated_selection.validate(&validator,params).map(|_|())
+        }, |_| {})
+        .await
+        .unwrap();
+    let workspace = owner
+        .workspace_once(&security, &auth, &request.id, &params, &selection)
+        .await
+        .unwrap();
+    assert_eq!(
+        workspace
+            .creation
+            .as_ref()
+            .unwrap()
+            .resources
+            .terminal_id
+            .as_ref()
+            .unwrap()
+            .0,
+        "created-terminal"
+    );
+    let args = vec![
+        "--cwd".into(),
+        root.to_str().unwrap().into(),
+        "--config".into(),
+        overlay.to_str().unwrap().into(),
+    ];
+    assert_eq!(
+        owner
+            .launch_once(&security, &auth, &request.id, &params, &selection, args.clone())
+            .await
+            .err(),
+        Some(ErrorCode::NotReady)
+    );
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+    event
+        .send(Some(json!({"event":"pane_created","data":{}})))
+        .unwrap();
+    let prepared=owner.prepare_created_shell(
+        &security,&auth,(&request.id,&params,&selection),
+        tokio::time::Instant::now()+Duration::from_secs(10),None,
+    ).await.unwrap().expect("new original shell and actual selected cwd must prepare before input");
+    assert_eq!(prepared.shell.pid,new_pid);
+    assert_eq!(probes.load(Ordering::SeqCst),0,"actual-cwd preparation must not send the fixed query");
+    let probe=owner.shell_probe_once(&security,&auth,prepared).await.unwrap();
+    assert_eq!(
+        probe.creation.as_ref().unwrap().stage_state,
+        StageState::Confirmed
+    );
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+    assert!(owner.prepare_created_shell(
+        &security,&auth,(&request.id,&params,&selection),
+        tokio::time::Instant::now()+Duration::from_secs(10),None,
+    ).await.unwrap().is_none(),"the existing probe intent is status-only, not another prepared input owner");
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+    let submitted = owner
+        .launch_once(&security, &auth, &request.id, &params, &selection, args.clone())
+        .await
+        .unwrap();
+    let progress = submitted.creation.as_ref().unwrap();
+    assert_eq!(progress.stage, CreationStage::Launch);
+    assert_eq!(progress.stage_state, StageState::Dispatching);
+    assert!(progress.resources.native_id.is_none() && progress.resources.session_id.is_none());
+    fs::remove_file(&socket).unwrap();
+    owner
+        .workspace_once(&security, &auth, &request.id, &params, &selection)
+        .await
+        .unwrap();
+    owner
+        .launch_once(&security, &auth, &request.id, &params, &selection, args)
+        .await
+        .unwrap();
+    assert_eq!(workspaces.load(Ordering::SeqCst), 1);
+    assert_eq!(launches.load(Ordering::SeqCst), 1);
+    security
+        .revoke(auth.proof.peer_id().clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .workspace_once(&security, &auth, &request.id, &params, &selection)
+            .await
+            .err(),
+        Some(ErrorCode::Unauthorized)
+    );
+    stop.send(true).unwrap();
+    job.await.unwrap().unwrap();
+    relay_job.await.unwrap().unwrap();
+    fixture.abort();
+    let _ = fixture.await;
+    old_shell.kill().await.unwrap();
+    new_shell.kill().await.unwrap();
+    old_shell.wait().await.unwrap();
+    new_shell.wait().await.unwrap();
+    drop(owner);
+    security.shutdown().await.unwrap();
+    crate::close_endpoint(&phone).await.unwrap();
+    crate::close_endpoint(&host).await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+    #[test]
+    fn stock_alias_confirmation_requires_effective_name_original_route_kind_and_session() {
+        let original:Pane=serde_json::from_value(json!({"pane_id":"w1:p1","terminal_id":"terminal","workspace_id":"w1","tab_id":"w1:t1",
+            "focused":false,"agent_status":"idle","agent":"omp","agent_session":{"source":"native","agent":"omp","kind":"session","value":"original"}})).unwrap();
+        let reply:Agent=serde_json::from_value(json!({"pane_id":"w1:p1","terminal_id":"terminal","workspace_id":"w1","tab_id":"w1:t1",
+            "name":"new-name","agent":"omp","agent_session":{"source":"native","agent":"omp","kind":"session","value":"original"}})).unwrap();
+        let context=RenameContext{source_epoch:Uuid::random(),pane:original.pane_id.clone(),terminal:original.terminal_id.clone(),
+            workspace:original.workspace_id.clone(),tab:original.tab_id.clone()};
+        let name=AgentName("new-name".into());
+        assert!(alias_ack_matches(&reply,&original,&context,&name));
+        for changed in 0..8 {
+            let mut wrong=reply.clone();
+            match changed {
+                0=>wrong.name=Some("other".into()),
+                1=>wrong.pane_id=Id("w1:p2".into()),
+                2=>wrong.terminal_id=Id("replacement-terminal".into()),
+                3=>wrong.workspace_id=Id("w2".into()),
+                4=>wrong.tab_id=Id("w1:t2".into()),
+                5=>wrong.agent=Some("codex".into()),
+                6=>wrong.agent_session.as_mut().unwrap().value="replacement-session".into(),
+                _=>wrong.launch_pending=true,
+            }
+            assert!(!alias_ack_matches(&wrong,&original,&context,&name));
+        }
+    }
+    #[test]
+    fn stock_creation_replies_preserve_partial_ids_and_require_the_captured_workspace_and_tab() {
+        let workspace=Id("w1".into());
+        let tab=json!({
+            "tab":{"workspace_id":"w1","tab_id":"w1:t2"},
+            "root_pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","terminal_id":"terminal-two"}
+        });
+        let (known,tab_id,complete)=workspace_resources(&tab,Some(&workspace));
+        assert!(complete);
+        assert_eq!(known.workspace_id,Some(workspace.clone()));
+        assert_eq!(known.pane_id,Some(Id("w1:p2".into())));
+        assert_eq!(tab_id,Some(Id("w1:t2".into())));
+        assert!(!workspace_resources(&tab,None).2,"a tab response is not a separate-workspace response");
+        let mut different=tab.clone();
+        different["root_pane"]["workspace_id"]=json!("w3");
+        let (known,_,complete)=workspace_resources(&different,Some(&workspace));
+        assert!(!complete);
+        assert_eq!(known.workspace_id,Some(Id("w3".into())),"reported partial facts must not be silently replaced with the requested workspace");
+        let mut partial=tab.clone();partial["root_pane"].as_object_mut().unwrap().remove("terminal_id");
+        let (known,tab_id,complete)=workspace_resources(&partial,Some(&workspace));
+        assert!(!complete);assert!(known.terminal_id.is_none());
+        assert_eq!(known.pane_id,Some(Id("w1:p2".into())));assert_eq!(tab_id,Some(Id("w1:t2".into())));
+        let mut wrong_tab=tab.clone();wrong_tab["root_pane"]["tab_id"]=json!("w1:t3");
+        assert!(!workspace_resources(&wrong_tab,Some(&workspace)).2);
+        let mut separate=tab;separate["workspace"]=json!({"workspace_id":"w1"});
+        assert!(workspace_resources(&separate,None).2);
+    }
+
+    #[test]
+    fn coarse_shell_capture_is_backend_only_once_and_reserves_native_slots() {
+        for reporter in [OmpCreationReporter::new(), OmpCreationReporter::new_offline()] {
+            reporter.report_coarse_shell(CoarseShellGuard::Installed, None, "none");
+            assert_eq!(reporter.0.lock().unwrap().lines, 0);
+            assert!(!reporter.0.lock().unwrap().coarse_shell_settled);
+        }
+        let reporter = OmpCreationReporter::new_backend();
+        for _ in 0..20 {
+            reporter.report("follower", "follower_other", Some(ErrorCode::NotReady));
+        }
+        reporter.report_coarse_shell(CoarseShellGuard::Installed, None, "none");
+        reporter.report_coarse_shell(CoarseShellGuard::ShellAbsent, Some(ErrorCode::NotReady), "none");
+        reporter.report_agent("ack_matched", None);
+        reporter.report("omp_ready", "topology_not_ready", Some(ErrorCode::NotReady));
+        let state = reporter.0.lock().unwrap();
+        assert_eq!(state.lines, 3);
+        assert!(state.coarse_shell_settled && state.backend_launch_emitted && state.backend_readiness_emitted);
+        assert!(state.seen.contains(&("coarse_shell", "installed")));
+        assert!(!state.seen.contains(&("coarse_shell", "shell_absent")));
+    }
 
     #[test]
     fn omp_launch_capture_backend_only_reserves_native_slots_from_transport_progress() {
@@ -8239,27 +8377,9 @@ mod tests {
         let state = Arc::new(State::default());
         let connection = state.connect(&peer);
         let host = EndpointId(iroh::SecretKey::from_bytes(&[17; 32]).public().to_string());
-        let mut owner = Topology::new(config, storage.clone(), state.clone(), host.clone())
+        let owner = Topology::new(config, storage.clone(), state.clone(), host.clone())
             .await
             .unwrap();
-        Arc::get_mut(&mut owner)
-            .expect("exclusive fixture owner")
-            .inner
-            .get_mut()
-            .expect("exclusive fixture state")
-            .servers
-            .insert(
-                server.clone(),
-                ServerRecord {
-                    slot,
-                    name: Label::new("fixture").unwrap(),
-                    path: path.clone(),
-                    server_id: server.clone(),
-                    source: None,
-                    reason: None,
-                    coarse_shell: None,
-                },
-            );
         assert!(owner.source_readiness(&server).unwrap().is_none());
         assert!(matches!(owner.source(&server), Err(ErrorCode::NotReady)));
         let snapshot: Snapshot = serde_json::from_value(json!({
@@ -8354,11 +8474,9 @@ mod tests {
         assert!(omp_reporter.0.lock().unwrap().invalidated);
         let prompt = Request {
             id: Uuid::random(),
-            body: RequestBody::PromptSubmit(PromptSubmitParams {
-                boot_id: boot,
-                target: target.clone(),
-                text: PromptText::new("fixture admission").unwrap(),
-            }),
+            body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
+            target: target.clone(),
+            text: PromptText::new("fixture admission").unwrap(), }),
         };
         state.validate_session_mutation(&prompt).unwrap();
         let retained_history = state
@@ -8774,6 +8892,264 @@ mod probe_tests {
             .find(|p| p.is_file())
             .unwrap_or_else(|| panic!("owned {name} resolver fixture is required"))
     }
+    /// Actual private Unix frames and kernel process/shell evidence, with no admission bypass.
+    struct CoarseRecoveryFixture {
+        owner: Arc<Topology>,
+        state: Arc<State>,
+        connection: Uuid,
+        server: Uuid,
+        snapshot: Snapshot,
+        snapshots: Arc<AtomicU64>,
+        probes: Arc<AtomicU64>,
+        probe_started: Arc<tokio::sync::Notify>,
+        native: tokio::task::JoinHandle<()>,
+        shell: tokio::process::Child,
+        root: Root,
+    }
+    impl Drop for CoarseRecoveryFixture {
+        fn drop(&mut self) {
+            self.native.abort();
+        }
+    }
+    impl CoarseRecoveryFixture {
+        async fn new(consent: bool, missing_first: bool, pause: Option<tokio::sync::oneshot::Receiver<()>>) -> Self {
+            let root = Root::new();
+            let path = root.0.join("h.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let shell = tokio::process::Command::new(executable("bash"))
+                .args(["--noprofile", "--norc"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true).spawn().unwrap();
+            let shell_pid = shell.id().unwrap();
+            let (wrapper, _) = shell_executable(&process_evidence(shell_pid).unwrap()).unwrap();
+            let binary = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+            let runtime = &root.0;
+            let mut config = Config::parse(&format!(
+                "version=1\nruntime_dir={runtime:?}\nruntime_dir_agent={runtime:?}\nallow_scoped_shell_probe={consent}\n[executables]\nherdr={binary:?}\nomp={wrapper:?}\n"
+            )).unwrap();
+            config.projects.push(config::ConfiguredProject {
+                allow_read_tools: false,
+                id: Uuid::random(), label: Label::new("fixture").unwrap(), path: root.0.clone(),
+            });
+            let mut storage = Storage::memory([28; 32], 0).unwrap();
+            let device = PairedDevice {
+                device_id: Uuid::random(),
+                endpoint_id: EndpointId(iroh::SecretKey::from_bytes(&[28; 32]).public().to_string()),
+                device_name: Label::new("coarse recovery fixture").unwrap(),
+                paired_at: Uint(0), last_seen_at: None,
+            };
+            let epoch = storage.pair_device(&device).unwrap();
+            let peer = storage.authenticated_hello(&device.device_id, epoch).unwrap();
+            let slot = serde_json::to_string(&(&path, "fixture")).unwrap();
+            let server = storage.enroll_server(&slot, &Label::new("fixture").unwrap()).unwrap();
+            let state = Arc::new(State::default());
+            let connection = state.connect(&peer);
+            let owner = Topology::new(config, Arc::new(StorageOwner::new(storage).unwrap()), state.clone(),
+                EndpointId(iroh::SecretKey::from_bytes(&[29; 32]).public().to_string())).await.unwrap();
+            // The real backend callback supplies attempt availability; this fixture launches no provider.
+            owner.omp_availability(None).unwrap();
+            let wire = json!({
+                "version":"0.9.1","protocol":22,"focused_workspace_id":"workspace",
+                "workspaces":[{"workspace_id":"workspace","number":1,"label":"fixture","focused":true,"active_tab_id":"tab","agent_status":"idle"}],
+                "tabs":[{"tab_id":"tab","workspace_id":"workspace","number":1,"label":"fixture","focused":true,"agent_status":"idle"}],
+                "panes":[{"pane_id":"pane","terminal_id":"terminal","workspace_id":"workspace","tab_id":"tab","focused":true,"agent_status":"idle","agent":"omp"}],
+                "agents":[{"pane_id":"pane","terminal_id":"terminal","workspace_id":"workspace","tab_id":"tab","agent":"omp","agent_session":{"source":"fixture","agent":"omp","kind":"path","value":"/native.jsonl"},"interactive_ready":true}]
+            });
+            let snapshot: Snapshot = serde_json::from_value(wire.clone()).unwrap();
+            snapshot.validate().unwrap();
+            let snapshots = Arc::new(AtomicU64::new(0));
+            let probes = Arc::new(AtomicU64::new(0));
+            let pause = Arc::new(Mutex::new(pause));
+            let probe_started = Arc::new(tokio::sync::Notify::new());
+            let native = {
+                let snapshots = snapshots.clone();
+                let probes = probes.clone();
+                let probe_started = probe_started.clone();
+                tokio::spawn(async move {
+                    let mut handlers = tokio::task::JoinSet::new();
+                    loop {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let wire = wire.clone();
+                        let snapshots = snapshots.clone();
+                        let probes = probes.clone();
+                        let pause = pause.clone();
+                        let probe_started = probe_started.clone();
+                        handlers.spawn(async move {
+                            let mut reader = BufReader::new(stream);
+                            // A connect used only for peer evidence legitimately sends no request.
+                            let Ok(bytes) = read_line(&mut reader).await else { return; };
+                            let request: Value = serde_json::from_slice(&bytes).unwrap();
+                            let method = request["method"].as_str().unwrap();
+                            let result = match method {
+                                "events.subscribe" => json!({"type":"subscription_started"}),
+                                "session.snapshot" => {
+                                    snapshots.fetch_add(1, Ordering::SeqCst);
+                                    json!({"type":"session_snapshot","snapshot":wire})
+                                }
+                                "pane.process_info" => {
+                                    let number = probes.fetch_add(1, Ordering::SeqCst);
+                                    let waiting = { pause.lock().unwrap().take() };
+                                    if let Some(waiting) = waiting {
+                                        probe_started.notify_one();
+                                        waiting.await.unwrap();
+                                    }
+                                    let pid = if missing_first && number == 0 { None } else { Some(shell_pid) };
+                                    json!({"type":"pane_process_info","process_info":{"pane_id":"pane","shell_pid":pid,"foreground_process_group_id":null,"tty":null,"foreground_processes":[]}})
+                                }
+                                _ => panic!("unexpected fixture native method"),
+                            };
+                            let mut reply = serde_json::to_vec(&json!({"id":request["id"],"result":result})).unwrap();
+                            reply.push(b'\n');
+                            reader.get_mut().write_all(&reply).await.unwrap();
+                            if method == "events.subscribe" {
+                                // Keep this real subscription healthy and quiet until its owner closes it.
+                                let _ = read_line(&mut reader).await;
+                            }
+                        });
+                    }
+                })
+            };
+            Self { owner, state, connection, server, snapshot, snapshots, probes, probe_started, native, shell, root }
+        }
+        fn inventory(&self) -> HostSnapshotResult {
+            let request = Uuid::random();
+            self.state.host_snapshot(&self.connection, request.clone()).unwrap();
+            while let (Some(bytes), _) = self.state.pop_output(&self.connection).unwrap() {
+                if let Envelope::Response(response) = decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
+                    && response.id == request
+                    && let Ok(ResultBody::HostSnapshot(snapshot)) = response.outcome
+                {
+                    return snapshot;
+                }
+            }
+            panic!("fixture host snapshot missing")
+        }
+        fn recover(&self) -> (watch::Sender<bool>, watch::Sender<()>, tokio::task::JoinHandle<io::Result<()>>) {
+            let (stop, mut stopped) = watch::channel(false);
+            let (refresh, mut refreshed) = watch::channel(());
+            let owner = self.owner.clone();
+            let server = self.server.clone();
+            let path = self.root.0.join("h.sock");
+            let job = tokio::spawn(async move { owner.recover(&server, &path, &mut stopped, &mut refreshed).await });
+            (stop, refresh, job)
+        }
+        async fn finish(mut self) {
+            self.native.abort();
+            let _ = (&mut self.native).await;
+            self.shell.kill().await.unwrap();
+            self.shell.wait().await.unwrap();
+        }
+    }
+    async fn coarse_wait(mut ready: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ready() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_coarse_proof_heals_on_unchanged_recovery_without_rebinding_or_reprobing() {
+        let fixture = CoarseRecoveryFixture::new(true, true, None).await;
+        let (stop, refresh, job) = fixture.recover();
+        coarse_wait(|| fixture.probes.load(Ordering::SeqCst) == 1).await;
+        let source = fixture.owner.source(&fixture.server).unwrap();
+        assert!(!fixture.inventory().servers[0].can_create.omp);
+        // Retain an installed provider Target/source epoch across the metadata-only healing.
+        let native_owner = process_evidence(std::process::id()).unwrap();
+        let key = StableSessionKey {
+            host_id: fixture.owner.host_id.clone(), server_id: fixture.server.clone(),
+            server_incarnation: source.incarnation.clone(), terminal_id: Id("terminal".into()),
+            provider_owner_identity: Id(format!("{}:{}",native_owner.pid,native_owner.start_ticks)),
+            native_conversation_id: Id("/native.jsonl".into()),
+        };
+        let mut display: SessionState = serde_json::from_value(json!({
+            "summary":{"sessionId":Uuid::random(),"generation":Uuid::random(),"serverId":fixture.server,
+                "workspaceId":"workspace","terminalId":"terminal","paneId":"pane","provider":"omp",
+                "nativeId":"/native.jsonl","title":"retained","status":"idle","connectivity":"ready",
+                "capabilities":{"history":true,"prompt":true,"cancel":true,"respond":true,"promptMode":"submit_or_steer","cancelMode":"current_work"},
+                "historyCoverage":{"scope":"all_branches","source":"persisted_and_live","olderAvailable":false,"sourceTruncated":false,"desktopBranchKnown":false}},
+            "desktopSelection":"unknown","activity":{"state":"idle"}
+        })).unwrap();
+        let (target, epoch) = fixture.owner.begin_native(key.clone(), native_owner.clone(), display.clone(), false).await.unwrap();
+        display.summary.session_id = target.session_id.clone();
+        display.summary.generation = target.generation.clone();
+        fixture.owner.finish_native(&key, &native_owner, &epoch, ProviderSnapshot {
+            state: display, history: vec![], pending: vec![], older_available: false, native_older: None,
+        }).await.unwrap();
+        // Same watch notification as the existing healthy five-second discovery owner.
+        refresh.send_replace(());
+        coarse_wait(|| fixture.inventory().servers[0].can_create.omp).await;
+        assert_eq!(fixture.probes.load(Ordering::SeqCst), 2);
+        let healed = fixture.owner.source(&fixture.server).unwrap();
+        assert!(source.same_physical_identity(&healed));
+        assert_eq!(source.revision, healed.revision);
+        assert!(Arc::ptr_eq(&source.snapshot, &healed.snapshot));
+        fixture.state.validate_source(&target, &epoch).unwrap();
+        let retained = fixture.state.session_state(&target, &epoch).unwrap();
+        assert_eq!(retained.summary.session_id, target.session_id);
+        assert_eq!(retained.summary.generation, target.generation);
+        // Reaching the following snapshot proves the preceding serialized refresh completed.
+        let before = fixture.snapshots.load(Ordering::SeqCst);
+        refresh.send_replace(());
+        coarse_wait(|| fixture.snapshots.load(Ordering::SeqCst) > before).await;
+        let next = fixture.snapshots.load(Ordering::SeqCst);
+        refresh.send_replace(());
+        coarse_wait(|| fixture.snapshots.load(Ordering::SeqCst) > next).await;
+        assert_eq!(fixture.probes.load(Ordering::SeqCst), 2, "installed proof was reprobed");
+        stop.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(5), job).await.unwrap().unwrap().unwrap();
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn consent_absent_unchanged_recovery_never_requests_process_info() {
+        let fixture = CoarseRecoveryFixture::new(false, false, None).await;
+        let (stop, refresh, job) = fixture.recover();
+        coarse_wait(|| fixture.snapshots.load(Ordering::SeqCst) >= 2).await;
+        for _ in 0..2 {
+            let before = fixture.snapshots.load(Ordering::SeqCst);
+            refresh.send_replace(());
+            coarse_wait(|| fixture.snapshots.load(Ordering::SeqCst) > before).await;
+        }
+        assert_eq!(fixture.probes.load(Ordering::SeqCst), 0);
+        assert!(!fixture.inventory().servers[0].can_create.omp);
+        stop.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(5), job).await.unwrap().unwrap().unwrap();
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn in_flight_coarse_probe_cannot_install_into_equal_replaced_source() {
+        for new_recovery_owner in [false, true] {
+            let (release, waiting) = tokio::sync::oneshot::channel();
+            let fixture = CoarseRecoveryFixture::new(true, false, Some(waiting)).await;
+            let path = fixture.root.0.join("h.sock");
+            let evidence = Client::connect(&path).await.unwrap().evidence;
+            let original_owner = Arc::new(AtomicU64::new(0));
+            fixture.owner.apply_snapshot(&fixture.server,evidence.clone(),fixture.snapshot.clone(),0,original_owner.clone(),true).await.unwrap();
+            let original = fixture.owner.source(&fixture.server).unwrap();
+            let probe = {
+                let owner = fixture.owner.clone(); let server = fixture.server.clone(); let revision = original_owner.clone();
+                tokio::spawn(async move { owner.refresh_coarse(&server,0,&revision).await })
+            };
+            tokio::time::timeout(Duration::from_secs(5), fixture.probe_started.notified()).await.unwrap();
+            let replacement_owner = if new_recovery_owner { Arc::new(AtomicU64::new(0)) } else { original_owner.clone() };
+            fixture.owner.apply_snapshot(&fixture.server,evidence,fixture.snapshot.clone(),0,replacement_owner.clone(),true).await.unwrap();
+            assert!(original.recheck().is_ok(), "physical/revision check alone must not admit the stale completion");
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), probe).await.unwrap().unwrap();
+            assert!(fixture.owner.inner.lock().unwrap().servers[&fixture.server].coarse_shell.is_none());
+            assert!(!fixture.inventory().servers[0].can_create.omp);
+            // A later admitted observation can still heal; discarding stale I/O must not latch failure.
+            fixture.owner.refresh_coarse(&fixture.server,0,&replacement_owner).await;
+            assert!(fixture.inventory().servers[0].can_create.omp);
+            assert_eq!(fixture.probes.load(Ordering::SeqCst),2);
+            fixture.finish().await;
+        }
+    }
+
     #[tokio::test]
     async fn creation_admission_uses_current_same_source_root_and_rejects_changes() {
         let root = Root::new();
@@ -9197,6 +9573,7 @@ mod probe_tests {
                 let cases = if dialect == ShellDialect::Zsh {
                     vec![
                         "plain",
+                        "same_object_outer",
                         "hashed",
                         "automatic_hash",
                         "relative_path_hash",
@@ -9218,6 +9595,7 @@ mod probe_tests {
                 } else {
                     vec![
                         "plain",
+                        "same_object_outer",
                         "hashed",
                         "automatic_hash",
                         "higher_precedence",
@@ -9251,8 +9629,10 @@ mod probe_tests {
                     fs::create_dir(root.0.join("relative")).unwrap();
                     let other_bin = other_dir.join(kind);
                     let relative_bin = relative_dir.join(kind);
-                    std::os::unix::fs::symlink(&wrapper, &other_bin).unwrap();
-                    std::os::unix::fs::symlink(&wrapper, &relative_bin).unwrap();
+                    let other_wrapper = root.0.join("different wrapper");
+                    fs::copy(&wrapper, &other_wrapper).unwrap();
+                    std::os::unix::fs::symlink(&other_wrapper, &other_bin).unwrap();
+                    std::os::unix::fs::symlink(&other_wrapper, &relative_bin).unwrap();
                     let result = root.0.join("result");
                     File::create(&result).unwrap();
                     fs::set_permissions(&result, fs::Permissions::from_mode(0o600)).unwrap();
@@ -9264,7 +9644,7 @@ mod probe_tests {
                     let bin_path = shell_word(bin_dir.to_str().unwrap()).unwrap();
                     let other_path = shell_word(other_dir.to_str().unwrap()).unwrap();
                     let setup = match case {
-                        "plain" | "wrong_outer" => String::new(),
+                        "plain" | "same_object_outer" | "wrong_outer" => String::new(),
                         "hashed" if dialect == ShellDialect::Bash => {
                             format!("PATH={other_path}; hash -p {literal} {kind}")
                         }
@@ -9302,6 +9682,7 @@ mod probe_tests {
                     };
                     let expected_wrapper = match case {
                         "wrong_outer" => root.0.join("different-outer"),
+                        "same_object_outer" => wrapper.clone(),
                         _ => bin,
                     };
                     let nonce = "b".repeat(64);
@@ -9373,7 +9754,7 @@ mod probe_tests {
                         measured.as_ref().ok().copied(),
                         Some(matches!(
                             case,
-                            "plain" | "hashed" | "automatic_hash" | "version_5_9" | "version_5_9_1"
+                            "plain" | "same_object_outer" | "hashed" | "automatic_hash" | "version_5_9" | "version_5_9_1"
                         )),
                         "{name} {kind} synthetic {case}: status={:?}; finite diagnostics={}; synthetic stderr={}; result category={:?}",
                         output.status.code(),
@@ -9389,35 +9770,36 @@ mod probe_tests {
     }
 }
 
+fn alias_ack_matches(reply:&Agent,original:&Pane,context:&RenameContext,name:&AgentName)->bool {
+    reply.name.as_deref()==Some(name.0.as_str())&&!reply.launch_pending
+        &&reply.pane_id==context.pane&&reply.terminal_id==context.terminal
+        &&reply.workspace_id==context.workspace&&reply.tab_id==context.tab
+        &&reply.agent==original.agent&&reply.agent_session==original.agent_session
+}
 fn positive_agent_alias(snapshot:&Snapshot,pane:&Pane,provider:Provider)->bool {
     let kind=match provider {Provider::Omp=>"omp",Provider::Codex=>"codex"};
     pane.agent.as_deref()==Some(kind) && snapshot.agents.iter().filter(|agent|agent.pane_id==pane.pane_id).count()==1 && snapshot.agents.iter().any(|agent|agent.pane_id==pane.pane_id && agent.terminal_id==pane.terminal_id && agent.workspace_id==pane.workspace_id && agent.tab_id==pane.tab_id && agent.agent.as_deref()==Some(kind) && agent.agent_session==pane.agent_session && !agent.launch_pending)
 }
 impl Topology {
-    pub(crate) async fn agent_alias_context(&self,target:&Target)->SecurityResult<(Source,WorktreeReadContext)> {
+    pub(crate) async fn agent_alias_context(&self,target:&Target)->SecurityResult<(Source,RenameContext)> {
         let _update=self.updates.lock().await;
-        let (server,epoch,pin)={let inner=self.inner.lock().expect("topology mutex");let binding=inner.bindings.get(&target.session_id).filter(|binding|binding.target==*target).ok_or(ErrorCode::StaleSession)?;(binding.key.server_id.clone(),binding.source_epoch.clone(),binding.terminal_read_pin.clone().ok_or(ErrorCode::NotReady)?)};
-        let source=self.source(&server)?;let state=self.state.session_state(target,&epoch)?;
-        let pane=source.snapshot.pane(&state.summary.pane_id).map_err(policy)?;
-        let context=WorktreeReadContext {source_epoch:epoch,pane:pane.pane_id.clone(),terminal:pane.terminal_id.clone(),workspace:pane.workspace_id.clone(),tab:pane.tab_id.clone(),read_identity:pin,creation:None};
-        self.validate_agent_alias_context(target,&source,&context,false)?;Ok((source,context))
+        let (source,context,summary)=self.logical_rename_context(target)?;
+        let pane=source.snapshot.pane(&context.pane).map_err(policy)?;
+        if !summary.capabilities.agent_rename||!positive_agent_alias(&source.snapshot,pane,summary.provider) {
+            return Err(ErrorCode::NotReady);
+        }
+        Ok((source,context))
     }
     /// Before effect this is full readiness admission. After a correlated ack only
     /// the original authority survives; our own PaneUpdated may advance inventory.
-    pub(crate) fn validate_agent_alias_context(&self,target:&Target,original:&Source,context:&WorktreeReadContext,ack:bool)->SecurityResult<()> {
-        original.recheck_identity().map_err(policy)?;
-        let source={let inner=self.inner.lock().expect("topology mutex");
-            let binding=inner.bindings.get(&target.session_id).filter(|binding|binding.target==*target && binding.source_epoch==context.source_epoch && binding.key.server_id==original.server_id && binding.key.terminal_id==context.terminal && binding.terminal_read_pin.as_ref()==Some(&context.read_identity)).ok_or(ErrorCode::StaleSession)?;
-            let current=inner.servers.get(&binding.key.server_id).and_then(|record|record.source.as_ref()).ok_or(ErrorCode::NotReady)?;
-            if current.server_id!=original.server_id || current.incarnation!=original.incarnation || current.evidence!=original.evidence || current.socket_path!=original.socket_path || !Arc::ptr_eq(&current.invalidation,&original.invalidation) {return Err(ErrorCode::StaleSession)}current.clone()
-        };
-        let state=self.state.session_state(target,&context.source_epoch)?;
-        if !ack {original.recheck().map_err(policy)?;source.recheck().map_err(policy)?;if state.summary.connectivity!=SessionConnectivity::Ready || !state.summary.capabilities.agent_rename {return Err(ErrorCode::NotReady)}}
+    pub(crate) fn validate_agent_alias_context(&self,target:&Target,original:&Source,context:&RenameContext,ack:bool)->SecurityResult<()> {
+        let (source,summary)=self.validate_logical_rename_context(target,original,context,ack)?;
+        if !ack&&!summary.capabilities.agent_rename{return Err(ErrorCode::NotReady)}
         let pane=source.snapshot.pane(&context.pane).map_err(policy)?;
         let initial=original.snapshot.pane(&context.pane).map_err(policy)?;
-        if !source.snapshot.agent_rename_bound || !positive_agent_alias(&source.snapshot,pane,state.summary.provider) || !positive_agent_alias(&original.snapshot,initial,state.summary.provider)
-            || pane.agent_session!=initial.agent_session || state.summary.pane_id!=context.pane || state.summary.terminal_id!=context.terminal || state.summary.workspace_id!=context.workspace
-            || pane.terminal_id!=context.terminal || pane.workspace_id!=context.workspace || pane.tab_id!=context.tab || pane.read_identity.as_ref()!=Some(&context.read_identity) {return Err(ErrorCode::StaleSession)}
+        if !positive_agent_alias(&source.snapshot,pane,summary.provider)
+            ||!positive_agent_alias(&original.snapshot,initial,summary.provider)
+            ||pane.agent_session!=initial.agent_session {return Err(ErrorCode::StaleSession)}
         Ok(())
     }
 }
@@ -9436,20 +9818,54 @@ impl Topology {
             security.state.validate_session_mutation(&Request {id:action.clone(),body:RequestBody::AgentRename(params.clone())})
         },|checkpoint|async move {
             let lost=|result|crate::storage::ReceiptTransition {state:ReceiptState::Uncertain,proof:crate::storage::TransitionProof::LostOutcome,result,error:None,at:pairing::now_ms()};
-            let response=client.agent_rename_bound(&context.pane,&context.terminal,&context.read_identity,&params.name).await;
+            let response=client.agent_rename(&context.pane,&params.name).await;
             let (reply,normal)=match response {
                 Ok(reply)=>(Some(reply),true),
-                Err(ApiError::Changed(value))=>(decode_agent_rename_bound(value).ok(),false),
-                Err(ApiError::Rejected(code)) if matches!(code.as_str(),"agent_rename_bound_mismatch"|"agent_rename_bound_invalid_name"|"agent_rename_bound_duplicate_name"|"agent_rename_bound_pending_launch"|"agent_rename_bound_not_agent")=>return crate::storage::ReceiptTransition {state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("native alias refused before mutation".into())),result:None,error:Some(crate::protocol::WireError {code:ErrorCode::NotReady,message:SafeMessage("Agent alias was refused before mutation".into())}),at:pairing::now_ms()},
+                Err(ApiError::Changed(mut value))=>(value.get_mut("agent").and_then(|agent|serde_json::from_value(agent.take()).ok()),false),
+                Err(ApiError::Rejected(code)) if matches!(code.as_str(),"invalid_agent_name"|"agent_name_taken"|"agent_launch_pending"|"agent_not_found"|"agent_target_ambiguous")=>return crate::storage::ReceiptTransition {state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("native alias refused before mutation".into())),result:None,error:Some(crate::protocol::WireError {code:ErrorCode::NotReady,message:SafeMessage("Agent alias was refused before mutation".into())}),at:pairing::now_ms()},
                 Err(_)=>(None,false),
             };
             let Some(reply)=reply else {return lost(None)};
-            if reply.name!=params.name.0 || reply.scope.pane_id!=context.pane || reply.scope.terminal_id!=context.terminal || reply.scope.workspace_id!=context.workspace || reply.scope.tab_id!=context.tab || reply.scope.read_identity!=context.read_identity {return lost(None)}
+            let Ok(original)=source.snapshot.pane(&context.pane) else{return lost(None)};
+            if !alias_ack_matches(&reply,original,&context,&params.name){return lost(None)}
             let facts=ActionResultAgentRenamed {target:params.target.clone(),terminal_id:context.terminal.clone()};
             if checkpoint.retain(&params.target,&context.source_epoch,facts.clone()).is_err() {return lost(None)}
             let result=Some(ActionResult::AgentRenamed(facts));
             if checkpoint.checkpoint().await.is_err() || !normal || self.validate_agent_alias_context(&params.target,&source,&context,true).is_err() {return lost(result)}
             crate::storage::ReceiptTransition {state:ReceiptState::Succeeded,proof:crate::storage::TransitionProof::CorrelatedAcknowledgement(Id("native alias mutation acknowledged".into())),result,error:None,at:pairing::now_ms()}
+        }).await
+    }
+    pub(crate) async fn workspace_rename_once(&self,security:&Security,auth:&Authorized,action:&Uuid,params:&WorkspaceRenameParams)->SecurityResult<()> {
+        let (source,context)=self.workspace_rename_context(&params.target).await?;
+        let client=Client::connect(&source.socket_path).await.map_err(policy)?;
+        if client.evidence!=source.evidence{return Err(ErrorCode::StaleSession)}
+        let fd=client.fence_socket().map_err(policy)?;
+        let admission_source=source.clone();let admission_context=context.clone();
+        security.boundary(auth,action.clone(),|| {
+            self.validate_workspace_rename_context_now(&params.target,&admission_source,&admission_context)?;
+            security.state.validate_session_mutation(&Request{id:action.clone(),body:RequestBody::WorkspaceRename(params.clone())})
+        },fd,async move {
+            let response=client.workspace_rename(&context.workspace,&params.label).await;
+            let (reply,normal)=match response {
+                Ok(reply)=>(Some(reply),true),
+                Err(ApiError::Changed(mut value))=>(value.get_mut("workspace").and_then(|workspace|serde_json::from_value(workspace.take()).ok()),false),
+                Err(ApiError::Rejected(code)) if matches!(code.as_str(),"workspace_not_found"|"invalid_request"|"invalid_params")=>{
+                    return ReceiptTransition{state:ReceiptState::Failed,
+                        proof:TransitionProof::DefinitiveNoEffect(Id("native workspace rename refused before mutation".into())),
+                        result:None,error:Some(crate::transport::wire_error(ErrorCode::NotReady)),at:pairing::now_ms()};
+                }
+                Err(_)=>(None,false),
+            };
+            let matched=reply.as_ref().is_some_and(|reply|reply.workspace_id==context.workspace&&reply.label==params.label.0);
+            let result=matched.then(||ActionResult::WorkspaceRenamed(ActionResultWorkspaceRenamed{
+                target:params.target.clone(),workspace_id:context.workspace.clone(),
+            }));
+            if !normal||!matched||self.validate_logical_rename_context(&params.target,&source,&context,true).is_err() {
+                return ReceiptTransition{state:ReceiptState::Uncertain,proof:TransitionProof::LostOutcome,result,error:None,at:pairing::now_ms()};
+            }
+            ReceiptTransition{state:ReceiptState::Succeeded,
+                proof:TransitionProof::CorrelatedAcknowledgement(Id("native workspace effective label confirmed".into())),
+                result,error:None,at:pairing::now_ms()}
         }).await
     }
 }

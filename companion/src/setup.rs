@@ -329,8 +329,11 @@ fn new_config(sub: &ArgMatches) -> io::Result<Config> {
         runtime_dir: runtime,
         allow_scoped_shell_probe: false,
             allow_attachments: false,
+        allow_terminal_control: false,
+        allow_omp_controls:false,
+        skill_document_roots:Vec::new(),
         herdr_sockets: vec![],
-        push_allowed_origins: vec![],
+        push_allowed_origins: config::default_push_allowed_origins(),
         omp_registry_dir: choose_path(sub, "omp-registry-dir"),
         omp_session_roots: sub
             .get_many::<PathBuf>("omp-session-root")
@@ -833,21 +836,80 @@ pub async fn run(sub: &ArgMatches, path: &Path) -> io::Result<()> {
     if sub.get_flag("disable-scoped-shell-probe") {
         c.allow_scoped_shell_probe = false;
     }
+    if sub.get_flag("allow-terminal-control") && !c.allow_terminal_control {
+        println!("Terminal control permits an explicitly selected known non-agent pane in the connected Herdr session. Begin/Resize may resize every workspace/tab and let Herdr resume deferred agents; observed agent transitions retire Goatr input, but queued native bytes cannot be recalled. Native Close is unavailable.");
+        if !confirm("Save this terminal-control permission? Changes require companion restart.").await? {
+            println!("Terminal control declined; no effects.");
+            return Ok(());
+        }
+        c.allow_terminal_control = true;
+    }
+    if sub.get_flag("disable-terminal-control") {
+        c.allow_terminal_control = false;
+    }
+    if let Some(package)=sub.get_one::<PathBuf>("omp-skills-package-root") {
+        config::absolute(package)?;
+        let package=fs::canonicalize(package)?;
+        if !package.is_dir() {return Err(refused("OMP package root is not a directory"))}
+        crate::backends::omp::qualify_extension_package(&package)?;
+        println!("Qualified public OMP extension source: {}",quote(&package));
+        println!("Only future owned OMP launches may load the supported extension. Existing originals are never restarted, and disk source does not prove their loaded code.");
+        if !confirm("Save this qualified package source? Changes require companion restart.").await? {return Ok(())}
+        c.omp_skills_package_root=Some(package);
+    }
+    if sub.get_flag("allow-omp-controls")&&!c.allow_omp_controls {
+        println!("OMP controls permit shared native model/thinking changes and explicit native delivery on an original that loaded the qualified authenticated extension. Opening a panel does nothing; Apply affects the shared session. Native Plan, queue editing and Skill invocation are unavailable.");
+        if !confirm("Save this separate OMP-controls permission? Changes require companion restart.").await? {return Ok(())}
+        c.allow_omp_controls=true;
+    }
+    if sub.get_flag("disable-omp-controls") {c.allow_omp_controls=false;}
+    if sub.get_flag("clear-skill-document-roots") {c.skill_document_roots.clear();}
+    if let Some(roots)=sub.get_many::<PathBuf>("skill-document-root") {
+        let mut selected=Vec::new();
+        for root in roots {
+            config::absolute(root)?;
+            let root=fs::canonicalize(root)?;
+            config::project_directory(&root)?;
+            println!("Enabled-Skill document read root: {}",quote(&root));
+            if !selected.contains(&root) {selected.push(root);}
+        }
+        println!("This separately grants complete bounded UTF-8 previews only for currently enabled native Skill catalogue documents beneath these roots. It grants no arbitrary phone paths, creation, Git/file tools, attachments or model-tool approval. Roots are held for this companion lifetime.");
+        if !confirm("Add these document-read roots? Changes require companion restart.").await? {return Ok(())}
+        for root in selected {if !c.skill_document_roots.contains(&root) {c.skill_document_roots.push(root);}}
+    }
+    if let Some(paths)=sub.get_many::<PathBuf>("disable-project-read") {
+        for path in paths {c.set_project_read_tools(path,false)?;}
+    }
+    if let Some(paths)=sub.get_many::<PathBuf>("allow-project-read") {
+        let mut selected=Vec::new();
+        for path in paths {
+            config::absolute(path)?;
+            let path=fs::canonicalize(path)?;config::project_directory(&path)?;
+            if !c.projects.iter().any(|project|project.path==path) {return Err(refused("read permission requires an already configured project; approve it with --project first"))}
+            println!("Project subtree read/export and confined Git-review root: {}",quote(&path));
+            if !selected.contains(&path) {selected.push(path);}
+        }
+        println!("This separately permits bounded artifact browsing/export and read-only Git review beneath these held project roots. It grants no staging, commits, worktree mutation, arbitrary phone paths, terminal input, attachments or model-tool permission. Outside Git administration/configuration/alternates and unsupported confinement refuse the whole Git observation.");
+        if !confirm("Save these separate project-read grants? Changes and revocation require companion restart.").await? {return Ok(())}
+        for path in selected {c.set_project_read_tools(&path,true)?;}
+    }
     c.preflight()?;
     for p in &c.projects {
         println!(
-            "Approved project {} {} {}",
+            "Approved project {} {} {} (read/export/Git: {})",
             p.id.0,
             p.label.0,
-            quote(&p.path)
+            quote(&p.path),
+            if p.allow_read_tools {"explicitly granted"}else{"not granted"},
         );
     }
     for provider in [Provider::Omp, Provider::Codex] {
         println!("{provider:?}: {}",c.backend_reason(provider)?.unwrap_or("trusted local prerequisites; actual source/new-root wrapper views/native readiness are checked before creation, not proved by setup"));
     }
     println!(
-        "Projects restrict creation ONLY; paired phones control all supported same-user Herdr sessions. No identity, keys, devices or receipts are opened/rekeyed."
+        "Projects restrict creation; explicit per-project read grants separately authorize bounded subtree export/Git review. Paired phones still control all supported same-user Herdr conversations. No identity, keys, devices or receipts are opened/rekeyed."
     );
+    println!("Push publishing permits only the configured exact HTTPS origins {:?}. The default is https://ntfy.sh; an explicit empty list denies all and self-hosted origins require local consent. Saving does not register a phone or select its delivery mode.",c.push_allowed_origins);
     let proposed = c.serialized()?;
     let identical = expected.bytes().is_some_and(|bytes| {
         Config::parse(std::str::from_utf8(bytes).unwrap_or(""))

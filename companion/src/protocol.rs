@@ -106,6 +106,24 @@ fn optional_non_null<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 }
 pub type Text = String;
 
+/// Count actual escaped JSON bytes without allocating a second catalogue/view buffer.
+fn encoded_limit(value:&impl Serialize,limit:usize)->Validation {
+    encoded_size(value,limit).map(|_|())
+}
+pub(crate) fn encoded_size(value:&impl Serialize,limit:usize)->Result<usize,ProtocolFailure> {
+    struct Counter {remaining:usize}
+    impl std::io::Write for Counter {
+        fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {
+            self.remaining=self.remaining.checked_sub(bytes.len()).ok_or(std::io::ErrorKind::OutOfMemory)?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self)->std::io::Result<()> {Ok(())}
+    }
+    let mut counter=Counter {remaining:limit};
+    serde_json::to_writer(&mut counter,value).map_err(|_|invalid())?;
+    Ok(limit-counter.remaining)
+}
+
 macro_rules! string_type {
     ($name:ident, $check:expr) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -710,7 +728,7 @@ pub fn canonical_request(request: &Request) -> ValidationResult<Vec<u8>> {
     let mut value = serde_json::to_value(&request.body).map_err(|_| invalid())?;
     if matches!(
         request.body.method(),
-        Method::SessionHistory | Method::NotificationsSync
+        Method::SessionHistory | Method::NotificationsSync | Method::SessionQueueList
     ) {
         value["params"]
             .as_object_mut()
@@ -839,6 +857,13 @@ pub fn encode_payload(envelope: &Envelope) -> ValidationResult<Vec<u8>> {
                 }
                 Ok(result) => {
                     let result = match result {
+                        ResultBody::SessionControlsRead(x)=>value(x)?,
+                        ResultBody::SessionControlsApply(x)=>value(x)?,
+                        ResultBody::SessionQueueList(x)=>value(x)?,
+                        ResultBody::SessionQueueUpdate(x)=>value(x)?,
+                        ResultBody::SessionQueueDelete(x)=>value(x)?,
+                        ResultBody::SessionQueueReorder(x)=>value(x)?,
+                        ResultBody::SessionQueueStart(x)=>value(x)?,
                         ResultBody::PairConfirm(x) => value(x)?,
                         ResultBody::Hello(x) => value(x)?,
                         ResultBody::HostSnapshot(x) => value(x)?,
@@ -851,9 +876,8 @@ pub fn encode_payload(envelope: &Envelope) -> ValidationResult<Vec<u8>> {
                         ResultBody::AttachmentsChunk(x)=>value(x)?,
                         ResultBody::AttachmentsComplete(x)=>value(x)?,
                         ResultBody::AttachmentsDiscard(x)=>value(x)?,
+                        ResultBody::CreationDirectories(x)=>value(x)?,
                         ResultBody::AttachmentsStatus(x)=>value(x)?,
-                        ResultBody::WorktreesRemovePreview(x)=>value(x)?,
-                        ResultBody::WorktreesRemove(x)=>value(x)?,
                         ResultBody::AgentRename(x) => value(x)?,
                         ResultBody::WorkspaceRename(x) => value(x)?,
                         ResultBody::PromptSubmit(x) => value(x)?,
@@ -861,10 +885,10 @@ pub fn encode_payload(envelope: &Envelope) -> ValidationResult<Vec<u8>> {
                         ResultBody::RequestRespond(x) => value(x)?,
                         ResultBody::ActionStatus(x) => value(x)?,
                         ResultBody::ContentRead(x) => value(x)?,
-                        ResultBody::TerminalRead(x) => value(x)?,
-                        ResultBody::ShellRead(x) => value(x)?,
-                        ResultBody::ShellCreate(x) => value(x)?,
+                        ResultBody::TerminalGridSubscribe(x) => value(x)?,
+                        ResultBody::ShellGridSubscribe(x) => value(x)?,
                         ResultBody::ShellInput(x) => value(x)?,
+                        ResultBody::ShellResize(x)=>value(x)?,
                         ResultBody::ArtifactsList(x)=>value(x)?,
                         ResultBody::ArtifactsOpen(x)=>value(x)?,
                         ResultBody::ArtifactsRead(x)=>value(x)?,

@@ -9,6 +9,7 @@ import java.util.Base64
 import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
+import kotlinx.coroutines.*
 
 internal class ProtocolFixtureChecks(text: String) {
     private val corpus = Json.parseToJsonElement(text).jsonObject
@@ -33,6 +34,12 @@ internal class ProtocolFixtureChecks(text: String) {
                     assertEquals(case.text("hmac"),hex(Protocol.hmacSha256(ByteArray(32) { 11 },bytes)))
                     assertTrue(Protocol.verifyHmacSha256(ByteArray(32) { 11 },bytes,Protocol.hmacSha256(ByteArray(32) { 11 },bytes)))
                     assertFalse(Protocol.verifyHmacSha256(ByteArray(32) { 12 },bytes,Protocol.hmacSha256(ByteArray(32) { 11 },bytes)))
+                }
+                val catalogue=((decoded as? Envelope.ResponseFrame)?.response?.result as? ResultBody.SkillsList)?.result
+                if(catalogue!=null) {
+                    val rows=Protocol.parseRawJson(input(case)).jsonObject.getValue("result").jsonObject.getValue("skills").jsonArray
+                    val expected=rows.map {it.jsonObject["invocationRef"]?.jsonPrimitive?.content}
+                    assertEquals(case.text("name")+": retain opaque native invocation references",expected,catalogue.skills.map {it.invocationRef?.value})
                 }
                 val encoded = Protocol.encodePayload(decoded)
                 assertArrayEquals(case.text("name"),encoded,Protocol.encodePayload(Protocol.decodePayload(encoded,method(case))))
@@ -262,5 +269,106 @@ internal class ProtocolFixtureChecks(text: String) {
         assertTrue(host.ready)
         assertTrue(host.sourceCurrent(summary.serverId))
         assertTrue(conversation.mutationsEnabled)
+    }
+    fun gridCommitOwnsPixelsAndRejectsUncertainBoundaries() {
+        val id=Uuid.random()
+        val begin=GridBegin(GridMode.Replace,Uint(0),Uint(2),Uint(1),alternateScreen=false,graphicsOmitted=false,partCount=Uint(2))
+        val attrs=GridAttributes(false,false,false,false,false,GridUnderline.None)
+        fun cell(text:String,width:Long)=GridCell(text,Uint(width),GridColor.Default,GridColor.Default,attrs)
+        fun part(seq:Long,index:Long,column:Long,cell:GridCell)=Event(id,Uint(seq),EventBody.GridPart(GridPart(Uint(0),Uint(index),listOf(GridSpan(Uint(0),Uint(column),listOf(cell))))))
+        val reducer=TerminalGridReducer();reducer.open(begin,32)
+        val deadline=reducer.transactionDeadline
+        assertNull(reducer.committed)
+        val left=part(1,0,0,cell("界",2))
+        assertFalse(reducer.event(left,64));assertNull(reducer.committed)
+        assertFalse(reducer.event(left,64))
+        assertEquals(deadline,reducer.transactionDeadline)
+        assertFalse(reducer.event(part(2,1,1,cell("",0)),64));assertNull(reducer.committed)
+        assertTrue(reducer.event(Event(id,Uint(3),EventBody.GridCommit(GridCommit(Uint(0)))),32))
+        assertEquals("界",reducer.committed!!.cells[0].text)
+        assertEquals(0L,reducer.transactionDeadline)
+        reducer.clear();assertNull(reducer.committed)
+        reducer.open(begin,32)
+        assertTrue(runCatching {reducer.event(part(2,0,0,cell("x",1)),64)}.isFailure)
+        reducer.clear();reducer.open(begin,32)
+        assertTrue(reducer.expired(Long.MAX_VALUE));reducer.clear();assertNull(reducer.committed)
+        val initial=cases("frames").first {it.text("name")=="result terminal.grid.subscribe"}
+        val parsed=(Protocol.decodePayload(input(initial),Method.TerminalGridSubscribe) as Envelope.ResponseFrame).response.result as ResultBody.TerminalGridSubscribe
+        assertEquals(0L,parsed.result.frame.revision.value)
+        val shell=ShellSummary(ShellTarget(id,id),id,Id("w"),Id("t"),Id("p"),Id("n"),Label("Shell"),SessionConnectivity.Ready,ShellCapabilities(true,true,true,false,grid=true))
+        assertTrue(shell.sameLogicalIdentity(shell.copy(capabilities=shell.capabilities.copy(grid=false))))
+    }
+    private fun completeGrid(columns:Int,rows:Int,wide:Boolean=false,blinkColumn:Int?=null):TerminalGrid {
+        val begin=GridBegin(GridMode.Replace,Uint(0),Uint(columns.toLong()),Uint(rows.toLong()),alternateScreen=false,graphicsOmitted=false,partCount=Uint(rows.toLong()))
+        val cells=List(columns*rows){index->
+            val row=index/columns;val column=index%columns
+            val width=if(wide && row==0 && column==0)2L else if(wide && row==0 && column==1)0L else 1L
+            GridCell(if(width==0L)"" else if(width==2L)"界" else "x",Uint(width),GridColor.Default,GridColor.Default,GridAttributes(false,false,false,row==0 && column==blinkColumn,false,GridUnderline.None))
+        }
+        return TerminalGrid(begin,cells,cells.any {it.width.value!=0L && it.attributes.blink && !it.attributes.concealed})
+    }
+    fun gridViewportUsesWideExtentAndOnlyVisibleBlinkingContent() {
+        val grid=completeGrid(512,64,wide=true)
+        val viewport=TerminalGridViewport(512,64,-15f,0f,10f,20f,10f,20f)
+        var backgrounds=0;viewport.backgrounds(grid){_,_,_->backgrounds++}
+        assertEquals(2,backgrounds)
+        val glyphs=mutableListOf<String>()
+        viewport.glyphs(grid){cell,x,_,right->
+            glyphs+=cell.text
+            if(cell.width.value==2L){assertEquals(-15f,x,0f);assertEquals(5f,right,0f)}
+        }
+        assertEquals(listOf("界","x"),glyphs)
+        assertFalse(viewport.needsBlink(grid))
+        val blinking=completeGrid(512,1,wide=true,blinkColumn=100)
+        assertFalse(viewport.needsBlink(blinking))
+        val visible=TerminalGridViewport(512,1,-995f,0f,10f,20f,10f,20f)
+        assertTrue(visible.needsBlink(blinking))
+        val outside=TerminalGridViewport(512,1,20f,0f,10f,20f,10f,20f)
+        assertFalse(outside.needsBlink(blinking))
+    }
+    /** Android-only invocation: real Main dispatcher barrier through the actual production consumers. */
+    suspend fun gridMainDeliveryCannotResurrectDismissedOrReplacedViewers()=coroutineScope {
+        val outer=this
+        val frame=completeGrid(2,1,wide=true);val source=Uuid.random()
+        val key=ConversationKey("fixture",Target(Uuid.random(),Uuid.random()))
+        for(mode in listOf("dismiss","background","replace","source")){
+            val caller=Job();val lease=TerminalGridLease(caller);var foreground=true;var currentSource=true
+            val (queued,state)=withContext(Dispatchers.Main.immediate){
+                val state=androidx.compose.runtime.mutableStateOf<TerminalSnapshot?>(TerminalSnapshot(key,source,1,null,true,false))
+                lease.stage(frame)
+                val produced=java.util.concurrent.CountDownLatch(1)
+                val queued=outer.async(Dispatchers.IO){
+                    produced.countDown()
+                    lease.deliver {grid,actual->publishTerminalGrid(state,key,source,1,foreground,key,Screen.Conversation,currentSource,actual,grid)}
+                }
+                assertTrue(produced.await(1,java.util.concurrent.TimeUnit.SECONDS))
+                when(mode){
+                    "dismiss"->{state.value=null;caller.cancel()}
+                    "background"->foreground=false
+                    "source"->currentSource=false
+                    else->state.value=TerminalSnapshot(key,source,2,null,true,false)
+                }
+                queued to state
+            }
+            queued.await()
+            if(mode=="dismiss")assertNull(state.value) else assertNull(state.value!!.grid)
+            if(mode=="replace")assertEquals(2L,state.value!!.ticket)
+            lease.close();caller.cancel()
+        }
+        val shellTarget=ShellTarget(Uuid.random(),Uuid.random());val selected=ShellSelection("fixture",shellTarget)
+        val summary=ShellSummary(shellTarget,Uuid.random(),Id("w"),Id("t"),Id("p"),Id("n"),Label("Shell"),SessionConnectivity.Ready,ShellCapabilities(true,false,true,false,grid=true))
+        val caller=Job();val lease=TerminalGridLease(caller)
+        val (queued,state)=withContext(Dispatchers.Main.immediate){
+            val state=androidx.compose.runtime.mutableStateOf<ShellSnapshot?>(ShellSnapshot(selected,source,1,summary,null,true,false))
+            lease.stage(frame);val produced=java.util.concurrent.CountDownLatch(1)
+            val queued=outer.async(Dispatchers.IO){produced.countDown();lease.deliver {grid,actual->publishShellGrid(state,selected,source,1,true,actual,grid)}}
+            assertTrue(produced.await(1,java.util.concurrent.TimeUnit.SECONDS))
+            state.value=ShellSnapshot(selected,source,2,summary,null,true,false)
+            queued to state
+        }
+        queued.await();assertEquals(2L,state.value!!.ticket);assertNull(state.value!!.grid)
+        lease.close()
+        lease.clear {grid,actual->publishShellGrid(state,selected,source,1,true,actual,grid)}
+        assertEquals(2L,state.value!!.ticket);assertNull(state.value!!.grid);caller.cancel()
     }
 }

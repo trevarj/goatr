@@ -112,8 +112,9 @@ class DeliveryService : Service() {
         try {
             runtime.connection.ensureConnectedIfNeeded(host)
             runtime.connection.snapshot(host)
+            val expected=runtime.connection.state.value.hello[host] ?: throw StorePolicy(ErrorCode.NotReady)
             var after:Uint?=null
-            do { after=runtime.connection.notificationsSync(host,after).nextSequence } while(after!=null)
+            do { after=runtime.connection.notificationsSync(host,expected,after).nextSequence } while(after!=null)
             retryMutex.withLock {retryIndex.remove(host);hostGates[host]?.retryScheduled=false}
             markReconnecting(host,false)
             runtime.notifications.reconcile(host)
@@ -171,9 +172,12 @@ class DeliveryService : Service() {
         private val statusMutable=MutableStateFlow(DeliverySnapshot())
         val status:StateFlow<DeliverySnapshot> = statusMutable
         private fun updateStatus(value:DeliverySnapshot) {statusMutable.value=value}
-        fun startFromUser(context:Context):Boolean {
-            val app=context.applicationContext as GoatrApplication;app.runtime.deliveryPreferences.setServiceRequested(true)
-            if(!app.runtime.deliveryPreferences.canPostNotifications()) return false
+        fun startFromUser(context:Context,admitted:()->Boolean):Boolean {
+            if(!admitted())return false
+            val app=context.applicationContext as GoatrApplication
+            if(!app.runtime.deliveryPreferences.canPostNotifications()||!admitted())return false
+            app.runtime.deliveryPreferences.setServiceRequested(true)
+            if(!admitted())return false
             app.startForegroundService(Intent(app,DeliveryService::class.java).setAction(ACTION_START));return true
         }
         fun stopFromUser(context:Context) {val app=context.applicationContext as GoatrApplication;app.runtime.deliveryPreferences.setServiceRequested(false);app.stopService(Intent(app,DeliveryService::class.java))}

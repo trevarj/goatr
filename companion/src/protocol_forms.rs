@@ -4,6 +4,13 @@ use std::collections::HashMap;
 
 pub(super) fn decode_request_body(method: Method, params: &Value) -> ValidationResult<RequestBody> {
     match method {
+        Method::SessionControlsRead=>Ok(RequestBody::SessionControlsRead(typed(params,true)?)),
+        Method::SessionControlsApply=>Ok(RequestBody::SessionControlsApply(typed(params,true)?)),
+        Method::SessionQueueList=>Ok(RequestBody::SessionQueueList(typed(params,true)?)),
+        Method::SessionQueueUpdate=>Ok(RequestBody::SessionQueueUpdate(typed(params,true)?)),
+        Method::SessionQueueDelete=>Ok(RequestBody::SessionQueueDelete(typed(params,true)?)),
+        Method::SessionQueueReorder=>Ok(RequestBody::SessionQueueReorder(typed(params,true)?)),
+        Method::SessionQueueStart=>Ok(RequestBody::SessionQueueStart(typed(params,true)?)),
         Method::ArtifactsList=>Ok(RequestBody::ArtifactsList(typed(params,true)?)),
         Method::ArtifactsOpen=>Ok(RequestBody::ArtifactsOpen(typed(params,true)?)),
         Method::ArtifactsRead=>Ok(RequestBody::ArtifactsRead(typed(params,true)?)),
@@ -20,9 +27,8 @@ pub(super) fn decode_request_body(method: Method, params: &Value) -> ValidationR
         Method::SessionOpen => Ok(RequestBody::SessionOpen(typed(params, true)?)),
         Method::SessionHistory => Ok(RequestBody::SessionHistory(typed(params, true)?)),
         Method::SessionUnsubscribe => Ok(RequestBody::SessionUnsubscribe(typed(params, true)?)),
+        Method::CreationDirectories => Ok(RequestBody::CreationDirectories(typed(params, true)?)),
         Method::SessionCreate => Ok(RequestBody::SessionCreate(typed(params, true)?)),
-        Method::WorktreesRemovePreview=>Ok(RequestBody::WorktreesRemovePreview(typed(params,true)?)),
-        Method::WorktreesRemove=>Ok(RequestBody::WorktreesRemove(typed(params,true)?)),
         Method::AgentRename => Ok(RequestBody::AgentRename(typed(params, true)?)),
         Method::WorkspaceRename => Ok(RequestBody::WorkspaceRename(typed(params, true)?)),
         Method::PromptSubmit => Ok(RequestBody::PromptSubmit(typed(params, true)?)),
@@ -30,10 +36,12 @@ pub(super) fn decode_request_body(method: Method, params: &Value) -> ValidationR
         Method::RequestRespond => Ok(RequestBody::RequestRespond(typed(params, true)?)),
         Method::ActionStatus => Ok(RequestBody::ActionStatus(typed(params, true)?)),
         Method::ContentRead => Ok(RequestBody::ContentRead(typed(params, true)?)),
-        Method::TerminalRead => Ok(RequestBody::TerminalRead(typed(params, true)?)),
-        Method::ShellRead => Ok(RequestBody::ShellRead(typed(params, true)?)),
-        Method::ShellCreate => Ok(RequestBody::ShellCreate(typed(params, true)?)),
+        Method::TerminalGridSubscribe => {
+            Ok(RequestBody::TerminalGridSubscribe(typed(params, true)?))
+        }
+        Method::ShellGridSubscribe => Ok(RequestBody::ShellGridSubscribe(typed(params, true)?)),
         Method::ShellInput => Ok(RequestBody::ShellInput(typed(params, true)?)),
+        Method::ShellResize=>Ok(RequestBody::ShellResize(typed(params,true)?)),
         Method::SkillsList => Ok(RequestBody::SkillsList(typed(params, true)?)),
         Method::SkillsPreviewOpen=>Ok(RequestBody::SkillsPreviewOpen(typed(params,true)?)),
         Method::SkillsPreviewRead=>Ok(RequestBody::SkillsPreviewRead(typed(params,true)?)),
@@ -51,6 +59,13 @@ pub(super) fn decode_request_body(method: Method, params: &Value) -> ValidationR
 }
 pub(super) fn decode_result_body(method: Method, result: &Value) -> ValidationResult<ResultBody> {
     match method {
+        Method::SessionControlsRead=>Ok(ResultBody::SessionControlsRead(typed(result,false)?)),
+        Method::SessionControlsApply=>Ok(ResultBody::SessionControlsApply(typed(result,false)?)),
+        Method::SessionQueueList=>Ok(ResultBody::SessionQueueList(typed(result,false)?)),
+        Method::SessionQueueUpdate=>Ok(ResultBody::SessionQueueUpdate(typed(result,false)?)),
+        Method::SessionQueueDelete=>Ok(ResultBody::SessionQueueDelete(typed(result,false)?)),
+        Method::SessionQueueReorder=>Ok(ResultBody::SessionQueueReorder(typed(result,false)?)),
+        Method::SessionQueueStart=>Ok(ResultBody::SessionQueueStart(typed(result,false)?)),
         Method::ArtifactsList=>Ok(ResultBody::ArtifactsList(typed(result,false)?)),
         Method::ArtifactsOpen=>Ok(ResultBody::ArtifactsOpen(typed(result,false)?)),
         Method::ArtifactsRead=>Ok(ResultBody::ArtifactsRead(typed(result,false)?)),
@@ -67,9 +82,8 @@ pub(super) fn decode_result_body(method: Method, result: &Value) -> ValidationRe
         Method::SessionOpen => Ok(ResultBody::SessionOpen(typed(result, false)?)),
         Method::SessionHistory => Ok(ResultBody::SessionHistory(typed(result, false)?)),
         Method::SessionUnsubscribe => Ok(ResultBody::SessionUnsubscribe(typed(result, false)?)),
+        Method::CreationDirectories => Ok(ResultBody::CreationDirectories(typed(result, false)?)),
         Method::SessionCreate => Ok(ResultBody::SessionCreate(typed(result, false)?)),
-        Method::WorktreesRemovePreview=>Ok(ResultBody::WorktreesRemovePreview(typed(result,false)?)),
-        Method::WorktreesRemove=>Ok(ResultBody::WorktreesRemove(typed(result,false)?)),
         Method::AgentRename => Ok(ResultBody::AgentRename(typed(result, false)?)),
         Method::WorkspaceRename => Ok(ResultBody::WorkspaceRename(typed(result, false)?)),
         Method::PromptSubmit => Ok(ResultBody::PromptSubmit(typed(result, false)?)),
@@ -86,10 +100,12 @@ pub(super) fn decode_result_body(method: Method, result: &Value) -> ValidationRe
             Ok(ResultBody::ActionStatus(status))
         }
         Method::ContentRead => Ok(ResultBody::ContentRead(typed(result, false)?)),
-        Method::TerminalRead => Ok(ResultBody::TerminalRead(typed(result, false)?)),
-        Method::ShellRead => Ok(ResultBody::ShellRead(typed(result, false)?)),
-        Method::ShellCreate => Ok(ResultBody::ShellCreate(typed(result, false)?)),
+        Method::TerminalGridSubscribe => {
+            Ok(ResultBody::TerminalGridSubscribe(typed(result, false)?))
+        }
+        Method::ShellGridSubscribe => Ok(ResultBody::ShellGridSubscribe(typed(result, false)?)),
         Method::ShellInput => Ok(ResultBody::ShellInput(typed(result, false)?)),
+        Method::ShellResize=>Ok(ResultBody::ShellResize(typed(result,false)?)),
         Method::SkillsList => Ok(ResultBody::SkillsList(typed(result, false)?)),
         Method::SkillsPreviewOpen=>Ok(ResultBody::SkillsPreviewOpen(typed(result,false)?)),
         Method::SkillsPreviewRead=>Ok(ResultBody::SkillsPreviewRead(typed(result,false)?)),
@@ -382,13 +398,15 @@ pub(super) fn validate_history_upsert_event(x: &HistoryUpsertEvent) -> Validatio
 }
 pub(super) fn validate_receipt(x: &Receipt) -> Validation {
     ensure(x.created_at <= x.updated_at)?;
-    ensure(matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput)==x.shell_target.is_some())?;
-    if matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput) {
+    ensure(matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput|ActionMethod::ShellResize)==x.shell_target.is_some())?;
+    if matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput|ActionMethod::ShellResize) {
         ensure(x.target.is_none() && x.creation.is_none())?;
-        if x.state==ReceiptState::Succeeded {ensure(match &x.result {Some(ActionResult::ShellCreation(result)) if x.method==ActionMethod::ShellCreate=>result.resources.complete(),Some(ActionResult::ShellInput(result)) if x.method==ActionMethod::ShellInput=>result.progress.accepted(),_=>false})?;}
+        if x.state==ReceiptState::Succeeded {ensure(match &x.result {Some(ActionResult::ShellCreation(result)) if x.method==ActionMethod::ShellCreate=>result.resources.complete(),Some(ActionResult::ShellInput(result)) if x.method==ActionMethod::ShellInput=>result.progress.accepted(),Some(ActionResult::ShellResize(_)) if x.method==ActionMethod::ShellResize=>true,_=>false})?;}
     }
-    if matches!(x.method,ActionMethod::AttachmentsBegin|ActionMethod::AttachmentsChunk|ActionMethod::AttachmentsComplete|ActionMethod::AttachmentsDiscard) {ensure(x.target.is_some() && x.creation.is_none())?;if let Some(ActionResult::Attachment(result))=&x.result{ensure(x.target.as_ref()==Some(&result.target))?;}if x.state==ReceiptState::Succeeded {ensure(matches!(&x.result,Some(ActionResult::Attachment(_))))?;}}
-    if x.method==ActionMethod::TerminalCreate {ensure(x.target.is_some()&&x.shell_target.is_none()&&x.creation.is_none())?;if x.state==ReceiptState::Succeeded{ensure(matches!(&x.result,Some(ActionResult::ShellCreation(result)) if result.resources.complete()))?;}}
+    if matches!(x.method,ActionMethod::AttachmentsBegin|ActionMethod::AttachmentsChunk|ActionMethod::AttachmentsComplete|ActionMethod::AttachmentsDiscard) {ensure(x.target.is_some() && x.creation.is_none())?;if let Some(ActionResult::Attachment(result))=&x.result{ensure(x.target.as_ref()==Some(&result.target))?;}
+    if x.state==ReceiptState::Succeeded {ensure(matches!(&x.result,Some(ActionResult::Attachment(_))))?;}}
+    // Old provider-target terminal.create receipts remain readable; new configured creation has no provider target.
+    if x.method==ActionMethod::TerminalCreate {ensure(x.shell_target.is_none()&&x.creation.is_none())?;if x.state==ReceiptState::Succeeded{ensure(matches!(&x.result,Some(ActionResult::ShellCreation(result)) if result.resources.complete()))?;}}
     if x.method==ActionMethod::WorktreesRemove {
         ensure(x.target.is_some() && x.creation.is_none())?;
         if let Some(ActionResult::WorktreeRemoval(result))=&x.result{ensure(Some(&result.target)==x.target.as_ref())?;}
@@ -399,12 +417,21 @@ pub(super) fn validate_receipt(x: &Receipt) -> Validation {
         if let Some(ActionResult::AgentRenamed(result))=&x.result {ensure(Some(&result.target)==x.target.as_ref())?;}
         if x.state == ReceiptState::Succeeded { ensure(matches!(&x.result, Some(ActionResult::AgentRenamed(result)) if Some(&result.target) == x.target.as_ref()))?; }
     }
+    if x.method==ActionMethod::SessionControlsApply {
+        ensure(x.target.is_some()&&x.creation.is_none()&&x.result.is_none())?;
+    }
+    if matches!(x.method,ActionMethod::SessionQueueUpdate|ActionMethod::SessionQueueDelete|ActionMethod::SessionQueueReorder|ActionMethod::SessionQueueStart) {
+        ensure(x.target.is_some()&&x.creation.is_none())?;
+        if x.state==ReceiptState::Succeeded {ensure(matches!(&x.result,Some(ActionResult::Queue(_))))?;}
+    }
     if let Some(result) = &x.result {
         ensure(matches!(
             (x.method, result),
             (ActionMethod::TerminalCreate,ActionResult::ShellCreation(_)) | (ActionMethod::SessionCreate, ActionResult::Created(_))
                 | (ActionMethod::ShellCreate, ActionResult::ShellCreation(_))
                 | (ActionMethod::ShellInput, ActionResult::ShellInput(_))
+                | (ActionMethod::ShellInput,ActionResult::ShellDispatch(_))
+                | (ActionMethod::ShellResize,ActionResult::ShellResize(_))
                 | (ActionMethod::WorktreesRemove,ActionResult::WorktreeRemoval(_))
                 | (ActionMethod::AttachmentsBegin,ActionResult::Attachment(_))
                 | (ActionMethod::AttachmentsChunk,ActionResult::Attachment(_))
@@ -413,9 +440,36 @@ pub(super) fn validate_receipt(x: &Receipt) -> Validation {
                 | (ActionMethod::AgentRename, ActionResult::AgentRenamed(_))
                 | (ActionMethod::WorkspaceRename, ActionResult::WorkspaceRenamed(_))
                 | (ActionMethod::PromptSubmit, ActionResult::Prompt(_))
+                | (ActionMethod::PromptSubmit,ActionResult::Queue(_))
+                | (ActionMethod::SessionQueueUpdate,ActionResult::Queue(_))
+                | (ActionMethod::SessionQueueDelete,ActionResult::Queue(_))
+                | (ActionMethod::SessionQueueReorder,ActionResult::Queue(_))
+                | (ActionMethod::SessionQueueStart,ActionResult::Queue(_))
                 | (ActionMethod::TurnCancel, ActionResult::Cancel(_))
                 | (ActionMethod::RequestRespond, ActionResult::Response(_))
         ))?;
+        if let ActionResult::ShellDispatch(result)=result {
+            ensure(x.state!=ReceiptState::Succeeded)?;
+            if x.state==ReceiptState::Dispatched {ensure(result.progress.complete())?;}
+        }
+        if let ActionResult::Queue(result)=result {
+            ensure(x.target.is_some()&&x.shell_target.is_none()&&x.creation.is_none())?;
+            match x.method {
+                ActionMethod::PromptSubmit|ActionMethod::SessionQueueUpdate=>{
+                    ensure(result.entry_id.is_some()&&result.deleted.is_none()&&result.native_turn_id.is_none())?;
+                }
+                ActionMethod::SessionQueueDelete=>{
+                    ensure(result.entry_id.is_some()&&result.native_turn_id.is_none())?;
+                    if x.state==ReceiptState::Succeeded {ensure(result.deleted.is_some())?;}
+                }
+                ActionMethod::SessionQueueStart=>{
+                    ensure(result.entry_id.is_some()&&result.deleted.is_none())?;
+                    if x.state==ReceiptState::Succeeded {ensure(result.native_turn_id.is_some())?;}
+                }
+                ActionMethod::SessionQueueReorder=>ensure(result.entry_id.is_none()&&result.deleted.is_none()&&result.native_turn_id.is_none())?,
+                _=>return Err(invalid()),
+            }
+        }
     }
     if x.method == ActionMethod::SessionCreate && x.state == ReceiptState::Succeeded {
         ensure(

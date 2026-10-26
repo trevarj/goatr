@@ -32,14 +32,35 @@ class ProviderFormsTest {
     private var received: Answer?=null
     private var presentation by mutableStateOf<Presentation>(PresentationDesktopOnly(c("Desktop"),"unsupported native request"))
     private var enabled by mutableStateOf(true)
+    private var requestOpen by mutableStateOf(true)
+    private var draft by mutableStateOf("Retained selected draft")
+    private var sends=0
+    private var stops=0
     private fun c(value: String)=ContentText(InlineText(value))
-    private fun render(fontScale: Float=1f,narrow: Boolean=false) {
-        ui.setContent {MaterialTheme {val density=LocalDensity.current;CompositionLocalProvider(LocalDensity provides Density(density.density,fontScale)) {Column((if(narrow) Modifier.width(300.dp).height(260.dp) else Modifier.fillMaxSize()).verticalScroll(rememberScrollState()).semantics {testTagsAsResourceId=true}) {
-            val context=LocalContext.current
-            val provider=if(presentation is PresentationOmpSelect || presentation is PresentationOmpEditor) Provider.Omp else Provider.Codex
-            val kind=when(presentation) {is PresentationOmpSelect->PresentationKind.OmpSelect;is PresentationOmpEditor->PresentationKind.OmpEditor;is PresentationCodexApproval->PresentationKind.CodexApproval;is PresentationCodexQuestions->PresentationKind.CodexQuestions;is PresentationCodexForm->PresentationKind.CodexForm;is PresentationCodexUrl->PresentationKind.CodexUrl;is PresentationDesktopOnly->PresentationKind.DesktopOnly}
-            ProviderForm(PendingRequest(requestKey,provider,kind,presentation),memory,enabled,"Stale source: writes disabled",{content,loaded->ContentView(content,null,null,null,onLoaded=loaded)},{url->openHttpUrl(context,url)}) {received=it}
-        }}}}
+    private fun render(fontScale: Float=1f,narrow: Boolean=false,pinned:Boolean=false) {
+        ui.setContent {MaterialTheme {val density=LocalDensity.current;CompositionLocalProvider(LocalDensity provides Density(density.density,fontScale)) {
+            val actualForm: @Composable () -> Unit = {
+                val context=LocalContext.current
+                val provider=if(presentation is PresentationOmpSelect || presentation is PresentationOmpEditor) Provider.Omp else Provider.Codex
+                val kind=when(presentation) {
+                    is PresentationOmpSelect -> PresentationKind.OmpSelect
+                    is PresentationOmpEditor -> PresentationKind.OmpEditor
+                    is PresentationCodexApproval -> PresentationKind.CodexApproval
+                    is PresentationCodexQuestions -> PresentationKind.CodexQuestions
+                    is PresentationCodexForm -> PresentationKind.CodexForm
+                    is PresentationCodexUrl -> PresentationKind.CodexUrl
+                    is PresentationDesktopOnly -> PresentationKind.DesktopOnly
+                }
+                ProviderForm(PendingRequest(requestKey,provider,kind,presentation),memory,enabled,"Stale source: writes disabled",{content,loaded->ContentView(content,null,null,null,onLoaded=loaded)},{url->openHttpUrl(context,url)}) {received=it}
+            }
+            val bounds=if(narrow)Modifier.width(300.dp).height(260.dp) else Modifier.fillMaxSize()
+            if(pinned)BoxWithConstraints(bounds.semantics {testTagsAsResourceId=true}) {
+                ConversationFrame(chrome={},history={
+                    if(requestOpen)ConversationRequestPanel(requestKey,{requestOpen=false},memory){actualForm()}
+                    else androidx.compose.material3.Text("Original conversation remains")
+                },editor={ConversationControlRail(enabled,"Stale source: writes disabled",{stops++},{}) {}},actions={ConversationDraftControls(draft,{draft=it},enabled,{sends++})},requestOpen=requestOpen)
+            }else Column(bounds.verticalScroll(rememberScrollState()).semantics {testTagsAsResourceId=true}) {actualForm()}
+        }}}
     }
     private fun show(p: Presentation) {ui.runOnIdle {memory.clear();received=null;presentation=p};ui.waitForIdle()}
     private fun tap(tag: String) {ui.onNodeWithTag(tag).performScrollTo().performClick();ui.waitForIdle()}
@@ -92,6 +113,34 @@ class ProviderFormsTest {
         assertEquals(listOf("synthetic-secret-canary"),(received as AnswerCodexQuestions).answers.single().values)
         ui.runOnIdle {received=null;assertTrue(memory.values("question_secret-id",true).isEmpty());assertEquals("",memory.secret("question_secret-id-input"))}
         ui.onNodeWithTag("question_0_input").assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText,androidx.compose.ui.text.AnnotatedString("")))
+    }
+
+    @Test fun nativeSecretRequestKeepsActualDraftSendAndSeparateStopReachableAndClearsOnPanelTeardown() {
+        render(2f,true,true)
+        show(PresentationCodexQuestions(true,listOf(Question(Id("secret-id"),"Secret native answer",c("Synthetic secret request"),false,true,emptyList()))))
+        ui.onNodeWithTag("prompt_send").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+        ui.onNodeWithTag("turn_stop").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+        ui.onNodeWithTag("composer").assertIsDisplayed().performTextReplacement("Draft remains separate from answer")
+        ui.onNodeWithTag("question_0_input").performScrollTo().performTextInput("synthetic-panel-secret")
+        ui.runOnIdle {assertEquals("synthetic-panel-secret",memory.secret("question_secret-id-input"));assertNull(received)}
+        ui.onNodeWithTag("composer").assertIsDisplayed().assertTextContains("Draft remains separate from answer")
+        ui.onNodeWithTag("prompt_send").performClick()
+        ui.onNodeWithTag("turn_stop").performClick()
+        ui.runOnIdle {assertEquals(1,sends);assertEquals(1,stops);assertNull(received);assertTrue(requestOpen)}
+        ui.runOnIdle {enabled=false}
+        ui.onNodeWithTag("form_submit").performScrollTo().assertIsNotEnabled()
+        ui.onNodeWithText("Stale source: writes disabled").assertExists()
+        ui.onNodeWithTag("prompt_send").assertIsNotEnabled()
+        ui.onNodeWithTag("turn_stop").assertIsNotEnabled()
+        val lifetime=memory.secretLifetime
+        ui.onNodeWithTag("request_close").assertIsDisplayed().performClick()
+        ui.runOnIdle {
+            assertFalse(requestOpen);assertNull(received)
+            assertEquals("",memory.secret("question_secret-id-input"))
+            assertTrue(memory.secretLifetime>lifetime)
+            assertEquals("Draft remains separate from answer",draft)
+        }
+        ui.onNodeWithTag("composer").assertIsDisplayed()
     }
 
     @Test fun opaqueSecretQuestionIdsCannotOverwriteAnotherQuestionsAnswers() {

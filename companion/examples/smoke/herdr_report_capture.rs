@@ -137,7 +137,9 @@ struct BudgetState {
     reserve_offline_roles: bool,
     backend_launch_emitted: bool,
     backend_readiness_emitted: bool,
+    coarse_shell_settled: bool,
     backend_seen: HashSet<(String, String)>,
+    shell_probe_delivered: bool,
     server_emitted: bool,
     phone_emitted: bool,
     child_emitted: bool,
@@ -297,6 +299,24 @@ fn backend_priority(value: &Value) -> Option<BackendPriority> {
     }
 }
 
+// Accept only the closed settlement shape already filtered by the companion stderr parser.
+fn coarse_shell_settlement(value: &Value) -> bool {
+    if value.get("phase").and_then(Value::as_str) != Some("coarse_shell")
+        || value.get("frame").and_then(Value::as_str) != Some("none")
+    {
+        return false;
+    }
+    let code = value.get("code").and_then(Value::as_str);
+    let io = value.get("io").and_then(Value::as_str);
+    match value.get("guard").and_then(Value::as_str) {
+        Some("installed") => code == Some("none") && io == Some("none"),
+        Some("consent_absent" | "peer_identity" | "shell_absent" | "no_candidate" | "record_absent") => code == Some("NotReady") && io == Some("none"),
+        Some("source_lookup") => matches!(code, Some("NotFound" | "NotReady" | "ResourceLimit")) && io == Some("none"),
+        Some("reporter_process" | "connect" | "process_info" | "reported_process" | "shell_executable" | "source_recheck") => matches!(code, Some("NotReady" | "ResourceLimit")) && matches!(io, Some("not_found" | "timed_out" | "connection_refused" | "unexpected_eof" | "connection_reset" | "connection_aborted" | "broken_pipe" | "not_connected" | "permission_denied" | "invalid_data" | "other")),
+        _ => false,
+    }
+}
+
 fn backend_budget_admits(state: &BudgetState, priority: Option<BackendPriority>) -> bool {
     if state.backend_launch_emitted && state.backend_readiness_emitted {
         return state.emitted < MAX_LINES;
@@ -365,6 +385,28 @@ fn creation_terminal_readiness(value: &Value) -> bool {
     )
 }
 
+/// Only the existing Backend result-deadline line may carry these finite observations.
+pub(super) fn valid_probe_deadline(value:&Value)->bool {
+    let detailed=["deadlineSite","observation","entryBudget"].iter().any(|key|value.get(key).is_some());
+    let deadline=value.get("phase").and_then(Value::as_str)==Some("shell_probe")
+        &&value.get("guard").and_then(Value::as_str)==Some("result_deadline");
+    if !deadline{return !detailed}
+    let Some(object)=value.as_object()else{return false};
+    if object.keys().any(|key|!matches!(key.as_str(),"gate"|"phase"|"guard"|"code"|"io"|"frame"|"ack"|"deadlineSite"|"observation"|"entryBudget")){return false}
+    if !detailed{return true}
+    if value.get("code").and_then(Value::as_str)!=Some("Timeout")
+        ||value.get("io").and_then(Value::as_str)!=Some("none")||value.get("frame").and_then(Value::as_str)!=Some("none")
+        ||value.get("ack").is_some_and(|ack|!ack.is_null()){return false}
+    let site=value.get("deadlineSite").and_then(Value::as_str);
+    let observation=value.get("observation").and_then(Value::as_str);
+    let budget=value.get("entryBudget").and_then(Value::as_str);
+    if !matches!(site,Some("loop_check"|"after_authorization"|"complete_before_parse"|"parsed_success"))
+        ||!matches!(observation,Some("not_read"|"empty_only"|"partial_seen"|"complete_seen"))
+        ||!matches!(budget,Some("expired"|"le_1s"|"le_5s"|"gt_5s")){return false}
+    if matches!(site,Some("complete_before_parse"|"parsed_success"))&&observation!=Some("complete_seen"){return false}
+    budget!=Some("expired")||(site==Some("loop_check")&&observation==Some("not_read"))
+}
+
 impl Budget {
     pub(super) fn new(reserve_offline_roles: bool) -> Self {
         let mode = if reserve_offline_roles {
@@ -389,7 +431,9 @@ impl Budget {
             reserve_offline_roles,
             backend_launch_emitted: false,
             backend_readiness_emitted: false,
+            coarse_shell_settled: false,
             backend_seen: HashSet::new(),
+            shell_probe_delivered: false,
             server_emitted: false,
             phone_emitted: false,
             child_emitted: false,
@@ -408,10 +452,33 @@ impl Budget {
         let Ok(mut state) = self.0.lock() else {
             return;
         };
+        let detailed=value.get("deadlineSite").is_some();
+        let deadline=value.get("phase").and_then(Value::as_str)==Some("shell_probe")
+            &&value.get("guard").and_then(Value::as_str)==Some("result_deadline");
+        if !valid_probe_deadline(&value)||(detailed&&state.mode!=BudgetMode::Backend)
+            ||(deadline&&state.mode==BudgetMode::Backend&&!detailed){return}
         if matches!(state.mode, BudgetMode::Creation | BudgetMode::Backend)
             && role == "server"
             && transport_progress(&value)
         {
+            return;
+        }
+        if value.get("phase").and_then(Value::as_str) == Some("coarse_shell") {
+            // Only Backend admits coarse startup capture. Creation keeps its original
+            // three companion slots and all five reserved receiver slots unchanged.
+            if state.mode != BudgetMode::Backend {
+                return;
+            }
+            let reserved = u8::from(!state.backend_launch_emitted) + u8::from(!state.backend_readiness_emitted);
+            if role != "server" || !coarse_shell_settlement(&value) || state.coarse_shell_settled
+                || state.emitted.saturating_add(reserved) >= MAX_LINES
+            {
+                return;
+            }
+            state.coarse_shell_settled = true;
+            state.emitted += 1;
+            state.companion_emitted += 1;
+            let _ = writeln!(std::io::stdout().lock(), "{value}");
             return;
         }
         let creation_terminal = state.mode == BudgetMode::Creation
@@ -449,7 +516,8 @@ impl Budget {
             state.backend_seen.insert(key);
             state.emitted += 1;
             state.companion_emitted += 1;
-            let _ = writeln!(std::io::stdout().lock(), "{value}");
+            let delivered = writeln!(std::io::stdout().lock(), "{value}").is_ok();
+            state.shell_probe_delivered |= shell_probe_failure && delivered;
             return;
         }
         if !state.reserve_offline_roles {
@@ -499,6 +567,10 @@ impl Budget {
     /// The first selected server-side cause reserves one companion slot.
     pub(super) fn omp(&self, value: Value) {
         self.companion("server", value);
+    }
+    /// Acknowledges delivery through this budget, not a producer exit or native success.
+    pub(super) fn shell_probe_captured(&self) -> bool {
+        self.0.lock().is_ok_and(|state| state.shell_probe_delivered)
     }
 
     #[cfg(test)]
@@ -2423,6 +2495,48 @@ mod tests {
     }
 
     #[test]
+    fn coarse_shell_budget_is_backend_only_once_and_keeps_creation_arrival_order() {
+        let coarse = json!({"phase":"coarse_shell","guard":"installed","code":"none","io":"none","frame":"none","ack":null});
+        let creation = Budget::new(false);
+        for guard in ["follower_other", "follower_history"] {
+            creation.omp(json!({"phase":"follower","guard":guard}));
+        }
+        creation.omp(coarse.clone());
+        creation.omp(json!({"phase":"omp_ready","guard":"report_absent_after_interactive_ready"}));
+        assert_eq!(creation.creation_counts(), (3, 2, true));
+        assert!(!creation.0.lock().unwrap().coarse_shell_settled);
+        let offline = Budget::new(true);
+        offline.omp(coarse.clone());
+        assert_eq!(offline.0.lock().unwrap().emitted, 0);
+        let backend = Budget::new_backend();
+        for _ in 0..20 {
+            backend.omp(json!({"phase":"follower","guard":"follower_other"}));
+        }
+        backend.omp(coarse.clone());
+        backend.omp(coarse);
+        backend.omp(json!({"phase":"herdr_launch","guard":"ack_matched"}));
+        backend.omp(json!({"phase":"omp_ready","guard":"topology_not_ready"}));
+        let state = backend.0.lock().unwrap();
+        assert_eq!(state.emitted, 3);
+        assert!(state.coarse_shell_settled && state.backend_launch_emitted && state.backend_readiness_emitted);
+    }
+
+    #[test]
+    fn retained_backend_capture_acknowledges_only_delivered_probe_disposition() {
+        let budget = Budget::new_backend();
+        assert!(!budget.shell_probe_captured());
+        budget.omp(json!({"phase":"coarse_shell","guard":"installed","code":"none","io":"none","frame":"none"}));
+        budget.omp(json!({"phase":"herdr_launch","guard":"ack_matched","code":"none","io":"none","frame":"none"}));
+        assert!(!budget.shell_probe_captured());
+        budget.omp(json!({"phase":"shell_probe","guard":"result_read_failed","code":"NotReady","io":"none","frame":"none"}));
+        assert!(budget.shell_probe_captured());
+        let before = budget.0.lock().unwrap().emitted;
+        budget.omp(json!({"phase":"shell_probe","guard":"result_read_failed","code":"NotReady","io":"none","frame":"none"}));
+        assert_eq!(budget.0.lock().unwrap().emitted, before);
+        assert!(budget.shell_probe_captured());
+    }
+
+    #[test]
     fn omp_launch_capture_backend_budget_reserves_launch_and_readiness_after_generic_chatter() {
         let budget = Budget::new_backend();
         for _ in 0..20 {
@@ -2520,8 +2634,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_snapshot_later_helper_success_is_silent_and_keeps_full_budget() {
-        let budget = Budget::new(false);
+    fn startup_snapshot_later_helper_success_has_no_failure_summary() {
         let mut snapshot = SnapshotState::default();
         snapshot.observe(SnapshotEvent::Stage(SnapshotStage::Parsed));
         snapshot.startup_failure(SnapshotFailure {
@@ -2530,13 +2643,7 @@ mod tests {
             io: "connection_refused",
         });
         snapshot.startup_success();
-        budget.snapshot_summary(&snapshot, "capture_complete");
-        for _ in 0..3 {
-            budget.omp(json!({"gate":"component_test"}));
-        }
-        let state = budget.0.lock().unwrap();
-        assert!(snapshot.startup_succeeded && snapshot.startup_failure.is_none());
-        assert_eq!(state.companion_emitted, MAX_COMPANION_LINES);
+        assert!(snapshot_summary_value(&snapshot, "capture_complete").is_none());
     }
 
     #[test]
@@ -2636,172 +2743,172 @@ mod tests {
     #[test]
     #[ignore = "requires GOATR_HOOK_TEST_NODE and executes only the generated private fixture"]
     fn omp_producer_generated_hook_reports_local_and_absent_socket_once() {
-        let node = std::env::var_os("GOATR_HOOK_TEST_NODE")
-            .expect("set GOATR_HOOK_TEST_NODE to the pinned TypeScript-capable Node executable");
-        let root = std::env::temp_dir().join(format!(
-            "gpf-{}",
-            goatr::pairing::hex(&goatr::pairing::random32().expect("test token")[..8])
-        ));
-        fs::create_dir(&root).expect("private fixture root");
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
-            .expect("private fixture permissions");
-        let listener_path = root.join("producer.sock");
-        let listener = UnixListener::bind(&listener_path).expect("local diagnostic socket");
-        listener
-            .set_nonblocking(true)
-            .expect("nonblocking listener");
-        let fallback = root.join("fallback.jsonl");
-        let token = "c".repeat(64);
-        let hook = root.join("replacement.ts");
-        write_private_new(
-            &hook,
-            &instrumented_hook(&listener_path, &fallback, &token).expect("generated hook"),
-        )
-        .expect("private replacement hook");
-        let runner = root.join("runner.mjs");
-        let hook_url = format!("file://{}", hook.display());
-        write_private_new(
-            &runner,
-            format!(
-                "const hook = (await import({hook_url:?})).default;\nhook({{ events: {{ on() {{}} }}, on() {{}} }});\nsetTimeout(() => process.exit(0), 100);\n"
-            )
-            .as_bytes(),
-        )
-        .expect("fixture runner");
-        let mut child = Command::new(node)
-            .arg("--experimental-strip-types")
-            .arg(&runner)
-            .current_dir(&root)
-            .env("HERDR_ENV", "1")
-            .env("HERDR_SOCKET_PATH", "fixture")
-            .env("HERDR_PANE_ID", "fixture")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("fixture process");
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let mut received = Vec::new();
-        while std::time::Instant::now() < deadline {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    stream
-                        .take(PRODUCER_MAX_TOTAL_BYTES as u64)
-                        .read_to_end(&mut received)
-                        .expect("local diagnostic frame");
-                    break;
+        use std::os::unix::process::ExitStatusExt;
+        use std::time::Instant;
+        #[derive(Debug)]
+        struct Facts {
+            phase: &'static str, name: &'static str, code: &'static str,
+            stderr_present: bool, stderr_truncated: bool, stderr_integrity: bool,
+            received: usize, pre_kill: &'static str, exit: Option<i32>, signal: Option<i32>,
+            killed: bool, reaped: bool, io: &'static str,
+        }
+        fn runner_source(url: &str) -> Vec<u8> {
+            let mut source = String::from(r#"process.stderr.write("goatr_hook_runner phase=runner_entered name=none code=none\n");
+let phase = "importing";
+try {
+  const hook = (await import("#);
+            source.push_str(&serde_json::to_string(url).expect("fixture URL"));
+            source.push_str(r#")).default;
+  phase = "factory";
+  hook({ events: { on() {} }, on() {} });
+  process.stderr.write("goatr_hook_runner phase=factory_returned name=none code=none\n");
+} catch (error) {
+  let name = "other", code = "other";
+  try {
+    const n = error?.name, c = error?.code;
+    if (["Error", "TypeError", "SyntaxError", "RangeError", "ReferenceError"].includes(n)) name = n;
+    if (c === undefined) code = "none";
+    else if (["ERR_MODULE_NOT_FOUND", "ERR_UNKNOWN_FILE_EXTENSION", "ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING", "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX", "ERR_INVALID_TYPESCRIPT_SYNTAX", "ERR_INVALID_ARG_TYPE", "ENOENT", "EACCES", "ECONNREFUSED"].includes(c)) code = c;
+  } catch {}
+  process.stderr.write("goatr_hook_runner phase=" + phase + " name=" + name + " code=" + code + "\n");
+  process.exitCode = 1;
+}
+setTimeout(() => process.exit(process.exitCode || 0), 100);
+"#);
+            source.into_bytes()
+        }
+        fn nonblocking(fd: i32) -> bool {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0
+        }
+        fn drain(stderr: &mut std::process::ChildStderr, saved: &mut Vec<u8>, facts: &mut Facts) {
+            let mut chunk = [0; 256];
+            for _ in 0..64 {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        facts.stderr_present = true;
+                        let retain = n.min(512 - saved.len());
+                        saved.extend_from_slice(&chunk[..retain]);
+                        facts.stderr_truncated |= retain < n;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => { facts.io = "stderr"; break; }
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("diagnostic listener failed: {error:?}"),
             }
         }
-        if received.is_empty() {
-            let _ = child.kill();
-            panic!("generated hook did not connect to local diagnostic socket");
+        fn drain_socket(listener: Option<&UnixListener>, stream: &mut Option<UnixStream>, received: &mut Vec<u8>, facts: &mut Facts, deadline: Instant) {
+            if facts.io != "none" || Instant::now() >= deadline { return; }
+            if stream.is_none() && let Some(listener) = listener {
+                match listener.accept() {
+                    Ok((accepted, _)) => { if accepted.set_nonblocking(true).is_err() { facts.io = "socket_mode"; } else { *stream = Some(accepted); } }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(_) => facts.io = "accept",
+                }
+            }
+            if let Some(stream) = stream {
+                let mut bytes = [0; 256];
+                for _ in 0..8 {
+                    if Instant::now() >= deadline { break; }
+                    match stream.read(&mut bytes) {
+                        Ok(0) => break,
+                        Ok(n) => { if received.len() + n > PRODUCER_MAX_TOTAL_BYTES { facts.io = "frame_limit"; break; } received.extend_from_slice(&bytes[..n]); }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(_) => { facts.io = "socket_read"; break; }
+                    }
+                }
+            }
         }
-        assert!(child.wait().expect("fixture exit").success());
-        assert!(
-            std::str::from_utf8(&received)
-                .expect("closed frame")
-                .starts_with(&format!("{token} startup_loaded\n"))
-        );
-        let fallback_state = read_producer_fallback(&ProducerFallbackFile {
-            path: fallback,
-            root: root.clone(),
-            token: token.clone(),
-        });
-        assert_eq!(fallback_state.integrity, "complete");
-        assert_eq!(fallback_state.socket, "connected");
-
-        let absent = root.join("absent.sock");
-        let absent_fallback = root.join("absent-fallback.jsonl");
-        let absent_hook = root.join("absent.ts");
-        write_private_new(
-            &absent_hook,
-            &instrumented_hook(&absent, &absent_fallback, &token).expect("absent hook"),
-        )
-        .expect("private absent hook");
-        let absent_runner = root.join("absent-runner.mjs");
-        write_private_new(
-            &absent_runner,
-            format!(
-                "const hook = (await import({:?})).default;\nhook({{ events: {{ on() {{}} }}, on() {{}} }});\nsetTimeout(() => process.exit(0), 100);\n",
-                format!("file://{}", absent_hook.display())
-            )
-            .as_bytes(),
-        )
-        .expect("absent fixture runner");
-        assert!(
-            Command::new(std::env::var_os("GOATR_HOOK_TEST_NODE").expect("node"))
-                .arg("--experimental-strip-types")
-                .arg(absent_runner)
-                .current_dir(&root)
-                .env("HERDR_ENV", "1")
-                .env("HERDR_SOCKET_PATH", "fixture")
-                .env("HERDR_PANE_ID", "fixture")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .expect("absent fixture process")
-                .success()
-        );
-        let absent_state = read_producer_fallback(&ProducerFallbackFile {
-            path: absent_fallback,
-            root: root.clone(),
-            token: token.clone(),
-        });
-        assert_eq!(absent_state.integrity, "complete");
-        assert_eq!(absent_state.socket, "not_found");
-
-        // The fixture replaces only the generated diagnostic connection expression.
-        // Production code retains the real Node net import and has no fault-injection seam.
-        let sync_fallback = root.join("sync-fallback.jsonl");
-        let sync_hook = root.join("sync.ts");
-        let sync_source = String::from_utf8(
-            instrumented_hook(&absent, &sync_fallback, &token).expect("sync hook"),
-        )
-        .expect("sync hook UTF-8")
-        .replacen(
-            "      goatrProducerSocket = net.createConnection(GOATR_PRODUCER_SOCKET);",
-            "      throw Object.assign(new Error(), { code: \"ECONNREFUSED\" });",
-            1,
-        );
-        write_private_new(&sync_hook, sync_source.as_bytes()).expect("private sync hook");
-        let sync_runner = root.join("sync-runner.mjs");
-        write_private_new(
-            &sync_runner,
-            format!(
-                "const hook = (await import({:?})).default;\nhook({{ events: {{ on() {{}} }}, on() {{}} }});\nsetTimeout(() => process.exit(0), 20);\n",
-                format!("file://{}", sync_hook.display())
-            )
-            .as_bytes(),
-        )
-        .expect("sync fixture runner");
-        assert!(
-            Command::new(std::env::var_os("GOATR_HOOK_TEST_NODE").expect("node"))
-                .arg("--experimental-strip-types")
-                .arg(sync_runner)
-                .current_dir(&root)
-                .env("HERDR_ENV", "1")
-                .env("HERDR_SOCKET_PATH", "fixture")
-                .env("HERDR_PANE_ID", "fixture")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .expect("sync fixture process")
-                .success()
-        );
-        let sync_state = read_producer_fallback(&ProducerFallbackFile {
-            path: sync_fallback,
-            root: root.clone(),
-            token,
-        });
-        assert_eq!(sync_state.integrity, "complete");
-        assert_eq!(sync_state.socket, "refused");
+        fn run(node: &std::ffi::OsStr, root: &Path, runner: &Path, listener: Option<&UnixListener>, deadline: Instant) -> (Vec<u8>, Facts) {
+            let mut facts = Facts { phase: "none", name: "none", code: "none", stderr_present: false, stderr_truncated: false, stderr_integrity: true, received: 0, pre_kill: "not_started", exit: None, signal: None, killed: false, reaped: false, io: "none" };
+            if Instant::now() >= deadline { return (Vec::new(), facts); }
+            // Establish the fallible cleanup owner before there is any Child to lose.
+            let cleanup_slot = Arc::new(Mutex::new(None::<std::process::Child>));
+            let owned_slot = cleanup_slot.clone();
+            let (wake_reaper, wakeups) = mpsc::sync_channel::<()>(1);
+            let (send_status, receive_status) = mpsc::sync_channel(1);
+            if thread::Builder::new().spawn(move || {
+                let mut disconnected = false;
+                loop {
+                    if let Some(mut owned) = owned_slot.lock().unwrap_or_else(|error| error.into_inner()).take() {
+                        drop(wakeups);
+                        let _ = send_status.send(owned.wait());
+                        return;
+                    }
+                    if disconnected { return; }
+                    disconnected = matches!(wakeups.recv_timeout(Duration::from_millis(1)), Err(mpsc::RecvTimeoutError::Disconnected));
+                }
+            }).is_err() { facts.io = "reaper_start"; return (Vec::new(), facts); }
+            let mut child = Command::new(node).arg("--experimental-strip-types").arg(runner).current_dir(root)
+                .env_remove("OMPCODE").env("HERDR_ENV", "1").env("HERDR_SOCKET_PATH", "fixture").env("HERDR_PANE_ID", "fixture")
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap_or_else(|_| panic!("owned hook fixture_spawn_failed"));
+            let mut stderr = child.stderr.take().expect("fixture stderr owner");
+            let stderr_nonblocking = nonblocking(stderr.as_raw_fd());
+            if !stderr_nonblocking { facts.io = "stderr_mode"; }
+            let mut saved = Vec::with_capacity(512);
+            let mut received = Vec::with_capacity(PRODUCER_MAX_TOTAL_BYTES);
+            let mut stream: Option<UnixStream> = None;
+            // Cleanup shares this consumer's two-second budget; it gets no extra allowance.
+            let observe_until = deadline.checked_sub(Duration::from_millis(20)).unwrap_or(deadline);
+            let mut observed = None;
+            while facts.io == "none" && Instant::now() < observe_until {
+                drain(&mut stderr, &mut saved, &mut facts);
+                drain_socket(listener, &mut stream, &mut received, &mut facts, deadline);
+                match child.try_wait() { Ok(Some(status)) => { observed = Some((status, Instant::now())); break; }, Ok(None) => {}, Err(_) => { facts.io = "status"; break; } }
+                thread::sleep(Duration::from_millis(5));
+            }
+            let before = observed.or_else(|| child.try_wait().unwrap_or_else(|_| { facts.io = "status"; None }).map(|status| (status, Instant::now())));
+            facts.pre_kill = match before { Some((status, _)) if status.success() => "exited_ok", Some((status, _)) if status.signal().is_some() => "signal", Some(_) => "exited_error", None => "running" };
+            let status = if before.is_some() { before } else {
+                facts.killed = child.kill().is_ok();
+                *cleanup_slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(child);
+                // This channel carries only a wakeup. The already-established owner retains
+                // the actual Child in its slot or stack even if the wakeup send is closed.
+                let _ = wake_reaper.send(());
+                receive_status.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok().and_then(Result::ok).map(|status| (status, Instant::now()))
+            };
+            if let Some((status, observed_at)) = status { facts.reaped = observed_at <= deadline; facts.exit = status.code().filter(|code| (0..=255).contains(code)); facts.signal = status.signal().filter(|signal| (1..=64).contains(signal)); }
+            // Exit can race an earlier WouldBlock. Accept/read its queued final frame now,
+            // nonblocking and only while the same original aggregate still permits it.
+            drain_socket(listener, &mut stream, &mut received, &mut facts, deadline);
+            if stderr_nonblocking { drain(&mut stderr, &mut saved, &mut facts); }
+            if let Ok(text) = std::str::from_utf8(&saved) {
+                for line in text.lines() {
+                    let mut fields = line.split_whitespace();
+                    if fields.next() != Some("goatr_hook_runner") { facts.stderr_integrity = false; continue; }
+                    facts.phase = match fields.next() { Some("phase=runner_entered") => "runner_entered", Some("phase=importing") => "importing", Some("phase=factory") => "factory", Some("phase=factory_returned") => "factory_returned", _ => { facts.stderr_integrity = false; "other" } };
+                    facts.name = match fields.next() { Some("name=none") => "none", Some("name=Error") => "Error", Some("name=TypeError") => "TypeError", Some("name=SyntaxError") => "SyntaxError", Some("name=RangeError") => "RangeError", Some("name=ReferenceError") => "ReferenceError", Some("name=other") => "other", _ => { facts.stderr_integrity = false; "other" } };
+                    facts.code = match fields.next() { Some("code=none") => "none", Some("code=ERR_MODULE_NOT_FOUND") => "ERR_MODULE_NOT_FOUND", Some("code=ERR_UNKNOWN_FILE_EXTENSION") => "ERR_UNKNOWN_FILE_EXTENSION", Some("code=ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING") => "ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING", Some("code=ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") => "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX", Some("code=ERR_INVALID_TYPESCRIPT_SYNTAX") => "ERR_INVALID_TYPESCRIPT_SYNTAX", Some("code=ERR_INVALID_ARG_TYPE") => "ERR_INVALID_ARG_TYPE", Some("code=ENOENT") => "ENOENT", Some("code=EACCES") => "EACCES", Some("code=ECONNREFUSED") => "ECONNREFUSED", Some("code=other") => "other", _ => { facts.stderr_integrity = false; "other" } };
+                    if fields.next().is_some() { facts.stderr_integrity = false; }
+                }
+            } else { facts.stderr_integrity = false; }
+            saved.fill(0);
+            facts.received = received.len();
+            facts.reaped &= Instant::now() <= deadline;
+            (received, facts)
+        }
+        let node = std::env::var_os("GOATR_HOOK_TEST_NODE").expect("set the qualified TypeScript-capable Node executable");
+        let root = std::env::temp_dir().join(format!("gpf-{}", goatr::pairing::hex(&goatr::pairing::random32().expect("test token")[..8])));
+        fs::create_dir(&root).expect("private fixture root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("private fixture permissions");
+        let listener_path = root.join("producer.sock");
+        let listener = UnixListener::bind(&listener_path).expect("local diagnostic socket");
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let token = "c".repeat(64);
+        for (name, socket, expected_socket, local) in [("local", listener_path, "connected", true), ("absent", root.join("absent.sock"), "not_found", false)] {
+            let fallback = root.join(format!("{name}-fallback.jsonl"));
+            let hook = root.join(format!("{name}.ts"));
+            write_private_new(&hook, &instrumented_hook(&socket, &fallback, &token).expect("generated hook")).expect("private generated fixture");
+            let runner = root.join(format!("{name}-runner.mjs"));
+            write_private_new(&runner, &runner_source(&format!("file://{}", hook.display()))).expect("private fixture runner");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (received, facts) = run(&node, &root, &runner, if local { Some(&listener) } else { None }, deadline);
+            let fallback = read_producer_fallback(&ProducerFallbackFile { path: fallback, root: root.clone(), token: token.clone() });
+            let failure = format!("case={name} runner={facts:?} fallback_integrity={} module={} factory={} socket={}", fallback.integrity, fallback.module_entered, fallback.factory_entered, fallback.socket);
+            assert!(facts.reaped && facts.pre_kill == "exited_ok" && facts.exit == Some(0) && !facts.killed && facts.io == "none" && facts.stderr_integrity && facts.phase == "factory_returned" && facts.name == "none" && facts.code == "none", "{failure}");
+            assert!(if local { received.starts_with(format!("{token} startup_loaded\n").as_bytes()) } else { received.is_empty() }, "{failure}");
+            assert!(fallback.integrity == "complete" && fallback.module_entered && fallback.factory_entered && fallback.socket == expected_socket, "{failure}");
+        }
         let _ = fs::remove_dir_all(root);
     }
 }

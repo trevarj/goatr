@@ -1,6 +1,19 @@
 {
   "schema": 1,
-  "lockSha256": "564e08eb50f4ed88df20d6249e408b63e57a02aa8db0516aa7ff276f3a98fb00",
+  "lockSha256": "6bde0b22012cbd06cee5c0c2dd773e4adc26c738d9d0c72f1a0a128753c37fe4",
+  "readOnlyGit": {
+    "owner": "flake.nix goatrManifest.readGit; the same locked pkgs.git derivation supplies product and all development shells",
+    "nixpkgsRevision": "767b0d3ec98a143ad9ed7dfc0d5553510ac27133",
+    "declaredGitVersion": "2.54.0",
+    "declaredSource": "https://www.kernel.org/pub/software/scm/git/git-2.54.0.tar.xz",
+    "declaredSourceHash": "sha256-9okWI2TBDeee+Jqo2/SHMesFfjTtu9IKylEM4BVGgaM=",
+    "recipe": "pkgs/by-name/gi/git/package.nix",
+    "declaredLicense": "GPL-2.0-only; retain the actual source COPYING terms",
+    "runtimeIdentity": "Generated at Nix build time: actual direct ELF/interpreter hashes, exact reference-graph closure/store-paths/registration, derivation/options/source recipes and packaged notices. No realized path/hash is asserted here.",
+    "authority": "GOATR_READ_GIT_MANIFEST is read at Rust compile time only. A same-named runtime variable or PATH executable grants no authority. Missing/unproved metadata disables Git only.",
+    "cargoLicenseCoverage": false,
+    "runtimeCompatibilityVerified": false
+  },
   "tls": {
     "provider": "ring",
     "rustlsFloor": "0.23.45"
@@ -3978,6 +3991,15 @@
       "features": []
     },
     {
+      "name": "unicode-width",
+      "version": "0.2.2",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254",
+      "license": "MIT OR Apache-2.0",
+      "licenseFile": null,
+      "features": ["cjk", "default"]
+    },
+    {
       "name": "unicode-xid",
       "version": "0.2.6",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -5104,6 +5126,12 @@
       ]
     },
     {
+      "name": "unicode-width",
+      "requirement": "=0.2.2",
+      "defaultFeatures": true,
+      "features": []
+    },
+    {
       "name": "url",
       "requirement": "=2.5.8",
       "defaultFeatures": true,
@@ -5119,10 +5147,10 @@
     }
   ],
   "resolution": {
-    "command": "nix develop --offline --cores 2 --max-jobs 1 /nix/store/mkzzvgxpwlfbvs22h5y4mqlmq7rgbf30-nix-shell.drv -c cargo metadata --offline --manifest-path companion/Cargo.toml --format-version 1",
-    "date": "2026-10-21",
-    "verification": "Actual offline Cargo metadata exit0. Cargo changed only the root package direct httpdate edge; all398 resolved registry package versions/checksums/licenses/features match the prior retained graph. reqwest moved from dev to product dependencies. Codex publisher and advisory records retained unchanged; no tests/build/audit/provider/device checks performed by this producer.",
-    "metadataSha256": "e3b53ea397ef076c4c58feb6a984d4533b00b9c9951a1033ab1817f3e3215881"
+    "command": "nix develop path:/home/trev/Workspace/.goatr-continuity-a1329ccc823f/step2-lifecycle-source-s -c cargo metadata --offline --format-version 1 --manifest-path /home/trev/Workspace/goatr-continuity-a1329ccc823f-writer/companion/Cargo.toml",
+    "date": "2026-10-24",
+    "verification": "Actual offline Cargo metadata exit0. Added only unicode-width0.2.2 and its root direct edge. All398 prior registry versions/checksums/licenses/features match the retained graph. The cached unicode-width archive SHA256 equals the lock checksum; source declares MIT OR Apache-2.0. Codex publisher and advisory records unchanged. No compilation/tests/build/audit/provider/device checks performed.",
+    "metadataSha256": "40b9bb117afb476a886afa48ef99aa8b3778b897a61cad24e9247d805b01f745"
   },
   "devDependencies": [
     {

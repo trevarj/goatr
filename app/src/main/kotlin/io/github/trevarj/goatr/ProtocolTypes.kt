@@ -2,6 +2,7 @@
 package io.github.trevarj.goatr
 
 import kotlinx.serialization.*
+import kotlinx.serialization.json.encodeToJsonElement
 
 
 @Serializable
@@ -228,6 +229,11 @@ enum class SyncReason {
 
 @Serializable
 enum class ActionMethod {
+    @SerialName("session.controls.apply") SessionControlsApply,
+    @SerialName("session.queue.update") SessionQueueUpdate,
+    @SerialName("session.queue.delete") SessionQueueDelete,
+    @SerialName("session.queue.reorder") SessionQueueReorder,
+    @SerialName("session.queue.start") SessionQueueStart,
     @SerialName("terminal.create") TerminalCreate,
     @SerialName("attachments.begin") AttachmentsBegin,
     @SerialName("attachments.chunk") AttachmentsChunk,
@@ -236,6 +242,7 @@ enum class ActionMethod {
     @SerialName("session.create") SessionCreate,
     @SerialName("shell.create") ShellCreate,
     @SerialName("shell.input") ShellInput,
+    @SerialName("shell.resize") ShellResize,
     @SerialName("worktrees.remove") WorktreesRemove,
     @SerialName("agent.rename") AgentRename,
     @SerialName("workspace.rename") WorkspaceRename,
@@ -303,6 +310,13 @@ enum class PresentationKind {
 
 @Serializable
 enum class Method {
+    @SerialName("session.controls.read") SessionControlsRead,
+    @SerialName("session.controls.apply") SessionControlsApply,
+    @SerialName("session.queue.list") SessionQueueList,
+    @SerialName("session.queue.update") SessionQueueUpdate,
+    @SerialName("session.queue.delete") SessionQueueDelete,
+    @SerialName("session.queue.reorder") SessionQueueReorder,
+    @SerialName("session.queue.start") SessionQueueStart,
     @SerialName("artifacts.list") ArtifactsList,
     @SerialName("artifacts.open") ArtifactsOpen,
     @SerialName("artifacts.read") ArtifactsRead,
@@ -319,11 +333,10 @@ enum class Method {
     @SerialName("session.open") SessionOpen,
     @SerialName("session.history") SessionHistory,
     @SerialName("session.unsubscribe") SessionUnsubscribe,
+    @SerialName("creation.directories") CreationDirectories,
     @SerialName("session.create") SessionCreate,
-    @SerialName("shell.create") ShellCreate,
     @SerialName("shell.input") ShellInput,
-    @SerialName("worktrees.remove_preview") WorktreesRemovePreview,
-    @SerialName("worktrees.remove") WorktreesRemove,
+    @SerialName("shell.resize") ShellResize,
     @SerialName("agent.rename") AgentRename,
     @SerialName("workspace.rename") WorkspaceRename,
     @SerialName("prompt.submit") PromptSubmit,
@@ -331,8 +344,8 @@ enum class Method {
     @SerialName("request.respond") RequestRespond,
     @SerialName("action.status") ActionStatus,
     @SerialName("content.read") ContentRead,
-    @SerialName("terminal.read") TerminalRead,
-    @SerialName("shell.read") ShellRead,
+    @SerialName("terminal.grid.subscribe") TerminalGridSubscribe,
+    @SerialName("shell.grid.subscribe") ShellGridSubscribe,
     @SerialName("worktrees.list") WorktreesList,
     @SerialName("changes.read") ChangesRead,
     @SerialName("skills.list") SkillsList,
@@ -527,15 +540,14 @@ data class Capabilities(
     val cancelMode: CancelMode,
     val terminalRead: Boolean = false,
     val worktreesRead: Boolean = false,
-    val worktreeCreate: Boolean = false,
     val changesRead: Boolean = false,
     val workspaceRename: Boolean = false,
     val agentRename: Boolean = false,
-    val worktreeRemove:Boolean=false,
     val skillsRead: Boolean = false,
     val attachments:Boolean=false,
     val terminalCreate:Boolean=false,
     val artifacts:Boolean=false,
+    val controls:Boolean=false,
 ) : WireValue {
     override fun validate() {
         history.validateWire()
@@ -544,11 +556,11 @@ data class Capabilities(
         respond.validateWire()
         terminalRead.validateWire()
         worktreesRead.validateWire()
-        worktreeCreate.validateWire()
         changesRead.validateWire()
         workspaceRename.validateWire()
-        agentRename.validateWire();worktreeRemove.validateWire()
+        agentRename.validateWire()
         skillsRead.validateWire()
+        controls.validateWire()
     }
 }
 
@@ -888,7 +900,7 @@ data class CreationProgress(
         serverId.validateWire()
         projectId.validateWire()
         resources.validateWire()
-        requireWire((sourceTarget!=null)==(resources.checkout!=null))
+        requireWire(resources.checkout==null || sourceTarget!=null)
     }
 }
 
@@ -1370,31 +1382,47 @@ data class SessionCreateParams(
     val projectId: Uuid,
     val provider: Provider,
     val name: Label,
-    val sourceTarget: Target? = null,
-    val checkout: CreationCheckout? = null,
+    val directoryRef: Uuid? = null,
+    val placement: SessionPlacement? = null,
 ) : WireValue {
     override fun validate() {
         bootId.validateWire()
         serverId.validateWire()
         projectId.validateWire()
         name.validateWire()
-        sourceTarget?.validateWire()
-        checkout?.validate()
-        requireWire((checkout == null) == (sourceTarget == null))
+        directoryRef.validateWire()
+        placement.validateWire()
     }
 }
 
 @Serializable
-sealed interface CreationCheckout : WireValue {
-    @Serializable
-    @SerialName("new")
-    data class New(val branch: Text? = null, val base: Text? = null) : CreationCheckout {
-        override fun validate() { branch?.let { validateWorktreeText(it,1024,false) }; base?.let { validateWorktreeText(it,1024,false) } }
+data class SessionPlacement(val sourceTarget:Target):WireValue {
+    override fun validate(){sourceTarget.validateWire()}
+}
+@Serializable
+data class CreationDirectoriesParams(
+    val serverId:Uuid,val projectId:Uuid,val source:ArtifactSource?=null,
+    val parent:Uuid?=null,val cursor:Uuid?=null,val limit:Uint?=null,
+):WireValue {
+    override fun validate(){
+        serverId.validateWire();projectId.validateWire();source.validateWire()
+        parent.validateWire();cursor.validateWire();limit.validateWire()
+        requireWire(limit==null || limit.value in 1L..100L)
     }
-    @Serializable
-    @SerialName("existing")
-    data class Existing(val branch: Text) : CreationCheckout {
-        override fun validate() { validateWorktreeText(branch,1024,false) }
+}
+@Serializable
+data class CreationDirectoryEntry(val reference:Uuid,val name:Label):WireValue {
+    override fun validate(){reference.validateWire();name.validateWire()}
+}
+@Serializable
+data class CreationDirectoriesResult(
+    val serverId:Uuid,val projectId:Uuid,val source:ArtifactSource?=null,
+    val entries:List<CreationDirectoryEntry>,val nextCursor:Uuid?=null,
+):WireValue {
+    override fun validate(){
+        serverId.validateWire();projectId.validateWire();source.validateWire()
+        requireWire(entries.size<=100);entries.validateWire();nextCursor.validateWire()
+        val seen=HashSet<Uuid>(entries.size*4/3+1);requireWire(entries.all {seen.add(it.reference)})
     }
 }
 
@@ -1440,15 +1468,29 @@ data class WorkspaceRenameResult(
 }
 
 @Serializable
+data class SkillSelector(val catalogueGeneration:Uuid,val reference:Uuid):WireValue {
+    override fun validate(){catalogueGeneration.validateWire();reference.validateWire()}
+}
+
+@Serializable
 data class PromptSubmitParams(
     val bootId: Uuid,
     val target: Target,
     val text: PromptText,
+    val skill:SkillSelector?=null,
+    val delivery:PromptDelivery?=null,
+    val nativeTurnId:Id?=null,
+    val images:List<Uuid>?=null,
 ) : WireValue {
     override fun validate() {
         bootId.validateWire()
         target.validateWire()
         text.validateWire()
+        skill.validateWire()
+        delivery.validateWire();nativeTurnId.validateWire();images.validateWire()
+        requireWire(nativeTurnId==null||delivery==PromptDelivery.Steer)
+        images?.let {ids->val unique=HashSet<Uuid>();requireWire(ids.size in 1..4&&ids.all(unique::add))}
+        requireWire(skill==null||text.value.isEmpty()&&delivery==null&&nativeTurnId==null&&images==null)
     }
 }
 
@@ -1546,23 +1588,61 @@ data class ContentReadResult(
 }
 
 @Serializable
-data class TerminalReadParams(
-    val target: Target,
-) : WireValue {
-    override fun validate() { target.validateWire() }
-}
-
+data class TerminalGridSubscribeParams(val target:Target):WireValue {override fun validate(){target.validateWire()}}
 @Serializable
-data class TerminalReadResult(
-    val target: Target,
-    val text: Text,
-    val truncated: Boolean,
-) : WireValue {
-    override fun validate() {
-        target.validateWire(); text.validateWire(); truncated.validateWire()
-        requireWire(text.toByteArray(Charsets.UTF_8).size <= 16 * 1024)
+data class TerminalGridSubscribeResult(val target:Target,val subscription:Uuid,val seq:ZeroValue,val frame:GridBegin):WireValue {
+    override fun validate(){target.validateWire();subscription.validateWire();seq.validateWire();frame.validate();requireWire(frame.revision.value==0L)}
+}
+@Serializable
+sealed interface GridColor:WireValue {
+    @Serializable @SerialName("default") data object Default:GridColor {override fun validate(){}}
+    @Serializable @SerialName("indexed") data class Indexed(val index:Uint):GridColor {override fun validate(){requireWire(index.value<=255)}}
+    @Serializable @SerialName("rgb") data class Rgb(val value:Uint):GridColor {override fun validate(){requireWire(value.value<=0xffffff)}}
+}
+@Serializable
+enum class GridUnderline {
+    @SerialName("none") None,@SerialName("single") Single,@SerialName("double") Double,
+    @SerialName("curly") Curly,@SerialName("dotted") Dotted,@SerialName("dashed") Dashed,
+}
+@Serializable
+data class GridAttributes(val bold:Boolean,val faint:Boolean,val italic:Boolean,val blink:Boolean,val strike:Boolean,val underline:GridUnderline,val underlineColor:GridColor?=null,val inverse:Boolean=false,val concealed:Boolean=false):WireValue {
+    override fun validate(){underlineColor.validateWire()}
+}
+@Serializable
+class GridCell(val text:String,val width:Uint,val foreground:GridColor,val background:GridColor,val attributes:GridAttributes):WireValue {
+    override fun validate(){
+        requireWire(validUnicode(text) && utf8Size(text)<=128 && width.value<=2 && (width.value==0L)==text.isEmpty() && text.none {it.isISOControl() || it=='\u2028' || it=='\u2029'})
+        foreground.validate();background.validate();attributes.validate()
+    }
+    override fun equals(other:Any?)=other is GridCell && text==other.text && width==other.width && foreground==other.foreground && background==other.background && attributes==other.attributes
+    override fun hashCode()=31*text.hashCode()+width.hashCode()
+    override fun toString()="GridCell(redacted)"
+}
+@Serializable
+data class GridCursor(val column:Uint,val row:Uint,val visible:Boolean,val shape:Uint)
+@Serializable
+enum class GridMode {@SerialName("replace") Replace}
+@Serializable
+data class GridBegin(val mode:GridMode,val revision:Uint,val columns:Uint,val rows:Uint,val cursor:GridCursor?=null,val alternateScreen:Boolean,val graphicsOmitted:Boolean,val partCount:Uint,val popupBlocked:Boolean=false):WireValue {
+    override fun validate(){
+        requireWire(columns.value in 1..512 && rows.value in 1..256 && columns.value*rows.value<=32768 && partCount.value in 1..128)
+        cursor?.let {requireWire(it.column.value<columns.value && it.row.value<rows.value && it.shape.value<=6)}
     }
 }
+@Serializable
+data class GridSpan(val row:Uint,val column:Uint,val cells:List<GridCell>)
+@Serializable
+data class GridPart(val revision:Uint,val index:Uint,val spans:List<GridSpan>):WireValue {
+    override fun validate(){
+        requireWire(index.value<128 && spans.size in 1..512)
+        var cells=0
+        for(span in spans){cells+=span.cells.size;requireWire(span.row.value<256 && span.column.value<512 && span.cells.size in 1..512 && cells<=512);span.cells.forEach {it.validate()}}
+    }
+}
+@Serializable
+data class GridCommit(val revision:Uint):WireValue {override fun validate(){}}
+@Serializable
+data class GridBeginEvent(val frame:GridBegin):WireValue {override fun validate(){frame.validate()}}
 
 @Serializable
 data class WorktreesListParams(
@@ -1573,7 +1653,6 @@ data class WorktreesListParams(
 
 @Serializable
 data class WorktreeEntry(
-    val candidateId:Uuid?=null,val managedWorkspaceId:Id?=null,
     val path: Text,
     val label: Text,
     val branch: Text? = null,
@@ -1585,7 +1664,6 @@ data class WorktreeEntry(
     val isLinkedWorktree: Boolean? = null,
 ) : WireValue {
     override fun validate() {
-        candidateId.validateWire();managedWorkspaceId.validateWire();if(candidateId!=null)requireWire(isLinkedWorktree==true && !isBare && !isLocked && !isPrunable)
         path.validateWire(); label.validateWire(); branch.validateWire(); head.validateWire()
         isBare.validateWire(); isDetached.validateWire(); isLocked.validateWire(); isPrunable.validateWire(); isLinkedWorktree.validateWire()
         validateWorktreeText(path, 4096, true)
@@ -1599,10 +1677,9 @@ data class WorktreeEntry(
 data class WorktreesListResult(
     val target: Target,
     val worktrees: List<WorktreeEntry>,
-    val creationScope: WorktreeCreationScope? = null,
 ) : WireValue {
     override fun validate() {
-        target.validateWire(); worktrees.validateWire(); creationScope.validateWire()
+        target.validateWire(); worktrees.validateWire()
         requireWire(worktrees.size <= 128)
     }
 }
@@ -1973,6 +2050,13 @@ sealed interface FieldValue {
 }
 
 sealed interface RequestBody {
+    data class SessionControlsRead(val params:SessionControlsReadParams):RequestBody {override val method=Method.SessionControlsRead}
+    data class SessionControlsApply(val params:SessionControlsApplyParams):RequestBody {override val method=Method.SessionControlsApply}
+    data class SessionQueueList(val params:SessionQueueListParams):RequestBody {override val method=Method.SessionQueueList}
+    data class SessionQueueUpdate(val params:SessionQueueUpdateParams):RequestBody {override val method=Method.SessionQueueUpdate}
+    data class SessionQueueDelete(val params:SessionQueueDeleteParams):RequestBody {override val method=Method.SessionQueueDelete}
+    data class SessionQueueReorder(val params:SessionQueueReorderParams):RequestBody {override val method=Method.SessionQueueReorder}
+    data class SessionQueueStart(val params:SessionQueueStartParams):RequestBody {override val method=Method.SessionQueueStart}
     data class ArtifactsList(val params:ArtifactsListParams):RequestBody{override val method=Method.ArtifactsList}
     data class ArtifactsOpen(val params:ArtifactsOpenParams):RequestBody{override val method=Method.ArtifactsOpen}
     data class ArtifactsRead(val params:ArtifactsReadParams):RequestBody{override val method=Method.ArtifactsRead}
@@ -1983,8 +2067,6 @@ sealed interface RequestBody {
     data class AttachmentsComplete(val params:AttachmentsCompleteParams):RequestBody {override val method=Method.AttachmentsComplete}
     data class AttachmentsDiscard(val params:AttachmentsDiscardParams):RequestBody {override val method=Method.AttachmentsDiscard}
     data class AttachmentsStatus(val params:AttachmentsStatusParams):RequestBody {override val method=Method.AttachmentsStatus}
-    data class WorktreesRemovePreview(val params:WorktreesRemovePreviewParams):RequestBody {override val method=Method.WorktreesRemovePreview}
-    data class WorktreesRemove(val params:WorktreesRemoveParams):RequestBody {override val method=Method.WorktreesRemove}
     val method: Method
     data class PairConfirm(val params: PairConfirmParams) : RequestBody { override val method = Method.PairConfirm }
     data class Hello(val params: HelloParams) : RequestBody { override val method = Method.Hello }
@@ -1992,6 +2074,7 @@ sealed interface RequestBody {
     data class SessionOpen(val params: SessionOpenParams) : RequestBody { override val method = Method.SessionOpen }
     data class SessionHistory(val params: SessionHistoryParams) : RequestBody { override val method = Method.SessionHistory }
     data class SessionUnsubscribe(val params: SessionUnsubscribeParams) : RequestBody { override val method = Method.SessionUnsubscribe }
+    data class CreationDirectories(val params:CreationDirectoriesParams):RequestBody {override val method=Method.CreationDirectories}
     data class SessionCreate(val params: SessionCreateParams) : RequestBody { override val method = Method.SessionCreate }
     data class AgentRename(val params: AgentRenameParams) : RequestBody { override val method = Method.AgentRename }
     data class WorkspaceRename(val params: WorkspaceRenameParams) : RequestBody { override val method = Method.WorkspaceRename }
@@ -2000,10 +2083,10 @@ sealed interface RequestBody {
     data class RequestRespond(val params: RequestRespondParams) : RequestBody { override val method = Method.RequestRespond }
     data class ActionStatus(val params: ActionStatusParams) : RequestBody { override val method = Method.ActionStatus }
     data class ContentRead(val params: ContentReadParams) : RequestBody { override val method = Method.ContentRead }
-    data class TerminalRead(val params: TerminalReadParams) : RequestBody { override val method = Method.TerminalRead }
-    data class ShellRead(val params: ShellReadParams) : RequestBody { override val method = Method.ShellRead }
-    data class ShellCreate(val params: ShellCreateParams) : RequestBody { override val method = Method.ShellCreate }
+    data class TerminalGridSubscribe(val params:TerminalGridSubscribeParams):RequestBody {override val method=Method.TerminalGridSubscribe}
+    data class ShellGridSubscribe(val params:ShellGridSubscribeParams):RequestBody {override val method=Method.ShellGridSubscribe}
     data class ShellInput(val params: ShellInputParams) : RequestBody { override val method = Method.ShellInput }
+    data class ShellResize(val params:ShellResizeParams):RequestBody {override val method=Method.ShellResize}
     data class WorktreesList(val params: WorktreesListParams) : RequestBody { override val method = Method.WorktreesList }
     data class ChangesRead(val params: ChangesReadParams) : RequestBody { override val method = Method.ChangesRead }
     data class SkillsList(val params: SkillsListParams) : RequestBody { override val method = Method.SkillsList }
@@ -2020,6 +2103,13 @@ sealed interface RequestBody {
 }
 
 sealed interface ResultBody {
+    data class SessionControlsRead(val result:SessionControlsReadResult):ResultBody
+    data class SessionControlsApply(val result:SessionControlsApplyResult):ResultBody
+    data class SessionQueueList(val result:SessionQueueListResult):ResultBody
+    data class SessionQueueUpdate(val result:SessionQueueResult):ResultBody
+    data class SessionQueueDelete(val result:SessionQueueResult):ResultBody
+    data class SessionQueueReorder(val result:SessionQueueResult):ResultBody
+    data class SessionQueueStart(val result:SessionQueueResult):ResultBody
     data class ArtifactsList(val result:ArtifactsListResult):ResultBody
     data class ArtifactsOpen(val result:ArtifactsOpenResult):ResultBody
     data class ArtifactsRead(val result:ArtifactsReadResult):ResultBody
@@ -2030,14 +2120,13 @@ sealed interface ResultBody {
     data class AttachmentsComplete(val result:AttachmentsResult):ResultBody
     data class AttachmentsDiscard(val result:AttachmentsResult):ResultBody
     data class AttachmentsStatus(val result:AttachmentsStatusResult):ResultBody
-    data class WorktreesRemovePreview(val result:WorktreesRemovePreviewResult):ResultBody
-    data class WorktreesRemove(val result:WorktreesRemoveResult):ResultBody
     data class PairConfirm(val result: PairConfirmResult) : ResultBody
     data class Hello(val result: HelloResult) : ResultBody
     data class HostSnapshot(val result: HostSnapshotResult) : ResultBody
     data class SessionOpen(val result: SessionOpenResult) : ResultBody
     data class SessionHistory(val result: SessionHistoryResult) : ResultBody
     data class SessionUnsubscribe(val result: SessionUnsubscribeResult) : ResultBody
+    data class CreationDirectories(val result:CreationDirectoriesResult):ResultBody
     data class SessionCreate(val result: SessionCreateResult) : ResultBody
     data class AgentRename(val result: AgentRenameResult) : ResultBody
     data class WorkspaceRename(val result: WorkspaceRenameResult) : ResultBody
@@ -2046,10 +2135,10 @@ sealed interface ResultBody {
     data class RequestRespond(val result: RequestRespondResult) : ResultBody
     data class ActionStatus(val result: ActionStatusResult) : ResultBody
     data class ContentRead(val result: ContentReadResult) : ResultBody
-    data class TerminalRead(val result: TerminalReadResult) : ResultBody
-    data class ShellRead(val result: ShellReadResult) : ResultBody
-    data class ShellCreate(val result: ShellCreateResult) : ResultBody
+    data class TerminalGridSubscribe(val result:TerminalGridSubscribeResult):ResultBody
+    data class ShellGridSubscribe(val result:ShellGridSubscribeResult):ResultBody
     data class ShellInput(val result: ShellInputResult) : ResultBody
+    data class ShellResize(val result:ShellResizeResult):ResultBody
     data class WorktreesList(val result: WorktreesListResult) : ResultBody
     data class ChangesRead(val result: ChangesReadResult) : ResultBody
     data class SkillsList(val result: SkillsListResult) : ResultBody
@@ -2067,6 +2156,11 @@ sealed interface ResultBody {
 sealed interface ActionStatusResult { data class Known(val value: KnownActionStatus) : ActionStatusResult; data class Unknown(val value: UnknownActionStatus) : ActionStatusResult }
 
 sealed interface EventBody {
+    data class ControlsChanged(val data:ControlsChangedEvent):EventBody
+    data class QueueChanged(val data:QueueChangedEvent):EventBody
+    data class GridBegin(val data:GridBeginEvent):EventBody
+    data class GridPart(val data:io.github.trevarj.goatr.GridPart):EventBody
+    data class GridCommit(val data:io.github.trevarj.goatr.GridCommit):EventBody
     data class HostChanged(val data: HostChangedEvent) : EventBody
     data class SessionState(val data: SessionStateEvent) : EventBody
     data class HistoryUpsert(val data: HistoryUpsertEvent) : EventBody
@@ -2090,18 +2184,15 @@ data class CreationCheckoutResources(val kind: CheckoutKind, val branch: Text, v
         resolvedCommit?.let {requireWire(it.length in setOf(40,64) && it.all {c->c in '0'..'9'||c in 'a'..'f'})}
     }
 }
-@Serializable
-data class WorktreeCreationScope(val projectId: Uuid,val canCreate: Boolean) : WireValue {
-    override fun validate() {projectId.validateWire();canCreate.validateWire()}
-}
 
 @Serializable
 data class SkillsListParams(val target:Target):WireValue { override fun validate() {target.validateWire()} }
 @Serializable
-data class SkillEntry(val name:Text,val description:Text,val path:Text?=null,val scope:Text,val enabled:Boolean,val displayName:Text?=null,val shortDescription:Text?=null,val commandName:Text?=null,val documentRef:Uuid?=null):WireValue {
+data class SkillEntry(val name:Text,val description:Text,val path:Text?=null,val scope:Text,val enabled:Boolean,val displayName:Text?=null,val shortDescription:Text?=null,val commandName:Text?=null,val documentRef:Uuid?=null,val invocationRef:Uuid?=null):WireValue {
     override fun validate() {
         name.validateWire();description.validateWire();path.validateWire();scope.validateWire();displayName.validateWire();shortDescription.validateWire();commandName.validateWire();documentRef.validateWire()
-        requireWire(commandName?.let{it.isNotEmpty()&&utf8Size(it)<=256&&!it.any{char->Character.isISOControl(char)}}!=false && (documentRef==null||commandName!=null))
+        invocationRef.validateWire();requireWire(invocationRef==null || enabled&&commandName==null)
+        requireWire(commandName?.let{it.isNotEmpty()&&utf8Size(it)<=256&&!it.any{char->Character.isISOControl(char)}}!=false&&(documentRef==null||enabled))
         requireWire(name.isNotEmpty() && name.toByteArray().size<=256 && description.toByteArray().size<=16384 && (path==null || path.isNotEmpty() && path.toByteArray().size<=4096))
         requireWire(scope in listOf("user","repo","system","admin","enabled") && (displayName?.toByteArray()?.size?:0)<=1024 && (shortDescription?.toByteArray()?.size?:0)<=4096)
     }
@@ -2117,7 +2208,22 @@ fun SkillEntry.exactInsertText():String? {
 data class SkillLoadError(val path:Text,val message:Text):WireValue {override fun validate() {path.validateWire();message.validateWire();requireWire(path.toByteArray().size<=4096 && message.toByteArray().size<=4096)} }
 @Serializable
 data class SkillsListResult(val target:Target,val catalogueGeneration:Uuid,val skills:List<SkillEntry>,val errors:List<SkillLoadError>,val provider:Provider=Provider.Codex):WireValue {
-    override fun validate() {target.validateWire();catalogueGeneration.validateWire();skills.validateWire();errors.validateWire();requireWire(skills.all{entry->when(provider){Provider.Codex->entry.path!=null&&entry.commandName==null&&entry.documentRef==null&&entry.scope!="enabled";Provider.Omp->errors.isEmpty()&&entry.path==null&&entry.enabled&&entry.commandName!=null&&entry.scope=="enabled"}});requireWire(provider!=Provider.Omp||(skills.map{it.commandName}.distinct().size==skills.size&&skills.mapNotNull{it.documentRef}.distinct().size==skills.mapNotNull{it.documentRef}.size&&skills.all{it.commandName?.removePrefix("skill:")==it.name&&it.commandName?.startsWith("skill:")==true}));requireWire(skills.size<=128 && errors.size<=32 && Protocol.strictJson.encodeToString(this).toByteArray(Charsets.UTF_8).size<=256*1024)}
+    override fun validate() {
+        target.validateWire();catalogueGeneration.validateWire();requireWire(skills.size<=128&&errors.size<=32)
+        skills.validateWire();errors.validateWire()
+        var invocations:HashSet<Uuid>?=null;var documents:HashSet<Uuid>?=null
+        val commands=if(provider==Provider.Omp)HashSet<Text>()else null
+        for(entry in skills) {
+            entry.invocationRef?.let {reference->requireWire(provider==Provider.Codex&&entry.enabled);val refs=invocations?:HashSet<Uuid>().also{invocations=it};requireWire(refs.add(reference))}
+            entry.documentRef?.let {reference->val refs=documents?:HashSet<Uuid>().also{documents=it};requireWire(refs.add(reference))}
+            requireWire(when(provider) {
+                Provider.Codex->entry.path!=null&&entry.commandName==null&&entry.scope!="enabled"
+                Provider.Omp->errors.isEmpty()&&entry.path==null&&entry.enabled&&entry.commandName!=null&&entry.scope=="enabled"
+                    &&commands!!.add(entry.commandName)&&entry.commandName.startsWith("skill:")&&entry.commandName.removePrefix("skill:")==entry.name
+            })
+        }
+        requireWire(Protocol.canonicalJsonSize(Protocol.strictJson.encodeToJsonElement(this))<=256L*1024)
+    }
 }
 
 
@@ -2139,21 +2245,29 @@ data class ShellTarget(val shellId:Uuid,val generation:Uuid):WireValue {
     override fun validate(){shellId.validateWire();generation.validateWire()}
 }
 @Serializable
-data class ShellCapabilities(val read:Boolean,val create:Boolean,val input:Boolean,val close:Boolean,val artifacts:Boolean=false):WireValue {
-    override fun validate(){requireWire(!close && (!(create || input) || read))}
+data class ShellCapabilities(val read:Boolean,val create:Boolean,val input:Boolean,val close:Boolean,val artifacts:Boolean=false,val grid:Boolean=false):WireValue {
+    override fun validate(){requireWire(!close && (!(create || input || grid) || read))}
 }
 @Serializable
 data class ShellSummary(val target:ShellTarget,val serverId:Uuid,val workspaceId:Id,val tabId:Id,val paneId:Id,val terminalId:Id,val title:Label,val connectivity:SessionConnectivity,val capabilities:ShellCapabilities):WireValue {
-    override fun validate(){target.validateWire();serverId.validateWire();workspaceId.validateWire();tabId.validateWire();paneId.validateWire();terminalId.validateWire();title.validateWire();capabilities.validateWire();requireWire((connectivity==SessionConnectivity.Ready || connectivity==SessionConnectivity.Offline) && (connectivity==SessionConnectivity.Ready || !capabilities.read && !capabilities.create && !capabilities.input && !capabilities.artifacts))}
+    override fun validate(){target.validateWire();serverId.validateWire();workspaceId.validateWire();tabId.validateWire();paneId.validateWire();terminalId.validateWire();title.validateWire();capabilities.validateWire();requireWire((connectivity==SessionConnectivity.Ready || connectivity==SessionConnectivity.Offline) && (connectivity==SessionConnectivity.Ready || !capabilities.read && !capabilities.create && !capabilities.input && !capabilities.artifacts && !capabilities.grid))}
 }
+internal fun ShellSummary.sameLogicalIdentity(other:ShellSummary):Boolean =
+    target==other.target && serverId==other.serverId && workspaceId==other.workspaceId &&
+    tabId==other.tabId && paneId==other.paneId && terminalId==other.terminalId
 @Serializable
-data class ShellReadParams(val target:ShellTarget):WireValue {override fun validate(){target.validateWire()}}
+data class ShellGridSubscribeParams(val target:ShellTarget):WireValue {override fun validate(){target.validateWire()}}
 @Serializable
-data class ShellReadResult(val target:ShellTarget,val text:Text,val truncated:Boolean):WireValue {override fun validate(){target.validateWire();text.validateWire();requireWire(text.toByteArray(Charsets.UTF_8).size<=16*1024)}}
+data class ShellGridSubscribeResult(val target:ShellTarget,val subscription:Uuid,val seq:ZeroValue,val frame:GridBegin):WireValue {override fun validate(){target.validateWire();subscription.validateWire();seq.validateWire();frame.validate();requireWire(frame.revision.value==0L)}}
 @Serializable
-data class ShellCreateParams(val bootId:Uuid,val target:ShellTarget):WireValue {override fun validate(){bootId.validateWire();target.validateWire()}}
+data class ShellResizeParams(val bootId:Uuid,val target:ShellTarget,val subscription:Uuid,val columns:Uint,val rows:Uint):WireValue {
+    override fun validate(){bootId.validate();target.validate();subscription.validate();validateShellDimensions(columns,rows)}
+}
+private fun validateShellDimensions(columns:Uint,rows:Uint){requireWire(columns.value in 1..512 && rows.value in 1..256 && columns.value*rows.value<=32768)}
 @Serializable
-data class ShellCreateResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validate()}}
+data class ShellResizeResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validate()}}
+@Serializable @SerialName("shell_resize")
+data class ActionResultShellResize(val columns:Uint,val rows:Uint):ActionResult {override fun validate(){validateShellDimensions(columns,rows)}}
 @Serializable
 data class ShellCreationResources(val serverId:Uuid?=null,val workspaceId:Id?=null,val tabId:Id?=null,val paneId:Id?=null,val terminalId:Id?=null,val createdTarget:ShellTarget?=null):WireValue {
     fun complete()=serverId!=null && workspaceId!=null && tabId!=null && paneId!=null && terminalId!=null
@@ -2165,20 +2279,25 @@ data class ActionResultShellCreation(val resources:ShellCreationResources):Actio
 
 @Serializable
 sealed interface ShellInput:WireValue {
- @Serializable @SerialName("text") data class Text(val text:String):ShellInput {override fun validate(){requireWire(text.isNotEmpty() && text.toByteArray(Charsets.UTF_8).size<=16384 && text.codePoints().allMatch { !Character.isISOControl(it) || it==10 || it==9 });requireWire(validShellScalars(text))}}
+ @Serializable @SerialName("text") data class Text(val text:String):ShellInput {override fun validate(){requireWire(text.isNotEmpty()&&text.length<=16384&&validUnicode(text)&&utf8Size(text)<=16384&&text.none {it.isISOControl()&&it!='\n'&&it!='\t'})}}
  @Serializable @SerialName("keys") data class Keys(val events:List<ShellKeyEvent>):ShellInput {override fun validate(){requireWire(events.isNotEmpty() && events.size<=32);events.validateWire()}}
 }
-private fun validShellScalars(value:String):Boolean {var i=0;while(i<value.length){val c=value[i++];if(c.isHighSurrogate()){if(i>=value.length || !value[i++].isLowSurrogate())return false}else if(c.isLowSurrogate())return false};return true}
 @Serializable
 enum class ShellKeyName {@SerialName("character") Character,@SerialName("enter") Enter,@SerialName("tab") Tab,@SerialName("escape") Escape,@SerialName("backspace") Backspace,@SerialName("delete") Delete,@SerialName("insert") Insert,@SerialName("left") Left,@SerialName("right") Right,@SerialName("up") Up,@SerialName("down") Down,@SerialName("home") Home,@SerialName("end") End,@SerialName("page_up") PageUp,@SerialName("page_down") PageDown,@SerialName("f1") F1,@SerialName("f2") F2,@SerialName("f3") F3,@SerialName("f4") F4,@SerialName("f5") F5,@SerialName("f6") F6,@SerialName("f7") F7,@SerialName("f8") F8,@SerialName("f9") F9,@SerialName("f10") F10,@SerialName("f11") F11,@SerialName("f12") F12}
 @Serializable
-data class ShellKey(val key:ShellKeyName,val value:String?=null):WireValue {override fun validate(){requireWire(if(key==ShellKeyName.Character)value!=null && validShellScalars(value) && value.codePointCount(0,value.length)==1 && !Character.isISOControl(value.codePointAt(0)) else value==null)}}
+data class ShellKey(val key:ShellKeyName,val value:String?=null):WireValue {override fun validate(){requireWire(if(key==ShellKeyName.Character)value!=null&&value.length in 1..2&&validUnicode(value)&&value.codePointCount(0,value.length)==1&&!Character.isISOControl(value.codePointAt(0)) else value==null)}}
 @Serializable
 data class ShellKeyModifiers(val shift:Boolean,val ctrl:Boolean,val alt:Boolean,@SerialName("super")val superKey:Boolean)
 @Serializable
-data class ShellKeyEvent(val key:ShellKey,val modifiers:ShellKeyModifiers):WireValue {override fun validate(){key.validate()}}
+enum class ShellKeyPhase {@SerialName("press") Press,@SerialName("repeat") Repeat,@SerialName("release") Release}
 @Serializable
-data class ShellInputParams(val bootId:Uuid,val target:ShellTarget,val input:ShellInput):WireValue {override fun validate(){bootId.validateWire();target.validateWire();input.validate()}}
+data class ShellKeyEvent(val key:ShellKey,val modifiers:ShellKeyModifiers,val phase:ShellKeyPhase,val physicalKeyId:Uint?=null):WireValue {
+ override fun validate(){key.validate();physicalKeyId.validateWire();requireWire(physicalKeyId==null || physicalKeyId.value<=0xffff_ffffL)}
+}
+@Serializable
+data class ShellInputParams(val bootId:Uuid,val target:ShellTarget,val subscription:Uuid,val input:ShellInput):WireValue {
+ override fun validate(){bootId.validateWire();target.validateWire();subscription.validateWire();input.validate()}
+}
 @Serializable
 data class ShellInputResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validate()}}
 @Serializable
@@ -2191,38 +2310,22 @@ data class ShellInputProgress(val encodedBytes:Int?=null,val writtenBytes:Int?=n
 data class ActionResultShellInput(val progress:ShellInputProgress):ActionResult {override fun validate(){progress.validate()}}
 
 @Serializable
-data class WorktreesRemovePreviewParams(val target:Target,val candidateId:Uuid):WireValue {override fun validate(){target.validateWire();candidateId.validateWire()}}
-@Serializable
-data class WorktreesRemoveParams(val bootId:Uuid,val target:Target,val candidateId:Uuid,val previewId:Uuid):WireValue {override fun validate(){bootId.validateWire();target.validateWire();candidateId.validateWire();previewId.validateWire()}}
-@Serializable
-data class WorktreesRemovePreviewResult(val target:Target,val candidateId:Uuid,val previewId:Uuid,val path:Text,val branch:Text?=null,val head:Text?=null,val removable:Boolean,val reason:WorktreeRemoveReason?=null):WireValue {
-    override fun validate(){target.validateWire();candidateId.validateWire();previewId.validateWire();validateWorktreeText(path,4096,true);branch?.let{validateWorktreeText(it,1024,false)};head?.let{validateWorktreeText(it,1024,false)};requireWire(removable==(reason==null))}
+data class ShellDispatchProgress(val frameBytes:Int?=null,val socketBytesWritten:Int?=null,val frameComplete:Boolean?=null):WireValue {
+ fun complete()=frameBytes!=null && frameBytes>4 && socketBytesWritten==frameBytes && frameComplete==true
+ override fun validate(){requireWire((frameBytes==null || frameBytes in 5..2_097_156)
+     &&(socketBytesWritten==null || frameBytes!=null && socketBytesWritten in 0..frameBytes)
+     &&(frameComplete!=true || complete()))}
+ fun retains(old:ShellDispatchProgress)=(old.frameBytes==null || frameBytes==old.frameBytes)
+     &&(old.socketBytesWritten==null || socketBytesWritten!=null && socketBytesWritten>=old.socketBytesWritten)
+     &&(old.frameComplete!=true || frameComplete==true)
 }
-@Serializable
-enum class WorktreeRemoveReason {
-    @SerialName("removed") Removed,
-    @SerialName("invalid_operation") InvalidOperation,
-    @SerialName("operation_already_consumed") OperationAlreadyConsumed,
-    @SerialName("operation_capacity") OperationCapacity,
-    @SerialName("operation_in_progress") OperationInProgress,
-    @SerialName("platform_unavailable") PlatformUnavailable,
-    @SerialName("candidate_unavailable") CandidateUnavailable,
-    @SerialName("preview_unavailable") PreviewUnavailable,
-    @SerialName("source_changed_before_effect") SourceChangedBeforeEffect,
-    @SerialName("source_changed_after_effect") SourceChangedAfterEffect,
-    @SerialName("deadline_before_effect") DeadlineBeforeEffect,
-    @SerialName("deadline_after_effect") DeadlineAfterEffect,
-    @SerialName("worker_unavailable_before_effect") WorkerUnavailableBeforeEffect,
-    @SerialName("preparation_pending") PreparationPending,
-    @SerialName("preparation_refused") PreparationRefused,
-    @SerialName("target_occupied") TargetOccupied,
-    @SerialName("target_changed") TargetChanged,
-    @SerialName("target_dirty") TargetDirty,
-    @SerialName("target_masked") TargetMasked,
-    @SerialName("target_submodules") TargetSubmodules,
-    @SerialName("mutation_uncertain") MutationUncertain,
-    @SerialName("cleanup_unproved") CleanupUnproved,
-}
+@Serializable @SerialName("shell_dispatch")
+data class ActionResultShellDispatch(val progress:ShellDispatchProgress):ActionResult {override fun validate(){progress.validate()}}
+
+/** Only this content-free complete-frame outcome settles a new terminal input handoff. */
+fun Receipt.shellDispatched()=method==ActionMethod.ShellInput && state==ReceiptState.Dispatched
+    &&(result as? ActionResultShellDispatch)?.progress?.complete()==true
+
 @Serializable
 data class WorktreeRemovalProgress(val effectStarted:Boolean?=null,val gitRemoveSucceeded:Boolean?=null,val checkoutAbsent:Boolean?=null,val registrationAbsent:Boolean?=null):WireValue {
     fun complete()=effectStarted==true && gitRemoveSucceeded==true && checkoutAbsent==true && registrationAbsent==true
@@ -2235,8 +2338,6 @@ data class WorktreeRemovalProgress(val effectStarted:Boolean?=null,val gitRemove
 @Serializable
 @SerialName("worktree_removal")
 data class ActionResultWorktreeRemoval(val target:Target,val candidateId:Uuid,val previewId:Uuid,val progress:WorktreeRemovalProgress):ActionResult {override fun validate(){target.validateWire();candidateId.validateWire();previewId.validateWire();progress.validateWire()}}
-@Serializable
-data class WorktreesRemoveResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validateWire()}}
 
 private fun attachmentDigest(value:String){requireWire(value.matches(Regex("[0-9a-f]{64}")))}
 private fun attachmentLabel(value:String){requireWire(validUnicode(value) && value.toByteArray(Charsets.UTF_8).size in 1..128 && value.none {it.isISOControl()})}
@@ -2262,13 +2363,45 @@ data class AttachmentsChunkParams(val bootId:Uuid,val target:Target,val uploadId
 }
 @Serializable @SerialName("attachment") data class ActionResultAttachment(val target:Target,val progress:AttachmentProgress):ActionResult {override fun validate(){target.validate();progress.validate()}}
 @Serializable enum class AttachmentUploadState {@SerialName("receiving") Receiving,@SerialName("complete") Complete,@SerialName("discarded") Discarded,@SerialName("uncertain") Uncertain}
-@Serializable data class AttachmentsStatusResult(val insertionReady:Boolean=false,val target:Target,val progress:AttachmentProgress,val state:AttachmentUploadState,val size:Uint):WireValue {override fun validate(){target.validate();progress.validate();requireWire(size.value in 1..8L*1024*1024 && progress.committedBytes.value<=size.value);requireWire(!insertionReady || state==AttachmentUploadState.Complete&&progress.published==true&&progress.discarded!=true&&progress.providerPath!=null)}}
+@Serializable
+enum class ImagePreparationReason {
+    @SerialName("pending_original_read") PendingOriginalRead,
+    @SerialName("original_source_unavailable") OriginalSourceUnavailable,
+    @SerialName("ownership_proof_unavailable") OwnershipProofUnavailable,
+    @SerialName("capacity_in_use") CapacityInUse,
+}
+@Serializable
+data class NativeImagePreparation(
+    val reason:ImagePreparationReason,val actions:List<Uuid>,val peerOwners:Uint?=null,val hostOwners:Uint?=null,
+):WireValue {
+    override fun validate() {
+        actions.validateWire();peerOwners.validateWire();hostOwners.validateWire()
+        val unique=HashSet<Uuid>();requireWire(actions.size<=4&&actions.all(unique::add))
+        requireWire(reason==ImagePreparationReason.OwnershipProofUnavailable||peerOwners!=null&&hostOwners!=null&&(reason==ImagePreparationReason.CapacityInUse||actions.isNotEmpty()))
+        requireWire(peerOwners==null||peerOwners.value<=4&&peerOwners.value>=actions.size)
+        requireWire(hostOwners==null||hostOwners.value<=16&&(peerOwners==null||peerOwners.value<=hostOwners.value))
+    }
+}
+@Serializable
+data class AttachmentsStatusResult(
+    val insertionReady:Boolean=false,val target:Target,val progress:AttachmentProgress,val state:AttachmentUploadState,val size:Uint,
+    val nativePreparation:NativeImagePreparation?=null,
+):WireValue {
+    override fun validate() {
+        target.validate();progress.validate();nativePreparation.validateWire()
+        requireWire(size.value in 1..8L*1024*1024&&progress.committedBytes.value<=size.value)
+        requireWire(!insertionReady||state==AttachmentUploadState.Complete&&progress.published==true&&progress.discarded!=true&&progress.providerPath!=null)
+    }
+}
 @Serializable data class AttachmentsResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validate()}}
 internal fun RequestBody.attachmentTarget():Target?=when(this){is RequestBody.AttachmentsBegin->params.target;is RequestBody.AttachmentsChunk->params.target;is RequestBody.AttachmentsComplete->params.target;is RequestBody.AttachmentsDiscard->params.target;else->null}
 internal fun RequestBody.attachmentUpload():Uuid?=when(this){is RequestBody.AttachmentsBegin->params.uploadId;is RequestBody.AttachmentsChunk->params.uploadId;is RequestBody.AttachmentsComplete->params.uploadId;is RequestBody.AttachmentsDiscard->params.uploadId;else->null}
 internal fun RequestBody.attachmentBoot():Uuid?=when(this){is RequestBody.AttachmentsBegin->params.bootId;is RequestBody.AttachmentsChunk->params.bootId;is RequestBody.AttachmentsComplete->params.bootId;is RequestBody.AttachmentsDiscard->params.bootId;else->null}
 
-@Serializable data class TerminalCreateParams(val bootId:Uuid,val target:Target):WireValue {override fun validate(){bootId.validate();target.validate()}}
+@Serializable data class TerminalCreateParams(val bootId:Uuid,val serverId:Uuid,val workspaceId:Id,val projectId:Uuid,
+ val directoryRef:Uuid?=null,val source:ArtifactSource?=null):WireValue {
+ override fun validate(){bootId.validate();serverId.validate();workspaceId.validate();projectId.validate();directoryRef.validateWire();source.validateWire()}
+}
 @Serializable data class TerminalCreateResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validate()}}
 
 @Serializable
@@ -2277,7 +2410,7 @@ sealed interface ArtifactSource:WireValue {
  @Serializable @SerialName("shell") data class Shell(val target:ShellTarget):ArtifactSource{override fun validate(){target.validateWire()}}
 }
 @Serializable enum class ArtifactKind{@SerialName("directory") Directory,@SerialName("file") File}
-@Serializable enum class ArtifactPreviewKind{@SerialName("text") Text,@SerialName("binary") Binary}
+@Serializable enum class ArtifactPreviewKind{@SerialName("text") Text,@SerialName("binary") Binary,@SerialName("unavailable") Unavailable}
 private fun artifactName(name:String){requireWire(validUnicode(name)&&name.isNotEmpty()&&utf8Size(name)<=255&&!name.any {Character.isISOControl(it)})}
 @Serializable data class ArtifactEntry(val reference:Uuid,val name:String,val kind:ArtifactKind,val size:Uint?=null):WireValue{
  override fun validate(){reference.validateWire();artifactName(name);size.validateWire();requireWire((kind==ArtifactKind.File)==(size!=null))}
@@ -2288,14 +2421,14 @@ private fun artifactName(name:String){requireWire(validUnicode(name)&&name.isNot
  override fun toString()="ArtifactsListParams(redacted)"
 }
 @Serializable data class ArtifactsListResult(val source:ArtifactSource,val entries:List<ArtifactEntry>,val nextCursor:Uuid?=null):WireValue{
- override fun validate(){source.validateWire();entries.validateWire();nextCursor.validateWire();requireWire(entries.size<=100&&entries.map {it.reference}.distinct().size==entries.size)}
+ override fun validate(){source.validateWire();entries.validateWire();nextCursor.validateWire();val references=HashSet<Uuid>();requireWire(entries.size<=100&&entries.all {references.add(it.reference)})}
  override fun toString()="ArtifactsListResult(redacted)"
 }
 @Serializable data class ArtifactsOpenParams(val source:ArtifactSource,val file:Uuid):WireValue{
  override fun validate(){source.validateWire();file.validateWire()};override fun toString()="ArtifactsOpenParams(redacted)"
 }
 @Serializable data class ArtifactsOpenResult(val source:ArtifactSource,val readId:Uuid,val name:String,val size:Uint,val sha256:String,val previewKind:ArtifactPreviewKind):WireValue{
- override fun validate(){source.validateWire();readId.validateWire();artifactName(name);size.validateWire();requireWire(size.value<=32L*1024*1024&&Regex("[0-9a-f]{64}").matches(sha256))}
+ override fun validate(){source.validateWire();readId.validateWire();artifactName(name);size.validateWire();requireWire((previewKind!=ArtifactPreviewKind.Text||size.value<=1024L*1024)&&size.value<=32L*1024*1024&&Regex("[0-9a-f]{64}").matches(sha256))}
  override fun toString()="ArtifactsOpenResult(redacted)"
 }
 @Serializable data class ArtifactsReadParams(val source:ArtifactSource,val readId:Uuid,val offset:Uint,val limit:Uint):WireValue{
@@ -2311,4 +2444,105 @@ private fun artifactName(name:String){requireWire(validUnicode(name)&&name.isNot
 }
 @Serializable data class ArtifactsCloseResult(val source:ArtifactSource,val readId:Uuid,val closed:Boolean):WireValue{
  override fun validate(){source.validateWire();readId.validateWire()};override fun toString()="ArtifactsCloseResult(redacted)"
+}
+
+@Serializable
+enum class ControlMode {@SerialName("default") Default,@SerialName("plan") Plan}
+@Serializable
+enum class PromptDelivery {
+    @SerialName("native") Native,@SerialName("steer") Steer,@SerialName("follow_up") FollowUp,
+    @SerialName("aside") Aside,@SerialName("queue") Queue,
+}
+@Serializable
+data class SessionControlModel(val reference:Uuid,val label:Label,val efforts:List<Text>):WireValue {
+    override fun validate() {
+        reference.validateWire();label.validateWire();requireWire(efforts.size<=64);efforts.validateWire()
+        val unique=HashSet<Text>();requireWire(efforts.all(unique::add))
+    }
+}
+@Serializable
+data class SessionControlsCurrent(val modelRef:Uuid?=null,val effort:Text?=null,val mode:ControlMode?=null):WireValue {
+    override fun validate(){modelRef.validateWire();effort.validateWire();mode.validateWire()}
+}
+@Serializable
+data class SessionControlsReadParams(val target:Target):WireValue {override fun validate(){target.validateWire()}}
+@Serializable
+data class SessionControlsReadResult(
+    val target:Target,val catalogueGeneration:Uuid,val models:List<SessionControlModel>,val current:SessionControlsCurrent,
+    val modes:List<ControlMode>,val deliveries:List<PromptDelivery>,val queueAvailable:Boolean,
+):WireValue {
+    override fun validate() {
+        target.validateWire();catalogueGeneration.validateWire();requireWire(models.size<=256&&modes.size<=2&&deliveries.size<=5)
+        models.validateWire();current.validateWire()
+        val references=HashSet<Uuid>();requireWire(models.all{references.add(it.reference)})
+        requireWire(current.modelRef==null||current.modelRef in references)
+        requireWire(modes.distinct().size==modes.size&&deliveries.distinct().size==deliveries.size)
+        val members=13L+models.size*4L+models.sumOf{it.efforts.size.toLong()}+
+            (if(current.modelRef!=null)1 else 0)+(if(current.effort!=null)1 else 0)+(if(current.mode!=null)1 else 0)+modes.size+deliveries.size
+        requireWire(members<=Protocol.JSON_MEMBERS_MAX)
+        requireWire(Protocol.canonicalJsonSize(Protocol.strictJson.encodeToJsonElement(this))<=256L*1024)
+    }
+}
+@Serializable
+data class SessionControlsApplyParams(
+    val bootId:Uuid,val target:Target,val catalogueGeneration:Uuid,val modelRef:Uuid?=null,val effort:Text?=null,val mode:ControlMode?=null,
+):WireValue {
+    override fun validate() {
+        bootId.validateWire();target.validateWire();catalogueGeneration.validateWire();modelRef.validateWire();effort.validateWire();mode.validateWire()
+        requireWire(modelRef!=null||effort!=null||mode!=null)
+    }
+}
+@Serializable
+data class SessionControlsApplyResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validateWire()}}
+@Serializable
+data class ControlsChangedEvent(val target:Target):WireValue {override fun validate(){target.validateWire()}}
+@Serializable
+data class QueueChangedEvent(val target:Target):WireValue {override fun validate(){target.validateWire()}}
+@Serializable
+data class SessionQueueListParams(val target:Target,val cursor:Id?=null,val limit:Uint?=null):WireValue {
+    override fun validate(){target.validateWire();cursor.validateWire();limit.validateWire();requireWire(limit==null||limit.value in 1..100)}
+}
+@Serializable
+data class SessionQueueEntry(val id:Id,val text:Content,val editable:Boolean):WireValue {override fun validate(){id.validateWire();text.validateWire()}}
+@Serializable
+data class SessionQueueListResult(val target:Target,val entries:List<SessionQueueEntry>,val nextCursor:Id?=null):WireValue {
+    override fun validate() {
+        target.validateWire();requireWire(entries.size<=100);entries.validateWire();nextCursor.validateWire()
+        val ids=HashSet<Id>();requireWire(entries.all{ids.add(it.id)})
+        requireWire(Protocol.canonicalJsonSize(Protocol.strictJson.encodeToJsonElement(this))<=256L*1024)
+    }
+}
+@Serializable
+data class SessionQueueUpdateParams(val bootId:Uuid,val target:Target,val entryId:Id,val text:PromptText):WireValue {
+    override fun validate(){bootId.validateWire();target.validateWire();entryId.validateWire();text.validateWire()}
+}
+@Serializable
+data class SessionQueueDeleteParams(val bootId:Uuid,val target:Target,val entryId:Id):WireValue {
+    override fun validate(){bootId.validateWire();target.validateWire();entryId.validateWire()}
+}
+@Serializable
+data class SessionQueueStartParams(val bootId:Uuid,val target:Target,val entryId:Id):WireValue {
+    override fun validate(){bootId.validateWire();target.validateWire();entryId.validateWire()}
+}
+@Serializable
+data class SessionQueueReorderParams(val bootId:Uuid,val target:Target,val entryIds:List<Id>):WireValue {
+    override fun validate(){bootId.validateWire();target.validateWire();requireWire(entryIds.size<=128);entryIds.validateWire();val ids=HashSet<Id>();requireWire(entryIds.all(ids::add))}
+}
+@Serializable
+data class SessionQueueResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validateWire()}}
+@Serializable
+@SerialName("queue")
+data class ActionResultQueue(val entryId:Id?=null,val deleted:Boolean?=null,val nativeTurnId:Id?=null):ActionResult {
+    override fun validate() {
+        entryId.validateWire();deleted.validateWire();nativeTurnId.validateWire()
+        requireWire((deleted==null&&nativeTurnId==null||entryId!=null)&&!(deleted!=null&&nativeTurnId!=null))
+    }
+}
+
+internal fun RequestBody.queueTarget():Target?=when(this) {
+    is RequestBody.SessionQueueUpdate->params.target
+    is RequestBody.SessionQueueDelete->params.target
+    is RequestBody.SessionQueueReorder->params.target
+    is RequestBody.SessionQueueStart->params.target
+    else->null
 }

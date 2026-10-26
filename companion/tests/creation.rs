@@ -68,13 +68,11 @@ fn prepare_workspace(
 ) -> (Request, CreationResources) {
     let request = Request {
         id: Uuid::random(),
-        body: RequestBody::SessionCreate(SessionCreateParams { source_target: None, checkout: None,
-            boot_id: store.boot_id.clone(),
-            server_id: Uuid::random(),
-            project_id: Uuid::random(),
-            provider,
-            name: Label::new("same desktop").unwrap(),
-        }),
+        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: store.boot_id.clone(),
+        server_id: Uuid::random(),
+        project_id: Uuid::random(),
+        provider,
+        name: Label::new("same desktop").unwrap(), }),
     };
     store.reserve(peer, &request, 0, |_| Ok(())).unwrap();
     store
@@ -467,13 +465,11 @@ fn workspace_probe_is_distinct_once_only_and_gates_every_provider_stage() {
     let p = peer(&mut store);
     let request = Request {
         id: Uuid::random(),
-        body: RequestBody::SessionCreate(SessionCreateParams { source_target: None, checkout: None,
-            boot_id: store.boot_id.clone(),
-            server_id: Uuid::random(),
-            project_id: Uuid::random(),
-            provider: Provider::Omp,
-            name: Label::new("probe").unwrap(),
-        }),
+        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: store.boot_id.clone(),
+        server_id: Uuid::random(),
+        project_id: Uuid::random(),
+        provider: Provider::Omp,
+        name: Label::new("probe").unwrap(), }),
     };
     store.reserve(&p, &request, 0, |_| Ok(())).unwrap();
     store
@@ -671,13 +667,11 @@ fn admitted_probe_revoke_and_restart_preserve_workspace_and_never_reenqueue_or_i
     let p = peer(&mut store);
     let request = Request {
         id: Uuid::random(),
-        body: RequestBody::SessionCreate(SessionCreateParams { source_target: None, checkout: None,
-            boot_id: store.boot_id.clone(),
-            server_id: Uuid::random(),
-            project_id: Uuid::random(),
-            provider: Provider::Omp,
-            name: Label::new("probe").unwrap(),
-        }),
+        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: store.boot_id.clone(),
+        server_id: Uuid::random(),
+        project_id: Uuid::random(),
+        provider: Provider::Omp,
+        name: Label::new("probe").unwrap(), }),
     };
     store.reserve(&p, &request, 0, |_| Ok(())).unwrap();
     store

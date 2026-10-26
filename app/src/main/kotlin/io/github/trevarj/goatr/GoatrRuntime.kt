@@ -68,7 +68,6 @@ class GoatrRuntime(private val app: Application) {
 
     /** UI-only memory, never persisted or used as session routing authority. */
     fun setVisibleConversation(key: ConversationKey?) { visibleConversation = key }
-    internal fun suppressesHint(host:String,hint:PushEventHint):Boolean=visibleConversation?.let{it.host==host&&it.target.sessionId==hint.sessionId}==true
     fun suppressesAlert(host: String, event: AttentionEvent): Boolean =
         visibleConversation == ConversationKey(host, Target(event.sessionId, event.generation))
 }

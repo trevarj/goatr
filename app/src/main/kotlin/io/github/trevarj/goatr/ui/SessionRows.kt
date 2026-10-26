@@ -2,6 +2,8 @@
 package io.github.trevarj.goatr
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.*
 import androidx.compose.material3.Text as UiText
 import androidx.compose.runtime.Composable
@@ -22,7 +24,7 @@ internal fun PresentationSwitchRow(
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag(tag),
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag(tag).semantics(mergeDescendants=true) {}.toggleable(checked,role=androidx.compose.ui.semantics.Role.Switch,onValueChange=onCheckedChange),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -30,7 +32,7 @@ internal fun PresentationSwitchRow(
             UiText(title, style = MaterialTheme.typography.titleSmall)
             UiText(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 

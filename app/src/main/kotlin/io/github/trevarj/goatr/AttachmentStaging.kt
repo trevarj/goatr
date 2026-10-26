@@ -155,9 +155,27 @@ internal class AttachmentStaging(context:Context) {
 
     /** Returns at most one canonical chunk only after the entire ciphertext tag/size/digest verifies.
      * The bounded scan prevents unauthenticated GCM prefix bytes from reaching a network caller. */
-    suspend fun readChunk(prepared:PreparedAttachment,offset:Long,limit:Int=MAX_CHUNK):ByteArray=guardedPreparation {withContext(Dispatchers.IO) {
+    suspend fun readChunk(prepared:PreparedAttachment,offset:Long,limit:Int=MAX_CHUNK):ByteArray {
+        require(limit in 1..MAX_CHUNK)
+        return readVerified(prepared,offset,limit)
+    }
+    /** Explicit local-only preview of the same authenticated object; never fetches a URI. */
+    suspend fun preview(prepared:PreparedAttachment):android.graphics.Bitmap? {
+        require(prepared.size in 1..MAX_BYTES)
+        val bytes=readVerified(prepared,0,prepared.size.toInt())
+        return try {withContext(Dispatchers.Default) {
+            val bounds=android.graphics.BitmapFactory.Options().apply {inJustDecodeBounds=true}
+            android.graphics.BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
+            if(bounds.outWidth<=0||bounds.outHeight<=0||bounds.outWidth.toLong()*bounds.outHeight>16L*1024*1024)return@withContext null
+            var sample=1
+            while(bounds.outWidth/sample>1024||bounds.outHeight/sample>1024)sample*=2
+            currentCoroutineContext().ensureActive()
+            android.graphics.BitmapFactory.decodeByteArray(bytes,0,bytes.size,android.graphics.BitmapFactory.Options().apply {inSampleSize=sample})
+        }}finally {bytes.fill(0)}
+    }
+    private suspend fun readVerified(prepared:PreparedAttachment,offset:Long,limit:Int):ByteArray=guardedPreparation {withContext(Dispatchers.IO) {
         mutex.withLock {
-            require(offset>=0 && offset<prepared.size && limit in 1..MAX_CHUNK)
+            require(offset>=0 && offset<prepared.size && limit in 1..MAX_BYTES.toInt()&&prepared.size<=MAX_BYTES)
             root();if(System.currentTimeMillis()>=prepared.expiresAt)fail(AttachmentPreparationFailure.Expired)
             val path=file(prepared.id);if(!same(path,prepared))fail(AttachmentPreparationFailure.Changed)
             val fd=Os.open(path.path,OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,0)

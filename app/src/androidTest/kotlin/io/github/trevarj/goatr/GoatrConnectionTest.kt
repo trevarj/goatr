@@ -19,6 +19,7 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import androidx.test.core.app.ActivityScenario
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
@@ -134,6 +135,74 @@ class GoatrConnectionTest {
         control("receipt", "action" to JsonPrimitive(request.id.value))
         return request
     }
+    private suspend fun canceledExplicitOpenPreservesDisplacedCleanup(provider:Provider) {
+        for(queuedBeforeEntry in listOf(true,false))withFixture(provider) {fixture->
+            fixture.reducer().composer(fixture.target,"retain original draft while queued open is canceled")
+            control("pause")
+            var paused=true
+            val blocker=if(queuedBeforeEntry)async(start=CoroutineStart.UNDISPATCHED){fixture.connection.snapshot(fixture.host)}else null
+            if(blocker!=null)sentReplies(fixture,1)
+            val opened=async(start=CoroutineStart.UNDISPATCHED){fixture.connection.open(fixture.host,fixture.target)}
+            var cleanup:Deferred<Unit>?=null
+            try {
+                if(queuedBeforeEntry) {
+                    // The existing serial-owner query queues after open's entry; operations is held by blocker.
+                    assertEquals(1,fixture.connection.pendingReplies(fixture.host))
+                } else sentReplies(fixture,1)
+                val original=withContext(Dispatchers.Main){fixture.connection.retireConversationSubscription(fixture.host,fixture.target)}
+                    ?: error("foreground loss must retain exact current cleanup ownership")
+                opened.cancelAndJoin()
+                cleanup=async {fixture.connection.leave(original)}
+                if(!queuedBeforeEntry) {
+                    // One already-sent unsubscribe plus independent displaced-owner cleanup, both real requests.
+                    sentReplies(fixture,2)
+                }
+                control("resume");paused=false
+                blocker?.await();cleanup.await()
+                withTimeout(10000){while(fixture.connection.pendingReplies(fixture.host,sentOnly=false)!=0)delay(10)}
+                assertTrue(fixture.connection.state.value.hello.containsKey(fixture.host))
+                assertNull(fixture.connection.state.value.sources[fixture.host]?.get(fixture.target))
+                assertFalse("No old transcript stream may survive canceled foreground entry",fixture.reducer().mutationsEnabled)
+                val foreground=fixture.connection.open(fixture.host,fixture.target)
+                fixture.connection.leave(original)
+                assertEquals(foreground.subscription,fixture.connection.state.value.sources.getValue(fixture.host).getValue(fixture.target))
+                assertTrue(fixture.reducer().mutationsEnabled)
+                assertEquals("retain original draft while queued open is canceled",fixture.reducer().composer(fixture.target))
+            } finally {
+                if(paused)withContext(NonCancellable){control("resume")}
+                opened.cancelAndJoin();blocker?.cancelAndJoin();cleanup?.cancelAndJoin()
+            }
+        }
+    }
+
+    private suspend fun backgroundRetiresOnlyOriginalConversation(provider:Provider) = withFixture(provider) {fixture->
+        fixture.reducer().composer(fixture.target,"keep this original unsent draft")
+        val original=withContext(Dispatchers.Main){fixture.connection.retireConversationSubscription(fixture.host,fixture.target)}
+            ?: error("an installed original conversation must have cleanup ownership")
+        control("source_begin")
+        await(fixture,"retired original source observes immediate native loss"){!fixture.reducer().mutationsEnabled}
+        control("ready")
+        fixture.connection.snapshot(fixture.host)
+        assertNull("Delivery may keep the endpoint, never silently reopen the retired conversation",fixture.connection.state.value.sources[fixture.host]?.get(fixture.target))
+        assertTrue(fixture.connection.state.value.hello.containsKey(fixture.host))
+        val foreground=fixture.connection.open(fixture.host,fixture.target)
+        fixture.connection.leave(original)
+        assertEquals("Late background cleanup must not unsubscribe the newer foreground route",foreground.subscription,fixture.connection.state.value.sources.getValue(fixture.host).getValue(fixture.target))
+        assertTrue(fixture.reducer().mutationsEnabled)
+        assertEquals("keep this original unsent draft",fixture.reducer().composer(fixture.target))
+        val background=fixture.connection.retireConversationSubscription(fixture.host,fixture.target) ?: error("foreground route missing")
+        fixture.connection.leave(background)
+        val retainedActivity=fixture.reducer().state?.activity
+        control("activity","text" to JsonPrimitive("background endpoint remains alive"))
+        fixture.connection.snapshot(fixture.host)
+        assertTrue(fixture.connection.state.value.hello.containsKey(fixture.host))
+        assertNull(fixture.connection.state.value.sources[fixture.host]?.get(fixture.target))
+        assertEquals(retainedActivity,fixture.reducer().state?.activity)
+        val resumed=fixture.connection.open(fixture.host,fixture.target)
+        assertEquals(fixture.target,Target(resumed.state.summary.sessionId,resumed.state.summary.generation))
+        assertEquals("keep this original unsent draft",fixture.reducer().composer(fixture.target))
+    }
+
     private suspend fun reopen(provider: Provider) = withFixture(provider) { fixture ->
         control("pause")
         var paused = true
@@ -169,6 +238,8 @@ class GoatrConnectionTest {
     }
     private suspend fun recover(provider: Provider, generation: Boolean) = withFixture(provider) { fixture ->
         val retained = retained(fixture)
+        val originalSource=fixture.connection.state.value.sources.getValue(fixture.host).getValue(fixture.target)
+        val originalHistory=fixture.reducer().history.toList()
         fixture.reducer().composer(fixture.target, "never retarget this draft")
         val replacement = target(control(if (generation) "generation_begin" else "source_begin"))
         await(fixture, "source invalidation") { !fixture.reducer().mutationsEnabled }
@@ -181,13 +252,28 @@ class GoatrConnectionTest {
         } else assertEquals(fixture.target, replacement)
         try { fixture.connection.open(fixture.host, fixture.target); fail("Install must reject the unavailable snapshot") }
         catch (failure: RemoteFailure) { assertEquals(if (generation) ErrorCode.StaleSession else ErrorCode.NotReady, failure.code) }
-        // The first real open attempt sees stale_session or not_ready while installation is
-        // paused. A subsequent authoritative host.changed must recover, not abandon the view.
+        // Read-only refresh must recover the same Target, never install a new generation.
+        // A replacement stays visible in inventory for a separate explicit user selection.
         fixture.connection.snapshot(fixture.host)
+        assertNull("Supported failed reopen leaves no installed route, but must retain recovery ownership",fixture.connection.state.value.sources[fixture.host]?.get(replacement))
         control("ready")
-        await(fixture, "ready replacement recovery") {
-            val summary = fixture.reducer().state?.summary
-            summary != null && Target(summary.sessionId, summary.generation) == replacement && fixture.reducer().mutationsEnabled
+        if(generation){
+            await(fixture,"ready replacement is inventory-only") {
+                fixture.connection.state.value.inventory[fixture.host]?.sessions?.singleOrNull()?.let {it.generation==replacement.generation&&it.connectivity==SessionConnectivity.Ready}==true&&
+                    fixture.connection.state.value.mutationReady[fixture.host]==true
+            }
+            assertNull(fixture.connection.state.value.sources[fixture.host]?.get(replacement))
+            assertFalse(fixture.reducer().mutationsEnabled)
+            assertEquals(originalHistory,fixture.reducer().history)
+            assertEquals("never retarget this draft",fixture.reducer().composer(fixture.target))
+            noWrite(fixture,replacement)
+        }else{
+            await(fixture,"same original Target recovery") {
+                val summary=fixture.reducer().state?.summary
+                summary!=null&&Target(summary.sessionId,summary.generation)==fixture.target&&fixture.reducer().mutationsEnabled
+            }
+            val recoveredSource=fixture.connection.state.value.sources.getValue(fixture.host).getValue(fixture.target)
+            assertNotEquals("Same-original recovery installs a fresh route",originalSource,recoveredSource)
         }
         val recovered = fixture.store.localAction(fixture.host, retained.id)!!
         assertTrue("Writes enable only after retained receipt reconciliation", recovered.authoritative)
@@ -195,8 +281,8 @@ class GoatrConnectionTest {
         assertEquals("Published hint must be the canonical committed durable outcome",recovered.receipt,fixture.connection.state.value.latestReceipt[fixture.host])
         assertEquals(fixture.target, recovered.metadata.target)
         assertEquals(fixture.target, recovered.receipt!!.target)
-        if (generation) assertNull(fixture.reducer().composer(replacement))
-        else assertEquals("never retarget this draft", fixture.reducer().composer(fixture.target))
+        if(generation)assertNull(fixture.reducer().composer(replacement))
+        assertEquals("never retarget this draft",fixture.reducer().composer(fixture.target))
     }
     private suspend fun postPreSendContinuationWaitsForExistingRecovery(provider: Provider) = withFixture(provider) { fixture ->
         val request = Request(Uuid.random(), RequestBody.PromptSubmit(PromptSubmitParams(
@@ -229,6 +315,29 @@ class GoatrConnectionTest {
         barrier.release.complete(Unit)
         assertEquals(0, barrier.frameStarts.get())
         assertEquals(0, fixture.store.localActions(fixture.host, null, 100).count { it.metadata.actionId == request.id })
+    }
+
+    private suspend fun skillSelectorRequiresOriginalPublicationAndRetainsFingerprintPriority(provider:Provider) = withFixture(provider) {fixture->
+        val params=PromptSubmitParams(fixture.hello.bootId,fixture.target,PromptText(""),SkillSelector(Uuid.random(),Uuid.random()))
+        val request=Request(Uuid.random(),RequestBody.PromptSubmit(params))
+        val barrier=fixture.connection.pauseNewActionContinuation(fixture.host,request.id,NewActionContinuationBarrierPoint.BeforePreSend)
+        val mutation=async {runCatching {fixture.connection.mutate(fixture.host,request,ordinaryComposer=false)}}
+        barrier.reached.await()
+        assertNull(fixture.store.localAction(fixture.host,request.id))
+        barrier.release.complete(Unit)
+        val rejected=mutation.await().exceptionOrNull() as? StorePolicy ?: error("missing original skill publication must reject admission")
+        assertEquals(ErrorCode.NotReady,rejected.code)
+        assertEquals(0,barrier.frameStarts.get())
+        assertNull(fixture.store.localAction(fixture.host,request.id))
+        val key=fixture.secrets.receipt(fixture.host,fixture.store)
+        try {assertTrue(fixture.store.preSend(fixture.host,request,key,ordinaryComposer=false) is PreSendDecision.NewAction)}
+        finally {key.fill(0)}
+        val changed=request.copy(body=RequestBody.PromptSubmit(params.copy(skill=params.skill!!.copy(reference=Uuid.random()))))
+        val conflictBarrier=fixture.connection.pauseNewActionContinuation(fixture.host,request.id)
+        val conflict=runCatching {fixture.connection.mutate(fixture.host,changed,ordinaryComposer=false)}.exceptionOrNull() as? StorePolicy ?: error("a changed selector must retain keyed UUID/body conflict precedence")
+        assertEquals(ErrorCode.ActionIdConflict,conflict.code)
+        assertEquals(0,conflictBarrier.frameStarts.get())
+        assertFalse(fixture.store.localAction(fixture.host,request.id)!!.authoritative)
     }
 
     private suspend fun postPreSendContinuationReturnsRecoveredReceiptWithoutFrame(provider: Provider) = withFixture(provider) { fixture ->
@@ -324,7 +433,7 @@ class GoatrConnectionTest {
                 fixture.connection.cacheContent(fixture.host,fixture.target,reopened.subscription,ContentRef(Uuid.random(),Uint(1),Mime.TextPlain),"x")
                 fail("A previous subscription must never relabel loaded content as the new source")
             } catch(failure: StorePolicy) {assertEquals(ErrorCode.ContentExpired,failure.code)}
-            fixture.connection.leave(fixture.host,fixture.target)
+            fixture.connection.retireConversationSubscription(fixture.host,fixture.target)?.let {fixture.connection.leave(it)}
             assertNull(fixture.connection.state.value.sources[fixture.host]?.get(fixture.target))
             assertFalse(fixture.reducer().mutationsEnabled)
             control("activity","text" to JsonPrimitive("after leaving current automatic subscription"))
@@ -402,7 +511,7 @@ class GoatrConnectionTest {
             var paused=true
             try {
                 repeat(40) {index->
-                    val read=async {fixture.connection.notificationsSync(fixture.host)}
+                    val read=async {fixture.connection.notificationsSync(fixture.host,fixture.hello)}
                     try {
                         sentReplies(fixture,index+1)
                         read.cancelAndJoin()
@@ -421,7 +530,7 @@ class GoatrConnectionTest {
     private suspend fun timedOutRead(provider:Provider) = withFixture(provider) {fixture->
         control("pause")
         var paused=true
-        val read=async {fixture.connection.notificationsSync(fixture.host)}
+        val read=async {fixture.connection.notificationsSync(fixture.host,fixture.hello)}
         try {
             sentReplies(fixture,1)
             try {withTimeout(20000) {read.await()};fail("The actual native read must retain its existing15-second caller deadline")}
@@ -438,7 +547,7 @@ class GoatrConnectionTest {
         }
     }
     private suspend fun canceledOpens(provider:Provider) = withFixture(provider) {fixture->
-        fixture.connection.leave(fixture.host,fixture.target)
+        fixture.connection.retireConversationSubscription(fixture.host,fixture.target)?.let {fixture.connection.leave(it)}
         // A late open must retire only its own source, never overwrite/retire the newer
         // installed open. Forty iterations also exceed the native32-subscription bound.
         repeat(40) {index->
@@ -448,7 +557,7 @@ class GoatrConnectionTest {
             try {
                 sentReplies(fixture,1)
                 opened.cancelAndJoin()
-                fixture.connection.leave(fixture.host,fixture.target)
+                fixture.connection.retireConversationSubscription(fixture.host,fixture.target)?.let {fixture.connection.leave(it)}
                 assertEquals(1,fixture.connection.pendingReplies(fixture.host))
                 val replacement=async {fixture.connection.open(fixture.host,fixture.target)}
                 try {
@@ -465,7 +574,7 @@ class GoatrConnectionTest {
                     fixture.connection.snapshot(fixture.host)
                     await(fixture,"newer subscription survives old-source cleanup") {(fixture.reducer().state?.activity?.text as? ContentText)?.text?.value=="after canceled old open $index"}
                     assertEquals(current.subscription,fixture.connection.state.value.sources.getValue(fixture.host).getValue(fixture.target))
-                    fixture.connection.leave(fixture.host,fixture.target)
+                    fixture.connection.retireConversationSubscription(fixture.host,fixture.target)?.let {fixture.connection.leave(it)}
                     assertNull(fixture.connection.state.value.sources[fixture.host]?.get(fixture.target))
                 } finally {replacement.cancelAndJoin()}
             } finally {
@@ -521,8 +630,8 @@ class GoatrConnectionTest {
     @Test fun review_reopen_preserves_queued_old_frames_and_unsubscribes_codex() = runBlocking { reopen(Provider.Codex) }
     @Test fun review_more_than_32_automatic_resnapshots_stay_bounded_omp() = runBlocking { boundedResnapshots(Provider.Omp) }
     @Test fun review_more_than_32_automatic_resnapshots_stay_bounded_codex() = runBlocking { boundedResnapshots(Provider.Codex) }
-    @Test fun review_generation_changed_reopens_authoritative_inventory_target_omp() = runBlocking { recover(Provider.Omp, true) }
-    @Test fun review_generation_changed_reopens_authoritative_inventory_target_codex() = runBlocking { recover(Provider.Codex, true) }
+    @Test fun review_generation_changed_keeps_original_read_only_without_retargeting_omp() = runBlocking {recover(Provider.Omp,true)}
+    @Test fun review_generation_changed_keeps_original_read_only_without_retargeting_codex() = runBlocking {recover(Provider.Codex,true)}
     @Test fun review_source_install_not_ready_then_ready_recovers_omp() = runBlocking { recover(Provider.Omp, false) }
     @Test fun review_source_install_not_ready_then_ready_recovers_codex() = runBlocking { recover(Provider.Codex, false) }
     @Test fun review_recovery_publication_withholds_mutation_ready_until_receipts_reconciled_omp() = runBlocking { recoveryPublicationWithholdsMutationReady(Provider.Omp) }
@@ -531,6 +640,12 @@ class GoatrConnectionTest {
     @Test fun review_post_pre_send_continuation_cancel_before_frame_omp() = runBlocking { postPreSendContinuationCancellationDoesNotStartFrame(Provider.Omp) }
     @Test fun review_post_pre_send_continuation_returns_recovered_receipt_without_frame_omp() = runBlocking { postPreSendContinuationReturnsRecoveredReceiptWithoutFrame(Provider.Omp) }
     @Test fun review_post_pre_send_continuation_rejects_replacement_target_omp() = runBlocking { postPreSendContinuationRejectsReplacementTarget(Provider.Omp) }
+    @Test fun review_skill_selector_requires_original_publication_and_fingerprint_codex() = runBlocking {skillSelectorRequiresOriginalPublicationAndRetainsFingerprintPriority(Provider.Codex)}
+    @Test fun review_skill_selector_requires_original_publication_and_fingerprint_omp() = runBlocking {skillSelectorRequiresOriginalPublicationAndRetainsFingerprintPriority(Provider.Omp)}
+    @Test fun review_background_original_subscription_cleanup_cannot_close_new_foreground_omp() = runBlocking {backgroundRetiresOnlyOriginalConversation(Provider.Omp)}
+    @Test fun review_background_original_subscription_cleanup_cannot_close_new_foreground_codex() = runBlocking {backgroundRetiresOnlyOriginalConversation(Provider.Codex)}
+    @Test fun review_canceled_explicit_open_preserves_original_cleanup_omp() = runBlocking {canceledExplicitOpenPreservesDisplacedCleanup(Provider.Omp)}
+    @Test fun review_canceled_explicit_open_preserves_original_cleanup_codex() = runBlocking {canceledExplicitOpenPreservesDisplacedCleanup(Provider.Codex)}
     @Test fun review_history_upsert_preserves_unaffected_sqlite_history_and_offline_content() = runBlocking {
         withFixture(Provider.Omp) {fixture->
             control("pending_view","sample" to JsonPrimitive("history"))
@@ -1096,6 +1211,9 @@ class GoatrConnectionTest {
         val trigger=stockControl("trigger_dialog","provider" to Protocol.strictJson.encodeToJsonElement(Provider.serializer(),provider),
             "kind" to Protocol.strictJson.encodeToJsonElement(PresentationKind.serializer(),kind))
         val key=Uuid(trigger.getValue("requestKey").jsonPrimitive.content)
+        stockAnswerExistingDialog(owner,host,selected,key,kind)
+    }
+    private suspend fun stockAnswerExistingDialog(owner:GoatrViewModel,host:String,selected:Target,key:Uuid,kind:PresentationKind) {
         ui.waitUntil(30000) {stockReducer(owner,host,selected)?.pending?.any {it.requestKey==key && it.kind==kind}==true}
         val request=stockReducer(owner,host,selected)!!.pending.first {it.requestKey==key}
         val before=owner.connection.state.value.latestReceipt[host]?.actionId
@@ -1605,6 +1723,267 @@ class GoatrConnectionTest {
                 if(owner.store.state.value.hosts.isEmpty()) owner.connection.forgetInstallation()
                 scenario.close()
             }
+        }
+    }
+
+    private suspend fun attentionRpcKeepsItsCapturedHello(provider:Provider)=withFixture(provider){fixture->
+        val old=fixture.hello
+        val current=fixture.connection.reconnect(fixture.host)
+        assertNotSame(old,current)
+        fixture.connection.snapshot(fixture.host)
+        val registration=LocalPushRegistration(1,fixture.host,old.deviceId,Uuid.random(),Uuid.random(),PushHints.encode(ByteArray(32){12}),0,endpoint="https://ntfy.sh/no-dispatch-fixture")
+        suspend fun stale(operation:suspend ()->Unit) {
+            val before=fixture.connection.pendingReplies(fixture.host,sentOnly=false)
+            try{operation();fail("Old authenticated owner reached the native request path")}catch(error:StorePolicy){assertEquals(ErrorCode.NotReady,error.code)}
+            assertEquals(before,fixture.connection.pendingReplies(fixture.host,sentOnly=false))
+            assertSame(current,fixture.connection.state.value.hello[fixture.host])
+        }
+        stale{fixture.connection.notificationsSync(fixture.host,old)}
+        stale{fixture.connection.markRead(fixture.host,old,fixture.target.sessionId,Uint(1))}
+        stale{fixture.connection.registerPush(fixture.host,old,registration)}
+        stale{fixture.connection.acknowledgePush(fixture.host,old,registration)}
+        stale{fixture.connection.unregisterPush(fixture.host,old,registration.generation)}
+        assertNull(fixture.store.encryptedRegistration(fixture.host))
+        fixture.connection.notificationsSync(fixture.host,current)
+        assertSame(current,fixture.connection.state.value.hello[fixture.host])
+    }
+    @Test fun review_attention_rpc_captured_hello_omp()=runBlocking{attentionRpcKeepsItsCapturedHello(Provider.Omp)}
+    @Test fun review_attention_rpc_captured_hello_codex()=runBlocking{attentionRpcKeepsItsCapturedHello(Provider.Codex)}
+
+    private suspend fun backgroundRegistration(runtime:GoatrRuntime,host:String):LocalPushRegistration? {
+        val stored=runtime.store.encryptedRegistration(host) ?: return null
+        val plain=runtime.secrets.pushOpen(host,stored.first,stored.second)
+        return try {Protocol.strictJson.decodeFromString(LocalPushRegistration.serializer(),plain.toString(Charsets.UTF_8))}
+        catch(_:Exception){error("Protected registration metadata unavailable; no private values retained")}
+        finally{plain.fill(0)}
+    }
+    private fun backgroundApkSha(path:String):String {
+        val digest=java.security.MessageDigest.getInstance("SHA-256")
+        File(path).inputStream().use{input->val bytes=ByteArray(65536);try{while(true){val size=input.read(bytes);if(size<0)break;digest.update(bytes,0,size)}}finally{bytes.fill(0)}}
+        return digest.digest().joinToString(""){"%02x".format(it.toInt() and 255)}
+    }
+    @Test fun stock_background_persistent_real_native_both_providers()=runBlocking<Unit>{stockBackgroundDelivery("persistent")}
+    @Test fun stock_background_ntfy_real_native_both_providers()=runBlocking<Unit>{stockBackgroundDelivery("ntfy")}
+
+    private fun stockRenderedConversation(owner:GoatrViewModel,host:String,target:Target) {
+        ui.runOnIdle {assertEquals(host,owner.host);assertEquals(ConversationKey(host,target),owner.selection);assertEquals(Screen.Conversation,owner.screen)}
+        ui.onNodeWithTag("conversation_list").assertIsDisplayed()
+        ui.onNodeWithTag("conversation_target_${target.sessionId.value}_${target.generation.value}",useUnmergedTree=true).assertIsDisplayed()
+    }
+
+    /** Router components AFTER a genuine OS tap, never reported as notification-tap acceptance. */
+    private suspend fun stockPendingAttentionComponents(scenario:ActivityScenario<MainActivity>,owner:GoatrViewModel,host:String,target:Target,event:Uuid) {
+        val runtime=(context as GoatrApplication).runtime
+        for(invalidation in listOf("none","navigation","foreground")) {
+            ui.runOnIdle {owner.settings(host)}
+            val entered=java.util.concurrent.CountDownLatch(1);val release=java.util.concurrent.CountDownLatch(1)
+            coroutineScope {
+                val barrier=async(Dispatchers.IO){runtime.store.reconcilePresentations(host,{entered.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))}){PresentationPolicy(true,true){runtime.suppressesAlert(host,it)}}}
+                try {
+                    withContext(Dispatchers.IO){check(entered.await(5,java.util.concurrent.TimeUnit.SECONDS))}
+                    ui.runOnIdle {owner.refresh()}
+                    ui.waitUntil(10000){owner.busy}
+                    ui.runOnIdle {
+                        owner.openNotification(host,event.value)
+                        assertTrue(owner.busy);assertNull(owner.selection)
+                        if(invalidation=="navigation")owner.settings(host)
+                    }
+                    if(invalidation=="foreground")scenario.moveToState(Lifecycle.State.CREATED)
+                }finally{release.countDown()}
+                barrier.await()
+            }
+            if(invalidation=="foreground") {
+                ui.waitUntil(30000){!owner.foreground&&!owner.busy}
+                val previous=withContext(Dispatchers.Main.immediate){owner.viewModelScope.coroutineContext[Job]!!.children.toSet()}
+                scenario.moveToState(Lifecycle.State.RESUMED)
+                // foreground(true) synchronously installs any resumed route operation before
+                // returning. Join that real owner if present, not a status-string observation.
+                val resumed=withContext(Dispatchers.Main.immediate){owner.viewModelScope.coroutineContext[Job]!!.children.filter{it !in previous}.toList()}
+                withTimeout(30000){resumed.forEach{it.join()}}
+            }
+            ui.waitUntil(30000){owner.foreground&&!owner.busy}
+            if(invalidation=="none") {
+                stockAwait(owner,host,target)
+                stockRenderedConversation(owner,host,target)
+            }else ui.runOnIdle {assertEquals(Screen.Settings,owner.screen);assertEquals(host,owner.host);assertNull(owner.selection)}
+        }
+        for(loss in listOf("disconnect","replacement")) {
+            ui.runOnIdle{owner.settings(host)}
+            val captured=owner.connection.state.value.hello.getValue(host)
+            val entered=java.util.concurrent.CountDownLatch(1);val release=java.util.concurrent.CountDownLatch(1)
+            lateinit var route:Job
+            lateinit var previous:Set<Job>
+            coroutineScope {
+                val barrier=async(Dispatchers.IO){runtime.store.reconcilePresentations(host,{entered.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))}){PresentationPolicy(true,true){runtime.suppressesAlert(host,it)}}}
+                var retired:Deferred<Unit>?=null
+                try {
+                    withContext(Dispatchers.IO){check(entered.await(5,java.util.concurrent.TimeUnit.SECONDS))}
+                    ui.runOnIdle {
+                        previous=owner.viewModelScope.coroutineContext[Job]!!.children.toSet()
+                        owner.openNotification(host,event.value)
+                        assertTrue(owner.busy);assertNull(owner.selection)
+                        route=owner.viewModelScope.coroutineContext[Job]!!.children.first{it !in previous}
+                    }
+                    // The existing real reply owner proves a read was admitted while SQLite
+                    // publication is queued; no production hook or fake source is supplied.
+                    withTimeout(3000) {
+                        while(owner.connection.pendingReplies(host,sentOnly=false)==0)delay(10)
+                        assertSame(captured,owner.connection.state.value.hello[host])
+                        retired=this@coroutineScope.async{owner.connection.disconnect(host)}
+                        while(owner.connection.state.value.hello[host]===captured)delay(10)
+                    }
+                }finally{release.countDown()}
+                barrier.await()
+                // Original retirement publishes before its reader cleanup, without opening
+                // Store. Reconnect must wait until this real writer/mutex owner has released.
+                val replacing=if(loss=="replacement")async{owner.connection.reconnect(host)}else null
+                withTimeout(30000){checkNotNull(retired).await();replacing?.await()?.let{assertNotSame(captured,it)};route.join()}
+            }
+            // Join any job the original perform-finally actually scheduled. An unconsumed
+            // entry must not hide behind a transient idle observation or be canceled by us.
+            withTimeout(30000){
+                val followups=withContext(Dispatchers.Main.immediate){owner.viewModelScope.coroutineContext[Job]!!.children.filter{it !in previous}.toList()}
+                followups.forEach{it.join()}
+            }
+            ui.runOnIdle{assertEquals(Screen.Settings,owner.screen);assertEquals(host,owner.host);assertNull(owner.selection)}
+            val replacement=owner.connection.reconnect(host)
+            assertNotSame(captured,replacement)
+            owner.connection.snapshot(host)
+            ui.runOnIdle{assertEquals(Screen.Settings,owner.screen);assertNull(owner.selection)}
+            assertEquals(event,checkNotNull(owner.store.notificationEvent(host,event)).event.eventId)
+            // Only a fresh explicit lookup gesture may admit the replacement/current owner.
+            ui.runOnIdle{owner.openNotification(host,event.value)}
+            stockAwait(owner,host,target)
+            stockRenderedConversation(owner,host,target)
+        }
+    }
+
+    private suspend fun stockBackgroundDelivery(mode:String) {
+        val keys=KeyStore.getInstance("AndroidKeyStore").apply{load(null)}
+        assertFalse("Only a fresh explicitly owned emulator fixture is admitted",keys.containsAlias(SecretStore.ENDPOINT_ALIAS))
+        assertFalse(File(context.noBackupFilesDir,"goatr-keys/${SecretStore.ENDPOINT_ALIAS}.gcm.initialized").exists())
+        assertEquals(34,android.os.Build.VERSION.SDK_INT)
+        IrohAndroid.installAndroidContext(context)
+        val info=stockControl("live_info")
+        assertEquals(mode,info.getValue("background").jsonPrimitive.content)
+        assertEquals(info.getValue("appApkSha256").jsonPrimitive.content,backgroundApkSha(context.applicationInfo.sourceDir))
+        assertEquals(info.getValue("testApkSha256").jsonPrimitive.content,backgroundApkSha(InstrumentationRegistry.getInstrumentation().context.applicationInfo.sourceDir))
+        val host=info.getValue("host").jsonPrimitive.content
+        val rows=info.getValue("sessions").jsonArray.map{it.jsonObject}
+        assertEquals(2,rows.size)
+        assertEquals(setOf(Provider.Omp,Provider.Codex),rows.map(::stockProvider).toSet())
+        val runtime=(context as GoatrApplication).runtime
+        val manager=checkNotNull(context.getSystemService(android.app.NotificationManager::class.java))
+        check(runtime.deliveryPreferences.canPostNotifications()){"Owned delivery requires already granted notification permission; never skip or bypass a user dialog"}
+        if(mode=="ntfy") {
+            val packageInfo=context.packageManager.getPackageInfo("io.heckel.ntfy",android.content.pm.PackageManager.PackageInfoFlags.of(android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES.toLong()))
+            assertTrue(checkNotNull(packageInfo.applicationInfo).flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE==0)
+            val signers=checkNotNull(packageInfo.signingInfo).apkContentsSigners
+            assertEquals(1,signers.size)
+            val signer=java.security.MessageDigest.getInstance("SHA-256").digest(signers.single().toByteArray()).joinToString(""){"%02x".format(it.toInt() and 255)}
+            assertEquals(info.getValue("ntfySignerSha256").jsonPrimitive.content,signer)
+            assertEquals(info.getValue("ntfyApkSha256").jsonPrimitive.content,backgroundApkSha(checkNotNull(packageInfo.applicationInfo).sourceDir))
+            assertTrue(runtime.push.ntfyInstalled())
+        }
+        var scenario:ActivityScenario<MainActivity>?=ActivityScenario.launch(MainActivity::class.java)
+        var coldActivity:MainActivity?=null
+        lateinit var owner:GoatrViewModel
+        try {
+            scenario!!.onActivity{owner=ViewModelProvider(it)[GoatrViewModel::class.java]}
+            ui.waitUntil(20000){owner.foreground&&owner.connection.ownsNetworkCallback()}
+            var invitation=stockControl("live_pair").getValue("uri").jsonPrimitive.content
+            stockTap("pair_begin")
+            try{ui.onNodeWithTag("pair_paste").performScrollTo().performSemanticsAction(SemanticsActions.SetText){it(AnnotatedString(invitation))};stockTap("pair_preview")}
+            catch(_:Throwable){ui.runOnIdle{owner.connections()};invitation="";fail("Private background pairing paste failed; no capability retained")}
+            invitation=""
+            ui.waitUntil(10000){owner.preview?.host?.value==host}
+            ui.onNodeWithTag("pair_authority").assertIsDisplayed()
+            assertTrue(owner.store.state.value.hosts.isEmpty())
+            stockTap("pair_confirm")
+            ui.waitUntil(30000){owner.connection.state.value.hello[host]!=null&&!owner.busy}
+            val device=owner.connection.state.value.hello.getValue(host).deviceId
+            ui.runOnIdle{owner.settings(host)}
+            stockTap("delivery_mode_${mode}_$host")
+            if(!owner.deliveryEnabled(host))stockTap("delivery_enabled_$host")
+            if(!owner.deliveryCompleted(host))stockTap("delivery_completed_$host")
+            if(mode=="persistent") {
+                stockTap("delivery_start_$host")
+                ui.waitUntil(30000){DeliveryService.status.value.running&&owner.connection.state.value.hello[host]!=null}
+                assertEquals(DeliveryMode.Persistent,runtime.deliveryPreferences.mode(host))
+            } else {
+                withTimeout(60000){while(true){
+                    val registration=backgroundRegistration(runtime,host)
+                    if(owner.connection.state.value.hello[host]!=null&&runtime.push.verified(host)&&registration?.let{it.device==device&&it.probeReceived&&it.acknowledged&&!it.repair&&!it.unregister}==true)break
+                    delay(50)
+                }}
+                assertEquals(DeliveryMode.Ntfy,runtime.deliveryPreferences.mode(host))
+            }
+            val prefix="goatr.attention.$host."
+            val seen=manager.activeNotifications.filter{it.tag?.startsWith(prefix)==true}.mapTo(mutableSetOf()){it.tag}
+            var delivered=0
+            for((providerIndex,row) in rows.withIndex()) {
+                val target=stockTarget(row);val provider=stockProvider(row);val native=row.getValue("nativeId").jsonPrimitive.content
+                for(category in listOf(AttentionCategory.Completed,AttentionCategory.Attention)) {
+                    if(mode=="ntfy")ui.waitUntil(30000){owner.connection.state.value.hello[host]!=null&&runtime.push.verified(host)}
+                    val beforeActions=owner.store.localActions(host,null,100).map{it.metadata.actionId}.toSet()
+                    ui.runOnIdle{owner.open(host,target)}
+                    stockAwait(owner,host,target)
+                    stockRenderedConversation(owner,host,target)
+                    OwnedUiAutomationRunner.backgroundOwnedDeliveryConversation(InstrumentationRegistry.getInstrumentation(),target.sessionId.value,target.generation.value)
+                    val cold=providerIndex==rows.lastIndex&&category==AttentionCategory.Attention
+                    if(cold){scenario!!.close();scenario=null}
+                    ui.waitUntil(30000){!owner.foreground}
+                    if(mode=="ntfy") {
+                        ui.waitUntil(30000){owner.connection.state.value.hello[host]==null&&!DeliveryService.status.value.running}
+                        assertTrue(runtime.push.verified(host))
+                    } else assertTrue("Persistent delivery retains its actual keeper claim",DeliveryService.status.value.running)
+                    val kind=if(provider==Provider.Omp)PresentationKind.OmpSelect else PresentationKind.CodexForm
+                    val trigger=if(category==AttentionCategory.Completed)stockControl("desktop","provider" to Protocol.strictJson.encodeToJsonElement(Provider.serializer(),provider))
+                        else stockControl("trigger_dialog","provider" to Protocol.strictJson.encodeToJsonElement(Provider.serializer(),provider),"kind" to Protocol.strictJson.encodeToJsonElement(PresentationKind.serializer(),kind))
+                    assertEquals(target,Protocol.strictJson.decodeFromJsonElement(Target.serializer(),trigger.getValue("target")))
+                    var alert:android.service.notification.StatusBarNotification?=null
+                    withTimeout(180000){while(alert==null){alert=manager.activeNotifications.firstOrNull{it.tag?.startsWith(prefix)==true&&it.tag !in seen};if(alert==null)delay(50)}}
+                    val actual=checkNotNull(alert);seen+=actual.tag
+                    val eventId=Uuid(actual.tag.removePrefix(prefix))
+                    assertEquals(1,manager.activeNotifications.count{it.tag==actual.tag})
+                    val monitor=if(cold)InstrumentationRegistry.getInstrumentation().addMonitor(MainActivity::class.java.name,null,false)else null
+                    try {
+                        OwnedUiAutomationRunner.tapOwnedDeliveryNotification(InstrumentationRegistry.getInstrumentation(),manager,actual,host,eventId.value)
+                        if(monitor!=null) {
+                            coldActivity=withContext(Dispatchers.IO){monitor.waitForActivityWithTimeout(15000)} as? MainActivity
+                            val opened=checkNotNull(coldActivity){"The native notification-row click did not create MainActivity"}
+                            InstrumentationRegistry.getInstrumentation().runOnMainSync{owner=ViewModelProvider(opened)[GoatrViewModel::class.java]}
+                        }
+                    }finally{monitor?.let{InstrumentationRegistry.getInstrumentation().removeMonitor(it)}}
+                    ui.waitUntil(30000){owner.foreground&&owner.selection==ConversationKey(host,target)&&owner.connection.state.value.mutationReady[host]==true&&!owner.busy}
+                    stockRenderedConversation(owner,host,target)
+                    val authenticated=checkNotNull(owner.store.notificationEvent(host,eventId)).event
+                    assertEquals(category,authenticated.category)
+                    assertEquals(target,Target(authenticated.sessionId,authenticated.generation))
+                    assertEquals(native,stockReducer(owner,host,target)!!.state!!.summary.nativeId.value)
+                    assertEquals("Notification entry must not send, answer, or create any action",beforeActions,owner.store.localActions(host,null,100).map{it.metadata.actionId}.toSet())
+                    val hello=owner.connection.state.value.hello.getValue(host)
+                    owner.connection.notificationsSync(host,hello)
+                    assertEquals(1,owner.store.cachedNotifications(host).events.count{it.eventId==eventId})
+                    owner.viewed(ConversationKey(host,target))
+                    withTimeout(10000){while(manager.activeNotifications.any{it.tag==actual.tag})delay(20)}
+                    if(category==AttentionCategory.Attention) {
+                        val request=Uuid(trigger.getValue("requestKey").jsonPrimitive.content)
+                        assertTrue("A tap never answers the native request",stockReducer(owner,host,target)!!.pending.any{it.requestKey==request})
+                        stockAnswerExistingDialog(owner,host,target,request,kind)
+                    }
+                    if(providerIndex==0&&category==AttentionCategory.Completed)stockPendingAttentionComponents(checkNotNull(scenario),owner,host,target,eventId)
+                    assertEquals(if(mode=="ntfy")DeliveryMode.Ntfy else DeliveryMode.Persistent,runtime.deliveryPreferences.mode(host))
+                    delivered++
+                }
+            }
+            assertEquals(4,delivered)
+            stockControl("complete")
+        }finally {
+            // Normal UI release only. Preserve pairing, registration, receipts, keeper choice
+            // and all native originals for Main-reviewed inspection/cleanup and other scenarios.
+            scenario?.moveToState(Lifecycle.State.CREATED);scenario?.close()
+            coldActivity?.let{activity->InstrumentationRegistry.getInstrumentation().runOnMainSync{activity.finish()}}
         }
     }
 }

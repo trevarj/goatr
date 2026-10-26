@@ -698,13 +698,13 @@ async fn prepare_bounded_history(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToolOutputMarkerState {
+pub(super) enum ToolOutputMarkerState {
     Pending,
     Rejected,
     Ready,
 }
 
-fn completed_tool_output_state(records: &[HistoryRecord], marker: &str) -> ToolOutputMarkerState {
+pub(super) fn completed_tool_output_state(records: &[HistoryRecord], marker: &str) -> ToolOutputMarkerState {
     let mut matching = records.iter().filter(|record| {
         record.complete
             && record
@@ -932,13 +932,11 @@ async fn mobile_then_desktop(
         phone
             .request(
                 Uuid::random(),
-                RequestBody::PromptSubmit(PromptSubmitParams {
-                    boot_id: phone.hello.boot_id.clone(),
-                    target: proof.target.clone(),
-                    text: PromptText(format!(
-                        "In this exact existing session, run the native shell tool to execute printf '%s\\n' '{mobile_marker}'. Do not write files or create/switch sessions. Then repeat {mobile_marker}."
-                    )),
-                }),
+                RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: phone.hello.boot_id.clone(),
+                target: proof.target.clone(),
+                text: PromptText(format!(
+                    "In this exact existing session, run the native shell tool to execute printf '%s\\n' '{mobile_marker}'. Do not write files or create/switch sessions. Then repeat {mobile_marker}."
+                )), }),
             )
             .await?
             .map_err(|error| {
@@ -983,7 +981,7 @@ async fn mobile_then_desktop(
     }))
 }
 
-async fn reconnect_original(
+pub(super) async fn reconnect_original(
     phone: Phone,
     endpoint: &iroh::Endpoint,
     host: &EndpointId,
@@ -1097,6 +1095,7 @@ pub async fn run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
     config.runtime_dir_agent = config.runtime_dir.clone();
     config.herdr_sockets = vec![herdr_socket.clone()];
     config.projects = vec![ConfiguredProject {
+        allow_read_tools: false,
         id: Uuid::random(),
         label: Label::new("Goatr development continuity").map_err(io::Error::other)?,
         path: root.join("project"),

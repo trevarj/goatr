@@ -56,6 +56,14 @@ fn shared_envelopes_canonical_hashes_and_roundtrips() {
                     &hmac_sha256(&key, &canonical)
                 ));
             }
+            if let Envelope::Response(response)=&decoded
+                && let Ok(ResultBody::SkillsList(result))=&response.outcome {
+                let wire=parse_raw_json(&input(case)).unwrap();
+                let rows=wire["result"]["skills"].as_array().unwrap();
+                let expected:Vec<_>=rows.iter().map(|row|row.get("invocationRef").and_then(Value::as_str)).collect();
+                let actual:Vec<_>=result.skills.iter().map(|row|row.invocation_ref.as_ref().map(|id|id.0.as_str())).collect();
+                assert_eq!(actual,expected,"{} must retain opaque native invocation references",text(case,"name"));
+            }
             let encoded = encode_payload(&decoded).unwrap();
             let roundtrip = decode_payload(&encoded, method(case)).unwrap();
             assert_eq!(decoded, roundtrip, "{}", text(case, "name"));
@@ -347,11 +355,9 @@ fn canonical_expansion_does_not_shrink_valid_decoded_editor_or_prompt_limit() {
         generation: Uuid::random(),
     };
     for body in [
-        RequestBody::PromptSubmit(PromptSubmitParams {
-            boot_id: id.clone(),
-            target: target.clone(),
-            text: PromptText::new("\n".repeat(ANSWER_MAX)).unwrap(),
-        }),
+        RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: id.clone(),
+        target: target.clone(),
+        text: PromptText::new("\n".repeat(ANSWER_MAX)).unwrap(), }),
         RequestBody::RequestRespond(RequestRespondParams {
             boot_id: id.clone(),
             target,

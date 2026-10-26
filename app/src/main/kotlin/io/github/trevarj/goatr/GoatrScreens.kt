@@ -11,7 +11,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -44,13 +46,13 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.*
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.time.Instant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -60,17 +62,16 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
     val store by model.store.state.collectAsStateWithLifecycle()
     model.artifacts?.let{ArtifactBrowser(it,model,connectionLabel(it.host,connection,model.connectingHosts[it.host]==true),compactConnectionLabel(it.host,connection,model.connectingHosts[it.host]==true))}
     model.agentSessionCreation?.let {shown->AgentSessionCreationSheet(shown,connection,model,store.hosts.firstOrNull {it.hostId==shown.key.host}?.name ?: "Paired desktop")}
-    model.agentTerminalCreation?.let {shown->
-        val agentSummary=connection.sessions[shown.key.host]?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==shown.key.target}==true}?.state?.summary
-        AgentTerminalCreationDialog(shown,model,store.hosts.firstOrNull {it.hostId==shown.key.host}?.name ?: "Paired desktop",conversationTitle(agentSummary),connectionLabel(shown.key.host,connection,model.connectingHosts[shown.key.host]==true),compactConnectionLabel(shown.key.host,connection,model.connectingHosts[shown.key.host]==true))
+    model.terminalCreation?.let {shown->
+        TerminalCreationDialog(shown,connection,model,store.hosts.firstOrNull {it.hostId==shown.host}?.name ?: "Paired desktop")
     }
     if(model.attachmentVisible)model.attachmentTransfer?.let {AttachmentTransferSheet(it,model,connectionLabel(it.original.key.host,connection,model.connectingHosts[it.original.key.host]==true),compactConnectionLabel(it.original.key.host,connection,model.connectingHosts[it.original.key.host]==true))}
     model.attachmentRecovery?.let {AttachmentRecoverySheet(it,model,connectionLabel(it.record.host,connection,model.connectingHosts[it.record.host]==true),compactConnectionLabel(it.record.host,connection,model.connectingHosts[it.record.host]==true))}
     val selected=model.selection
     val context=LocalContext.current
     val notificationPermission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {model.notificationPermissionResult()}
-    LaunchedEffect(model.notificationPermissionRequest) {
-        if(model.notificationPermissionRequest>0) {
+    LaunchedEffect(model.notificationPermissionRequest,model.notificationPermissionLaunch) {
+        if(model.notificationPermissionRequest>0&&model.beginNotificationPermissionRequest(model.notificationPermissionRequest)) {
             if(Build.VERSION.SDK_INT>=33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             else model.notificationPermissionResult()
         }
@@ -84,7 +85,7 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
     val hasSecret=reducer?.pending?.any {it.presentation is PresentationCodexUrl || (it.presentation as? PresentationCodexQuestions)?.questions?.any {q->q.isSecret}==true}==true
     // Inline catalogue names retain the picker’s screenshot/recents privacy after dismissal.
     val inlineSkillsPrivate=selected?.let {key->model.suggestedSkills(key,model.composers[key].orEmpty())?.catalogue!=null}==true
-    SideEffect {privateWindow(model.attentionInbox!=null || model.artifacts!=null || model.agentTerminalCreation!=null || model.agentSessionCreation!=null || model.attachmentVisible || model.attachmentRecovery!=null || model.shell!=null || model.screen==Screen.Pairing && model.preview==null || model.screen==Screen.Conversation && (hasSecret || model.terminal!=null || model.worktrees!=null || model.changes!=null || inlineSkillsPrivate))}
+    SideEffect {privateWindow(model.sessionControls!=null || model.composerUploads.values.any {it.isNotEmpty()} || model.attentionInbox!=null || model.artifacts!=null || model.terminalCreation!=null || model.agentSessionCreation!=null || model.attachmentVisible || model.attachmentRecovery!=null || model.shell!=null || model.screen==Screen.Pairing && model.preview==null || model.screen==Screen.Conversation && (hasSecret || model.terminal!=null || model.worktrees!=null || model.changes!=null || inlineSkillsPrivate))}
     DisposableEffect(Unit) {onDispose {privateWindow(false)}}
     val backScreen=model.screen
     val backHost=model.host
@@ -107,33 +108,21 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
             val headerLoading=headerHost?.let {model.connectingHosts[it]==true || inventoryRefreshing(it,connection)} ?: store.hosts.any {model.connectingHosts[it.hostId]==true || inventoryRefreshing(it.hostId,connection)}
             Surface {Column(Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
             GoatrTitleBar(
-                title=if(headerHost!=null && (model.screen==Screen.Sessions || model.screen==Screen.Settings)) (store.hosts.firstOrNull {it.hostId==headerHost}?.name ?: "Desktop")+" · "+(if(model.screen==Screen.Settings)"Settings" else "Sessions") else if(model.screen==Screen.Conversation) conversationTitle(reducer?.state?.summary) else when(model.screen) {Screen.Sessions->"goatr";Screen.Connections->"Hosts";Screen.Pairing->"Pair a desktop";Screen.Settings->"Settings";Screen.Terminals->"Terminals";else->"goatr"},
+                title=if(headerHost!=null && (model.screen==Screen.Sessions || model.screen==Screen.Settings)) (store.hosts.firstOrNull {it.hostId==headerHost}?.name ?: "Desktop")+" · "+(if(model.screen==Screen.Settings)"Settings" else "Sessions") else if(model.screen==Screen.Conversation) conversationTitle(reducer?.state?.summary) else when(model.screen) {Screen.Sessions->"";Screen.Connections->"Hosts";Screen.Pairing->"Pair a desktop";Screen.Settings->"Settings";Screen.Terminals->"Terminals";else->""},
                 status=headerStatus,
                 loading=headerLoading,
                 compactStatus=headerCompactStatus,
                 navigationIcon={
                     if(model.screen==Screen.Conversation || model.screen==Screen.Pairing || model.screen==Screen.Terminals || model.host!=null && (model.screen==Screen.Sessions || model.screen==Screen.Settings)) {
-                        val backTag=when(model.screen) {Screen.Pairing->"pair_cancel";Screen.Settings->"settings_overview";Screen.Terminals->"terminal_back_host";Screen.Conversation->"nav_sessions";else->"host_back_sessions"}
+                        val backTag=when(model.screen) {Screen.Pairing->"pair_cancel";Screen.Settings->"settings_overview";Screen.Terminals->"terminal_back_host";Screen.Conversation->"conversation_back_sessions";else->"host_back_sessions"}
                         val backLabel=when(model.screen) {Screen.Pairing->"Back and clear invitation";Screen.Settings->"All settings";Screen.Terminals->"Back to host sessions";else->"Back to sessions"}
                         IconButton(onClick={contextBack()},modifier=Modifier.size(48.dp).testTag(backTag)) {GoatrIcon(MaterialGlyph.Back,backLabel)}
                     }
                 },
-                actions={
-                    var menu by remember {mutableStateOf(false)}
-                    Box {IconButton(onClick={menu=true},modifier=Modifier.size(48.dp).testTag("navigation_menu")) {GoatrIcon(MaterialGlyph.Menu,"Navigation menu")}
-                        DropdownMenu(expanded=menu,onDismissRequest={menu=false}) {
-                            DropdownMenuItem(text={UiText("Sessions")},onClick={menu=false;model.sessions()})
-                            DropdownMenuItem(text={UiText("Hosts")},leadingIcon={GoatrIcon(MaterialGlyph.Desktop,null)},modifier=Modifier.testTag(if(model.screen==Screen.Conversation) "nav_hosts" else "navigation_hosts_menu"),onClick={menu=false;model.connections()})
-                            DropdownMenuItem(text={UiText("Settings")},leadingIcon={GoatrIcon(MaterialGlyph.Settings,null)},modifier=Modifier.testTag(if(model.screen==Screen.Conversation) "nav_settings" else "navigation_settings_menu"),onClick={menu=false;model.settings()})
-                            model.host?.let {host->DropdownMenuItem(text={UiText("Host settings")},modifier=Modifier.testTag("settings"),onClick={menu=false;model.settings(host)})}
-                        }
-                    }
-                },
+                actions={NavigationMenu(model)},
             )
             }}
         },
-        // Conversation is a detail destination: its composer docks to the IME, not a navigation bar.
-        bottomBar={ if(model.screen!=Screen.Conversation) TopLevelNav(model.screen, { model.sessions() }, model::connections, { model.settings() }) },
     ) {padding->
         BoxWithConstraints(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding().padding(horizontal=if(model.screen==Screen.Conversation) 10.dp else 16.dp)) {
             val wide=maxWidth>=840.dp
@@ -478,15 +467,15 @@ private fun UnboundSessionRow(row: UnboundRow) {
 private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: GoatrViewModel,onNewSession: (String)->Unit) {
     val focusManager=LocalFocusManager.current
     val keyboard=LocalSoftwareKeyboardController.current
-    var filter by remember { mutableStateOf<String?>(null) }
-    var query by remember { mutableStateOf("") }
-    var providerFilter by remember { mutableStateOf<Provider?>(null) }
-    var statusFilter by remember { mutableStateOf<SessionStatus?>(null) }
+    var filter by model.sessionFilters::host
+    var query by model.sessionFilters::query
+    var providerFilter by model.sessionFilters::provider
+    var statusFilter by model.sessionFilters::status
     var filtersOpen by remember { mutableStateOf(false) }
     var expandedOtherHosts by remember { mutableStateOf(emptySet<String>()) }
     val pairedHostIds=remember(store.hosts) {store.hosts.map {it.hostId}.toSet()}
     LaunchedEffect(pairedHostIds) {
-        if(filter!=null && filter !in pairedHostIds) {filter=null;query=""}
+        model.sessionFilters.retainHosts(pairedHostIds)
         expandedOtherHosts=expandedOtherHosts.intersect(pairedHostIds)
     }
     val activeFilters=listOfNotNull(filter?.let {host->store.hosts.firstOrNull {it.hostId==host}?.name ?: "Selected host"},providerFilter?.let(::providerLabel),statusFilter?.let(::sessionGroupLabel))
@@ -494,6 +483,12 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
     fun matches(summary:SessionSummary):Boolean=summary.title.contains(query,ignoreCase=true) && (providerFilter==null || summary.provider==providerFilter) && (statusFilter==null || summary.status==statusFilter)
     var choosingCreationHost by remember { mutableStateOf(false) }
     val hosts=store.hosts.filter { filter==null || it.hostId==filter }
+    val directories=hosts.associate {paired->
+        paired.hostId to key(paired.hostId) {
+            val inventory=connection.inventory[paired.hostId] ?: store.inventory.firstOrNull {it.hostId==paired.hostId}?.inventory
+            rememberSessionDirectory(paired,connection.hello[paired.hostId],inventory,connection.inventoryReady[paired.hostId]==true,inventory?.sessions.orEmpty().filter(::matches),narrowed)
+        }
+    }
     val creationHosts=hosts.filter {paired->(connection.inventory[paired.hostId] ?: store.inventory.firstOrNull {it.hostId==paired.hostId}?.inventory) != null}
     LaunchedEffect(choosingCreationHost,creationHosts.map {it.hostId}) {if(choosingCreationHost && creationHosts.isEmpty()) choosingCreationHost=false}
     Box(Modifier.fillMaxSize()) {
@@ -554,32 +549,10 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                     }
                 } else {
                     if(model.sessionListPreferences.directoryView==SessionDirectoryView.Workspaces) {
-                        val directory=projectSessionDirectory(paired.hostId,inventory,ready,rows,narrowed)
-                        directory.workspaces.filter {it.agents.isNotEmpty()}.forEach {group->
-                            item(key=group.key.lazyKey) {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}}
-                        }
-                        if(directory.standalone.isNotEmpty()) item(key="standalone_heading_${paired.hostId}") {
-                            Column(Modifier.padding(vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                                UiText(if(ready) "Agents" else "Last observed agents",style=MaterialTheme.typography.titleMedium,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.semantics {heading()})
-                                UiText("Workspace association unavailable",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
-                            }
-                        }
-                        directory.standalone.forEach {summary->item(key="session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}") {
-                            Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {DirectoryAgentRow(summary,paired.name,null,model.sessionListPreferences,!ready,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)})}
-                        }}
-                        // These may contain shells or unbound panes; absence of a bound agent is not emptiness.
-                        val other=directory.workspaces.filter {it.agents.isEmpty()}
-                        if(other.isNotEmpty()) {
-                            val expanded=paired.hostId in expandedOtherHosts
-                            item(key="other_workspaces_${paired.hostId}") {
-                                TextButton(onClick={expandedOtherHosts=if(expanded) expandedOtherHosts-paired.hostId else expandedOtherHosts+paired.hostId},modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("other_workspaces_${paired.hostId}")) {
-                                    IconLabel(MaterialGlyph.ExpandMore,"${if(expanded) "Hide other workspaces" else "Other workspaces"} (${other.size})")
-                                }
-                            }
-                            if(expanded) other.forEach {group->
-                                item(key=group.key.lazyKey) {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {WorkspaceDirectoryCard(group,paired.name,model.sessionListPreferences) {target->model.open(paired.hostId,target)}}}
-                            }
-                        }
+                        val expanded=paired.hostId in expandedOtherHosts
+                        workspaceDirectoryItems(directories.getValue(paired.hostId),paired.hostId,paired.name,model.sessionListPreferences,!ready,expanded,
+                            {expandedOtherHosts=if(expanded) expandedOtherHosts-paired.hostId else expandedOtherHosts+paired.hostId},
+                            {target->model.open(paired.hostId,target)})
                     } else {
                         val workspaceByTarget=projectSessionDirectory(paired.hostId,inventory,ready,rows).workspaces.flatMap {group->
                             group.agents.map {Target(it.sessionId,it.generation) to group.workspace.label?.value}
@@ -597,6 +570,12 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                                 Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {DirectoryAgentRow(summary,paired.name,workspace,model.sessionListPreferences,!ready || cached!=null,"session_${paired.hostId}_${summary.sessionId.value}_${summary.generation.value}",{target->model.open(paired.hostId,target)},cached?.partial)}
                             }
                             previousStatus=summary.status
+                        }
+                    }
+                    if(inventory.unbound.isNotEmpty())item(key="setup_required_heading_${paired.hostId}") {
+                        Column(Modifier.fillMaxWidth().padding(top=12.dp,bottom=4.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                            HorizontalDivider(color=MaterialTheme.colorScheme.outlineVariant)
+                            GoatrSection("Setup required","These native panes are not openable conversations.")
                         }
                     }
                     inventory.unbound.forEach { row -> item(key="unbound_${paired.hostId}_${row.rowId.value}") {Box(Modifier.fillMaxWidth().animateItem(fadeInSpec=null,fadeOutSpec=null)) {UnboundSessionRow(row)}} }
@@ -619,8 +598,8 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                     }}
                 }
                 item(key="host_actions_${paired.hostId}") { FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    IconAction(MaterialGlyph.Terminal,"Terminals","host_terminals_${paired.hostId}",enabled=!model.busy) {model.terminals(paired.hostId)}
-                    IconAction(MaterialGlyph.Desktop,"View host","host_sessions_${paired.hostId}",enabled=!model.busy) {model.sessions(paired.hostId)}
+                    TextButton(onClick={model.terminals(paired.hostId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("host_terminals_${paired.hostId}")) {IconLabel(MaterialGlyph.Terminal,"Terminals")}
+                    TextButton(onClick={model.sessions(paired.hostId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("host_sessions_${paired.hostId}")) {IconLabel(MaterialGlyph.Desktop,"View host")}
                 } }
             }
             if(store.hosts.isNotEmpty()) item("add_host") { TextButton(onClick=model::beginPairing,enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("pair_begin")) {IconLabel(MaterialGlyph.Scan,"Add desktop") } }
@@ -632,7 +611,7 @@ private fun SessionsConsole(store: StoreView,connection: ConnectionView,model: G
                 IconButton(onClick={filtersOpen=false},modifier=Modifier.size(48.dp).testTag("session_filters_close")) {GoatrIcon(MaterialGlyph.Close,"Close filters")}
             })
             Column(Modifier.weight(1f,fill=false).verticalScroll(rememberScrollState()).padding(bottom=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick={filter=null;providerFilter=null;statusFilter=null},enabled=activeFilters.isNotEmpty(),modifier=Modifier.heightIn(min=48.dp).testTag("session_filters_clear")) {UiText("Clear all")}
+                TextButton(onClick=model.sessionFilters::clearFilters,enabled=activeFilters.isNotEmpty(),modifier=Modifier.heightIn(min=48.dp).testTag("session_filters_clear")) {UiText("Clear all")}
                 GoatrSection("Desktop")
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                     FilterChip(selected=filter==null,onClick={filter=null},label={UiText("All hosts")},modifier=Modifier.heightIn(min=48.dp).testTag("host_filter_all"))
@@ -771,7 +750,7 @@ private fun AttentionInboxDialog(shown:AttentionInboxState,store:StoreView,conne
 }
 
 @Composable
-private fun SeparateCreationConfirmation(host: String,action: LocalAction,model: GoatrViewModel,worktreeScope: WorktreeCreationRequestScope? = null,onConfirmed: ()->Unit) {
+private fun SeparateCreationConfirmation(host: String,action: LocalAction,model: GoatrViewModel,onConfirmed: ()->Unit) {
     val actionId=action.metadata.actionId.value
     val uncertain=action.receipt?.state==ReceiptState.Uncertain
     val resources=retainedCreationResources(action)
@@ -790,7 +769,7 @@ private fun SeparateCreationConfirmation(host: String,action: LocalAction,model:
                 }
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick={model.dismissSeparateCreation(action.metadata.actionId)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp)) {IconLabel(MaterialGlyph.Close,"Cancel")}
-                    IconAction(MaterialGlyph.Add,"Start separate new session","separate_creation_confirm_$actionId",enabled=!model.busy) {if(worktreeScope==null) model.confirmSeparateCreation(host,action.metadata.actionId,onConfirmed) else model.confirmSeparateWorktree(worktreeScope,action.metadata.actionId,onConfirmed)}
+                    IconAction(MaterialGlyph.Add,"Start separate new session","separate_creation_confirm_$actionId",enabled=!model.busy) {model.confirmSeparateCreation(host,action.metadata.actionId,onConfirmed)}
                 }
             }
         }
@@ -812,67 +791,12 @@ private fun retainedCreationResources(action: LocalAction): List<String> = actio
     )
 }.orEmpty()
 
-private fun creationOngoing(host: String,inventory: HostSnapshotResult?,model: GoatrViewModel,focused: LocalAction?): Boolean = inventory!=null && (
+internal fun creationOngoing(host: String,inventory: HostSnapshotResult?,model: GoatrViewModel,focused: LocalAction?): Boolean = inventory!=null && (
     model.creationActions.containsKey(host) ||
         focused?.let {it.receipt==null || it.receipt.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching)}==true ||
         model.actions[host].orEmpty().any {it.metadata.method==ActionMethod.SessionCreate && (it.receipt==null || it.receipt.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching))}
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun WorktreeCreationSheet(key: ConversationKey, inventory: HostSnapshotResult, summary: SessionSummary, listing: WorktreesSnapshot, connection: ConnectionView, model: GoatrViewModel, onDismiss: () -> Unit) {
-    val scope=listing.creationScope
-    val requestScope=remember(key,listing.source,listing.ticket) {WorktreeCreationRequestScope(key,listing.source,listing.ticket)}
-    LaunchedEffect(requestScope) {model.loadWorktreeCreation(requestScope)}
-    val creationGate=model.worktreeCreationGate?.takeIf {it.scope==requestScope}
-    val project=scope?.projectId
-    var provider by remember(key,listing.source,listing.ticket) {mutableStateOf(summary.provider)}
-    var name by remember(key,listing.source,listing.ticket) {mutableStateOf("")}
-    var existing by remember(key,listing.source,listing.ticket) {mutableStateOf(false)}
-    var branch by remember(key,listing.source,listing.ticket) {mutableStateOf("")}
-    var base by remember(key,listing.source,listing.ticket) {mutableStateOf("")}
-    val server=inventory.servers.singleOrNull {it.serverId==summary.serverId}
-    val selectedProject=inventory.projects.singleOrNull {it.projectId==project && it.available}
-    val sourceCurrent=model.foreground && model.selection==key && model.screen==Screen.Conversation && connection.sources[key.host]?.get(key.target)==listing.source && connection.mutationReady[key.host]==true && connection.inventoryReady[key.host]==true
-    val validCheckout=runCatching {if(existing) CreationCheckout.Existing(branch.trim()).validate() else CreationCheckout.New(branch.trim().takeIf {it.isNotEmpty()},base.trim().takeIf {it.isNotEmpty()}).validate()}.isSuccess
-    val providerReady=server?.let {if(provider==Provider.Omp) it.canCreate.omp else it.canCreate.codex}==true
-    val available=scope?.canCreate==true && selectedProject!=null && summary.capabilities.worktreeCreate && sourceCurrent && providerReady && name.isNotBlank() && runCatching {Label(name)}.isSuccess && validCheckout && !model.busy && model.worktreeCreationAllowed(requestScope)
-    ModalBottomSheet(onDismissRequest=onDismiss,sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
-        Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding().imePadding().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            GoatrTitleBar("Start in worktree",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),listing.loading,compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true),actions={
-                IconButton(onClick=onDismiss,modifier=Modifier.size(48.dp).testTag("worktree_create_close")) {GoatrIcon(MaterialGlyph.Close,"Close checkout creation")}
-            })
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)) {
-            UiText(selectedProject?.label?.value ?: "No authorized project is available for this source.",style=MaterialTheme.typography.bodyMedium,modifier=Modifier.testTag("worktree_create_project"))
-            if(creationGate?.loaded!=true) UiText("Checking retained creation actions…",style=MaterialTheme.typography.bodySmall)
-            creationGate?.prior?.let {action->
-                UiText("Inspect the retained creation before starting a separate action.",style=MaterialTheme.typography.bodySmall)
-                ReceiptPanel(key.host,action,model,onSeparateCreation={model.prepareSeparateWorktree(requestScope,action.metadata.actionId)})
-            }
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                listOf(Provider.Omp,Provider.Codex).forEachIndexed {index,option->
-                    SegmentedButton(selected=provider==option,onClick={provider=option},enabled=server?.let {if(option==Provider.Omp) it.canCreate.omp else it.canCreate.codex}==true,shape=SegmentedButtonDefaults.itemShape(index,2),label={UiText(providerLabel(option))},modifier=Modifier.testTag("worktree_create_provider_"+option.name.lowercase()))
-                }
-            }
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                SegmentedButton(selected=!existing,onClick={existing=false},shape=SegmentedButtonDefaults.itemShape(0,2),label={UiText("New branch")},modifier=Modifier.testTag("worktree_create_new"))
-                SegmentedButton(selected=existing,onClick={existing=true},shape=SegmentedButtonDefaults.itemShape(1,2),label={UiText("Existing branch")},modifier=Modifier.testTag("worktree_create_existing"))
-            }
-            OutlinedTextField(name,{name=it},label={UiText("Session name")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("worktree_create_name"))
-            OutlinedTextField(branch,{branch=it},label={UiText(if(existing) "Existing branch" else "New branch (generated if blank)")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("worktree_create_branch"))
-            if(!existing) OutlinedTextField(base,{base=it},label={UiText("Base (HEAD if blank)")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("worktree_create_base"))
-            if(!sourceCurrent) UiText("Refresh this conversation before creating a checkout.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall)
-            }
-            IconAction(MaterialGlyph.Add,"Create checkout and session","worktree_create_submit",enabled=available,modifier=Modifier.fillMaxWidth()) {
-                val selected=project ?: return@IconAction
-                model.createInWorktree(key,listing.source,listing.ticket,selected,provider,name,existing,branch,base)
-            }
-        }
-    }
-    if(model.separateWorktreeScope==requestScope) creationGate?.prior?.takeIf {it.metadata.actionId==model.separateCreationAction}?.let {action->
-        SeparateCreationConfirmation(key.host,action,model,requestScope) {}
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -881,6 +805,8 @@ private fun HostCreationSheet(host: String,inventory: HostSnapshotResult,connect
     val ongoing=creationOngoing(host,inventory,model,focused)
     var creationMemory by remember(host) {mutableStateOf<FormMemory?>(null)}
     LaunchedEffect(host) {creationMemory=model.creationForms.getOrPut(host) {FormMemory()}}
+    val directories=remember(host) {model.creationBrowser(host)}
+    DisposableEffect(directories) {onDispose {model.closeCreationDirectories(directories)}}
     ModalBottomSheet(onDismissRequest=onDismiss,sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
         Box(Modifier.fillMaxWidth().heightIn(max=640.dp).semantics {testTagsAsResourceId=true}.navigationBarsPadding().imePadding()) {
             Column(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
@@ -889,31 +815,38 @@ private fun HostCreationSheet(host: String,inventory: HostSnapshotResult,connect
                 })
                 creationMemory?.let {memory->Box(Modifier.weight(1f).fillMaxWidth()) {
                     val creationGate=creationReadinessReason(connection.hello[host],model.busy,connection.inventoryReady[host]==true,connection.mutationReady[host]==true,ongoing)
-                    CreateSession(inventory,connection.hello[host],connection.inventoryReady[host]==true && connection.mutationReady[host]==true && !model.busy && !ongoing,memory,{},creationGate?.message,creationGate?.tag) {server,project,provider,name->
-                        onDismiss()
-                        model.create(server,project,provider,name)
+                    CreateSession(inventory,connection.hello[host],connection.inventoryReady[host]==true && connection.mutationReady[host]==true && !model.busy && !ongoing,memory,{},creationGate?.message,creationGate?.tag,directories=directories) {choice->
+                        model.create(choice)
                     }
                 }}
+                focused?.takeIf {creationMemory?.text?.get("submitted")=="yes"}?.let {ReceiptPanel(host,it,model)}
             }
         }
     }
 }
 
 @Composable
-fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boolean,memory: FormMemory,contentBeforeFields:@Composable ()->Unit,gateMessage: String? = null,gateTag: String? = null,pinnedProvider:Provider?=null,requireProjectSelection:Boolean=false,onCreate: (Uuid,Uuid,Provider,String)->Unit) {
+internal fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boolean,memory: FormMemory,contentBeforeFields:@Composable ()->Unit,gateMessage: String? = null,gateTag: String? = null,requireProjectSelection:Boolean=false,directories:CreationDirectoryBrowser?=null,beside:Pair<Uuid,Target>?=null,onCreate: (SessionCreationChoice)->Unit) {
     var server by remember(inventory.servers) {mutableStateOf(memory.text["server"]?.let(::Uuid) ?: inventory.servers.firstOrNull()?.serverId)}
     var project by remember(inventory.projects) {mutableStateOf(memory.text["project"]?.let(::Uuid) ?: if(requireProjectSelection)null else inventory.projects.firstOrNull {it.available}?.projectId)}
-    var provider by remember {mutableStateOf(pinnedProvider ?: memory.text["provider"]?.let(Provider::valueOf) ?: Provider.Omp)}
+    var provider by remember {mutableStateOf(memory.text["provider"]?.let(Provider::valueOf) ?: Provider.Omp)}
     val name=memory.text["name"].orEmpty()
     val submitted=memory.text["submitted"]=="yes"
+    // Keep authenticated source identity available when scrolling clips the selectors.
+    val formSourceTag=remember(hello,server,project) {
+        "creation_form_source_${hello?.hostId?.value ?: "none"}_${hello?.bootId?.value ?: "none"}_${server?.value ?: "none"}_${project?.value ?: "none"}"
+    }
     SideEffect {server?.let {memory.text["server"]=it.value};project?.let {memory.text["project"]=it.value};memory.text["provider"]=provider.name}
+    LaunchedEffect(directories,server,project) {directories?.configure(server,project)}
+    val directoryChoice=directories?.choice(server,project)
+    val besideHere=memory.text["placement"]=="beside"&&beside?.first==server
     val validName=runCatching {Label(name)}.isSuccess
     val selectedServer=inventory.servers.firstOrNull {it.serverId==server}
     val selectedProject=inventory.projects.firstOrNull {it.projectId==project}
     val selectedBackend=hello?.backends?.firstOrNull {it.provider==provider}
     val nativeCurrent=inventory.hierarchy.none {it.serverId==server && (it.freshness==NativeFreshness.Stale || it.reason==NativeUnavailableReason.SourceUnavailable)}
     // canCreate is authoritative guarded ATTEMPT eligibility, not an existing native binding.
-    val available=enabled && selectedServer?.connectivity==ServerConnectivity.Online && nativeCurrent && (if(provider==Provider.Omp) selectedServer.canCreate.omp else selectedServer.canCreate.codex) && inventory.projects.any {it.projectId==project && it.available} && validName && !submitted
+    val available=enabled && selectedServer?.connectivity==ServerConnectivity.Online && nativeCurrent && (if(provider==Provider.Omp) selectedServer.canCreate.omp else selectedServer.canCreate.codex) && inventory.projects.any {it.projectId==project && it.available} && validName && !submitted && (directories==null||directoryChoice!=null)
     val conditions=buildList {
             if(hello==null) add("Reconnect before creating a session.")
             if(!enabled) add(gateMessage ?: "Wait for the phone to finish synchronizing or its current operation.")
@@ -927,11 +860,12 @@ fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boo
                 selectedProject==null -> add("Choose an available project.")
                 !selectedProject.available -> add("Choose an available project.")
             }
+            if(directories!=null&&directoryChoice==null)add(if(directories.loading)"Reading the selected directory." else "Reopen or refresh directory selection for this original desktop view.")
             if(!validName) add(if(name.isEmpty()) "Name your session to continue." else "Enter a session name between 1 and 128 characters.")
     }
     val details=listOfNotNull(selectedServer?.reason,selectedBackend?.reason,selectedProject?.reason).distinct()
     Column(Modifier.fillMaxSize(),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(16.dp)) {
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag(formSourceTag),verticalArrangement=Arrangement.spacedBy(16.dp)) {
             contentBeforeFields()
             UiText("Start a session without changing what is open on your desktop.",style=MaterialTheme.typography.bodySmall)
             val serverItems=inventory.servers.map {candidate->
@@ -945,13 +879,24 @@ fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boo
                 )
             }
             val projectItems=inventory.projects.map {candidate->CreationPickerItem(candidate.projectId,candidate.label.value,candidate.available)}
-            CreationPicker("Server",server,"Choose a server","create_server",serverItems) {selectedId->server=selectedId}
-            CreationPicker("Project",project,"Choose a project","create_project",projectItems) {selectedId->project=selectedId}
+            CreationPicker("Server",server,"Choose a server","create_server",serverItems) {selectedId->
+                server=selectedId;if(beside?.first!=selectedId)memory.text.remove("placement")
+                directories?.configure(server,project)
+            }
+            CreationPicker("Project",project,"Choose a project","create_project",projectItems) {selectedId->project=selectedId;directories?.configure(server,project)}
             if(inventory.projects.isEmpty()) UiText("No configured projects. New creation is unavailable; existing sessions remain host-wide accessible.")
+            if(directories!=null&&selectedProject!=null)CreationDirectoriesChooser(directories,selectedProject.label.value)
+            if(beside!=null) {
+                Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
+                    Checkbox(checked=besideHere,onCheckedChange={if(it)memory.text["placement"]="beside" else memory.text.remove("placement")},enabled=enabled&&server==beside.first)
+                    UiText("Beside this agent · new tab in its original current workspace",modifier=Modifier.weight(1f),style=MaterialTheme.typography.bodyMedium)
+                }
+                UiText(if(besideHere)"Directory selection is independent of placement. No desktop focus change is requested." else "Create in a separate workspace using the selected project and directory.",style=MaterialTheme.typography.bodySmall)
+            }
             GroupedSurface {
                 GoatrSection("Provider")
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {Provider.entries.forEach {p->
-                    FilterChip(selected=provider==p,onClick={provider=p},enabled=pinnedProvider==null,label={UiText(providerLabel(p))},modifier=Modifier.heightIn(min=48.dp).testTag("create_provider"))
+                    FilterChip(selected=provider==p,onClick={provider=p},label={UiText(providerLabel(p))},modifier=Modifier.heightIn(min=48.dp).testTag("create_provider"))
                 }}
                 OutlinedTextField(value=name,onValueChange={memory.text["name"]=it},label={UiText("Session name")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("create_name"))
             }
@@ -970,7 +915,17 @@ fun CreateSession(inventory: HostSnapshotResult,hello: HelloResult?,enabled: Boo
                     !available -> Box(if(gateTag==null) Modifier else Modifier.testTag(gateTag)) {UiText(conditions.firstOrNull() ?: "Creation is unavailable until the selected desktop setup is ready.",color=if(gateTag!=null || (name.isEmpty() && conditions.size==1 && conditions.first()=="Name your session to continue.") || conditions.firstOrNull()=="Wait for the phone to finish synchronizing or its current operation.") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("create_blocking_reason"))}
                     else -> UiText("Ready to create your session.",style=MaterialTheme.typography.bodySmall)
                 }
-                IconAction(MaterialGlyph.Add,"Create session","session_create",enabled=available,modifier=Modifier.fillMaxWidth()) { memory.text["submitted"]="yes";onCreate(server!!,project!!,provider,name) }
+                IconAction(MaterialGlyph.Add,"Create session","session_create",enabled=available,modifier=Modifier.fillMaxWidth()) {
+                    if(memory.text["submitted"]=="yes")return@IconAction
+                    val selectedServer=server ?: return@IconAction;val selectedProject=project ?: return@IconAction
+                    val selectedDirectory=directories?.choice(selectedServer,selectedProject)
+                    if(directories!=null&&selectedDirectory==null)return@IconAction
+                    val selectedName=memory.text["name"].orEmpty()
+                    if(runCatching {Label(selectedName)}.isFailure)return@IconAction
+                    val placement=beside?.takeIf {it.first==selectedServer&&memory.text["placement"]=="beside"}?.let {SessionPlacement(it.second)}
+                    memory.text["submitted"]="yes"
+                    onCreate(SessionCreationChoice(selectedServer,selectedProject,provider,selectedName,selectedDirectory,placement))
+                }
             }
         }
     }
@@ -1037,6 +992,13 @@ private fun conversationReadinessReason(
     else -> null
 }
 
+@Composable
+internal fun PromptActionPreparation(text:String,images:List<ComposerImageInput>,submitted:Boolean,reserved:Boolean,enabled:Boolean,onPrepare:()->Unit) {
+    if(!submitted&&!reserved&&(text.isNotEmpty()||images.isNotEmpty())) {
+        TextButton(onClick=onPrepare,enabled=enabled,modifier=Modifier.heightIn(min=48.dp).testTag("prompt_new_action")) {IconLabel(MaterialGlyph.Add,"Prepare a new send action")}
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConversationScreen(key: ConversationKey,store: StoreView,connection: ConnectionView,model: GoatrViewModel) {
@@ -1044,6 +1006,7 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     val cache=store.cached.firstOrNull {it.hostId==key.host && Target(it.summary.sessionId,it.summary.generation)==key.target}
     val summary=reducer?.state?.summary ?: cache?.summary
     val source=connection.sources[key.host]?.get(key.target)
+    SideEffect {model.initializeComposerSelection(key)}
     val inventory=connection.inventory[key.host]
     val sourceCurrent=summary!=null && inventory?.hierarchy?.none {it.serverId==summary.serverId && (it.freshness==NativeFreshness.Stale || it.reason==NativeUnavailableReason.SourceUnavailable)}==true && inventory.servers.none {it.serverId==summary.serverId && it.connectivity!=ServerConnectivity.Online}
     val ready=model.foreground && source!=null && reducer?.mutationsEnabled==true && connection.inventoryReady[key.host]==true && connection.mutationReady[key.host]==true && sourceCurrent && !model.busy
@@ -1062,6 +1025,7 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     var switcher by remember {mutableStateOf(false)}
     var snippets by remember(key) {mutableStateOf(false)}
     var moreTools by remember(key,source) {mutableStateOf(false)}
+    var copySubmitted by remember(key) {mutableStateOf(false)}
     LaunchedEffect(key,source,model.foreground,reducer?.pending?.map {it.requestKey},summary?.status) {if(source!=null && model.foreground) try {model.viewed(key)} catch(cancel: CancellationException) {throw cancel} catch(_: Exception) {}}
     if(switcher) ModalBottomSheet(onDismissRequest={switcher=false},containerColor=MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(.8f).semantics {testTagsAsResourceId=true}.padding(16.dp).testTag("switcher_scope_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -1077,81 +1041,91 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     }
     model.skills?.takeIf {it.key==key && it.source==source && (it.generation==summary?.skillsGeneration||it.loading&&summary?.provider==Provider.Omp) && summary?.capabilities?.skillsRead==true && ready && model.foreground}?.let { SkillsPicker(it,model,connectionLabel(it.key.host,connection,model.connectingHosts[it.key.host]==true),compactConnectionLabel(it.key.host,connection,model.connectingHosts[it.key.host]==true)) }
     model.skillsDocument?.takeIf{it.snapshot.key==key&&it.snapshot.source==source&&it.snapshot.generation==summary?.skillsGeneration&&summary?.capabilities?.skillsRead==true&&ready&&model.foreground}?.let{SkillsDocument(it,model,connectionLabel(it.snapshot.key.host,connection,model.connectingHosts[it.snapshot.key.host]==true),compactConnectionLabel(it.snapshot.key.host,connection,model.connectingHosts[it.snapshot.key.host]==true))}
-    if(snippets) ComposerSnippetPicker(key,store.snippets.filter {it.hostId==key.host},model,model.composers[key].orEmpty().isEmpty(),connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true)) {snippets=false}
+    model.sessionControls?.takeIf {it.key==key}?.let {SessionControls(it,model,summary?.provider ?: Provider.Omp)}
+    if(copySubmitted)AlertDialog(onDismissRequest={copySubmitted=false},title={UiText("Copy submitted message to a new draft?")},text={UiText("The original text and image inputs may already have reached the native session. Sending this copy can duplicate native work. Nothing is sent by copying.")},confirmButton={TextButton(onClick={copySubmitted=false;model.newComposerMessage(key,true,true)},modifier=Modifier.heightIn(min=48.dp)){UiText("Copy with duplicate warning acknowledged")}},dismissButton={TextButton(onClick={copySubmitted=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Keep submitted snapshot")}})
+    if(snippets) ComposerSnippetPicker(key,store.snippets.filter {it.hostId==key.host},model,model.composers[key].orEmpty().isEmpty()&&model.composerUploads[key].isNullOrEmpty(),connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true)) {snippets=false}
     val pending=reducer?.pending.orEmpty()
     val history=reducer?.history ?: cache?.history.orEmpty()
-    val routineToolIds=history.filter {isRoutineToolRecord(it,reducer?.state?.activity?.toolRecordId)}.map {it.id}.toSet()
-    // Older browsing opens the routine records so native backscroll remains inspectable.
-    var routineToolsExpanded by remember(key,source,reducer?.browsingOlder) {mutableStateOf(reducer?.browsingOlder==true)}
-    val focusedAction=model.focusedAction?.takeIf {(it.metadata.target==key.target || it.metadata.sourceTarget==key.target)}
-    // One constant activity-tail item follows all raw history slots, including folded zero-height records.
-    val activityTailIndex=history.size+if(focusedAction!=null) 2 else 1
-    val latestTailIndex=when {
-        history.isNotEmpty()->history.size+if(focusedAction!=null) 1 else 0
-        focusedAction!=null->1
-        else->0
-    }
-    val transcript=rememberLazyListState()
-    val scope=rememberCoroutineScope()
-    var following by remember(key,source) {mutableStateOf(true)}
-    var readTail by remember(key,source) {mutableStateOf<Id?>(null)}
-    LaunchedEffect(transcript,key,source) {
-        snapshotFlow {transcript.isScrollInProgress to transcript.canScrollForward}.collect {(scrolling,canForward)->if(scrolling || !canForward) following=!canForward}
-    }
-    LaunchedEffect(history.lastOrNull()?.id,focusedAction?.metadata?.actionId,following,reducer?.browsingOlder) {
-        if(following && reducer?.browsingOlder!=true) {
-            readTail=history.lastOrNull()?.id
-            // Follow the completed native transcript, falling back to the focused receipt
-            // only until history arrives. Stable native keys retain a reader's anchor.
-            if(history.isNotEmpty() || focusedAction!=null) transcript.scrollToItem(latestTailIndex)
-        }
-    }
     var selectedRequest by remember(key,source) {mutableStateOf<Uuid?>(null)}
     val request=pending.firstOrNull {it.requestKey==selectedRequest}
     LaunchedEffect(pending.map {it.requestKey}) {if(request==null) selectedRequest=null}
-    request?.let {active->
-        var memory by remember(key,source,active.requestKey) {mutableStateOf<FormMemory?>(null)}
-        LaunchedEffect(key,source,active.requestKey) {memory=model.formMemory(key,source,active.requestKey)}
-        DisposableEffect(key,source,active.requestKey) {onDispose {memory?.clearSecrets()}}
-        Dialog(onDismissRequest={selectedRequest=null},properties=DialogProperties(usePlatformDefaultWidth=false)) {
-            Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(),color=MaterialTheme.colorScheme.surface) {
-                Column(Modifier.padding(16.dp)) {
-                    GoatrTitleBar("Needs your answer",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),false,compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true),actions={
-                        IconButton(onClick={selectedRequest=null},modifier=Modifier.size(48.dp).testTag("request_close")) {GoatrIcon(MaterialGlyph.Close,"Close")}
-                    })
-                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).semantics {paneTitle="Native request answer"}.testTag("request_editor_${active.requestKey.value}")) {
-                        UiText("Closing keeps the native request open.",style=MaterialTheme.typography.bodySmall)
-                        memory?.let {form->ProviderForm(active,form,ready && summary?.capabilities?.respond==true,"Reconnect and refresh this request before answering.",{content,loaded->ContentView(content,key,source,model,onLoaded=loaded)},{url->model.forms.values.forEach(FormMemory::clearSecrets);openHttpUrl(model.getApplication(),url)}) {answer->model.respond(active,answer)}}
-                    }
-                    OutlinedButton(onClick=model::stop,enabled=stopAllowed,modifier=Modifier.fillMaxWidth().heightIn(min=56.dp).testTag("request_stop")) {IconLabel(MaterialGlyph.Stop,"Stop current work")}
+    val activeToolId=reducer?.state?.activity?.toolRecordId
+    val routineToolIds=remember(history,activeToolId) {history.asSequence().filter {isRoutineToolRecord(it,activeToolId)}.map {it.id}.toSet()}
+    val focusedAction=model.focusedAction?.takeIf {(it.metadata.target==key.target || it.metadata.sourceTarget==key.target)}
+    val otherActions=remember(model.actions[key.host],focusedAction?.metadata?.actionId,key.target){model.actions[key.host].orEmpty().filter {it.metadata.target==key.target&&it.metadata.actionId!=focusedAction?.metadata?.actionId}}
+    val otherReceiptIds=remember(otherActions){otherActions.map {it.metadata.actionId}}
+    // One constant activity-tail item follows all raw history slots, including folded zero-height records.
+    val activityTailIndex=history.size+if(focusedAction!=null) 2 else 1
+    val readerIdentity=remember(summary,inventory?.hierarchy){summary?.let {row->inventory?.hierarchy?.singleOrNull {it.serverId==row.serverId}?.let {graph->ConversationReaderIdentity(row.serverId,graph.serverIncarnation,row.provider,row.nativeId)}}}
+    val reader=remember(key,readerIdentity){model.readerPosition(key,readerIdentity)}
+    val routineToolsExpanded=observeReaderToolExpansion(reader,reducer?.browsingOlder==true)
+    val readerSource=source?.takeIf {sourceCurrent}
+    val readerTicket=remember(reader,readerSource,request?.requestKey){reader.attach()}
+    val transcript=key(key){rememberLazyListState()}
+    val scope=rememberCoroutineScope()
+    val following=reader.following
+    val readTail=reader.readTail
+    val restoring=remember(readerTicket){mutableStateOf(true)}
+    suspend fun scrollReader(index:Int,offset:Int=0) {
+        if(!reader.current(readerTicket))return
+        restoring.value=true
+        try{transcript.scrollToItem(index,offset)}finally{restoring.value=false}
+    }
+    val currentHistory=rememberUpdatedState(history)
+    val currentFocused=rememberUpdatedState(focusedAction?.metadata?.actionId)
+    val currentOlder=rememberUpdatedState(reducer?.browsingOlder==true)
+    LaunchedEffect(transcript,reader,readerTicket,request?.requestKey) {
+        var wasScrolling=false
+        snapshotFlow {Triple(transcript.layoutInfo,transcript.isScrollInProgress,restoring.value)}.collect {(layout,scrolling,paused)->
+            val userScroll=scrolling||wasScrolling
+            wasScrolling=scrolling&&!paused
+            if(!paused&&request==null&&reader.current(readerTicket)) {
+                val shown=layout.visibleItemsInfo.firstOrNull {it.size>0&&it.key is String}
+                if(shown!=null) {
+                    val start=1+if(currentFocused.value!=null)1 else 0
+                    val record=currentHistory.value.getOrNull(shown.index-start)?.takeIf {shown.key=="history_${it.id.value}"}
+                    reader.capture(readerTicket,shown.key as String,record?.order?.value,shown.offset,!transcript.canScrollForward,userScroll,currentOlder.value,currentHistory.value.lastOrNull()?.id)
                 }
             }
         }
     }
+    LaunchedEffect(reader,readerTicket,history.firstOrNull()?.id,request?.requestKey) {
+        restoring.value=true
+        if(request!=null)return@LaunchedEffect
+        try {
+            if(!reader.following||currentOlder.value) {
+                val index=reader.locate(currentHistory.value,currentFocused.value,otherReceiptIds)
+                if(index!=null)transcript.scrollToItem(index,if(reader.anchorMissing)0 else reader.anchor?.offset ?: 0)
+            }
+        }finally{restoring.value=false}
+    }
+    LaunchedEffect(transcript,reader,readerTicket,request?.requestKey) {
+        if(request==null)followConversationReader(reader,readerTicket,transcript,currentHistory,currentFocused,currentOlder,restoring)
+    }
+    DisposableEffect(reader,readerTicket){onDispose{reader.release(readerTicket)}}
+
+    var requestMemory by remember(key,source,request?.requestKey) {mutableStateOf<FormMemory?>(null)}
+    LaunchedEffect(key,source,request?.requestKey) {request?.let {requestMemory=model.formMemory(key,source,it.requestKey)}}
     model.terminal?.takeIf {it.key==key && it.source==source}?.let {terminal->
         Dialog(onDismissRequest=model::closeTerminal,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
             Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("terminal_dialog"),color=MaterialTheme.colorScheme.surface) {
                 Column(Modifier.fillMaxSize().padding(16.dp).testTag("terminal_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                    GoatrTitleBar("Terminal snapshot",connectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),terminal.loading,compactStatus=compactConnectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),actions={
-                        IconButton(onClick=model::closeTerminal,modifier=Modifier.size(48.dp).testTag("terminal_close")) {GoatrIcon(MaterialGlyph.Close,"Close terminal snapshot")}
+                    GoatrTitleBar("Live terminal",connectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),terminal.loading,compactStatus=compactConnectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),actions={
+                        IconButton(onClick=model::closeTerminal,modifier=Modifier.size(48.dp).testTag("terminal_close")) {GoatrIcon(MaterialGlyph.Close,"Close terminal viewer")}
                     })
-                    UiText("Snapshot · refresh to update",style=MaterialTheme.typography.labelMedium)
+                    UiText("Live grid · pan and pinch locally",style=MaterialTheme.typography.labelMedium)
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         when {
-                            terminal.loading -> UiText("Loading terminal snapshot",modifier=Modifier.testTag("terminal_loading"))
-                            terminal.error -> UiText("Terminal snapshot is unavailable",modifier=Modifier.testTag("terminal_error"))
-                            terminal.text.isNullOrEmpty() -> UiText("No text in this snapshot",modifier=Modifier.testTag("terminal_empty"))
-                            else -> UiText(terminal.text,style=MaterialTheme.typography.bodyMedium,fontFamily=FontFamily.Monospace,modifier=Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("terminal_output"))
+                            terminal.error -> UiText("Live terminal is unavailable",modifier=Modifier.testTag("terminal_error"))
+                            terminal.grid==null -> UiText("Waiting for a complete terminal grid",modifier=Modifier.testTag("terminal_loading"))
+                            else -> TerminalGridCanvas(terminal.grid,TerminalAppearance.FollowApp,Modifier.fillMaxSize())
                         }
                     }
-                    if(terminal.truncated) UiText("Snapshot truncated to 16 KiB",style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("terminal_truncated"))
-                    TextButton(onClick=model::refreshTerminal,enabled=!terminal.loading,modifier=Modifier.heightIn(min=48.dp).testTag("terminal_refresh")) {IconLabel(MaterialGlyph.Refresh,"Refresh")}
                 }
             }
         }
     }
     model.worktrees?.takeIf {it.key==key && it.source==source}?.let {worktrees->
-        var createCheckout by remember(key,source,worktrees.ticket) { mutableStateOf(false) }
         Dialog(onDismissRequest=model::closeWorktrees,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
             Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("worktrees_dialog"),color=MaterialTheme.colorScheme.surface) {
                 Column(Modifier.fillMaxSize().padding(16.dp).testTag("worktrees_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -1183,7 +1157,6 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                                         add(if(entry.isLinkedWorktree==true) "linked worktree" else if(entry.isLinkedWorktree==false) "main worktree" else "link status unknown")
                                     }
                                     UiText(flags.joinToString(" · "),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                                    if(entry.candidateId!=null && summary?.capabilities?.worktreeRemove==true)IconAction(MaterialGlyph.Delete,"Remove checkout","worktree_remove_open",enabled=ready && !model.busy && !worktrees.loading && !worktrees.error){model.previewWorktreeRemoval(worktrees,entry)}
                                 }
                             }
                         }
@@ -1191,16 +1164,9 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                     }
                     FlowRow(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                         TextButton(onClick=model::refreshWorktrees,enabled=!worktrees.loading,modifier=Modifier.heightIn(min=48.dp).testTag("worktrees_refresh")) {IconLabel(MaterialGlyph.Refresh,"Refresh")}
-                        IconAction(MaterialGlyph.Add,"Start session in checkout","worktrees_create",enabled=ready && !worktrees.loading && !worktrees.error && worktrees.creationScope?.canCreate==true && summary?.capabilities?.worktreeCreate==true) { createCheckout=true }
                     }
                 }
             }
-        }
-        model.worktreeRemoval?.takeIf {it.key==key && it.source==source && it.ticket==worktrees.ticket}?.let {WorktreeRemovalDialog(it,model,connectionLabel(it.key.host,connection,model.connectingHosts[it.key.host]==true),compactConnectionLabel(it.key.host,connection,model.connectingHosts[it.key.host]==true))}
-        if(createCheckout) {
-            val inventory=connection.inventory[key.host]
-            val summary=connection.sessions[key.host]?.firstOrNull {it.state?.summary?.let {state->Target(state.sessionId,state.generation)==key.target}==true}?.state?.summary
-            if(inventory==null || summary==null) createCheckout=false else WorktreeCreationSheet(key,inventory,summary,worktrees,connection,model) {createCheckout=false}
         }
     }
     model.changes?.takeIf {it.key==key && it.source==source}?.let {changes->
@@ -1348,20 +1314,20 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
         modifier=Modifier.testTag("workspace_rename_dialog"),
     )
 
-    if(moreTools) ModalBottomSheet(onDismissRequest={moreTools=false},containerColor=MaterialTheme.colorScheme.surface) {
-        Column(Modifier.fillMaxWidth().fillMaxHeight(.8f).padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+    if(moreTools) ModalBottomSheet(onDismissRequest={moreTools=false},sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),containerColor=MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(.8f).semantics {testTagsAsResourceId=true}.navigationBarsPadding().imePadding().padding(horizontal=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             GoatrTitleBar("Conversation tools",connectionLabel(key.host,connection,model.connectingHosts[key.host]==true),false,compactStatus=compactConnectionLabel(key.host,connection,model.connectingHosts[key.host]==true),actions={
                 IconButton(onClick={moreTools=false},modifier=Modifier.size(48.dp).testTag("conversation_more_close")) {GoatrIcon(MaterialGlyph.Close,"Close conversation tools")}
             })
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 GoatrSection("History")
                 if(reducer?.browsingOlder==true) {
-                    ComposerControlAction(MaterialGlyph.Refresh,"Return to latest history","conversation_refresh",!model.busy&&key.host in connection.hello,"Finish connecting or the current operation before refreshing") {moreTools=false;model.refresh()}
+                    ComposerControlAction(MaterialGlyph.Refresh,"Return to latest history","conversation_refresh",!model.busy&&key.host in connection.hello,"Finish connecting or the current operation before refreshing") {moreTools=false;reader.latest(history.lastOrNull()?.id);model.refresh()}
                     if(model.busy || key.host !in connection.hello) UiText("Finish connecting or the current operation before refreshing",style=MaterialTheme.typography.bodySmall)
                 }
                 if(reducer!=null && !reducer.browsingOlder) {
                     val historyAvailable=!model.busy&&source!=null&&reducer.state?.summary?.capabilities?.history==true
-                    ComposerControlAction(MaterialGlyph.Back,"Browse native history","history_browse",historyAvailable,"History is unavailable") {moreTools=false;model.older()}
+                    ComposerControlAction(MaterialGlyph.Back,"Browse native history","history_browse",historyAvailable,"History is unavailable") {moreTools=false;reader.following=false;model.older()}
                     if(!historyAvailable) UiText("History is unavailable",style=MaterialTheme.typography.bodySmall)
                 }
                 reducer?.nextCursor?.let {cursor->
@@ -1380,26 +1346,25 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                     TextButton(onClick={moreTools=false;model.openRetainedAttachment(record)},enabled=ready&&summary?.capabilities?.attachments==true,modifier=Modifier.heightIn(min=48.dp).testTag("attachment_inspect_original")) {AttachmentIconLabel(R.drawable.ic_material_attach_file,"Inspect for this conversation")}
                     if(!(ready&&summary?.capabilities?.attachments==true)) UiText("Attachment inspection is unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
                 }
-                if(summary?.capabilities?.artifacts==true) {
-                    val filesAvailable=ready&&source!=null&&!model.busy
-                    ComposerControlAction(MaterialGlyph.Folder,"Files","conversation_files",filesAvailable,"Files are unavailable for this current session.") {moreTools=false;model.beginArtifacts(key.host,ArtifactSource.Session(key.target))}
-                    if(!filesAvailable) UiText("Files are unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
-                }
+                val filesAvailable=ready&&source!=null&&!model.busy&&summary?.capabilities?.artifacts==true
+                ComposerControlAction(MaterialGlyph.Folder,"Files","conversation_files",filesAvailable,PROJECT_FILE_READ_REQUIREMENT) {moreTools=false;model.beginArtifacts(key.host,ArtifactSource.Session(key.target))}
+                if(!filesAvailable) UiText(PROJECT_FILE_READ_REQUIREMENT,style=MaterialTheme.typography.bodySmall)
                 val terminalAvailable=ready&&source!=null&&summary?.capabilities?.terminalRead==true
                 ComposerControlAction(MaterialGlyph.Terminal,"Terminal","terminal_open",terminalAvailable,"Terminal text is unavailable for this current native session.") {moreTools=false;model.openTerminal(key)}
                 if(!terminalAvailable) UiText("Terminal text is unavailable for this current native session.",style=MaterialTheme.typography.bodySmall)
                 val worktreesAvailable=ready&&source!=null&&summary?.capabilities?.worktreesRead==true
-                ComposerControlAction(MaterialGlyph.Desktop,"Worktrees","worktrees_open",worktreesAvailable,"Worktrees are unavailable for this current session.") {moreTools=false;model.openWorktrees(key)}
-                if(!worktreesAvailable) UiText("Worktrees are unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
+                ComposerControlAction(MaterialGlyph.Desktop,"Worktrees","worktrees_open",worktreesAvailable,PROJECT_GIT_READ_REQUIREMENT) {moreTools=false;model.openWorktrees(key)}
+                if(!worktreesAvailable) UiText(PROJECT_GIT_READ_REQUIREMENT,style=MaterialTheme.typography.bodySmall)
+                UiText(STOCK_CLOSE_LIMITATION,style=MaterialTheme.typography.bodySmall)
                 val changesAvailable=ready&&source!=null&&summary?.capabilities?.changesRead==true
-                ComposerControlAction(MaterialGlyph.Terminal,"Changes","changes_open",changesAvailable,"Changes are unavailable for this current session.") {moreTools=false;model.openChanges(key)}
-                if(!changesAvailable) UiText("Changes are unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
+                ComposerControlAction(MaterialGlyph.Terminal,"Changes","changes_open",changesAvailable,PROJECT_GIT_READ_REQUIREMENT) {moreTools=false;model.openChanges(key)}
+                if(!changesAvailable) UiText(PROJECT_GIT_READ_REQUIREMENT,style=MaterialTheme.typography.bodySmall)
                 val creationAvailable=ready&&source!=null&&!model.busy
                 ComposerControlAction(MaterialGlyph.Add,"New session","agent_new_session",creationAvailable,"Creation is unavailable for this current session.") {moreTools=false;model.beginAgentSession(key)}
                 if(!creationAvailable) UiText("Creation is unavailable for this current session.",style=MaterialTheme.typography.bodySmall)
                 val terminalCreationAvailable=ready&&source!=null&&summary?.capabilities?.terminalCreate==true&&!model.busy
-                ComposerControlAction(MaterialGlyph.Terminal,"New terminal in agent process directory","agent_terminal_new",terminalCreationAvailable,"Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.") {moreTools=false;model.beginAgentTerminal(key)}
-                if(!terminalCreationAvailable) UiText("Agent process directory creation requires native support, the desktop shell grant and the original bound provider process.",style=MaterialTheme.typography.bodySmall)
+                ComposerControlAction(MaterialGlyph.Terminal,"New terminal beside this session","agent_terminal_new",terminalCreationAvailable,"Choose an approved project/directory in this original native workspace. The desktop terminal-control grant is required; no conversation/process cwd is inferred.") {moreTools=false;model.beginAgentTerminal(key)}
+                if(!terminalCreationAvailable) UiText("An original current native workspace and the desktop terminal-control grant are required. You can also choose a workspace from Terminals.",style=MaterialTheme.typography.bodySmall)
                 val renameAvailable=aliasAvailable&&!model.busy
                 ComposerControlAction(MaterialGlyph.Edit,"Agent alias","agent_alias_open",renameAvailable,"Agent alias is unavailable for this original native session.") {moreTools=false;source?.let {aliasScope=model.beginAgentAlias(key,it);aliasName=""}}
                 if(!renameAvailable) UiText("Agent alias is unavailable for this original native session.",style=MaterialTheme.typography.bodySmall)
@@ -1409,7 +1374,13 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
         }
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val imageInputs=model.composerUploads[key].orEmpty()
+    val imageInputCount=imageInputs.size
+    val composerSubmitted=model.submittedComposer(key)
+    val composerStateTag=remember(key,imageInputCount,composerSubmitted) {
+        "composer_state_${key.target.sessionId.value}_${key.target.generation.value}_${imageInputCount}_${if(composerSubmitted) 1 else 0}"
+    }
+    BoxWithConstraints(Modifier.fillMaxSize().testTag(composerStateTag)) {
         val compact=maxHeight<480.dp || LocalDensity.current.fontScale>=1.5f
         val expiry=model.reservation?.takeIf {it.key==key}?.let {"Recovery copy until ${deadline(it.warning.futureExpiry?.expiresAt)} (≤7 days)."}
         ConversationFrame(chrome={
@@ -1419,60 +1390,10 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                 StatusPill(summary?.status?.let(::sessionStatusLabel) ?: "Unavailable",when(summary?.status) {SessionStatus.Attention->StatusEmphasis.Attention;SessionStatus.Working->StatusEmphasis.Positive;SessionStatus.Unknown,null->StatusEmphasis.Muted;SessionStatus.Idle->StatusEmphasis.Neutral})
             }
             RequestDock(pending) {selectedRequest=it}
+            if(request==null)ComposerRecoveryNotice(expiry)
             if(reducer?.browsingOlder==true) UiText("Viewing older history. Newer messages may be outside this window.",style=MaterialTheme.typography.bodySmall)
+            if(reader.anchorMissing)UiText("Your previous reading position is outside this history window. Return to latest is explicit.",style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("reader_anchor_missing"))
             if(summary?.provider==Provider.Omp) UiText("All branches; desktop-selected branch unavailable",style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("omp_branches"))
-        },history={
-            Box(Modifier.fillMaxSize().testTag("conversation_target_${key.target.sessionId.value}_${key.target.generation.value}")) {
-            LazyColumn(Modifier.fillMaxSize().testTag("conversation_list"),state=transcript,contentPadding=PaddingValues(vertical=8.dp)) {
-                item(key="conversation_header") {Column(Modifier.padding(bottom=6.dp)) {
-                    GoatrSection(summary?.provider?.let(::providerLabel) ?: "Provider unavailable",inventory?.let {current->summary?.let {sessionWorkspaceLabel(current,it)}})
-                    var details by remember(key,source) {mutableStateOf(false)}
-                    TextButton(onClick={details=!details},modifier=Modifier.testTag("conversation_details")) {UiText(if(details) "Hide details" else "Details")}
-                    if(details) SelectionContainer {UiText("Session ${key.target.sessionId.value}\nGeneration ${key.target.generation.value}\nWorkspace ${summary?.workspaceId?.value ?: "unavailable"}\nSource ${source?.value ?: "unavailable"}",style=MaterialTheme.typography.bodySmall)}
-                    if(source==null) UiText("Offline/stale${if(cache?.partial!=false) " · partial cache" else ""}. Writes disabled; retained source is not authority.")
-                    val changed=inventory?.sessions?.firstOrNull {it.sessionId==key.target.sessionId && it.generation!=key.target.generation}
-                    if(changed!=null) {UiText("Observed generation replacement. Selection was not retargeted.");Action("Explicitly open observed replacement","open_replacement") {model.open(key.host,Target(changed.sessionId,changed.generation))}}
-                    if(summary?.historyCoverage?.sourceTruncated==true) UiText("Native history source truncated")
-                    if(reducer?.partial==true || cache?.partial==true) UiText("Partial history; not a complete transcript")
-                    if (reducer?.state?.summary?.capabilities?.history==true) UiText("Native backscroll keeps a local window of up to 1,000 completed records.")
-                }}
-                // Keep the current canonical receipt near the header. Completed native history
-                // remains the follow target instead of being covered by this status card.
-                focusedAction?.let {action->item(key="receipt_${action.metadata.actionId.value}") {Column(Modifier.padding(bottom=6.dp)) {ReceiptPanel(key.host,action,model)}}}
-                // Keep native keys/order/indices. Only visible bodies own spacing, so folded
-                // records occupy zero height without accumulating blank transcript gaps.
-                items(history,key={"history_${it.id.value}"},contentType={it.kind}) {record->
-                    if(routineToolsExpanded || record.id !in routineToolIds) Column(Modifier.padding(bottom=6.dp).testTag("history_record_${record.id.value}")) {HistoryCard(record,key,source,model)}
-                }
-                item(key="conversation_activity_tail") {
-                    Column(Modifier.fillMaxWidth().heightIn(max=if(compact) 112.dp else 192.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                        reducer?.state?.activity?.let {activity->GoatrSection("Activity · ${activity.state}");activity.text?.let {ContentView(it,key,source,model)}}
-                        ToolActivitySummary(routineToolIds.size,routineToolsExpanded) {routineToolsExpanded=!routineToolsExpanded}
-                    }
-                }
-                items(model.actions[key.host].orEmpty().filter {it.metadata.target==key.target && it.metadata.actionId!=focusedAction?.metadata?.actionId},key={"receipt_${it.metadata.actionId.value}"}) {Column(Modifier.padding(bottom=6.dp)) {ReceiptPanel(key.host,it,model)}}
-                item {ActionPaging(model,collapsed=true)}
-            }
-            }
-        },editor={
-            ConversationControlRail(
-                stopEnabled=stopAllowed && request==null,
-                stopDisabledReason=when {
-                    request!=null -> "Close the current answer form before stopping."
-                    readiness!=null -> readiness.message
-                    else -> "Stopping is unavailable for this current native state."
-                },
-                onStop=model::stop,
-                onMore={moreTools=true},
-            ) {
-                ConversationControl(MaterialGlyph.Chat,"Switch conversation","switcher") {switcher=true}
-                ConversationControl(MaterialGlyph.Add,"Snippets","composer_snippets") {snippets=true}
-                AttachmentPicker(enabled=ready && summary?.capabilities?.attachments==true && request==null,connectionStatus={ticket,compact->
-                    val originalHost=(ticket.originalScope as AttachmentConsentScope).key.host
-                    if(compact)compactConnectionLabel(originalHost,connection,model.connectingHosts[originalHost]==true) else connectionLabel(originalHost,connection,model.connectingHosts[originalHost]==true)
-                },captureSourceTicket={model.startAttachmentPicker(key)},returnSourceTicket=model::returnAttachmentPicker,cancelSourceTicket=model::finishAttachmentPicker,isSourceTicketCurrent=model::attachmentAdmitted,onUpload=model::beginAttachmentUpload)
-                if(reducer?.browsingOlder!=true) ConversationControl(MaterialGlyph.Refresh,"Refresh","conversation_refresh",!model.busy&&key.host in connection.hello,"Finish connecting or the current operation before refreshing",model::refresh)
-            }
             val inlineReadiness=readiness?.takeIf {it.tag in listOf("conversation_gate_inventory","conversation_gate_receipt")}
             if(inlineReadiness!=null) {
                 Row(Modifier.fillMaxWidth().heightIn(min=48.dp),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
@@ -1481,20 +1402,30 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                 }
             }
             // Auxiliary notices scroll independently; neither the draft nor Send moves into that viewport.
+            if(composerSubmitted) {
+                UiText("Submitted snapshot retained. Inspect its receipt; unchanged resubmission is disabled.",style=MaterialTheme.typography.bodySmall)
+                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick={model.newComposerMessage(key)},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("composer_new_message")){UiText("New message")}
+                    TextButton(onClick={copySubmitted=true},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("composer_copy_submitted")){UiText("Copy into new draft…")}
+                }
+            }
+            if(imageInputs.isNotEmpty())FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                imageInputs.forEachIndexed {index,image->InputChip(selected=true,onClick={store.attachments.firstOrNull {it.uploadId==image.record.uploadId&&it.host==key.host}?.let(model::openRetainedAttachment)},label={UiText("Image input ${index+1} · ${image.record.size} bytes")},trailingIcon={if(!composerSubmitted)IconButton(onClick={model.removeComposerImage(key,image.record.uploadId)},modifier=Modifier.size(48.dp)){GoatrIcon(MaterialGlyph.Close,"Remove image input ${index+1}")}},modifier=Modifier.heightIn(min=48.dp))}
+            }
             Column(Modifier.fillMaxWidth().heightIn(max=if(compact) 64.dp else 112.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(2.dp)) {
                 FlowRow(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                     focusedAction?.let {action->
                         val status=when(action.receipt?.state) {ReceiptState.Reserved,ReceiptState.Dispatching->"Pending";ReceiptState.Dispatched->"Sent to desktop";ReceiptState.Succeeded->"Action accepted";ReceiptState.Failed->"Action failed";ReceiptState.Uncertain,null->"Outcome unknown"}
-                        TextButton(onClick={scope.launch {transcript.scrollToItem(1)}},modifier=Modifier.heightIn(min=48.dp).testTag("focused_action_status")) {UiText("$status · Inspect${if(action.authoritative) "" else " · Last observed"}",style=MaterialTheme.typography.labelMedium)}
+                        TextButton(onClick={reader.following=false;scope.launch {scrollReader(1)}},modifier=Modifier.heightIn(min=48.dp).testTag("focused_action_status")) {UiText("$status · Inspect${if(action.authoritative) "" else " · Last observed"}",style=MaterialTheme.typography.labelMedium)}
                     }
-                    if(reducer?.state?.activity!=null || routineToolIds.isNotEmpty()) TextButton(onClick={scope.launch {transcript.scrollToItem(activityTailIndex)}},modifier=Modifier.heightIn(min=48.dp).testTag("conversation_activity_jump")) {
+                    if(reducer?.state?.activity!=null || routineToolIds.isNotEmpty()) TextButton(onClick={reader.following=false;scope.launch {scrollReader(activityTailIndex)}},modifier=Modifier.heightIn(min=48.dp).testTag("conversation_activity_jump")) {
                         UiText(reducer?.state?.activity?.let {"Activity · ${it.state}"} ?: "${routineToolIds.size} completed tools",style=MaterialTheme.typography.labelMedium)
                     }
                 }
                 if(!following && reducer?.browsingOlder!=true) {
                     val position=history.indexOfFirst {it.id==readTail}
                     val unread=if(position>=0) history.size-position-1 else 0
-                    TextButton(onClick={following=true;scope.launch {if(history.isNotEmpty() || focusedAction!=null) transcript.scrollToItem(latestTailIndex)}},modifier=Modifier.testTag("jump_latest")) {UiText(if(unread>0) "$unread new messages · Latest" else "Jump to latest")}
+                    TextButton(onClick={reader.latest(history.lastOrNull()?.id)},modifier=Modifier.heightIn(min=48.dp).testTag("jump_latest")) {UiText(if(unread>0) "$unread new messages · Latest" else "Jump to latest")}
                 }
                 val promptCapability=summary?.capabilities
                 val promptCapabilityUnavailable=promptCapability?.let { !it.prompt || it.promptMode!=PromptMode.SubmitOrSteer } ?: true
@@ -1503,17 +1434,121 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                     else -> null
                 }
                 if(promptGate?.tag !in listOf("conversation_gate_inventory","conversation_gate_receipt")) ComposerGateNotice(promptGate?.message ?: if(summary?.status==SessionStatus.Working) "Send may steer the current native work." else null,promptGate?.tag)
-                if(model.reservation==null && model.composers[key].orEmpty().isNotEmpty()) TextButton(onClick=model::prepareNewPrompt,enabled=promptAllowed,modifier=Modifier.heightIn(min=48.dp).testTag("prompt_new_action")) {IconLabel(MaterialGlyph.Add,"Prepare a new send action")}
+                PromptActionPreparation(model.composers[key].orEmpty(),imageInputs,composerSubmitted,model.reservation!=null,promptAllowed,model::prepareNewPrompt)
+            }
+            val suggestions=if(request==null) model.suggestedSkills(key,model.composers[key].orEmpty()) else null
+            if(suggestions!=null)SkillsSuggestions(suggestions,model,Modifier.heightIn(max=100.dp))
+        },history={
+            Box(Modifier.fillMaxSize().testTag("conversation_target_${key.target.sessionId.value}_${key.target.generation.value}")) {
+            if(request!=null) ConversationRequestPanel(request.requestKey,{selectedRequest=null},requestMemory) {
+                ComposerRecoveryNotice(expiry)
+                UiText("Closing keeps the native request open.",style=MaterialTheme.typography.bodySmall)
+                requestMemory?.let {form->ProviderForm(request,form,ready && summary?.capabilities?.respond==true,readiness?.message ?: "Answering is unavailable for this current native state.",{content,loaded->ContentView(content,key,source,model,onLoaded=loaded)},{url->model.forms.values.forEach(FormMemory::clearSecrets);openHttpUrl(model.getApplication(),url)}) {answer->model.respond(request,answer)}}
+                OutlinedButton(onClick=model::stop,enabled=stopAllowed,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("request_stop")) {IconLabel(MaterialGlyph.Stop,"Stop current work")}
+            } else {
+            LazyColumn(Modifier.fillMaxSize().testTag("conversation_list"),state=transcript,contentPadding=PaddingValues(vertical=8.dp)) {
+                item(key="conversation_header") {Column(Modifier.padding(bottom=6.dp)) {
+                    GoatrSection(summary?.provider?.let(::providerLabel) ?: "Provider unavailable",inventory?.let {current->summary?.let {sessionWorkspaceLabel(current,it)}})
+                    var details by remember(key,source) {mutableStateOf(false)}
+                    TextButton(onClick={details=!details},modifier=Modifier.testTag("conversation_details")) {UiText(if(details) "Hide details" else "Details")}
+                    if(details) SelectionContainer {UiText("Session ${key.target.sessionId.value}\nGeneration ${key.target.generation.value}\nWorkspace ${summary?.workspaceId?.value ?: "unavailable"}\nSource ${source?.value ?: "unavailable"}",style=MaterialTheme.typography.bodySmall)}
+                    if(details)UiText(STOCK_CLOSE_LIMITATION,style=MaterialTheme.typography.bodySmall)
+                    if(source==null) UiText("Offline/stale${if(cache?.partial!=false) " · partial cache" else ""}. Writes disabled; retained source is not authority.")
+                    val changed=inventory?.sessions?.firstOrNull {it.sessionId==key.target.sessionId && it.generation!=key.target.generation}
+                    if(changed!=null) {UiText("Observed generation replacement. Selection was not retargeted.");Action("Explicitly open observed replacement","open_replacement") {model.open(key.host,Target(changed.sessionId,changed.generation))}}
+                    if(summary?.historyCoverage?.sourceTruncated==true) UiText("Native history source truncated")
+                    if(reducer?.partial==true || cache?.partial==true) UiText("Partial history; not a complete transcript")
+                    if (reducer?.state?.summary?.capabilities?.history==true) UiText("Native backscroll keeps a local window of up to 1,000 completed records.")
+                    if(history.isEmpty())UiText(when {
+                        source==null -> "No messages in this retained window. Reconnect to inspect the original native history."
+                        !sourceCurrent -> "Current source is not admitted. This retained history window is empty."
+                        summary?.historyCoverage?.source==HistorySource.Unavailable -> "Native history is unavailable for this original session."
+                        reducer==null -> "Waiting for the original session's history window."
+                        reducer.browsingOlder -> "No messages in this older native history window."
+                        else -> "No messages in the current native history window."
+                    },style=MaterialTheme.typography.bodyMedium,modifier=Modifier.testTag("conversation_empty"))
+                }}
+                // Keep the current canonical receipt near the header. Completed native history
+                // remains the follow target instead of being covered by this status card.
+                focusedAction?.let {action->item(key="receipt_${action.metadata.actionId.value}") {Column(Modifier.padding(bottom=6.dp)) {ReceiptPanel(key.host,action,model)}}}
+                // Keep native keys/order/indices. Only visible bodies own spacing, so folded
+                // records occupy zero height without accumulating blank transcript gaps.
+                items(history,key={"history_${it.id.value}"},contentType={it.kind}) {record->
+                    if(routineToolsExpanded || record.id !in routineToolIds) Column(Modifier.padding(bottom=12.dp).testTag("history_record_${record.id.value}")) {HistoryCard(record,key,source,model)}
+                }
+                item(key="conversation_activity_tail") {
+                    Column(Modifier.fillMaxWidth().heightIn(max=if(compact) 112.dp else 192.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                        reducer?.state?.activity?.let {activity->GoatrSection("Activity · ${activity.state}");activity.text?.let {ContentView(it,key,source,model)}}
+                        ToolActivitySummary(routineToolIds.size,routineToolsExpanded) {reader.toolsExpanded=!routineToolsExpanded}
+                    }
+                }
+                items(otherActions,key={"receipt_${it.metadata.actionId.value}"}) {Column(Modifier.padding(bottom=6.dp)) {ReceiptPanel(key.host,it,model)}}
+                item {ActionPaging(model,collapsed=true)}
+            }
+            }
+            }
+        },editor={
+            ConversationControlRail(
+                stopEnabled=stopAllowed,
+                stopDisabledReason=when {
+                    readiness!=null -> readiness.message
+                    else -> "Stopping is unavailable for this current native state."
+                },
+                onStop=model::stop,
+                onMore={moreTools=true},
+            ) {
+                ConversationControl(MaterialGlyph.Chat,"Switch conversation","switcher") {switcher=true}
+                ConversationControl(MaterialGlyph.Add,"Snippets","composer_snippets") {snippets=true}
+                ConversationControl(MaterialGlyph.Settings,"Native controls","session_controls",ready&&summary?.capabilities?.controls==true,"Native controls need the original channel and explicit local provider grant.") {model.openSessionControls(key)}
+                AttachmentPicker(enabled=ready && summary?.capabilities?.attachments==true && request==null,connectionStatus={ticket,compact->
+                    val originalHost=(ticket.originalScope as AttachmentConsentScope).key.host
+                    if(compact)compactConnectionLabel(originalHost,connection,model.connectingHosts[originalHost]==true) else connectionLabel(originalHost,connection,model.connectingHosts[originalHost]==true)
+                },captureSourceTicket={model.startAttachmentPicker(key)},returnSourceTicket=model::returnAttachmentPicker,cancelSourceTicket=model::finishAttachmentPicker,isSourceTicketCurrent=model::attachmentAdmitted,onUpload=model::beginAttachmentUpload)
+                if(reducer?.browsingOlder!=true) ConversationControl(MaterialGlyph.Refresh,"Refresh","conversation_refresh",!model.busy&&key.host in connection.hello,"Finish connecting or the current operation before refreshing",model::refresh)
             }
         },actions={
             val draft=model.composers[key].orEmpty()
-            val suggestions=if(request==null) model.suggestedSkills(key,draft) else null
-            val suggestionHeight=if(suggestions!=null) 100.dp.coerceAtMost((maxHeight-112.dp).coerceAtLeast(0.dp)) else 0.dp
-            if(suggestions!=null && suggestionHeight>=80.dp) SkillsSuggestions(suggestions,model,Modifier.height(suggestionHeight))
-            ConversationDraftControls(draft,model::composer,expiry,compact,(maxHeight-56.dp-if(suggestions!=null && suggestionHeight>=80.dp) suggestionHeight else 0.dp).coerceAtLeast(0.dp),promptAllowed && model.reservation?.key==key && request==null,model::send,model.skillsFocusSignal,model::composerCursor)
-        })
+            ConversationDraftControls(draft,{text->if(model.selection==key)model.composer(text)},promptAllowed && model.reservation?.key==key&&!composerSubmitted,model::send,model.skillsFocusSignal,{start,end->if(model.selection==key)model.composerCursor(start,end)},readOnly=composerSubmitted,selection=model.composerSelection(key))
+        },requestOpen=request!=null)
     }
 }
+
+/** Initialize a history-mode transition, not every recomposition or collapse gesture. */
+@Composable
+internal fun observeReaderToolExpansion(reader:ConversationReaderPosition,older:Boolean):Boolean {
+    SideEffect {reader.observeHistoryView(older)}
+    return reader.toolsExpanded
+}
+
+/** The existing list owner services the current native tail after restoration settles. */
+internal suspend fun followConversationReader(reader:ConversationReaderPosition,ticket:Any,transcript:LazyListState,
+    history:State<List<HistoryRecord>>,focused:State<Uuid?>,older:State<Boolean>,restoring:MutableState<Boolean>) {
+    // A tail arriving while paused is retained in the observed current state. Serial
+    // collection also drains changes that arrive during this writer's own suspension.
+    snapshotFlow {if(older.value||!reader.following)null else history.value.lastOrNull() to focused.value}.collect {latest->
+        if(latest==null||!reader.current(ticket))return@collect
+        snapshotFlow {
+            if(restoring.value||older.value||!reader.following)null else {
+                val records=history.value
+                val focus=focused.value
+                val index=if(records.isEmpty()){if(focus!=null)1 else 0}else records.size+if(focus!=null)2 else 1
+                transcript.layoutInfo to index
+            }
+        }.first {ready->ready!=null&&ready.first.viewportSize.height>0&&ready.first.totalItemsCount>ready.second}
+        if(!reader.current(ticket)||!reader.following||older.value||restoring.value)return@collect
+        val records=history.value
+        val focus=focused.value
+        val index=if(records.isEmpty()){if(focus!=null)1 else 0}else records.size+if(focus!=null)2 else 1
+        val end=transcript.layoutInfo.viewportEndOffset.coerceAtLeast(0)
+        val tail=records.lastOrNull()?.id
+        restoring.value=true
+        try {
+            transcript.scrollToItem(index,if(records.isEmpty())0 else -end)
+            if(reader.current(ticket)&&reader.following&&!older.value)reader.latest(tail)
+        }finally{restoring.value=false}
+    }
+}
+
 
 private fun changeStateLabel(state: ChangeState): String = when(state) {
     ChangeState.Unchanged -> "unchanged"; ChangeState.Added -> "added"; ChangeState.Modified -> "modified"; ChangeState.Deleted -> "deleted";
@@ -1529,6 +1564,7 @@ private fun ComposerSnippetPicker(key: ConversationKey,snippets: List<ComposerSn
     var title by remember(key) {mutableStateOf("")}
     var body by remember(key) {mutableStateOf("")}
     var deleting by remember(key) {mutableStateOf<ComposerSnippet?>(null)}
+    var clearing by remember(key) {mutableStateOf(false)}
     fun beginEdit(snippet: ComposerSnippet?) {
         editing=true
         // Allocate only an in-memory local identifier until the user explicitly saves text.
@@ -1577,6 +1613,7 @@ private fun ComposerSnippetPicker(key: ConversationKey,snippets: List<ComposerSn
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 UiText("Save stores only text you write on this phone. It remains local until deletion or Forget.",style=MaterialTheme.typography.bodySmall)
                 IconAction(MaterialGlyph.Add,"New local snippet","snippet_new",modifier=Modifier.fillMaxWidth()) {beginEdit(null)}
+                OutlinedButton(onClick={clearing=true},enabled=!draftEmpty&&!model.busy&&!model.submittedComposer(key),modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("snippet_clear_draft")) {IconLabel(MaterialGlyph.Delete,"Clear selected draft…")}
                 if(snippets.isEmpty()) UiText("No local snippets saved for this desktop.",style=MaterialTheme.typography.bodyMedium)
                 snippets.forEach {snippet->
                     GroupedSurface(Modifier.testTag("snippet_${snippet.id.value}")) {
@@ -1596,6 +1633,7 @@ private fun ComposerSnippetPicker(key: ConversationKey,snippets: List<ComposerSn
     deleting?.let {snippet->
         AlertDialog(onDismissRequest={deleting=null},modifier=Modifier.semantics {testTagsAsResourceId=true}.testTag("snippet_delete_scope_${snippet.id.value}"),title={UiText("Delete local snippet?")},text={UiText("This removes the saved local text from this phone.",modifier=Modifier.testTag("snippet_delete_target_${key.target.sessionId.value}_${key.target.generation.value}"))},confirmButton={TextButton(onClick={model.deleteSnippet(key.host,snippet.id);deleting=null},modifier=Modifier.testTag("snippet_delete_confirm")) {IconLabel(MaterialGlyph.Delete,"Delete")}},dismissButton={TextButton(onClick={deleting=null}) {UiText("Keep")}})
     }
+    if(clearing)AlertDialog(onDismissRequest={clearing=false},title={UiText("Clear this conversation's draft?")},text={UiText("Removes local text and selected image inputs only. Saved snippets, completed uploads and the native conversation are unchanged. Nothing is sent.")},confirmButton={TextButton(onClick={if(model.clearComposerDraft(key)){clearing=false;onDismiss()}},enabled=model.selection==key&&model.foreground&&!model.busy&&!model.submittedComposer(key),modifier=Modifier.heightIn(min=48.dp).testTag("snippet_clear_draft_confirm")){UiText("Clear selected draft")}},dismissButton={TextButton(onClick={clearing=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Keep draft")}})
 }
 
 @Composable
@@ -1626,42 +1664,70 @@ fun RequestDock(pending: List<PendingRequest>,onSelect: (Uuid)->Unit) {
     }
 }
 
+/** Native answers share the reader region; opening one never replaces the draft or control rail. */
+@Composable
+internal fun ConversationRequestPanel(requestKey:Uuid,onClose:()->Unit,memory:FormMemory?=null,content:@Composable ()->Unit) {
+    DisposableEffect(memory){onDispose{memory?.clearSecrets()}}
+    Column(Modifier.fillMaxSize().semantics {paneTitle="Native request answer"}.testTag("request_editor_${requestKey.value}")) {
+        Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
+            UiText("Needs your answer",style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f))
+            IconButton(onClick=onClose,modifier=Modifier.size(48.dp).testTag("request_close")) {GoatrIcon(MaterialGlyph.Close,"Close answer form")}
+        }
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {content()}
+    }
+}
+
 /** Keep native notices, the transcript and the pinned composer in independent layout regions. */
 @Composable
 fun ConversationFrame(chrome: @Composable ()->Unit,history: @Composable ()->Unit,
-    editor: @Composable ()->Unit,actions: @Composable ()->Unit) {
-    BoxWithConstraints(Modifier.fillMaxSize().testTag("conversation_frame")) {
-    val noticeHeight=if(maxHeight<420.dp) 64.dp else 96.dp
-    Column(Modifier.fillMaxSize()) {
-        Column(Modifier.weight(1f)) {
-            // The control rail is measured before this weighted chrome/history region as well.
-            Column(Modifier.weight(1f).fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth().heightIn(max=noticeHeight).verticalScroll(rememberScrollState()).testTag("conversation_notices")) {chrome()}
-                Box(Modifier.weight(1f).fillMaxWidth()) {history()}
-            }
-            Surface(color=MaterialTheme.colorScheme.surface,tonalElevation=3.dp,modifier=Modifier.fillMaxWidth().testTag("composer_region")) {
-                // Controls remain outside a clipped scroll viewport so they stay reachable above the IME.
-                Column(Modifier.padding(top=2.dp),verticalArrangement=Arrangement.spacedBy(2.dp)) {editor()}
-            }
+    editor: @Composable ()->Unit,actions: @Composable ()->Unit,requestOpen:Boolean=false) {
+    androidx.compose.ui.layout.Layout(content={
+        Surface(color=MaterialTheme.colorScheme.surfaceVariant,shape=RoundedCornerShape(topStart=24.dp,topEnd=24.dp),modifier=Modifier.fillMaxWidth().testTag("composer_region")) {
+            Column(Modifier.padding(top=2.dp),verticalArrangement=Arrangement.spacedBy(2.dp)) {editor()}
         }
-        // This nonweighted footer is measured before allocating the weighted remainder above it.
-        actions()
-    }
+        Surface(color=MaterialTheme.colorScheme.surfaceVariant,shape=RoundedCornerShape(bottomStart=24.dp,bottomEnd=24.dp),modifier=Modifier.fillMaxWidth()) {Column(Modifier.fillMaxWidth()) {actions()}}
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).testTag("conversation_notices")) {chrome()}
+        Box(Modifier.fillMaxWidth()) {history()}
+    },modifier=Modifier.fillMaxSize().testTag("conversation_frame")) {children,constraints->
+        val width=constraints.maxWidth
+        val height=constraints.maxHeight
+        fun bounded(maximum:Int)=constraints.copy(minWidth=width,maxWidth=width,minHeight=0,maxHeight=maximum.coerceAtLeast(0))
+        // Measure the real fixed rail first. The remaining viewport, not a font/height pin,
+        // bounds the actual text field before any transcript or optional notice is allocated.
+        val rail=children[0].measure(bounded(height))
+        val remaining=(height-rail.height).coerceAtLeast(0)
+        val draftFloor=(56.dp+6.dp).roundToPx().coerceAtMost(remaining)
+        val readerFloor=(if(requestOpen)96.dp else 48.dp).roundToPx().coerceAtMost((remaining-draftFloor).coerceAtLeast(0))
+        val noticeFloor=(if(requestOpen)0.dp else 48.dp).roundToPx().coerceAtMost((remaining-draftFloor-readerFloor).coerceAtLeast(0))
+        val draft=children[1].measure(bounded(remaining-readerFloor-noticeFloor))
+        val upper=(remaining-draft.height).coerceAtLeast(0)
+        val noticeLimit=if(requestOpen)0 else (if(height<420.dp.roundToPx())64.dp else 96.dp).roundToPx()
+        val notices=children[2].measure(bounded(noticeLimit.coerceAtMost((upper-readerFloor).coerceAtLeast(0))))
+        val readerHeight=(upper-notices.height).coerceAtLeast(0)
+        val transcript=children[3].measure(bounded(readerHeight).copy(minHeight=readerHeight))
+        layout(width,height) {
+            notices.placeRelative(0,0)
+            transcript.placeRelative(0,notices.height)
+            rail.placeRelative(0,upper)
+            draft.placeRelative(0,upper+rail.height)
+        }
     }
 }
 
 @Composable
-fun ComposerEditor(text: String,onText: (String)->Unit,expiry: String?,compact: Boolean,notice: String?,focusSignal:Long=0L,onCursor:((Int,Int)->Unit)?=null) {
-    var editing by remember {mutableStateOf(TextFieldValue(text,TextRange(text.length)))}
-    if(editing.text!=text)editing=TextFieldValue(text,TextRange(text.length))
-    SideEffect {onCursor?.invoke(editing.selection.start,editing.selection.end)}
+fun ComposerEditor(text: String,onText: (String)->Unit,expiry: String?,notice: String?,focusSignal:Long=0L,onCursor:((Int,Int)->Unit)?=null,selection:Pair<Int,Int>?=null) {
+    val requested=selection?.let {TextRange(it.first.coerceIn(0,text.length),it.second.coerceIn(0,text.length))}
+    var editing by remember {mutableStateOf(TextFieldValue(text,requested ?: TextRange(text.length)))}
+    if(editing.text!=text)editing=TextFieldValue(text,requested ?: TextRange(text.length))
+    else if(requested!=null&&editing.selection!=requested)editing=editing.copy(selection=requested,composition=null)
     val focus=remember {FocusRequester()}
     val keyboard=LocalSoftwareKeyboardController.current
     LaunchedEffect(focusSignal) {if(focusSignal>0L) {focus.requestFocus();keyboard?.show()}}
     notice?.let {UiText(it,style=MaterialTheme.typography.bodySmall)}
-    OutlinedTextField(value=editing,onValueChange={value->val changed=value.text!=editing.text;editing=value;if(changed)onText(value.text);onCursor?.invoke(value.selection.start,value.selection.end)},label={UiText("Message")},
-        minLines=1,maxLines=if(compact) 2 else 4,
-        shape=MaterialTheme.shapes.large,modifier=Modifier.fillMaxWidth().heightIn(max=if(compact) 112.dp else 160.dp).focusRequester(focus).testTag("composer").semantics {contentDescription="Message to this exact session"})
+    TextField(value=editing,onValueChange={value->val changed=value.text!=editing.text;editing=value;if(changed)onText(value.text);onCursor?.invoke(value.selection.start,value.selection.end)},label={UiText("Message")},
+        minLines=1,maxLines=6,textStyle=MaterialTheme.typography.bodyLarge,
+        colors=TextFieldDefaults.colors(focusedContainerColor=MaterialTheme.colorScheme.surface,unfocusedContainerColor=MaterialTheme.colorScheme.surface,focusedIndicatorColor=androidx.compose.ui.graphics.Color.Transparent,unfocusedIndicatorColor=androidx.compose.ui.graphics.Color.Transparent),
+        shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth().focusRequester(focus).testTag("composer").semantics {contentDescription="Message to this exact session"})
     expiry?.let {UiText(it,style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("send_deadline"))}
 }
 
@@ -1680,23 +1746,24 @@ private fun ConversationPrimaryAction(sendEnabled: Boolean,onSend: ()->Unit) {
     ComposerSendFab(sendEnabled,onSend)
 }
 
-/** One viewport budget bounds the disclosure and draft; neither region uses weighted height. */
+/** Recovery disclosure scrolls with notices, never stealing the draft or fixed action targets. */
 @Composable
-internal fun ConversationDraftControls(text: String,onText: (String)->Unit,expiry: String?,compact: Boolean,maximumHeight: Dp,sendEnabled: Boolean,onSend: ()->Unit,focusSignal:Long=0L,onCursor:((Int,Int)->Unit)?=null) {
-    val availableHeight=(maximumHeight-6.dp).coerceAtLeast(0.dp)
-    val minimumDraftHeight=56.dp.coerceAtMost(availableHeight)
-    val disclosureHeight=if(expiry!=null) 48.dp.coerceAtMost((availableHeight-minimumDraftHeight).coerceAtLeast(0.dp)) else 0.dp
-    val draftHeight=(availableHeight-disclosureHeight).coerceAtLeast(0.dp)
-    Column(Modifier.fillMaxWidth().heightIn(max=maximumHeight).padding(bottom=6.dp)) {
-        expiry?.let {
-            Box(Modifier.fillMaxWidth().heightIn(max=disclosureHeight).verticalScroll(rememberScrollState())) {
-                UiText(it,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.testTag("send_deadline"))
-            }
-        }
-        Row(Modifier.fillMaxWidth().heightIn(min=minimumDraftHeight,max=draftHeight),horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=androidx.compose.ui.Alignment.Bottom) {
-            Box(Modifier.weight(1f)) {ComposerEditor(text,onText,null,compact,null,focusSignal,onCursor)}
+internal fun ComposerRecoveryNotice(expiry:String?) {
+    expiry?.let {UiText(it,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.testTag("send_deadline"))}
+}
+
+/** The actual viewport bounds the draft; six native text lines are its unconstrained maximum. */
+@Composable
+internal fun ConversationDraftControls(text: String,onText: (String)->Unit,sendEnabled: Boolean,onSend: ()->Unit,focusSignal:Long=0L,onCursor:((Int,Int)->Unit)?=null,readOnly:Boolean=false,selection:Pair<Int,Int>?=null) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    val availableHeight=(maxHeight-6.dp).coerceAtLeast(0.dp)
+    val minimumDraftHeight=48.dp.coerceAtMost(availableHeight)
+    Column(Modifier.fillMaxWidth().padding(start=8.dp,end=8.dp,bottom=6.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min=minimumDraftHeight,max=availableHeight),horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=androidx.compose.ui.Alignment.Bottom) {
+            Box(Modifier.weight(1f)) {if(readOnly)SelectionContainer {UiText(text,style=MaterialTheme.typography.bodyLarge,modifier=Modifier.fillMaxWidth().heightIn(max=availableHeight).verticalScroll(rememberScrollState()).testTag("submitted_composer_snapshot"))}else ComposerEditor(text,onText,null,null,focusSignal,onCursor,selection)}
             ConversationPrimaryAction(sendEnabled,onSend)
         }
+    }
     }
 }
 
@@ -1708,7 +1775,7 @@ fun ConversationComposer(text: String,onText: (String)->Unit,sendEnabled: Boolea
     LaunchedEffect(expiry) {if(expiry!=null) {withFrameNanos {};scroll.scrollTo(scroll.maxValue)}}
     Column(Modifier.fillMaxWidth().heightIn(max=if(compact) 256.dp else 360.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
         Column(Modifier.weight(1f,fill=false).verticalScroll(scroll),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            ComposerEditor(text,onText,expiry,compact,notice)
+            ComposerEditor(text,onText,expiry,notice)
         }
         ConversationActions(sendEnabled,stopEnabled,onSend,onStop)
     }
@@ -1723,12 +1790,12 @@ fun ReceiptPanel(host: String,action: LocalAction,model: GoatrViewModel? = null,
     val window=LocalResources.current.displayMetrics
     GroupedSurface(Modifier.testTag("receipt_${action.metadata.actionId.value}")) {
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-            UiText(when(action.metadata.method) {ActionMethod.PromptSubmit->"Message status";ActionMethod.TurnCancel->"Stop status";ActionMethod.RequestRespond->"Answer status";ActionMethod.SessionCreate->"New conversation status";ActionMethod.TerminalCreate,ActionMethod.ShellCreate->"New terminal status";ActionMethod.ShellInput->"Terminal input status";ActionMethod.WorktreesRemove->"Worktree removal status";ActionMethod.AgentRename->"Agent alias status";ActionMethod.WorkspaceRename->"Workspace rename status";ActionMethod.AttachmentsBegin,ActionMethod.AttachmentsChunk,ActionMethod.AttachmentsComplete,ActionMethod.AttachmentsDiscard->"Attachment status"},style=MaterialTheme.typography.titleSmall,modifier=Modifier.weight(1f).padding(end=8.dp))
+            UiText(when(action.metadata.method) {ActionMethod.SessionControlsApply->"Shared native settings status";ActionMethod.SessionQueueUpdate,ActionMethod.SessionQueueDelete,ActionMethod.SessionQueueReorder,ActionMethod.SessionQueueStart->"Native queue action status";ActionMethod.PromptSubmit->"Message status";ActionMethod.TurnCancel->"Stop status";ActionMethod.RequestRespond->"Answer status";ActionMethod.SessionCreate->"New conversation status";ActionMethod.TerminalCreate,ActionMethod.ShellCreate->"New terminal status";ActionMethod.ShellInput->"Terminal input status";ActionMethod.ShellResize->"Native frontend resize status";ActionMethod.WorktreesRemove->"Worktree removal status";ActionMethod.AgentRename->"Agent alias status";ActionMethod.WorkspaceRename->"Workspace rename status";ActionMethod.AttachmentsBegin,ActionMethod.AttachmentsChunk,ActionMethod.AttachmentsComplete,ActionMethod.AttachmentsDiscard->"Attachment status"},style=MaterialTheme.typography.titleSmall,modifier=Modifier.weight(1f).padding(end=8.dp))
             StatusPill(when(receipt?.state) {ReceiptState.Succeeded,ReceiptState.Dispatched->"Known";ReceiptState.Failed,ReceiptState.Uncertain,null->"Inspect";ReceiptState.Reserved,ReceiptState.Dispatching->"Pending"},when(receipt?.state) {ReceiptState.Succeeded,ReceiptState.Dispatched->StatusEmphasis.Positive;ReceiptState.Reserved,ReceiptState.Dispatching->StatusEmphasis.Attention;else->StatusEmphasis.Muted})
         }
         if(receipt==null) UiText("Outcome unknown · local reservation is not Sent. Inspect only; never replay this UUID.")
         else {
-            val label=when(receipt.state) {ReceiptState.Reserved->"Preparing";ReceiptState.Dispatching->"Sending";ReceiptState.Dispatched->"Sent to desktop";ReceiptState.Succeeded->"Action accepted";ReceiptState.Failed->"Action failed · inspect details";ReceiptState.Uncertain->"Outcome unknown · check status"}
+            val label=when(receipt.state) {ReceiptState.Reserved->"Preparing";ReceiptState.Dispatching->"Sending";ReceiptState.Dispatched->if(receipt.shellDispatched())"Native socket frame dispatched" else "Sent to desktop";ReceiptState.Succeeded->"Action accepted";ReceiptState.Failed->"Action failed · inspect details";ReceiptState.Uncertain->"Outcome unknown · check status"}
             UiText(if(action.authoritative) label else "Last observed: $label",modifier=Modifier.testTag("receipt_state"))
             receipt.creation?.resources?.checkout?.let {checkout->
                 UiText("Branch ${checkout.branch}",style=MaterialTheme.typography.bodySmall)
@@ -1737,11 +1804,20 @@ fun ReceiptPanel(host: String,action: LocalAction,model: GoatrViewModel? = null,
             if(receipt.method==ActionMethod.SessionCreate && receipt.state in listOf(ReceiptState.Reserved,ReceiptState.Dispatching)) UiText("Creation ongoing (including after 120-second response). Refresh receipt; do not submit another Create.")
             if(receipt.state in listOf(ReceiptState.Failed,ReceiptState.Uncertain)) UiText("Known partial resources are retained in Details. Inspect on desktop; no automatic retry or cleanup.")
             if(receipt.result is ActionResultResponse) UiText("This receipt does not prove this phone won first-response resolution.")
-            if(receipt.state==ReceiptState.Succeeded || receipt.state==ReceiptState.Dispatched) UiText("Operation admission/acknowledgement, not entire-turn completion.")
+            (receipt.result as? ActionResultQueue)?.let {facts->facts.entryId?.let {UiText("Native queue entry ${it.value}",style=MaterialTheme.typography.bodySmall)};facts.deleted?.let {UiText(if(it)"Native entry deleted" else "Native entry not deleted")};facts.nativeTurnId?.let {UiText("Started native turn ${it.value}",style=MaterialTheme.typography.bodySmall)}}
+            (receipt.result as? ActionResultShellResize)?.let {UiText("${if(action.authoritative&&receipt.state==ReceiptState.Succeeded)"Confirmed" else "Retained"} native frontend surface ${it.columns.value} × ${it.rows.value}; not an isolated pane size.",style=MaterialTheme.typography.bodySmall)}
+            (receipt.result as? ActionResultShellDispatch)?.progress?.let {
+                UiText("Native frame bytes: ${it.socketBytesWritten?.toString() ?: "unknown"} / ${it.frameBytes?.toString() ?: "unknown"} · complete: ${it.frameComplete?.toString() ?: "unknown"}",style=MaterialTheme.typography.bodySmall)
+                UiText("Full socket frame, including its four-byte prefix. Not PTY bytes, flush, consumption or a native per-write acknowledgement. Queued bytes cannot be recalled.",style=MaterialTheme.typography.bodySmall)
+            }
+            (receipt.result as? ActionResultShellInput)?.progress?.let {
+                UiText("Historical bound-input facts only: ${it.writtenBytes?.toString() ?: "unknown"} / ${it.encodedBytes?.toString() ?: "unknown"} · flush: ${it.flushCompleted?.toString() ?: "unknown"}",style=MaterialTheme.typography.bodySmall)
+            }
+            if(receipt.result !is ActionResultShellDispatch&&(receipt.state==ReceiptState.Succeeded || receipt.state==ReceiptState.Dispatched)) UiText("Operation admission/acknowledgement, not entire-turn completion.")
         }
         if(model!=null) Action("Inspect / refresh status (no replay)","receipt_inspect",enabled=!model.busy) { model.inspect(host,action.metadata.actionId) }
-        if(onSeparateCreation!=null && action.metadata.method in listOf(ActionMethod.SessionCreate,ActionMethod.ShellCreate) && action.authoritative && action.outcomeShown && receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain)) {
-            IconAction(MaterialGlyph.Add,if(action.metadata.method==ActionMethod.ShellCreate) "Start a separate terminal" else "Start a separate new session","separate_creation_prepare_${action.metadata.actionId.value}",enabled=model?.busy!=true,onClick=onSeparateCreation)
+        if(onSeparateCreation!=null && action.metadata.method==ActionMethod.SessionCreate && action.authoritative && action.outcomeShown && receipt?.state in listOf(ReceiptState.Succeeded,ReceiptState.Failed,ReceiptState.Uncertain)) {
+            IconAction(MaterialGlyph.Add,"Start a separate new session","separate_creation_prepare_${action.metadata.actionId.value}",enabled=model?.busy!=true,onClick=onSeparateCreation)
         }
         // Keep recovery controls reachable when the exact receipt is long.
         TextButton(onClick={expanded=!expanded;visible=false},modifier=Modifier.heightIn(min=48.dp).testTag("receipt_details_${action.metadata.actionId.value}")) {UiText(if(expanded) "Hide action details" else "Action details")}
@@ -1880,14 +1956,14 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
             GroupedSurface {
                 GoatrSection("Background delivery","Choose persistent socket delivery or ntfy. A received probe and authenticated acknowledgement are required before ntfy can replace the verification socket.")
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)){
-                    FilterChip(selected=model.pushMode(host)==DeliveryMode.Persistent,onClick={model.selectSocketDelivery(host)},label={IconLabel(MaterialGlyph.Notification,"Persistent socket")},modifier=Modifier.heightIn(min=48.dp))
-                    FilterChip(selected=model.pushMode(host)==DeliveryMode.Ntfy,onClick={model.selectNtfy(host)},enabled=model.ntfyAvailable(),label={IconLabel(MaterialGlyph.Notification,"ntfy")},modifier=Modifier.heightIn(min=48.dp))
+                    FilterChip(selected=model.pushMode(host)==DeliveryMode.Persistent,onClick={model.selectSocketDelivery(host)},label={IconLabel(MaterialGlyph.Notification,"Persistent socket")},modifier=Modifier.heightIn(min=48.dp).testTag("delivery_mode_persistent_$host"))
+                    FilterChip(selected=model.pushMode(host)==DeliveryMode.Ntfy,onClick={model.selectNtfy(host)},enabled=model.ntfyAvailable(),label={IconLabel(MaterialGlyph.Notification,"ntfy")},modifier=Modifier.heightIn(min=48.dp).testTag("delivery_mode_ntfy_$host"))
                 }
                 if(!model.ntfyAvailable())UiText("ntfy distributor is not installed. No distributor is chosen automatically.",style=MaterialTheme.typography.bodySmall)
                 if(model.pushMode(host)==DeliveryMode.Ntfy){
-                    UiText("ntfy · ${model.pushLabel(host)}",style=MaterialTheme.typography.bodyMedium)
+                    UiText("ntfy · ${model.pushLabel(host)}",style=MaterialTheme.typography.bodyMedium,modifier=Modifier.testTag("delivery_push_health_$host"))
                     FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)){
-                        TextButton(onClick={model.selectNtfy(host,true)},enabled=model.ntfyAvailable(),modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Refresh,"Repair ntfy registration")}
+                        TextButton(onClick={model.selectNtfy(host,true)},enabled=model.ntfyAvailable(),modifier=Modifier.heightIn(min=48.dp).testTag("delivery_ntfy_repair_$host")){IconLabel(MaterialGlyph.Refresh,"Repair ntfy registration")}
                         TextButton(onClick={model.selectSocketDelivery(host)},modifier=Modifier.heightIn(min=48.dp)){IconLabel(MaterialGlyph.Notification,"Use socket instead")}
                     }
                 }
@@ -1905,13 +1981,20 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
                     tag="delivery_completed_$host",
                     onCheckedChange={model.setCompletionDelivery(host,it)},
                 )
-                StatusPill(model.deliveryLabel(host),when(model.deliveryLabel(host)) {"Running"->StatusEmphasis.Positive;"Reconnecting","Permission required"->StatusEmphasis.Attention;else->StatusEmphasis.Muted})
+                val keeper=model.deliveryLabel(host)
+                StatusPill(keeper,when(keeper) {
+                    "Socket keeper connected" -> StatusEmphasis.Positive
+                    "Socket keeper reconnecting","Permission required" -> StatusEmphasis.Attention
+                    else -> StatusEmphasis.Muted
+                })
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                     IconAction(MaterialGlyph.Play,"Start","delivery_start_$host",enabled=!model.busy && model.deliveryEnabled(host),onClick=model::startPersistentDelivery)
                     IconAction(MaterialGlyph.Stop,"Stop","delivery_stop_$host",enabled=!model.busy && model.deliveryRequested(),onClick=model::stopPersistentDelivery)
                     IconAction(MaterialGlyph.Notification,"Repair notifications","delivery_repair_$host",enabled=!model.busy,onClick=onRepairNotifications)
                 }
                 UiText("ntfy hints contain no conversation text. Open a notification to authenticate and synchronize. Doze, notification permission, force-stop, desktop sleep and relay outages can delay delivery.",style=MaterialTheme.typography.bodySmall)
+                UiText("Registration verification is scoped to an authenticated connection. Offline is last verified, not current delivery health. Sleeping Goatr cannot instantly observe later host or distributor failure.",style=MaterialTheme.typography.bodySmall)
+                UiText("OMP registry-only desktop attention has no source-ordered notification transition. Only genuine mirrored requests and observed live completion cycles/turns notify; snapshots, tools/history and disconnects never fabricate completion.",style=MaterialTheme.typography.bodySmall)
             }
         }
         item(key="recovery_$host") {
@@ -1926,6 +2009,8 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
                 GoatrSection("Retained ordinary recovery",draft.action.actionId.value)
                 UiText("Original Target ${draft.action.target} · deletion deadline ${deadline(draft.expiresAt)}")
                 SelectionContainer {UiText(draft.text,modifier=Modifier.testTag("recovery_text"))}
+                if(draft.options.images!=null)UiText("${draft.options.images.size} original image-input references retained; inspection is not permission to reuse them.")
+                draft.options.delivery?.let {UiText("Original delivery: $it${draft.options.nativeTurnId?.let {turn->" · turn ${turn.value}"}.orEmpty()}",style=MaterialTheme.typography.bodySmall)}
                 UiText("Inspection only. Explicitly compose a new action if needed; never automatically resend or retarget this copy.",style=MaterialTheme.typography.bodySmall)
                 TextButton(onClick={discard=draft},enabled=!model.busy,modifier=Modifier.heightIn(min=48.dp).testTag("recovery_discard")) {UiText("Discard this inspected copy")}
             }

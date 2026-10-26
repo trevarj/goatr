@@ -9,12 +9,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
+
+private val HeaderStatusMeasureText=AnnotatedString("Ag\nAg")
 
 /** Compact page chrome only; callers retain navigation, loading and original-host authority. */
 @Composable
@@ -28,17 +34,47 @@ internal fun GoatrTitleBar(
     navigationIcon:@Composable ()->Unit={},
     actions:@Composable RowScope.()->Unit={},
 ) {
-    Box(modifier.fillMaxWidth().height(48.dp)) {
-        Row(Modifier.fillMaxSize().padding(horizontal=4.dp),horizontalArrangement=Arrangement.spacedBy(4.dp),verticalAlignment=Alignment.CenterVertically) {
-            navigationIcon()
-            Icon(painterResource(R.drawable.ic_notification_goat),"Goatr",modifier=Modifier.size(20.dp),tint=MaterialTheme.colorScheme.onSurface)
-            UiText(title,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=titleModifier.weight(1f).semantics {heading()})
-            Row(Modifier.width(100.dp),horizontalArrangement=Arrangement.spacedBy(4.dp),verticalAlignment=Alignment.CenterVertically) {
-                UiText(compactStatus,style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f).semantics {contentDescription=status})
-                Box(Modifier.size(16.dp)) {if(loading) CircularProgressIndicator(modifier=Modifier.fillMaxSize(),strokeWidth=2.dp)}
-            }
-            actions()
+    val statusStyle=MaterialTheme.typography.labelSmall
+    val density=LocalDensity.current
+    // The native paragraph engine owns nonlinear font scaling and first/last-line metrics.
+    // Its one-entry cache follows the same current font resolver/density/layout direction.
+    val measurer=rememberTextMeasurer(cacheSize=1)
+    val statusHeight=measurer.measure(HeaderStatusMeasureText,style=statusStyle,maxLines=2,density=density).size.height
+    val minimumHeight=with(density){statusHeight.toDp()}.coerceAtLeast(48.dp)
+    Row(
+        modifier.fillMaxWidth().heightIn(min=minimumHeight).padding(horizontal=8.dp,vertical=4.dp),
+        verticalAlignment=Alignment.CenterVertically,
+    ) {
+        navigationIcon()
+        Icon(
+            painterResource(R.drawable.ic_notification_goat),
+            contentDescription=null,
+            modifier=Modifier.size(24.dp),
+            tint=MaterialTheme.colorScheme.onSurface,
+        )
+        Column(Modifier.weight(1f).padding(start=8.dp,end=4.dp),verticalArrangement=Arrangement.spacedBy(2.dp)) {
+            UiText(
+                title.ifEmpty {"Goatr"},
+                style=if(title.isEmpty()) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleMedium,
+                maxLines=1,
+                overflow=TextOverflow.Ellipsis,
+                modifier=titleModifier.fillMaxWidth().semantics {heading()},
+            )
+            UiText(
+                compactStatus,
+                style=statusStyle,
+                color=MaterialTheme.colorScheme.onSurfaceVariant,
+                minLines=2,
+                maxLines=2,
+                overflow=TextOverflow.Ellipsis,
+                modifier=Modifier.fillMaxWidth().semantics {contentDescription=status},
+            )
         }
+        // Decorative progress never repeats the full accessible status or moves the trailing actions.
+        Box(Modifier.size(24.dp).clearAndSetSemantics {},contentAlignment=Alignment.Center) {
+            if(loading) CircularProgressIndicator(modifier=Modifier.size(14.dp),strokeWidth=1.5.dp)
+        }
+        Row(Modifier.heightIn(min=48.dp),verticalAlignment=Alignment.CenterVertically,content=actions)
     }
 }
 
@@ -90,15 +126,17 @@ internal fun SessionsHostCard(
     modifier:Modifier=Modifier,
     actions:@Composable RowScope.()->Unit,
 ) {
-    GroupedSurface(modifier) {
-        if(hostTitle!=null) Column(Modifier.fillMaxWidth().padding(vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            UiText(hostTitle,style=MaterialTheme.typography.titleMedium,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.semantics {heading()})
-            UiText(transport,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
-        } else StatusPill(transport,if(online)StatusEmphasis.Positive else StatusEmphasis.Attention)
+    Column(modifier.fillMaxWidth().padding(vertical=4.dp),verticalArrangement=Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min=48.dp),verticalAlignment=Alignment.CenterVertically) {
+            Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(2.dp)) {
+                hostTitle?.let {UiText(it,style=MaterialTheme.typography.titleSmall,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.semantics {heading()})}
+                UiText(transport,style=MaterialTheme.typography.bodySmall,color=if(online) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.tertiary,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
+            }
+            Row(horizontalArrangement=Arrangement.spacedBy(0.dp),content=actions)
+        }
         Box(Modifier.fillMaxWidth()) {
             if(failureText.isNotEmpty()) UiText(failureText,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error,minLines=1,maxLines=1,overflow=TextOverflow.Ellipsis)
             else RefreshHint(refreshing)
         }
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp),content=actions)
     }
 }

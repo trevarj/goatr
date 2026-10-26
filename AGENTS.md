@@ -231,12 +231,46 @@ owned Codex consent/relay and hash-verified private Herdr artifact. Ordinary
 diagnostics retain their no-extra-RPC boundary. No unguarded read, replacement
 adoption, retry, raw terminal text/hash/capture or additional report budget.
 
+### Owned continuity test capability context
+
+For the approved continuity MVP, the owner authorizes fresh owned Goatr test
+helpers, companions and local-admin test processes to hold `CAP_WAKE_ALARM`.
+Herdr and provider desktop children must still drop all inherited capabilities.
+This is an explicit test-context grant, not automatic escalation, production
+installation consent, `CAP_SYS_PTRACE`, a manager restart or a global policy change.
+Keep the real runtime, unchanged wrappers and every original process/socket/
+namespace check. Measure current objects; never borrow the one-off observer's
+namespace proof. Record actual capability sets and original unit/process ownership.
+Do not repeat this resolved authorization question.
+
+### Strict native Close boundary
+
+The owner chose the strict single-pane guarantee for the continuity MVP.
+Native session/shell Close is unavailable on the current stock Herdr API:
+`pane.close` can cascade to a native worktree group after concurrent changes.
+Keep viewer release distinct and present the specific limitation. Do not add
+workspace/group fallback, guessed atomic fencing, signals or a no-op Close.
+
+### Autonomous MVP execution
+
+The owner is AFK: do not ask further questions; choose the recommended safe,
+conservative option and continue. Existing authorization boundaries remain in
+force. Record genuinely unreachable prerequisites while finishing reachable work.
+
+
 ## Verification and handoff discipline
 
 Use incremental builds and checks scoped to changed behavior. Development APKs
 may be handed over for feedback with known failures disclosed; full clean builds
 and exhaustive acceptance belong to a later checkpoint. Keep identity,
 permission, privacy and no-replay protections intact. See `docs/STATUS.md`.
+
+Before tuning, inspect the selected compiler/profile and host/cgroup memory
+pressure. Keep the existing Cargo target/incremental cache; do not clean, move
+or recreate it during iteration. Companion dev/test builds use limited debug
+information with assertions retained; test inherits `profile.dev`. Use narrow
+checks while iterating. Build the Nix release only after the reviewed handoff
+is frozen.
 
 For the approved mobile MVP, use one GPT-6.1 Sol medium implementation writer
 and an independent GPT-6.1 Sol high reviewer before signed feature commits.
@@ -245,12 +279,24 @@ after each reviewed handoff; exhaustive clean/release checks remain later.
 Preserve app data and pairing on APK updates; exclude pairing secrets and
 sensitive screens from screenshots or video. See docs/UI_POLISH_PLAN.md.
 
+Current MVP validation is physical-device-only. Do not launch, use, recover or
+test emulators unless the owner explicitly reauthorizes them. Retained emulator
+records may be used only for ownership-proven shutdown; preserve their data.
+
 ADB shell invokes a remote shell: quote each remote token explicitly, including
 labels and JSON. Owned UI controllers must budget pre-input release admission
 separately from their UI-action deadline. Resolve an APK's registered launcher
 component before starting it; a debug application ID is not its Activity namespace.
 Window identity parsers must distinguish unavailable formats from a proven
 foreground mismatch and preserve secure-window checks across vendor metadata.
+UiAutomation `getWindows()` [omits covered windows](https://developer.android.com/reference/android/app/UiAutomation#getWindows%28%29)
+behind modal dialogs. Pin the current owned expected scene, not a covered Sessions root; use initial-root waits
+only before admission and immediate revalidation before input. Observe a fresh
+post-effect scene separately, retain original app UID/birth/artifact proof, and
+never replay an acknowledged input.
+
+For single-file formatting, pass `rustfmt --config skip_children=true`; otherwise
+Rustfmt also rewrites child modules. Preserve their exact preimages.
 
 Workers do not run builds, tests, linters, formatters, or smoke checks mid-flight
 unless verification is their explicit assignment. After all owned changes land,

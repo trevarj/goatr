@@ -151,8 +151,8 @@ internal fun ComposerOverflow(
                 ComposerControlAction(MaterialGlyph.Add, "Snippets", "composer_snippets", onClick = onSnippets)
                 ComposerControlAction(MaterialGlyph.Menu, "Skills", "composer_skills", skillsEnabled, "Skills are not available for this session.", onSkills)
                 ComposerControlAction(MaterialGlyph.Terminal, "Terminal", "terminal_open", terminalEnabled, "Terminal text is unavailable for this current native session.", onTerminal)
-                ComposerControlAction(MaterialGlyph.Desktop, "Worktrees", "worktrees_open", worktreesEnabled, "Worktrees are unavailable for this current native session.", onWorktrees)
-                ComposerControlAction(MaterialGlyph.Terminal, "Changes", "changes_open", changesEnabled, "Changes are unavailable for this current native session.", onChanges)
+                ComposerControlAction(MaterialGlyph.Desktop, "Worktrees", "worktrees_open", worktreesEnabled, PROJECT_GIT_READ_REQUIREMENT, onWorktrees)
+                ComposerControlAction(MaterialGlyph.Terminal, "Changes", "changes_open", changesEnabled, PROJECT_GIT_READ_REQUIREMENT, onChanges)
                 ComposerControlAction(MaterialGlyph.Edit, "Agent alias", "agent_alias_open", agentAliasEnabled, "Agent alias is unavailable for this original native session.", onAgentAlias)
                 ComposerControlAction(MaterialGlyph.Edit, "Rename", "workspace_rename_open", workspaceRenameEnabled, "Workspace rename is unavailable for this current native session.", onWorkspaceRename)
                 ComposerControlAction(

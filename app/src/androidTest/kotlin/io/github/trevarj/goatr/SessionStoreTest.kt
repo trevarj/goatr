@@ -3,7 +3,8 @@ package io.github.trevarj.goatr
 
 import androidx.test.platform.app.InstrumentationRegistry
 import computer.iroh.IrohAndroid
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.BeforeClass
 import org.junit.Test
@@ -33,7 +34,188 @@ class SessionStoreTest {
         val warning=store.recoveryWarning(HOST,request.id,text)
         return store.preSend(HOST,request,ByteArray(32){7},true,RecoveryApproval(replace,warning.futureExpiry))
     }
+    @Test fun terminalActionsKeepProtectedIdentityWithoutAProviderTargetAndFrameFactsNeverRegress()=runBlocking {
+        withStore {store,_,_,_->
+            val key=ByteArray(32){7};val boot=Uuid.random();val shell=ShellTarget(Uuid.random(),Uuid.random())
+            try {
+                val create=Request(Uuid.random(),RequestBody.TerminalCreate(TerminalCreateParams(boot,Uuid.random(),Id("workspace"),Uuid.random(),
+                    directoryRef=Uuid.random(),source=ArtifactSource.Shell(shell))))
+                assertFalse(store.matchingAction(HOST,create,key));assertNull(store.localAction(HOST,create.id))
+                assertTrue(store.preSend(HOST,create,key) is PreSendDecision.NewAction)
+                assertTrue(store.matchingAction(HOST,create,key))
+                val metadata=checkNotNull(store.localAction(HOST,create.id)).metadata
+                assertEquals(ActionMethod.TerminalCreate,metadata.method);assertNull(metadata.target);assertNull(metadata.shellTarget)
+                val changedCreate=create.copy(body=RequestBody.TerminalCreate((create.body as RequestBody.TerminalCreate).params.copy(projectId=Uuid.random())))
+                expectPolicy(ErrorCode.ActionIdConflict){store.matchingAction(HOST,changedCreate,key)}
+                val input=Request(Uuid.random(),RequestBody.ShellInput(ShellInputParams(boot,shell,Uuid.random(),ShellInput.Text("memory-only terminal text"))))
+                assertTrue(store.preSend(HOST,input,key) is PreSendDecision.NewAction)
+                val params=(input.body as RequestBody.ShellInput).params
+                val changedInput=input.copy(body=RequestBody.ShellInput(params.copy(subscription=Uuid.random())))
+                expectPolicy(ErrorCode.ActionIdConflict){store.matchingAction(HOST,changedInput,key)}
+                val partial=Receipt(input.id,ActionMethod.ShellInput,boot,createdAt=Uint(1),updatedAt=Uint(2),state=ReceiptState.Dispatching,
+                    shellTarget=shell,result=ActionResultShellDispatch(ShellDispatchProgress(19,7,false)))
+                store.receipt(HOST,partial,true)
+                store.receipt(HOST,partial.copy(updatedAt=Uint(3),result=ActionResultShellDispatch(ShellDispatchProgress(19,6,false))),true)
+                assertEquals(partial,store.localAction(HOST,input.id)?.receipt)
+                val dispatched=partial.copy(updatedAt=Uint(4),state=ReceiptState.Dispatched,result=ActionResultShellDispatch(ShellDispatchProgress(19,19,true)))
+                store.receipt(HOST,dispatched,true)
+                assertTrue(checkNotNull(store.localAction(HOST,input.id)?.receipt).shellDispatched())
+                store.receipt(HOST,partial.copy(updatedAt=Uint(5)),true)
+                assertEquals(dispatched,store.localAction(HOST,input.id)?.receipt)
+                store.receipt(HOST,dispatched.copy(updatedAt=Uint(6),result=ActionResultShellDispatch(ShellDispatchProgress(20,20,true))),true)
+                assertEquals(dispatched,store.localAction(HOST,input.id)?.receipt)
+                assertTrue(store.matchingAction(HOST,input,key))
+                assertTrue(store.state.value.recovery.isEmpty())
+            }finally {key.fill(0)}
+        }
+    }
+
     private fun referenced(n: Long, reference: ContentRef): SafeDisplayHistory = SafeDisplayHistory.redacted(record(n).record.copy(text=reference))
+    @Test fun presentationTransactionsCommitExpiryBeforeOsPostAndPublishAfterLaterPolicyFailure() = runBlocking {
+        withStore {store,name,_,advance->
+            val manager=checkNotNull(context.getSystemService(android.app.NotificationManager::class.java))
+            check(manager.areNotificationsEnabled()) {"Owned instrumentation requires enabled notification permission; never request a user dialog or skip this gate"}
+            val channel="store-expiry-${Uuid.random().value}"
+            val tag="owned-$channel"
+            manager.createNotificationChannel(android.app.NotificationChannel(channel,"Owned store expiry regression",android.app.NotificationManager.IMPORTANCE_LOW))
+            val session=summary();val target=Target(session.sessionId,session.generation);val source=Uuid.random()
+            val text="x".repeat(Protocol.CONTENT_INLINE_MAX+1)
+            val reference=ContentRef(Uuid.random(),Uint(text.length.toLong()),Mime.TextPlain)
+            val posts=mutableListOf<Uuid>()
+            try {
+                store.cache(HOST,session,listOf(referenced(0,reference)),false,snapshot=true,source=source)
+                store.cacheContent(HOST,target,source,reference,text)
+                val first=AttentionEvent(Uuid.random(),Uint(1),session.sessionId,session.generation,AttentionCategory.Attention,Uint(0))
+                val second=first.copy(eventId=Uuid.random(),sequence=Uint(2))
+                store.liveNotification(HOST,first);store.liveNotification(HOST,second)
+                store.installPresentationSink(object:PresentationSink {
+                    override fun post(host:String,event:AttentionEvent):Boolean {
+                        android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+                            db.rawQuery("SELECT disposition FROM notification_presentations WHERE host=? AND event=?",arrayOf(host,event.eventId.value)).use {row->
+                                assertTrue("Presentation decision must be committed before the OS effect",row.moveToFirst());assertEquals("posted",row.getString(0))
+                            }
+                            db.rawQuery("SELECT count(*) FROM content WHERE host=? AND session=?",arrayOf(host,session.sessionId.value)).use {row->assertTrue(row.moveToFirst());assertEquals(0L,row.getLong(0))}
+                        }
+                        manager.notify(tag,event.sequence.value.toInt(),android.app.Notification.Builder(context,channel).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Owned transaction regression").build())
+                        posts+=event.eventId
+                        return true
+                    }
+                    override fun cancel(host:String,eventId:String):Boolean {manager.cancel(tag,if(eventId==first.eventId.value)1 else 2);return true}
+                    override fun noLongerPresent(host:String,eventId:String):Boolean = manager.activeNotifications.none {it.tag==tag&&it.id==(if(eventId==first.eventId.value)1 else 2)}
+                })
+                advance(SessionStore.CONTENT_TTL)
+                expectPolicy(ErrorCode.InvalidRequest) {
+                    store.reconcilePresentations(HOST) {PresentationPolicy(true,true){event->if(event.eventId==second.eventId)throw StorePolicy(ErrorCode.InvalidRequest);false}}
+                }
+                assertEquals(listOf(first.eventId),posts)
+                assertTrue("Committed first-transaction expiry survives later policy failure",store.state.value.cached.single().history.single().text is ContentUnavailable)
+                kotlinx.coroutines.withTimeout(5000){while(manager.activeNotifications.none {it.tag==tag&&it.id==1})kotlinx.coroutines.delay(10)}
+                store.reconcilePresentations(HOST) {PresentationPolicy(true,true){false}}
+                assertEquals(listOf(first.eventId,second.eventId),posts)
+                kotlinx.coroutines.withTimeout(5000){while(manager.activeNotifications.count {it.tag==tag}!=2)kotlinx.coroutines.delay(10)}
+            } finally {
+                manager.cancel(tag,1);manager.cancel(tag,2);manager.deleteNotificationChannel(channel)
+            }
+        }
+    }
+
+    private fun storedRow(name:String,session:Uuid,id:Id):List<String> =
+        android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+            db.rawQuery("SELECT rowid,data,origins,ord,bytes,at FROM records WHERE host=? AND session=? AND id=?",arrayOf(HOST,session.value,id.value)).use {row->
+                assertTrue(row.moveToFirst());List(row.columnCount){row.getString(it)}
+            }
+        }
+    @Test fun incrementalRowsRetainPayloadProvenanceAndUnrelatedTranscriptIdentity() = runBlocking {
+        withStore {store,name,_,advance->
+            val first=summary(Provider.Omp);val other=summary();val source=Uuid.random()
+            store.cache(HOST,first,(0L..2L).map {record(it)},false,snapshot=true,source=source)
+            store.cache(HOST,other,listOf(record(9)),false,snapshot=true,source=source)
+            val unrelated=store.state.value.cached.single {it.summary.sessionId==other.sessionId}.history
+            val supplied=storedRow(name,first.sessionId,Id("item-0"))
+            val omitted=storedRow(name,first.sessionId,Id("item-1"))
+            advance(1)
+            store.cache(HOST,first,listOf(record(0)),false,source=source)
+            val refreshed=storedRow(name,first.sessionId,Id("item-0"))
+            assertEquals(supplied.dropLast(1),refreshed.dropLast(1))
+            assertEquals("1",refreshed.last())
+            assertEquals(omitted,storedRow(name,first.sessionId,Id("item-1")))
+            advance(2)
+            store.cache(HOST,first,listOf(record(0,text="changed completed display")),false,source=source)
+            assertSame("A committed change to another transcript must not decode/replace this retained value",unrelated,store.state.value.cached.single {it.summary.sessionId==other.sessionId}.history)
+            val changed=store.state.value.cached.single {it.summary.sessionId==first.sessionId}.history
+            store.host(store.state.value.hosts.single().copy(name="renamed host"))
+            assertSame(changed,store.state.value.cached.single {it.summary.sessionId==first.sessionId}.history)
+            assertSame(unrelated,store.state.value.cached.single {it.summary.sessionId==other.sessionId}.history)
+            val beforeSnapshot=storedRow(name,first.sessionId,Id("item-0"))
+            advance(3)
+            store.cache(HOST,first,changed.map(SafeDisplayHistory::redacted),false,snapshot=true,source=source)
+            val snapshotRow=storedRow(name,first.sessionId,Id("item-0"))
+            assertEquals(beforeSnapshot.dropLast(1),snapshotRow.dropLast(1))
+            assertEquals("3",snapshotRow.last())
+            val unchangedView=store.state.value
+            store.open()
+            assertSame("No display change publishes no replacement StoreView",unchangedView,store.state.value)
+            advance(SessionStore.CACHE_AGE+2)
+            store.open()
+            assertEquals("Unchanged snapshot rows retain their refreshed age",3,store.state.value.cached.single {it.summary.sessionId==first.sessionId}.history.size)
+            assertTrue(store.state.value.cached.single {it.summary.sessionId==other.sessionId}.history.isEmpty())
+            advance(SessionStore.CACHE_AGE+3)
+            store.open()
+            assertTrue(store.state.value.cached.single {it.summary.sessionId==first.sessionId}.history.isEmpty())
+        }
+    }
+    @Test fun snapshotsDeleteAbsentIdsResetOriginsAndDoNotRestoreReplacedSource() = runBlocking {
+        withStore {store,name,clock,_->
+            val session=summary(Provider.Omp);val source=Uuid.random();val target=Target(session.sessionId,session.generation)
+            store.cache(HOST,session,listOf(record(0,RecordSource.Persisted,"old persisted"),record(1)),false,snapshot=true,source=source)
+            store.cache(HOST,session,listOf(record(0,RecordSource.Live,"old live")),false,source=source)
+            store.cache(HOST,session,listOf(record(0,RecordSource.Live,"authoritative replacement"),record(2)),false,snapshot=true,source=source)
+            val reconciled=store.state.value.cached.single().history
+            assertEquals(setOf(Id("item-0"),Id("item-2")),reconciled.map {it.id}.toSet())
+            assertEquals(ContentText(InlineText("authoritative replacement")),reconciled.first {it.id==Id("item-0")}.text)
+            val text="x".repeat(Protocol.CONTENT_INLINE_MAX+1)
+            val reference=ContentRef(Uuid.random(),Uint(text.length.toLong()),Mime.TextPlain)
+            store.cache(HOST,session,listOf(referenced(3,reference)),false,source=source)
+            store.cacheContent(HOST,target,source,reference,text)
+            val nextSource=Uuid.random()
+            store.cache(HOST,session,listOf(referenced(3,reference)),false,snapshot=true,source=nextSource)
+            assertNull(store.offlineContent(HOST,target,reference.handle))
+            assertTrue(store.state.value.cached.single().history.single().text is ContentUnavailable)
+            expectPolicy(ErrorCode.StaleSession){store.cache(HOST,session,listOf(record(1)),false,source=source)}
+            val replacement=session.copy(generation=Uuid.random())
+            store.cache(HOST,replacement,listOf(record(7)),false,snapshot=true,source=Uuid.random())
+            val reopened=SessionStore(context,name,clock)
+            try {
+                reopened.open()
+                assertEquals(replacement.generation,reopened.state.value.cached.single().summary.generation)
+                assertEquals(listOf(Id("item-7")),reopened.state.value.cached.single().history.map {it.id})
+            } finally {reopened.close()}
+        }
+    }
+    @Test fun committedExpiryReconcilesOnlyAffectedHistoryEvenWhenOperationRollsBack() = runBlocking {
+        withStore {store,_,_,advance->
+            val expired=summary();val other=summary();val source=Uuid.random();val target=Target(expired.sessionId,expired.generation)
+            val text="x".repeat(Protocol.CONTENT_INLINE_MAX+1)
+            val reference=ContentRef(Uuid.random(),Uint(text.length.toLong()),Mime.TextPlain)
+            store.cache(HOST,expired,listOf(record(0),referenced(1,reference)),false,snapshot=true,source=source)
+            store.cacheContent(HOST,target,source,reference,text)
+            advance(1)
+            store.cache(HOST,other,listOf(record(9)),false,snapshot=true,source=source)
+            val unrelated=store.state.value.cached.single {it.summary.sessionId==other.sessionId}.history
+            advance(SessionStore.CONTENT_TTL)
+            expectPolicy(ErrorCode.ContentExpired){store.cacheContent(HOST,target,Uuid.random(),reference,text)}
+            assertTrue(store.state.value.cached.single {it.summary.sessionId==expired.sessionId}.history.single {it.id==Id("item-1")}.text is ContentUnavailable)
+            assertSame(unrelated,store.state.value.cached.single {it.summary.sessionId==other.sessionId}.history)
+            advance(SessionStore.CACHE_AGE)
+            expectPolicy(ErrorCode.StaleSession){store.cache(HOST,expired.copy(generation=Uuid.random()),listOf(record(2)),false,source=source)}
+            val removed=store.state.value.cached.single {it.summary.sessionId==expired.sessionId}
+            assertTrue(removed.history.isEmpty());assertTrue(removed.partial)
+            assertSame(unrelated,store.state.value.cached.single {it.summary.sessionId==other.sessionId}.history)
+            store.forget(HOST)
+            assertTrue(store.state.value.cached.isEmpty())
+        }
+    }
+
     @Test fun crashReopenKeepsOriginalRecoveryAndLocalReceiptNeverErases() = runBlocking {
         withStore { store,name,clock,_ ->
             val summary=summary(); val request=prompt(summary); store.cache(HOST,summary,listOf(record(0)),false)
@@ -132,6 +314,14 @@ class SessionStoreTest {
             advance(SessionStore.CONTENT_TTL)
             assertNull(store.content(HOST,Target(viewed.sessionId,viewed.generation),source,handles[0]))
             assertNull(store.offlineContent(HOST,Target(viewed.sessionId,viewed.generation),handles[0]))
+            // Evict a DIFFERENT retained transcript while writing the now-viewed other session.
+            store.viewing(HOST,other.sessionId)
+            for(handle in handles)store.cacheContent(HOST,Target(viewed.sessionId,viewed.generation),source,ContentRef(handle,Uint(text.length.toLong()),Mime.TextPlain),text)
+            assertTrue(store.state.value.cached.first {it.summary.sessionId==viewed.sessionId}.history.isNotEmpty())
+            store.cache(HOST,other,listOf(referenced(1,reference)),false,source=source)
+            store.cacheContent(HOST,Target(other.sessionId,other.generation),source,reference,text)
+            val retired=store.state.value.cached.first {it.summary.sessionId==viewed.sessionId}
+            assertTrue(retired.history.isEmpty());assertTrue(retired.partial)
         }
     }
     @Test fun authenticatedNotificationDedupReadPrivacyAndOfflineForgetAreAtomic() = runBlocking {
@@ -146,7 +336,7 @@ class SessionStoreTest {
             expectPolicy(ErrorCode.InvalidRequest) { store.readRequest(HOST,Uuid.random(),summary.sessionId,Uint(2)) }
             store.readConfirmed(HOST,ReadWatermark(summary.sessionId,Uint(1)))
             approved(store,prompt(summary))
-            store.encryptedRegistration(HOST,Uuid.random(),byteArrayOf(1,2,3))
+            store.encryptedRegistration(HOST,Uuid.random(),store.state.value.hosts.single().deviceId!!,null,byteArrayOf(1,2,3))
             val deletion=store.forget(HOST)
             assertEquals(listOf("goatr.test.endpoint","goatr.test.receipt"),deletion.aliases)
             assertTrue(store.state.value.hosts.isEmpty()); assertTrue(store.state.value.cached.isEmpty()); assertTrue(store.state.value.recovery.isEmpty())
@@ -600,5 +790,147 @@ class SessionStoreTest {
                 assertFalse(context.getDatabasePath(name).readBytes().toString(Charsets.ISO_8859_1).contains("Private native workspace label"))
             } finally { reopened.close() }
         }
+    }
+
+    @Test fun queuedOldOwnerNotificationAndRegistrationAppliesRefuseInsideTheActualSqliteWriter()=runBlocking {
+        withStore {store,_,_,_->
+            val original=Any();val installed=java.util.concurrent.atomic.AtomicReference(original)
+            val entered=java.util.concurrent.CountDownLatch(1);val release=java.util.concurrent.CountDownLatch(1)
+            val device=store.state.value.hosts.single().deviceId!!
+            val registration=Uuid.random()
+            val event=AttentionEvent(Uuid.random(),Uint(1),Uuid.random(),Uuid.random(),AttentionCategory.Attention,Uint(0))
+            supervisorScope {
+                val blocker=async(Dispatchers.IO){store.notifications(HOST,NotificationsSyncResult(emptyList(),emptyList(),Uint(0),Uint(1),resetRequired=false)){entered.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS));true}}
+                try {
+                    withContext(Dispatchers.IO){check(entered.await(5,java.util.concurrent.TimeUnit.SECONDS))}
+                    val notification=async(start=CoroutineStart.UNDISPATCHED){store.notifications(HOST,NotificationsSyncResult(listOf(event),emptyList(),Uint(1),Uint(1),resetRequired=false)){installed.get()===original}}
+                    val register=async(start=CoroutineStart.UNDISPATCHED){store.encryptedRegistration(HOST,registration,device,null,byteArrayOf(7)){installed.get()===original}}
+                    installed.set(Any());release.countDown();blocker.await()
+                    expectPolicy(ErrorCode.NotReady){notification.await()}
+                    expectPolicy(ErrorCode.NotReady){register.await()}
+                }finally{release.countDown()}
+            }
+            assertTrue(store.cachedNotifications(HOST).events.isEmpty())
+            assertNull(store.encryptedRegistration(HOST))
+            val calls=java.util.concurrent.atomic.AtomicInteger()
+            expectPolicy(ErrorCode.NotReady){store.notifications(HOST,NotificationsSyncResult(listOf(event),emptyList(),Uint(1),Uint(1),resetRequired=false)){calls.incrementAndGet()==1}}
+            assertTrue("A source lost after SQL changes still rolls back the original transaction",store.cachedNotifications(HOST).events.isEmpty())
+        }
+    }
+
+    @Test fun registrationGenerationAndDeviceCompareAtCommitCannotAdoptAForgottenRepairedHost()=runBlocking {
+        withStore {store,_,_,_->
+            val device=store.state.value.hosts.single().deviceId!!
+            val first=Uuid.random();val second=Uuid.random()
+            store.encryptedRegistration(HOST,first,device,null,byteArrayOf(1))
+            store.encryptedRegistration(HOST,second,device,first,byteArrayOf(2))
+            expectPolicy(ErrorCode.StaleRegistration){store.encryptedRegistration(HOST,first,device,first,byteArrayOf(3))}
+            assertEquals(second,store.encryptedRegistration(HOST)!!.first)
+            val deletion=store.forget(HOST);store.keysDeleted(deletion)
+            val replacement=Uuid.random()
+            store.host(HostMetadata(HOST,"repaired fixture",replacement,listOf("goatr.test.endpoint","goatr.test.receipt")))
+            expectPolicy(ErrorCode.NotReady){store.encryptedRegistration(HOST,second,device,second,byteArrayOf(4))}
+            assertNull(store.encryptedRegistration(HOST))
+        }
+    }
+
+    @Test fun generationlessHintsShareRealOsIdentityAndCannotPermanentlySuppressANewerOriginal()=runBlocking {
+        withStore {store,name,_,_->
+            val manager=checkNotNull(context.getSystemService(android.app.NotificationManager::class.java))
+            check(manager.areNotificationsEnabled()){"Owned notification fixture needs the existing granted permission; do not skip"}
+            val channel="push-store-${Uuid.random().value}";val tags=mutableSetOf<String>()
+            manager.createNotificationChannel(android.app.NotificationChannel(channel,"Owned push ledger regression",android.app.NotificationManager.IMPORTANCE_LOW))
+            val hints=mutableListOf<Uuid>();val authenticated=mutableListOf<Uuid>()
+            fun present(event:Uuid,hint:Boolean):Boolean {
+                val tag="$channel.${event.value}";tags+=tag
+                manager.notify(tag,1,android.app.Notification.Builder(context,channel).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Owned generic notification").setOnlyAlertOnce(true).build())
+                if(hint)hints+=event else authenticated+=event
+                return true
+            }
+            store.installPresentationSink(object:PresentationSink {
+                override fun post(host:String,event:AttentionEvent)=present(event.eventId,false)
+                override fun postHint(host:String,hint:PushEventHint)=present(hint.eventId,true)
+                override fun cancel(host:String,eventId:String):Boolean {manager.cancel("$channel.$eventId",1);return true}
+                override fun noLongerPresent(host:String,eventId:String)=manager.activeNotifications.none{it.tag=="$channel.$eventId"}
+            })
+            try {
+                val device=store.state.value.hosts.single().deviceId!!;val registration=Uuid.random()
+                store.encryptedRegistration(HOST,registration,device,null,byteArrayOf(1))
+                val session=Uuid.random();val old=Target(session,Uuid.random());val fresh=Target(session,Uuid.random())
+                val event=AttentionEvent(Uuid.random(),Uint(1),session,fresh.generation,AttentionCategory.Attention,Uint(0))
+                fun hint(value:AttentionEvent)=PushEventHint(1,EndpointId(HOST),device,registration,value.sessionId,value.eventId,value.sequence,value.category)
+                var checked=0
+                store.pushHint(HOST,hint(event),{true},{true}){known->checked++;Target(known.sessionId,known.generation)==old}
+                assertEquals(0,checked);assertEquals(listOf(event.eventId),hints)
+                assertTrue(store.cachedNotifications(HOST).events.isEmpty())
+                store.liveNotification(HOST,event)
+                store.reconcilePresentations(HOST){PresentationPolicy(true,true){Target(it.sessionId,it.generation)==old}}
+                assertEquals(listOf(event.eventId),authenticated)
+                withTimeout(5000){while(manager.activeNotifications.count{it.tag=="$channel.${event.eventId.value}"}!=1)delay(10)}
+                store.pushHint(HOST,hint(event),{true},{true}){true}
+                store.liveNotification(HOST,event)
+                store.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+                assertEquals(1,hints.size);assertEquals(1,authenticated.size)
+                val visible=event.copy(eventId=Uuid.random(),sequence=Uint(2),generation=old.generation)
+                store.liveNotification(HOST,visible)
+                store.pushHint(HOST,hint(visible),{true},{true}){Target(it.sessionId,it.generation)==old}
+                assertFalse(visible.eventId in hints||visible.eventId in authenticated)
+                val legacy=event.copy(eventId=Uuid.random(),sequence=Uint(3))
+                store.pushHint(HOST,hint(legacy),{true},{true}){false}
+                manager.cancel("$channel.${legacy.eventId.value}",1)
+                android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use{db->db.execSQL("UPDATE notification_presentations SET disposition='suppressed_visible',active=0 WHERE host=? AND event=?",arrayOf(HOST,legacy.eventId.value))}
+                store.liveNotification(HOST,legacy)
+                store.reconcilePresentations(HOST){PresentationPolicy(true,true){Target(it.sessionId,it.generation)==old}}
+                assertEquals(listOf(event.eventId,legacy.eventId),authenticated)
+                withTimeout(5000){while(manager.activeNotifications.none{it.tag=="$channel.${legacy.eventId.value}"})delay(10)}
+                val disabledCompletion=legacy.copy(eventId=Uuid.random(),sequence=Uint(4),category=AttentionCategory.Completed)
+                store.pushHint(HOST,hint(disabledCompletion),{true},{true}){false}
+                manager.cancel("$channel.${disabledCompletion.eventId.value}",1)
+                android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use{db->db.execSQL("UPDATE notification_presentations SET disposition='suppressed_visible',active=0 WHERE host=? AND event=?",arrayOf(HOST,disabledCompletion.eventId.value))}
+                store.liveNotification(HOST,disabledCompletion)
+                var completionVisibilityChecks=0
+                store.reconcilePresentations(HOST){PresentationPolicy(true,false){completionVisibilityChecks++;false}}
+                assertEquals("Completion policy precedes any exact-generation visibility decision",0,completionVisibilityChecks)
+                assertFalse(disabledCompletion.eventId in authenticated)
+                assertTrue(manager.activeNotifications.none{it.tag=="$channel.${disabledCompletion.eventId.value}"})
+                android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use{db->
+                    db.rawQuery("SELECT count(*) FROM push_hints WHERE host=? AND event=?",arrayOf(HOST,disabledCompletion.eventId.value)).use{rows->assertTrue(rows.moveToFirst());assertEquals(0,rows.getInt(0))}
+                }
+                store.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+                assertFalse("Later preference changes cannot replay an already consumed hint",disabledCompletion.eventId in authenticated)
+                store.readConfirmed(HOST,ReadWatermark(session,Uint(1)))
+                withTimeout(5000){while(manager.activeNotifications.any{it.tag=="$channel.${event.eventId.value}"})delay(10)}
+                assertTrue(manager.activeNotifications.any{it.tag=="$channel.${legacy.eventId.value}"})
+            }finally{tags.forEach{manager.cancel(it,1)};manager.deleteNotificationChannel(channel)}
+        }
+    }
+
+    @Test fun pushMacAdmissionPrecedesJsonAndOldGenerationOrDeviceCannotBecomeAttentionAuthority() {
+        val key=ByteArray(32){9}
+        val registration=LocalPushRegistration(1,HOST,Uuid.random(),Uuid.random(),Uuid.random(),PushHints.encode(key),0)
+        fun signed(payload:String):ByteArray {
+            val prefix="G1."+PushHints.encode(payload.toByteArray(Charsets.UTF_8))
+            val mac=javax.crypto.Mac.getInstance("HmacSHA256").apply{init(javax.crypto.spec.SecretKeySpec(key,"HmacSHA256"))}.doFinal(prefix.toByteArray(Charsets.US_ASCII))
+            return (prefix+"."+PushHints.encode(mac)).toByteArray(Charsets.US_ASCII)
+        }
+        fun refused(bytes:ByteArray,record:LocalPushRegistration=registration) {
+            try{PushHints.verify(bytes,record);fail("Unadmitted hint reached the typed consumer")}catch(_:Exception){}
+        }
+        try {
+            val probe=PushProbeHint(1,EndpointId(HOST),registration.device,registration.generation,registration.probe,"probe")
+            val bytes=signed(Protocol.strictJson.encodeToString(PushProbeHint.serializer(),probe))
+            repeat(2){assertTrue(PushHints.verify(bytes,registration) is VerifiedPushHint.Probe)}
+            refused(bytes,registration.copy(generation=Uuid.random()))
+            refused(bytes,registration.copy(device=Uuid.random()))
+            refused(bytes,registration.copy(key=PushHints.encode(ByteArray(32){11})))
+            val invalid=signed("not-json").toString(Charsets.US_ASCII).split('.')
+            val forged=(invalid[0]+"."+invalid[1]+"."+(if(invalid[2][0]=='A')"B"else"A")+invalid[2].drop(1)).toByteArray(Charsets.US_ASCII)
+            try{PushHints.verify(forged,registration);fail("Forged MAC reached JSON")}catch(error:StorePolicy){assertEquals(ErrorCode.PushRejected,error.code)}
+            val hint=PushEventHint(1,EndpointId(HOST),registration.device,registration.generation,Uuid.random(),Uuid.random(),Uint(1),AttentionCategory.Attention)
+            val raw=Protocol.strictJson.encodeToJsonElement(PushEventHint.serializer(),hint).jsonObject
+            assertTrue(PushHints.verify(signed(raw.toString()),registration) is VerifiedPushHint.Event)
+            refused(signed(JsonObject(raw+("generation" to JsonPrimitive(Uuid.random().value))).toString()))
+            refused(ByteArray(2049){'A'.code.toByte()})
+        }finally{key.fill(0)}
     }
 }

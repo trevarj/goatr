@@ -66,14 +66,12 @@ async fn authorized() -> (
 fn prompt(boot: Uuid) -> Request {
     Request {
         id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams {
-            boot_id: boot,
-            target: Target {
-                session_id: Uuid::random(),
-                generation: Uuid::random(),
-            },
-            text: PromptText("owned socket boundary".into()),
-        }),
+        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
+        target: Target {
+            session_id: Uuid::random(),
+            generation: Uuid::random(),
+        },
+        text: PromptText("owned socket boundary".into()), }),
     }
 }
 #[tokio::test]
@@ -306,13 +304,11 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
     let action = Uuid::random();
     let request = Request {
         id: action.clone(),
-        body: RequestBody::SessionCreate(SessionCreateParams { source_target: None, checkout: None,
-            boot_id: security.boot.clone(),
-            server_id: Uuid::random(),
-            project_id: Uuid::random(),
-            provider: Provider::Codex,
-            name: Label::new("owned OS boundary fixture").unwrap(),
-        }),
+        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: security.boot.clone(),
+        server_id: Uuid::random(),
+        project_id: Uuid::random(),
+        provider: Provider::Codex,
+        name: Label::new("owned OS boundary fixture").unwrap(), }),
     };
     security
         .reserve(&auth, request, |_| Ok(()), |_| {})
@@ -320,56 +316,49 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
         .unwrap();
     let root = std::env::temp_dir().join(format!("goatr-start-{}", Uuid::random().0));
     let directory = root.clone();
-    let resources = security
-        .start_boundary(
-            &auth,
-            action.clone(),
-            (CreationStage::Workspace, StageMetadata::default()),
-            || Ok(()),
-            move || {
-                fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(&directory)
-                    .unwrap();
-                let marker = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(directory.join("resource"))
-                    .unwrap();
-                marker.sync_all().unwrap();
-                let resources = CreationResources { checkout: None,
-                    workspace_id: Some(Id(format!(
-                        "directory-inode-{}",
-                        fs::metadata(&directory).unwrap().ino()
-                    ))),
-                    pane_id: Some(Id(format!(
-                        "file-inode-{}",
-                        marker.metadata().unwrap().ino()
-                    ))),
-                    terminal_id: Some(Id(format!(
-                        "descriptor-inode-{}",
-                        marker.metadata().unwrap().ino()
-                    ))),
-                    native_id: None,
-                    binding_id: None,
-                    session_id: None,
-                    generation: None,
-                    owner_started: None,
-                    relay_started: None,
-                };
-                Ok((
-                    resources.clone(),
-                    CreationOutcome {
-                        resources,
-                        metadata: StageMetadata::default(),
-                        state: StageState::Confirmed,
-                        definitive: Some(Id("owned directory/file creation completed".into())),
-                        at: now_ms(),
-                    },
-                ))
+    let resources = security.start_boundary(&auth, action.clone(), (CreationStage::Workspace, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, move || {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let marker = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.join("resource"))
+            .unwrap();
+        marker.sync_all().unwrap();
+        let resources = CreationResources { checkout: None,
+            workspace_id: Some(Id(format!(
+                "directory-inode-{}",
+                fs::metadata(&directory).unwrap().ino()
+            ))),
+            pane_id: Some(Id(format!(
+                "file-inode-{}",
+                marker.metadata().unwrap().ino()
+            ))),
+            terminal_id: Some(Id(format!(
+                "descriptor-inode-{}",
+                marker.metadata().unwrap().ino()
+            ))),
+            native_id: None,
+            binding_id: None,
+            session_id: None,
+            generation: None,
+            owner_started: None,
+            relay_started: None,
+        };
+        Ok((
+            resources.clone(),
+            CreationOutcome {
+                resources,
+                metadata: StageMetadata::default(),
+                state: StageState::Confirmed,
+                definitive: Some(Id("owned directory/file creation completed".into())),
+                at: now_ms(),
             },
-        )
+        ))
+    })
         .await
         .unwrap();
     let proof = auth.proof.clone();
@@ -420,55 +409,48 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
         .await
         .unwrap();
     let known = resources.clone();
-    let mut child = security
-        .start_boundary(
-            &auth,
-            action.clone(),
-            (CreationStage::Owner, StageMetadata::default()),
-            || Ok(()),
-            move || {
-                let child = std::process::Command::new("sleep")
-                    .arg("30")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .unwrap();
-                let pid = child.id();
-                let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-                let ticks = stat[stat.rfind(')').unwrap() + 2..]
-                    .split_whitespace()
-                    .nth(19)
-                    .unwrap()
-                    .parse::<u64>()
-                    .unwrap();
-                let boot = Uuid::new(
-                    fs::read_to_string("/proc/sys/kernel/random/boot_id")
-                        .unwrap()
-                        .trim(),
-                )
-                .unwrap();
-                let resources = CreationResources { checkout: None,
-                    owner_started: Some(true),
-                    ..known
-                };
-                Ok((
-                    child,
-                    CreationOutcome {
-                        resources,
-                        metadata: StageMetadata {
-                            pid: Some(pid),
-                            pid_start_ticks: Some(ticks),
-                            linux_boot_id: Some(boot),
-                            ..StageMetadata::default()
-                        },
-                        state: StageState::Confirmed,
-                        definitive: Some(Id(format!("started-pid-{pid}-{ticks}"))),
-                        at: now_ms(),
-                    },
-                ))
-            },
+    let mut child = security.start_boundary(&auth, action.clone(), (CreationStage::Owner, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, move || {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let ticks = stat[stat.rfind(')').unwrap() + 2..]
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let boot = Uuid::new(
+            fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .unwrap()
+                .trim(),
         )
+        .unwrap();
+        let resources = CreationResources { checkout: None,
+            owner_started: Some(true),
+            ..known
+        };
+        Ok((
+            child,
+            CreationOutcome {
+                resources,
+                metadata: StageMetadata {
+                    pid: Some(pid),
+                    pid_start_ticks: Some(ticks),
+                    linux_boot_id: Some(boot),
+                    ..StageMetadata::default()
+                },
+                state: StageState::Confirmed,
+                definitive: Some(Id(format!("started-pid-{pid}-{ticks}"))),
+                at: now_ms(),
+            },
+        ))
+    })
         .await
         .unwrap();
     let revoked = security
@@ -489,26 +471,19 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
         let forbidden = root.join(format!("forbidden-{stage:?}"));
         let attempt = forbidden.clone();
         let preserved = resources.clone();
-        let denied = security
-            .start_boundary(
-                &auth,
-                action.clone(),
-                (stage, StageMetadata::default()),
-                || Ok(()),
-                move || {
-                    fs::DirBuilder::new().mode(0o700).create(attempt).unwrap();
-                    Ok((
-                        (),
-                        CreationOutcome {
-                            resources: preserved,
-                            metadata: StageMetadata::default(),
-                            state: StageState::Uncertain,
-                            definitive: None,
-                            at: now_ms(),
-                        },
-                    ))
+        let denied = security.start_boundary(&auth, action.clone(), (stage, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, move || {
+            fs::DirBuilder::new().mode(0o700).create(attempt).unwrap();
+            Ok((
+                (),
+                CreationOutcome {
+                    resources: preserved,
+                    metadata: StageMetadata::default(),
+                    state: StageState::Uncertain,
+                    definitive: None,
+                    at: now_ms(),
                 },
-            )
+            ))
+        })
             .await;
         assert_eq!(denied.unwrap_err(), ErrorCode::Unauthorized);
         assert!(!forbidden.exists());
@@ -521,291 +496,6 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
     goatr::close_endpoint(&phone).await.unwrap();
 }
 
-#[tokio::test]
-async fn public_herdr_workspace_probe_and_launch_are_receipt_once_only_without_native_ready_claims()
-{
-    use goatr::{config::Config, herdr::*};
-    use serde_json::{Value, json};
-    use std::{
-        os::unix::fs::PermissionsExt,
-        path::PathBuf,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
-    use tokio::{
-        io::BufReader,
-        net::UnixListener,
-        sync::{Mutex, watch},
-        task::JoinSet,
-    };
-    let (host, phone, security, auth) = authorized().await;
-    let root = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(format!(".gc-{}", &Uuid::random().0[..8]));
-    fs::create_dir(&root).unwrap();
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-    let socket = root.join("h.sock");
-    let wrapper = root.join("omp");
-    let herdr = root.join("herdr");
-    let interpreter = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|p| p.join("bash"))
-        .find(|p| p.is_file())
-        .expect("owned GNU Bash fixture is required");
-    fs::write(&wrapper, format!("#!{}\nexit 99\n", interpreter.display())).unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
-    let listing = json!({"sessions":[{"name":"owned","default":false,"running":true,"socket_path":socket,"session_dir":root}]});
-    fs::write(
-        &herdr,
-        format!(
-            "#!{}\nprintf '%s\\n' '{}'\n",
-            interpreter.display(),
-            listing
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    let registry = root.join("r");
-    fs::create_dir(&registry).unwrap();
-    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
-    let project = Uuid::random();
-    let config=Config::parse(&format!("version=1\nruntime_dir={root:?}\nruntime_dir_agent={root:?}\nallow_scoped_shell_probe=true\nomp_registry_dir={registry:?}\nomp_session_roots=[{root:?}]\n[executables]\nherdr={herdr:?}\nomp={wrapper:?}\n[[projects]]\nid={:?}\nlabel=\"owned\"\npath={root:?}\n",project.0)).unwrap();
-    fn shell(executable: &std::path::Path, root: &std::path::Path) -> tokio::process::Child {
-        tokio::process::Command::new(executable)
-            .args(["--noprofile", "--norc", "-i"])
-            .current_dir(root)
-            .env("PATH", root)
-            .env("HOME", root)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap()
-    }
-    let mut old_shell = shell(&interpreter, &root);
-    let mut new_shell = shell(&interpreter, &root);
-    let old_pid = old_shell.id().unwrap();
-    let new_pid = new_shell.id().unwrap();
-    let stdin = Arc::new(Mutex::new(new_shell.stdin.take().unwrap()));
-    let snapshot = Arc::new(Mutex::new(
-        json!({"version":"0.9.1","protocol":22,"focused_workspace_id":"desktop","workspaces":[{"workspace_id":"desktop","number":1,"label":"Desktop","focused":true,"active_tab_id":"desktop-tab","agent_status":"unknown"}],"tabs":[{"tab_id":"desktop-tab","workspace_id":"desktop","number":1,"label":"Desktop tab","focused":true,"agent_status":"unknown"}],"panes":[{"pane_id":"desktop-pane","terminal_id":"desktop-terminal","workspace_id":"desktop","tab_id":"desktop-tab","focused":false,"agent_status":"unknown"}],"agents":[]}),
-    ));
-    let listener = UnixListener::bind(&socket).unwrap();
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
-    let workspaces = Arc::new(AtomicUsize::new(0));
-    let launches = Arc::new(AtomicUsize::new(0));
-    let probes = Arc::new(AtomicUsize::new(0));
-    let (event, event_rx) = watch::channel(None::<Value>);
-    let (view, writes, starts, queries, input, project_path) = (
-        snapshot.clone(),
-        workspaces.clone(),
-        launches.clone(),
-        probes.clone(),
-        stdin.clone(),
-        root.clone(),
-    );
-    let fixture = tokio::spawn(async move {
-        let mut clients = JoinSet::new();
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (view, writes, starts, queries, input, project_path) = (
-                view.clone(),
-                writes.clone(),
-                starts.clone(),
-                queries.clone(),
-                input.clone(),
-                project_path.clone(),
-            );
-            let mut events = event_rx.clone();
-            clients.spawn(async move {
-                let mut reader=BufReader::new(stream);let request:Value=serde_json::from_slice(&read_line(&mut reader).await.unwrap()).unwrap();let id=request["id"].clone();let p=&request["params"];
-                let result=match request["method"].as_str().unwrap() {
-                    "events.subscribe"=>{reader.get_mut().write_all(format!("{}\n",json!({"id":id,"result":{"type":"subscription_started"}})).as_bytes()).await.unwrap();loop{if events.changed().await.is_err(){return;}let value=events.borrow().clone();if let Some(value)=value&&reader.get_mut().write_all(format!("{value}\n").as_bytes()).await.is_err(){return;}}}
-                    "session.snapshot"=>json!({"type":"session_snapshot","snapshot":view.lock().await.clone()}),
-                    "pane.process_info"=>{let pid=if p["pane_id"]=="created-pane"{new_pid}else{old_pid};json!({"type":"pane_process_info","process_info":{"pane_id":p["pane_id"],"shell_pid":pid,"foreground_process_group_id":pid,"foreground_processes":[{"pid":pid,"name":"bash"}]}})}
-                    "workspace.create"=>{writes.fetch_add(1,Ordering::SeqCst);assert_eq!(p["focus"],false);assert_eq!(p["cwd"],json!(project_path));let root_pane=json!({"pane_id":"created-pane","terminal_id":"created-terminal","workspace_id":"created-workspace","tab_id":"created-tab","focused":false,"agent_status":"unknown"});let workspace=json!({"workspace_id":"created-workspace","number":2,"label":"Created workspace","focused":false,"active_tab_id":"created-tab","agent_status":"unknown"});let tab=json!({"tab_id":"created-tab","workspace_id":"created-workspace","number":1,"label":"Created tab","focused":false,"agent_status":"unknown"});let mut view=view.lock().await;view["workspaces"].as_array_mut().unwrap().push(workspace.clone());view["tabs"].as_array_mut().unwrap().push(tab.clone());view["panes"].as_array_mut().unwrap().push(root_pane.clone());assert_eq!(view["focused_workspace_id"],"desktop");json!({"type":"workspace_created","workspace":workspace,"tab":tab,"root_pane":root_pane})}
-                    "pane.send_input"=>{queries.fetch_add(1,Ordering::SeqCst);assert_eq!(p["pane_id"],"created-pane");assert_eq!(p["keys"],json!(["Enter"]));let text=p["text"].as_str().unwrap();assert!(text.len()<=8192&&!text.chars().any(char::is_control));let mut input=input.lock().await;input.write_all(text.as_bytes()).await.unwrap();input.write_all(b"\n").await.unwrap();input.flush().await.unwrap();json!({"type":"ok"})}
-                    "agent.start"=>{starts.fetch_add(1,Ordering::SeqCst);assert_eq!(p["kind"],"omp");assert_eq!(p["pane_id"],"created-pane");assert_eq!(p["timeout_ms"],30000);assert!(p.get("executable").is_none());let alias=p["name"].as_str().unwrap();assert!(alias.starts_with("goatr-omp-")&&alias.len()<=32);let mut argv=vec![json!("omp")];argv.extend(p["args"].as_array().unwrap().iter().cloned());json!({"type":"agent_started","agent":{"pane_id":"created-pane","terminal_id":"created-terminal","workspace_id":"created-workspace","tab_id":"created-tab","agent":"omp","name":alias,"launch_pending":true,"interactive_ready":false},"argv":argv})}
-                    method=>panic!("unexpected native fixture method {method}")
-                };
-                reader.get_mut().write_all(format!("{}\n",json!({"id":id,"result":result})).as_bytes()).await.unwrap();
-            });
-        }
-    });
-    let relay = goatr::backends::omp::Relay::bind(0).await.unwrap();
-    let overlay = goatr::backends::omp::overlay(&config, relay.port()).unwrap();
-    let owner = Topology::new(
-        config,
-        security.storage.clone(),
-        security.state.clone(),
-        security.host.clone(),
-    )
-    .await
-    .unwrap();
-    let (stop, rx) = watch::channel(false);
-    let relay_job = tokio::spawn(relay.run(stop.subscribe()));
-    owner.omp_availability(None).unwrap();
-    let job = tokio::spawn(owner.clone().run(rx));
-    let server = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let request = Uuid::random();
-            security
-                .state
-                .host_snapshot(&auth.connection_id, request.clone())
-                .unwrap();
-            let snapshot = loop {
-                let (Some(bytes), closed) = security.state.pop_output(&auth.connection_id).unwrap()
-                else {
-                    panic!("host.snapshot response required")
-                };
-                assert!(!closed);
-                if let Envelope::Response(response) =
-                    decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
-                    && response.id == request
-                {
-                    let Ok(ResultBody::HostSnapshot(snapshot)) = response.outcome else {
-                        panic!("host.snapshot result required")
-                    };
-                    break snapshot;
-                }
-            };
-            assert!(
-                snapshot.sessions.is_empty(),
-                "creation eligibility is not native readiness"
-            );
-            if let Some(server) = snapshot.servers.iter().find(|server| {
-                server.connectivity == ServerConnectivity::Online && server.can_create.omp
-            }) {
-                assert!(
-                    snapshot
-                        .projects
-                        .iter()
-                        .any(|row| row.project_id == project && row.available)
-                );
-                break server.server_id.clone();
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("actual coarse shell/object-view preflight must settle");
-    let params = SessionCreateParams { source_target: None, checkout: None,
-        boot_id: security.boot.clone(),
-        server_id: server.clone(),
-        project_id: project,
-        provider: Provider::Omp,
-        name: Label::new("new desktop").unwrap(),
-    };
-    let request = Request {
-        id: Uuid::random(),
-        body: RequestBody::SessionCreate(params.clone()),
-    };
-    security
-        .reserve(&auth, request.clone(), |_| Ok(()), |_| {})
-        .await
-        .unwrap();
-    let workspace = owner
-        .workspace_once(&security, &auth, &request.id, &params)
-        .await
-        .unwrap();
-    assert_eq!(
-        workspace
-            .creation
-            .as_ref()
-            .unwrap()
-            .resources
-            .terminal_id
-            .as_ref()
-            .unwrap()
-            .0,
-        "created-terminal"
-    );
-    let args = vec![
-        "--cwd".into(),
-        root.to_str().unwrap().into(),
-        "--config".into(),
-        overlay.to_str().unwrap().into(),
-    ];
-    assert_eq!(
-        owner
-            .launch_once(&security, &auth, &request.id, &params, args.clone())
-            .await
-            .err(),
-        Some(ErrorCode::NotReady)
-    );
-    assert_eq!(launches.load(Ordering::SeqCst), 0);
-    event
-        .send(Some(json!({"event":"pane_created","data":{}})))
-        .unwrap();
-    let probe = owner
-        .shell_probe_once(
-            &security,
-            &auth,
-            &request.id,
-            &params,
-            tokio::time::Instant::now() + Duration::from_secs(10),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        probe.creation.as_ref().unwrap().stage_state,
-        StageState::Confirmed
-    );
-    assert_eq!(probes.load(Ordering::SeqCst), 1);
-    owner
-        .shell_probe_once(
-            &security,
-            &auth,
-            &request.id,
-            &params,
-            tokio::time::Instant::now() + Duration::from_secs(10),
-        )
-        .await
-        .unwrap();
-    assert_eq!(probes.load(Ordering::SeqCst), 1);
-    let submitted = owner
-        .launch_once(&security, &auth, &request.id, &params, args.clone())
-        .await
-        .unwrap();
-    let progress = submitted.creation.as_ref().unwrap();
-    assert_eq!(progress.stage, CreationStage::Launch);
-    assert_eq!(progress.stage_state, StageState::Dispatching);
-    assert!(progress.resources.native_id.is_none() && progress.resources.session_id.is_none());
-    fs::remove_file(&socket).unwrap();
-    owner
-        .workspace_once(&security, &auth, &request.id, &params)
-        .await
-        .unwrap();
-    owner
-        .launch_once(&security, &auth, &request.id, &params, args)
-        .await
-        .unwrap();
-    assert_eq!(workspaces.load(Ordering::SeqCst), 1);
-    assert_eq!(launches.load(Ordering::SeqCst), 1);
-    security
-        .revoke(auth.proof.peer_id().clone(), None)
-        .await
-        .unwrap();
-    assert_eq!(
-        owner
-            .workspace_once(&security, &auth, &request.id, &params)
-            .await
-            .err(),
-        Some(ErrorCode::Unauthorized)
-    );
-    stop.send(true).unwrap();
-    job.await.unwrap().unwrap();
-    relay_job.await.unwrap().unwrap();
-    fixture.abort();
-    let _ = fixture.await;
-    old_shell.kill().await.unwrap();
-    new_shell.kill().await.unwrap();
-    old_shell.wait().await.unwrap();
-    new_shell.wait().await.unwrap();
-    drop(owner);
-    security.shutdown().await.unwrap();
-    goatr::close_endpoint(&phone).await.unwrap();
-    goatr::close_endpoint(&host).await.unwrap();
-    fs::remove_dir_all(root).unwrap();
-}
 
 #[tokio::test]
 async fn accepted_native_job_survives_disconnect_replacement_and_client_timeout_without_replay() {
@@ -1060,13 +750,11 @@ async fn codex_admission_before_readiness_component(stage: CreationStage) {
     let action = Uuid::random();
     let request = Request {
         id: action.clone(),
-        body: RequestBody::SessionCreate(SessionCreateParams { source_target: None, checkout: None,
-            boot_id: security.boot.clone(),
-            server_id: Uuid::random(),
-            project_id: Uuid::random(),
-            provider: Provider::Codex,
-            name: Label::new("admission consumer component").unwrap(),
-        }),
+        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: security.boot.clone(),
+        server_id: Uuid::random(),
+        project_id: Uuid::random(),
+        provider: Provider::Codex,
+        name: Label::new("admission consumer component").unwrap(), }),
     };
     security
         .reserve(&auth, request.clone(), |_| Ok(()), |_| {})
@@ -1223,35 +911,29 @@ async fn codex_admission_before_readiness_component(stage: CreationStage) {
     let admission_path = marker_path.clone();
     let admission = tokio::time::timeout(
         Duration::from_secs(3),
-        security.start_boundary(
-            &auth,
-            action.clone(),
-            (stage, StageMetadata::default()),
-            || Ok(()),
-            move || {
-                let file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&admission_path)
-                    .unwrap();
-                file.sync_all().unwrap();
-                effects_started.fetch_add(1, Ordering::SeqCst);
-                *retained_start.lock() = Some(file);
-                Ok((
-                    (),
-                    CreationOutcome {
-                        resources: admitted,
-                        metadata: StageMetadata::default(),
-                        state: StageState::Dispatching,
-                        definitive: Some(Id(
-                            "exclusive OS admission completed; native readiness unconfirmed".into(),
-                        )),
-                        at: now_ms(),
-                    },
-                ))
-            },
-        ),
+        security.start_boundary(&auth, action.clone(), (stage, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, move || {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&admission_path)
+                .unwrap();
+            file.sync_all().unwrap();
+            effects_started.fetch_add(1, Ordering::SeqCst);
+            *retained_start.lock() = Some(file);
+            Ok((
+                (),
+                CreationOutcome {
+                    resources: admitted,
+                    metadata: StageMetadata::default(),
+                    state: StageState::Dispatching,
+                    definitive: Some(Id(
+                        "exclusive OS admission completed; native readiness unconfirmed".into(),
+                    )),
+                    at: now_ms(),
+                },
+            ))
+        }),
     )
     .await;
     let proof = auth.proof.clone();

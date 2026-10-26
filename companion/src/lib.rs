@@ -16,6 +16,8 @@ pub mod config;
 pub mod herdr;
 pub mod native_json;
 pub mod pairing;
+#[cfg(target_os = "linux")]
+mod project_read;
 pub mod protocol;
 pub mod push;
 pub mod setup;

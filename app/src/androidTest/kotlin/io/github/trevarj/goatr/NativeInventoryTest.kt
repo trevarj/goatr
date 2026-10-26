@@ -24,7 +24,7 @@ import org.junit.Test
  * These display fixtures are not native bindings, Herdr parity or stock-provider conformance. */
 class NativeInventoryTest {
     @get:Rule val ui=createComposeRule()
-    @Test fun compactProductionTitleBarKeepsLogoNavigationAndTitleAtTwoHundredPercent() {
+    @Test fun leadingBrandKeepsContextStatusAndControlsReachableWithoutRefreshLayoutShift() {
         val host="523c7996bad77424e96786cf7a7205115337a5b4565cd25506a0f297b191a5ea"
         val hello=HelloResult(EndpointId(host),Uuid.random(),Uuid.random(),ProtocolVersion(),Provider.entries.map {Backend(it,"component geometry",Availability.SetupRequired,"No native binding")})
         val offline=ConnectionView()
@@ -35,57 +35,64 @@ class NativeInventoryTest {
         var view by mutableStateOf(offline)
         var connecting by mutableStateOf(false)
         var fontScale by mutableStateOf(1f)
-        var pageTitle by mutableStateOf("goatr")
+        var pageTitle by mutableStateOf("")
+        var width by mutableStateOf(320.dp)
+        var horizontalPadding by mutableStateOf(0.dp)
+        var hasActions by mutableStateOf(true)
+        var rootCount by mutableStateOf<Int?>(null)
         var backs=0;var menus=0
         ui.setContent {
             val density=LocalDensity.current
             GoatrTheme {CompositionLocalProvider(LocalDensity provides Density(density.density,fontScale)) {
-                Box(Modifier.width(320.dp)) {
-                    GoatrTitleBar(pageTitle,connectionLabel(host,view,connecting),connecting || host in view.hello && view.inventoryReady[host]!=true,compactConnectionLabel(host,view,connecting),modifier=Modifier.testTag("compact_header"),navigationIcon={
-                        androidx.compose.material3.IconButton(onClick={backs++},modifier=Modifier.size(48.dp).testTag("compact_back")) {GoatrIcon(MaterialGlyph.Back,"Back")}
+                // Filters uses this horizontal sheet inset: a 320dp screen supplies a 288dp bar.
+                Column(Modifier.width(width).padding(horizontal=horizontalPadding)) {
+                    val status=rootCount?.let {"$it connected"} ?: connectionLabel(host,view,connecting)
+                    val compact=rootCount?.let {if(it==0)"Offline" else "$it online"} ?: compactConnectionLabel(host,view,connecting)
+                    GoatrTitleBar(pageTitle,status,connecting || host in view.hello && view.inventoryReady[host]!=true,compact,modifier=Modifier.testTag("compact_header"),navigationIcon={
+                        if(pageTitle.isNotEmpty()) androidx.compose.material3.IconButton(onClick={backs++},modifier=Modifier.size(48.dp).testTag("compact_back")) {GoatrIcon(MaterialGlyph.Back,"Back")}
                     },actions={
-                        androidx.compose.material3.IconButton(onClick={menus++},modifier=Modifier.size(48.dp).testTag("compact_menu")) {GoatrIcon(MaterialGlyph.Menu,"Menu")}
+                        if(hasActions) androidx.compose.material3.IconButton(onClick={menus++},modifier=Modifier.size(48.dp).testTag("compact_menu")) {GoatrIcon(MaterialGlyph.Menu,"Menu")}
                     })
                 }
             }}
         }
         val progress=hasProgressBarRangeInfo(androidx.compose.ui.semantics.ProgressBarRangeInfo.Indeterminate)
-        for(scale in listOf(1f,2f)) for(contextTitle in listOf("goatr","Original desktop agent with a deliberately long conversation title")) {
-            ui.runOnIdle {fontScale=scale;pageTitle=contextTitle}
-            val header=ui.onNodeWithTag("compact_header").assertHeightIsEqualTo(48.dp).fetchSemanticsNode().boundsInRoot
-            val back=ui.onNodeWithTag("compact_back").assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp).fetchSemanticsNode().boundsInRoot
-            val menu=ui.onNodeWithTag("compact_menu").assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp).fetchSemanticsNode().boundsInRoot
-            val logo=ui.onNodeWithContentDescription("Goatr",useUnmergedTree=true).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-            val title=ui.onNodeWithText(contextTitle,useUnmergedTree=true).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-            assertTrue(back.right<=logo.left && logo.right<=title.left)
-            assertTrue(logo.top>=header.top && logo.bottom<=header.bottom)
-            if(contextTitle=="goatr") {
-                val layouts=mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
-                ui.onNodeWithText(contextTitle,useUnmergedTree=true).performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) {get->get(layouts)}
-                assertFalse(layouts.single().hasVisualOverflow)
-            }
-            for((observed,inFlight) in listOf(offline to false,offline to true,syncing to false,direct to false,relay to false,online to false)) {
-                ui.runOnIdle {view=observed;connecting=inFlight}
-                val shortStatus=compactConnectionLabel(host,observed,inFlight)
-                val statusNode=ui.onNodeWithText(shortStatus,useUnmergedTree=true).assertIsDisplayed()
+        val states:List<Triple<ConnectionView,Boolean,Int?>> = listOf(Triple(offline,false,null),Triple(offline,true,null),Triple(syncing,false,null),
+            Triple(direct,false,null),Triple(relay,false,null),Triple(online,false,null))+listOf(0,1,12,128).map {Triple(online,false,it)}
+        for(actionSlot in listOf(false,true)) for((screenWidth,sheetInset) in listOf(320.dp to 0.dp,360.dp to 0.dp,320.dp to 16.dp)) for(scale in listOf(1f,2f)) for(contextTitle in listOf("","Filters","Original desktop agent with a deliberately long conversation title")) {
+            ui.runOnIdle {width=screenWidth;horizontalPadding=sheetInset;fontScale=scale;pageTitle=contextTitle;hasActions=actionSlot;rootCount=null;view=offline;connecting=false}
+            val header=ui.onNodeWithTag("compact_header").fetchSemanticsNode().boundsInRoot
+            val back=if(contextTitle.isNotEmpty()) ui.onNodeWithTag("compact_back").assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp).fetchSemanticsNode().boundsInRoot else null
+            val menu=if(actionSlot) ui.onNodeWithTag("compact_menu").assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp).fetchSemanticsNode().boundsInRoot else {ui.onNodeWithTag("compact_menu").assertDoesNotExist();null}
+            val renderedTitle=contextTitle.ifEmpty {"Goatr"}
+            val title=ui.onNodeWithText(renderedTitle,useUnmergedTree=true).assertIsDisplayed().assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading)).fetchSemanticsNode().boundsInRoot
+            back?.let {assertTrue(it.right<title.left)}
+            menu?.let {assertTrue(title.right<it.left)}
+            assertTrue(title.top>=header.top && title.bottom<=header.bottom)
+            for((observed,inFlight,count) in states) {
+                ui.runOnIdle {view=observed;connecting=inFlight;rootCount=count}
+                val shortStatus=count?.let {if(it==0)"Offline" else "$it online"} ?: compactConnectionLabel(host,observed,inFlight)
+                val fullStatus=count?.let {"$it connected"} ?: connectionLabel(host,observed,inFlight)
+                val statusNode=ui.onNodeWithText(shortStatus,useUnmergedTree=true).assertIsDisplayed().assertContentDescriptionEquals(fullStatus)
                 val status=statusNode.fetchSemanticsNode().boundsInRoot
-                assertTrue(title.right<=status.left && status.right<=menu.left)
-                assertTrue(status.top>=header.top && status.bottom<=header.bottom)
+                assertEquals(title.left,status.left,0.5f)
+                assertTrue(title.bottom<=status.top && status.right<=(menu?.left ?: header.right))
+                assertTrue("Status vertical containment: screenWidth=$screenWidth sheetInset=$sheetInset scale=$scale titleCategory=${when {contextTitle.isEmpty()->"blank";contextTitle=="Filters"->"filters";else->"long"}} actions=$actionSlot count=$count state=${when {count!=null->"root_count";inFlight->"linking";observed===offline->"offline";observed===syncing->"sync";observed===direct->"direct";observed===relay->"relay";else->"online"}} shortStatus=$shortStatus header=$header status=$status currentHeader=${ui.onNodeWithTag("compact_header").fetchSemanticsNode().boundsInRoot}",status.top>=header.top && status.bottom<=header.bottom)
                 val layouts=mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
                 statusNode.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) {get->get(layouts)}
-                assertFalse("Essential connection state must not ellipsize: scale=$scale contextTitle=$contextTitle shortStatus=$shortStatus layoutSize=${layouts.single().size} maxIntrinsicWidth=${layouts.single().multiParagraph.intrinsics.maxIntrinsicWidth}",layouts.single().hasVisualOverflow)
-                ui.onAllNodes(progress).assertCountEquals(if(inFlight || host in observed.hello && observed.inventoryReady[host]!=true)1 else 0)
+                assertFalse("Essential connection state must not ellipsize: screenWidth=$screenWidth sheetInset=$sheetInset scale=$scale contextTitle=$contextTitle shortStatus=$shortStatus layoutSize=${layouts.single().size} maxIntrinsicWidth=${layouts.single().multiParagraph.intrinsics.maxIntrinsicWidth}",layouts.single().hasVisualOverflow)
+                // Loading is decorative; the complete observed status is the single spoken owner.
+                ui.onAllNodes(progress).assertCountEquals(0)
                 assertEquals(header,ui.onNodeWithTag("compact_header").fetchSemanticsNode().boundsInRoot)
-                assertEquals(back,ui.onNodeWithTag("compact_back").fetchSemanticsNode().boundsInRoot)
-                assertEquals(menu,ui.onNodeWithTag("compact_menu").fetchSemanticsNode().boundsInRoot)
-                assertEquals(logo,ui.onNodeWithContentDescription("Goatr",useUnmergedTree=true).fetchSemanticsNode().boundsInRoot)
-                assertEquals(title,ui.onNodeWithText(contextTitle,useUnmergedTree=true).fetchSemanticsNode().boundsInRoot)
+                if(back!=null) assertEquals(back,ui.onNodeWithTag("compact_back").fetchSemanticsNode().boundsInRoot)
+                if(menu!=null) assertEquals(menu,ui.onNodeWithTag("compact_menu").fetchSemanticsNode().boundsInRoot)
+                assertEquals(title,ui.onNodeWithText(renderedTitle,useUnmergedTree=true).fetchSemanticsNode().boundsInRoot)
             }
             val transportText=hasAnyAncestor(hasTestTag("compact_header")) and SemanticsMatcher("Rendered transport and its full description") {node->
                 node.config.contains(SemanticsProperties.Text) && node.config.contains(SemanticsProperties.ContentDescription)
             }
             for(transport in listOf(direct,relay)) {
-                ui.runOnIdle {view=transport;connecting=false}
+                ui.runOnIdle {view=transport;connecting=false;rootCount=null}
                 val before=ui.onNode(transportText,useUnmergedTree=true).fetchSemanticsNode()
                 val renderedBefore=before.config[SemanticsProperties.Text]
                 val descriptionBefore=before.config[SemanticsProperties.ContentDescription]
@@ -96,8 +103,8 @@ class NativeInventoryTest {
                     assertEquals(descriptionBefore,after.config[SemanticsProperties.ContentDescription])
                     assertEquals(before.boundsInRoot,after.boundsInRoot)
                     assertEquals(header,ui.onNodeWithTag("compact_header").fetchSemanticsNode().boundsInRoot)
-                    assertEquals(back,ui.onNodeWithTag("compact_back").fetchSemanticsNode().boundsInRoot)
-                    assertEquals(menu,ui.onNodeWithTag("compact_menu").fetchSemanticsNode().boundsInRoot)
+                    if(back!=null) assertEquals(back,ui.onNodeWithTag("compact_back").fetchSemanticsNode().boundsInRoot)
+                    if(menu!=null) assertEquals(menu,ui.onNodeWithTag("compact_menu").fetchSemanticsNode().boundsInRoot)
                 }
             }
         }
@@ -125,28 +132,26 @@ class NativeInventoryTest {
         }
     }
 
-    @Test fun workspaceDisclosuresSurviveLazyRemovalButResetForReplacementIdentity() {
+    @Test fun productionWorkspaceItemsRetainExpandedPlacementDuringRefreshAndResetForReplacementIdentity() {
         val original=inventory()
         var current by mutableStateOf(original)
         var ready by mutableStateOf(true)
         var host by mutableStateOf("original-host")
+        val hello=HelloResult(EndpointId("523c7996bad77424e96786cf7a7205115337a5b4565cd25506a0f297b191a5ea"),Uuid.random(),Uuid.random(),ProtocolVersion(),emptyList())
+        var liveHello by mutableStateOf<HelloResult?>(hello)
+        var pairedDevice by mutableStateOf(Uuid.random())
+        var savedAt by mutableStateOf(Uint(1))
         var opened: Target?=null
         var openCount=0
         val originalGroup=projectSessionDirectory(host,original,true,original.sessions).workspaces.single()
         val originalTarget=original.sessions.single().let {Target(it.sessionId,it.generation)}
-        ui.setContent {MaterialTheme {LazyColumn(Modifier.fillMaxSize()) {
-            val directory=projectSessionDirectory(host,current,ready,current.sessions)
-            directory.workspaces.forEach {group->
-                item(key=group.key.lazyKey) {
-                    WorkspaceDirectoryCard(group,host,SessionListPreferences()) {opened=it;openCount++}
-                }
+        ui.setContent {MaterialTheme {
+            val cached=CachedInventory(host,current,savedAt)
+            val directory=rememberSessionDirectory(HostMetadata(host,"Desktop",pairedDevice),liveHello,cached.inventory,ready,current.sessions)
+            LazyColumn(Modifier.fillMaxSize()) {
+                workspaceDirectoryItems(directory,host,"Desktop",SessionListPreferences(),!ready,false,{}, {opened=it;openCount++})
             }
-            directory.standalone.forEach {summary->
-                item(key="session_${host}_${summary.sessionId.value}_${summary.generation.value}") {
-                    DirectoryAgentRow(summary,host,null,SessionListPreferences(),!ready,"session_${host}_${summary.sessionId.value}_${summary.generation.value}",{opened=it;openCount++})
-                }
-            }
-        }}}
+        }}
         val originalRow="session_${host}_${originalTarget.sessionId.value}_${originalTarget.generation.value}"
         ui.onNodeWithTag(originalRow).assertDoesNotExist()
         ui.onNodeWithTag("${originalGroup.key.tag}_agents").assertHasClickAction().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button)).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Agents collapsed"))
@@ -159,12 +164,34 @@ class NativeInventoryTest {
         ui.onNodeWithTag(originalRow).assertExists()
         ui.onNodeWithContentDescription("Hide workspace details").assertExists()
         assertEquals(0,openCount)
-        ui.runOnIdle {ready=false}
-        ui.onNodeWithTag(originalGroup.key.tag).assertDoesNotExist()
-        ui.onNodeWithText("Stale · Working").assertExists()
-        assertEquals(original.sessions,projectSessionDirectory(host,current,false,current.sessions).standalone)
-        assertNull(opened)
-        ui.runOnIdle {ready=true}
+        val placement=ui.onNodeWithTag(originalRow).fetchSemanticsNode().boundsInRoot
+        repeat(3) {
+            ui.runOnIdle {ready=false}
+            ui.onNodeWithTag(originalGroup.key.tag).assertExists()
+            ui.onNodeWithText("Stale · Working").assertExists()
+            ui.onNodeWithText("Last observed agents").assertDoesNotExist()
+            assertEquals(placement,ui.onNodeWithTag(originalRow).fetchSemanticsNode().boundsInRoot)
+            assertEquals(original.sessions,projectSessionDirectory(host,current,false,current.sessions).standalone)
+            assertNull(opened)
+            assertEquals(0,openCount)
+            ui.runOnIdle {current=current.copy(subscription=Uuid.random());savedAt=Uint(savedAt.value+1);ready=true}
+            assertEquals(placement,ui.onNodeWithTag(originalRow).fetchSemanticsNode().boundsInRoot)
+        }
+        for(contextChange in listOf("boot","pairing","offline")) {
+            ui.runOnIdle {
+                ready=false
+                when(contextChange) {
+                    "boot"->liveHello=hello.copy(bootId=Uuid.random())
+                    "pairing"->pairedDevice=Uuid.random()
+                    else->liveHello=null
+                }
+            }
+            ui.onNodeWithTag(originalGroup.key.tag).assertDoesNotExist()
+            ui.onNodeWithText("Agents").assertExists()
+            ui.onNodeWithText("Stale · Working").assertExists()
+            assertEquals(0,openCount)
+            ui.runOnIdle {liveHello=hello;ready=true}
+        }
         ui.onNodeWithTag(originalRow).assertExists()
         ui.onNodeWithContentDescription("Hide workspace details").assertExists()
         ui.onNodeWithTag("${originalGroup.key.tag}_agents").assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button)).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Agents expanded"))
@@ -204,6 +231,13 @@ class NativeInventoryTest {
                 ui.onNodeWithTag("${group.key.tag}_details").performScrollTo().performClick()
             }
         }
+        ui.runOnIdle {ready=false;current=current.copy(hierarchy=current.hierarchy.map {it.copy(freshness=NativeFreshness.Unavailable,reason=NativeUnavailableReason.SourceUnavailable,workspaces=emptyList(),tabs=emptyList(),panes=emptyList())})}
+        ui.onNodeWithContentDescription("Show workspace details").assertDoesNotExist()
+        ui.onNodeWithText("Agents").assertExists()
+        ui.onNodeWithText("Last observed agents").assertDoesNotExist()
+        ui.runOnIdle {current=current.copy(sessions=emptyList())}
+        ui.onNodeWithText("Agents").assertDoesNotExist()
+        assertEquals(1,openCount)
     }
 
     @Test fun directoryRowConnectivityTransitionsKeepGeometryAndNeverOpenPassively() {
@@ -503,7 +537,7 @@ class NativeInventoryTest {
         val receipt=Receipt(metadata.actionId,metadata.method,metadata.bootId,null,Uint(1),Uint(2),ReceiptState.Failed,creation=progress).also {it.validate()}
         ui.setContent {MaterialTheme {Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             val memory=remember {FormMemory().apply {text["name"]="Explicit new session"}}
-            CreateSession(current,hello,true,memory,{}) {_,_,_,_->fail("No project/current native source must not offer a create action")}
+            CreateSession(current,hello,true,memory,{}) {_->fail("No project/current native source must not offer a create action")}
             ReceiptPanel("synthetic-display-host",LocalAction(metadata,receipt,true,false))
         }}}
         ui.onNodeWithTag("session_create").performScrollTo().assertIsNotEnabled()

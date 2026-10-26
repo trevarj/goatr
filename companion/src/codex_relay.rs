@@ -2268,10 +2268,10 @@ impl Observer {
             }
         }
         let account_request = self.diagnostic.is_some() && method == "account/read";
-        if method == "thread/resume" && thread.as_ref() == self.expected_thread.as_ref() {
-            if let Some(capture) = &self.diagnostic {
-                capture.lock().expect("diagnostic capture mutex").resume();
-            }
+        if method == "thread/resume" && thread.as_ref() == self.expected_thread.as_ref()
+            && let Some(capture) = &self.diagnostic
+        {
+            capture.lock().expect("diagnostic capture mutex").resume();
         }
         let bootstrap = if self.diagnostic.is_some() {
             let rpc = match method.as_ref() {
@@ -2600,6 +2600,7 @@ fn enqueue_marked(
     })
     .map_err(|_| invalid("native relay frame queue overflow"))
 }
+#[cfg(test)]
 fn enqueue(
     tx: &mpsc::Sender<Queued>,
     budget: &Arc<Semaphore>,
@@ -2917,6 +2918,7 @@ where
     }
     Ok(ForwardClose::TuiQueueDrained)
 }
+#[cfg(test)]
 async fn forward_owner_to_tui<S>(
     tui: &mut S,
     tui_queue: &mut mpsc::Receiver<Queued>,
@@ -3072,13 +3074,13 @@ async fn forward(
                 .await
                 .map_err(|_| "Owner write timed out")?
                 .map_err(|_| "Owner write failed")?;
-            if let Some(capture) = capture {
-                if let Some(diagnostic) = observed.as_ref() {
-                    diagnostic
-                        .lock()
-                        .expect("diagnostic capture mutex")
-                        .sent(capture);
-                }
+            if let Some(capture) = capture
+                && let Some(diagnostic) = observed.as_ref()
+            {
+                diagnostic
+                    .lock()
+                    .expect("diagnostic capture mutex")
+                    .sent(capture);
             }
         }
         Ok::<_, &'static str>(ForwardClose::OwnerQueueDrained)
@@ -3266,14 +3268,11 @@ pub async fn run(path: &Path) -> io::Result<()> {
     let terminal_capture = terminal_capture_enabled(&manifest);
     let capture = StartupDiagnostic::new(terminal_capture);
     let relay = capture.observe("self_process", herdr::process_evidence(std::process::id()))?;
-    match fs::symlink_metadata(presence_path(path)) {
-        Ok(_) => {
-            return capture.observe(
-                "existing_presence",
-                Err(invalid("existing relay presence cannot be adopted")),
-            );
-        }
-        Err(_) => {}
+    if fs::symlink_metadata(presence_path(path)).is_ok() {
+        return capture.observe(
+            "existing_presence",
+            Err(invalid("existing relay presence cannot be adopted")),
+        );
     }
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let (mut upstream, _) = startup_owner_stream(&manifest, startup_deadline, &capture).await?;

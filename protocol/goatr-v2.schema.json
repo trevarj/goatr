@@ -5,6 +5,13 @@
   "oneOf": [
     {
       "oneOf": [
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"session.controls.read"},"params":{"$ref":"#/$defs/SessionControlsReadParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"session.controls.apply"},"params":{"$ref":"#/$defs/SessionControlsApplyParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"session.queue.list"},"params":{"$ref":"#/$defs/SessionQueueListParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"session.queue.update"},"params":{"$ref":"#/$defs/SessionQueueUpdateParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"session.queue.delete"},"params":{"$ref":"#/$defs/SessionQueueDeleteParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"session.queue.reorder"},"params":{"$ref":"#/$defs/SessionQueueReorderParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"session.queue.start"},"params":{"$ref":"#/$defs/SessionQueueStartParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
         {
           "type": "object",
           "properties": {
@@ -410,10 +417,10 @@
               "$ref": "#/$defs/Uuid"
             },
             "method": {
-              "const": "terminal.read"
+              "const": "terminal.grid.subscribe"
             },
             "params": {
-              "$ref": "#/$defs/TerminalReadParams"
+              "$ref": "#/$defs/TerminalGridSubscribeParams"
             }
           },
           "required": [
@@ -662,38 +669,10 @@
               "$ref": "#/$defs/Uuid"
             },
             "method": {
-              "const": "shell.read"
+              "const": "shell.grid.subscribe"
             },
             "params": {
-              "$ref": "#/$defs/ShellReadParams"
-            }
-          },
-          "required": [
-            "v",
-            "type",
-            "id",
-            "method",
-            "params"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "v": {
-              "const": 2
-            },
-            "type": {
-              "const": "request"
-            },
-            "id": {
-              "$ref": "#/$defs/Uuid"
-            },
-            "method": {
-              "const": "shell.create"
-            },
-            "params": {
-              "$ref": "#/$defs/ShellCreateParams"
+              "$ref": "#/$defs/ShellGridSubscribeParams"
             }
           },
           "required": [
@@ -733,6 +712,7 @@
           ],
           "additionalProperties": false
         },
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"shell.resize"},"params":{"$ref":"#/$defs/ShellResizeParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
         {
           "type": "object",
           "properties": {
@@ -774,38 +754,10 @@
               "$ref": "#/$defs/Uuid"
             },
             "method": {
-              "const": "worktrees.remove_preview"
+              "const": "creation.directories"
             },
             "params": {
-              "$ref": "#/$defs/WorktreesRemovePreviewParams"
-            }
-          },
-          "required": [
-            "v",
-            "type",
-            "id",
-            "method",
-            "params"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "v": {
-              "const": 2
-            },
-            "type": {
-              "const": "request"
-            },
-            "id": {
-              "$ref": "#/$defs/Uuid"
-            },
-            "method": {
-              "const": "worktrees.remove"
-            },
-            "params": {
-              "$ref": "#/$defs/WorktreesRemoveParams"
+              "$ref": "#/$defs/CreationDirectoriesParams"
             }
           },
           "required": [
@@ -1199,6 +1151,10 @@
             },
             "result": {
               "anyOf": [
+                {"$ref":"#/$defs/ResponseSessionControlsReadResult"},
+                {"$ref":"#/$defs/ResponseSessionControlsApplyResult"},
+                {"$ref":"#/$defs/ResponseSessionQueueListResult"},
+                {"$ref":"#/$defs/ResponseSessionQueueResult"},
                 {
                   "$ref": "#/$defs/ResponsePairConfirmResult"
                 },
@@ -1221,6 +1177,9 @@
                   "$ref": "#/$defs/ResponseSessionCreateResult"
                 },
                 {
+                  "$ref": "#/$defs/ResponseCreationDirectoriesResult"
+                },
+                {
                   "$ref": "#/$defs/ResponsePromptSubmitResult"
                 },
                 {
@@ -1236,7 +1195,7 @@
                   "$ref": "#/$defs/ResponseContentReadResult"
                 },
                 {
-                  "$ref": "#/$defs/ResponseTerminalReadResult"
+                  "$ref": "#/$defs/ResponseTerminalGridSubscribeResult"
                 },
                 {
                   "$ref": "#/$defs/ResponseWorktreesListResult"
@@ -1266,14 +1225,12 @@
                   "$ref": "#/$defs/ResponseSkillsListResult"
                 },
                 {
-                  "$ref": "#/$defs/ResponseShellReadResult"
-                },
-                {
-                  "$ref": "#/$defs/ResponseShellCreateResult"
+                  "$ref": "#/$defs/ResponseShellGridSubscribeResult"
                 },
                 {
                   "$ref": "#/$defs/ResponseShellInputResult"
                 },
+                {"$ref":"#/$defs/ResponseShellResizeResult"},
                 {
                   "$ref": "#/$defs/ResponseAttachmentsResult"
                 },
@@ -1353,6 +1310,11 @@
     },
     {
       "oneOf": [
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"event"},"subscription":{"$ref":"#/$defs/Uuid"},"seq":{"$ref":"#/$defs/Uint"},"kind":{"const":"controls.changed"},"data":{"$ref":"#/$defs/ControlsChangedEvent"}},"required":["v","type","subscription","seq","kind","data"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"event"},"subscription":{"$ref":"#/$defs/Uuid"},"seq":{"$ref":"#/$defs/Uint"},"kind":{"const":"queue.changed"},"data":{"$ref":"#/$defs/QueueChangedEvent"}},"required":["v","type","subscription","seq","kind","data"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"event"},"subscription":{"$ref":"#/$defs/Uuid"},"seq":{"$ref":"#/$defs/Uint"},"kind":{"const":"grid.begin"},"data":{"$ref":"#/$defs/GridBeginEvent"}},"required":["v","type","subscription","seq","kind","data"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"event"},"subscription":{"$ref":"#/$defs/Uuid"},"seq":{"$ref":"#/$defs/Uint"},"kind":{"const":"grid.part"},"data":{"$ref":"#/$defs/GridPart"}},"required":["v","type","subscription","seq","kind","data"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"event"},"subscription":{"$ref":"#/$defs/Uuid"},"seq":{"$ref":"#/$defs/Uint"},"kind":{"const":"grid.commit"},"data":{"$ref":"#/$defs/GridCommit"}},"required":["v","type","subscription","seq","kind","data"],"additionalProperties":false},
         {
           "type": "object",
           "properties": {
@@ -1677,6 +1639,18 @@
     }
   ],
   "$defs": {
+    "GridBeginEvent":{"type":"object","properties":{"frame":{"$ref":"#/$defs/GridBegin"}},"required":["frame"],"additionalProperties":false},
+    "GridColor":{"oneOf":[{"type":"object","properties":{"kind":{"const":"default"}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"indexed"},"index":{"type":"integer","minimum":0,"maximum":255}},"required":["kind","index"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"rgb"},"value":{"type":"integer","minimum":0,"maximum":16777215}},"required":["kind","value"],"additionalProperties":false}]},
+    "GridCursor":{"type":"object","properties":{"column":{"$ref":"#/$defs/Uint"},"row":{"$ref":"#/$defs/Uint"},"visible":{"type":"boolean"},"shape":{"type":"integer","minimum":0,"maximum":6}},"required":["column","row","visible","shape"],"additionalProperties":false},
+    "GridAttributes":{"type":"object","properties":{"bold":{"type":"boolean"},"faint":{"type":"boolean"},"italic":{"type":"boolean"},"blink":{"type":"boolean"},"strike":{"type":"boolean"},"inverse":{"type":"boolean","default":false},"concealed":{"type":"boolean","default":false},"underline":{"enum":["none","single","double","curly","dotted","dashed"]},"underlineColor":{"$ref":"#/$defs/GridColor"}},"required":["bold","faint","italic","blink","strike","underline"],"additionalProperties":false},
+    "GridCell":{"type":"object","properties":{"text":{"type":"string","x-maxUtf8Bytes":128,"x-noControlCharacters":true,"x-noUnicodeSeparators":true},"width":{"type":"integer","minimum":0,"maximum":2},"foreground":{"$ref":"#/$defs/GridColor"},"background":{"$ref":"#/$defs/GridColor"},"attributes":{"$ref":"#/$defs/GridAttributes"}},"required":["text","width","foreground","background","attributes"],"additionalProperties":false,"x-widthContract":"zero requires empty text and previous width-two cell in the same row; one/two require nonempty text; two requires following zero, including across parts"},
+    "GridBegin":{"type":"object","properties":{"mode":{"const":"replace"},"revision":{"$ref":"#/$defs/Uint"},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256},"cursor":{"$ref":"#/$defs/GridCursor"},"alternateScreen":{"type":"boolean"},"graphicsOmitted":{"type":"boolean"},"popupBlocked":{"type":"boolean","default":false},"partCount":{"type":"integer","minimum":1,"maximum":128}},"required":["mode","revision","columns","rows","alternateScreen","graphicsOmitted","partCount"],"additionalProperties":false,"x-contextValidation":"columns*rows<=32768; cursor inside frame"},
+    "GridSpan":{"type":"object","properties":{"row":{"type":"integer","minimum":0,"maximum":255},"column":{"type":"integer","minimum":0,"maximum":511},"cells":{"type":"array","items":{"$ref":"#/$defs/GridCell"},"minItems":1,"maxItems":512}},"required":["row","column","cells"],"additionalProperties":false},
+    "GridPart":{"type":"object","properties":{"revision":{"$ref":"#/$defs/Uint"},"index":{"type":"integer","minimum":0,"maximum":127},"spans":{"type":"array","items":{"$ref":"#/$defs/GridSpan"},"minItems":1,"maxItems":512}},"required":["revision","index","spans"],"additionalProperties":false,"x-contextValidation":"<=512 cells; exact row-major frame coverage across parts, no overlaps/gaps/row-crossing spans"},
+    "GridCommit":{"type":"object","properties":{"revision":{"$ref":"#/$defs/Uint"}},"required":["revision"],"additionalProperties":false},
+    "ResponseGridColor":{"oneOf":[{"type":"object","properties":{"kind":{"const":"default"}},"required":["kind"],"additionalProperties":true},{"type":"object","properties":{"kind":{"const":"indexed"},"index":{"type":"integer","minimum":0,"maximum":255}},"required":["kind","index"],"additionalProperties":true},{"type":"object","properties":{"kind":{"const":"rgb"},"value":{"type":"integer","minimum":0,"maximum":16777215}},"required":["kind","value"],"additionalProperties":true}]},
+    "ResponseGridCursor":{"type":"object","properties":{"column":{"$ref":"#/$defs/ResponseUint"},"row":{"$ref":"#/$defs/ResponseUint"},"visible":{"type":"boolean"},"shape":{"type":"integer","minimum":0,"maximum":6}},"required":["column","row","visible","shape"],"additionalProperties":true},
+    "ResponseGridBegin":{"type":"object","properties":{"mode":{"const":"replace"},"revision":{"const":0},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256},"cursor":{"$ref":"#/$defs/ResponseGridCursor"},"alternateScreen":{"type":"boolean"},"graphicsOmitted":{"type":"boolean"},"partCount":{"type":"integer","minimum":1,"maximum":128}},"required":["mode","revision","columns","rows","alternateScreen","graphicsOmitted","partCount"],"additionalProperties":true,"x-contextValidation":"columns*rows<=32768; cursor inside frame"},
     "Text": {
       "type": "string",
       "x-maxUtf8Bytes": 1048576
@@ -2017,6 +1991,11 @@
     "ActionMethod": {
       "type": "string",
       "enum": [
+        "session.controls.apply",
+        "session.queue.update",
+        "session.queue.delete",
+        "session.queue.reorder",
+        "session.queue.start",
         "session.create",
         "workspace.rename",
         "prompt.submit",
@@ -2024,6 +2003,7 @@
         "request.respond",
         "shell.create",
         "shell.input",
+        "shell.resize",
         "agent.rename",
         "worktrees.remove",
         "attachments.begin",
@@ -2098,6 +2078,13 @@
     "Method": {
       "type": "string",
       "enum": [
+        "session.controls.read",
+        "session.controls.apply",
+        "session.queue.list",
+        "session.queue.update",
+        "session.queue.delete",
+        "session.queue.reorder",
+        "session.queue.start",
         "pair.confirm",
         "hello",
         "host.snapshot",
@@ -2105,13 +2092,14 @@
         "session.history",
         "session.unsubscribe",
         "session.create",
+        "creation.directories",
         "workspace.rename",
         "prompt.submit",
         "turn.cancel",
         "request.respond",
         "action.status",
         "content.read",
-        "terminal.read",
+        "terminal.grid.subscribe",
         "worktrees.list",
         "changes.read",
         "notifications.sync",
@@ -2121,12 +2109,10 @@
         "push.unregister",
         "device.unpair",
         "skills.list",
-        "shell.create",
-        "shell.read",
+        "shell.grid.subscribe",
         "shell.input",
+        "shell.resize",
         "agent.rename",
-        "worktrees.remove_preview",
-        "worktrees.remove",
         "attachments.begin",
         "attachments.chunk",
         "attachments.complete",
@@ -2250,6 +2236,7 @@
     "Capabilities": {
       "type": "object",
       "properties": {
+        "controls":{"type":"boolean","default":false},
         "history": {
           "type": "boolean"
         },
@@ -2284,19 +2271,11 @@
           "type": "boolean",
           "default": false
         },
-        "worktreeCreate": {
-          "type": "boolean",
-          "default": false
-        },
         "skillsRead": {
           "type": "boolean",
           "default": false
         },
         "agentRename": {
-          "type": "boolean",
-          "default": false
-        },
-        "worktreeRemove": {
           "type": "boolean",
           "default": false
         },
@@ -3002,13 +2981,23 @@
       ],
       "additionalProperties": false,
       "allOf": [
+        {"if":{"properties":{"method":{"const":"session.controls.apply"}},"required":["method"]},"then":{"required":["target"],"properties":{"creation":false,"result":false}}},
+        {"if":{"properties":{"method":{"enum":["session.queue.update","session.queue.delete","session.queue.reorder","session.queue.start"]}},"required":["method"]},"then":{"required":["target"],"properties":{"creation":false,"result":{"$ref":"#/$defs/ActionResultQueue"}}}},
+        {"if":{"properties":{"method":{"enum":["session.queue.update","session.queue.delete","session.queue.reorder","session.queue.start"]},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"required":["result"]}},
+        {"if":{"properties":{"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["result"]},"then":{"required":["target"],"properties":{"creation":false,"method":{"enum":["prompt.submit","session.queue.update","session.queue.delete","session.queue.reorder","session.queue.start"]}}}},
+        {"if":{"properties":{"method":{"enum":["prompt.submit","session.queue.update"]},"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["method","result"]},"then":{"properties":{"result":{"required":["entryId"],"properties":{"deleted":false,"nativeTurnId":false}}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.delete"},"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["method","result"]},"then":{"properties":{"result":{"required":["entryId"],"properties":{"nativeTurnId":false}}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.delete"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"properties":{"result":{"required":["deleted"]}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.start"},"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["method","result"]},"then":{"properties":{"result":{"required":["entryId"],"properties":{"deleted":false}}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.start"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"properties":{"result":{"required":["nativeTurnId"]}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.reorder"},"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["method","result"]},"then":{"properties":{"result":{"properties":{"entryId":false,"deleted":false,"nativeTurnId":false}}}}},
         {
           "if": {
             "properties": {
               "method": {
                 "enum": [
                   "shell.create",
-                  "shell.input"
+                  "shell.input","shell.resize"
                 ]
               }
             },
@@ -3132,6 +3121,10 @@
             }
           }
         },
+        {"if":{"properties":{"result":{"properties":{"kind":{"const":"shell_dispatch"}},"required":["kind"]}},"required":["result"]},"then":{"properties":{"method":{"const":"shell.input"},"state":{"not":{"const":"succeeded"}}}}},
+        {"if":{"properties":{"method":{"const":"shell.input"},"state":{"const":"dispatched"},"result":{"properties":{"kind":{"const":"shell_dispatch"}},"required":["kind"]}},"required":["method","state","result"]},"then":{"properties":{"result":{"properties":{"progress":{"required":["frameBytes","socketBytesWritten","frameComplete"],"properties":{"frameComplete":{"const":true}}}}}}}},
+        {"if":{"properties":{"method":{"const":"shell.resize"}},"required":["method"]},"then":{"properties":{"result":{"$ref":"#/$defs/ActionResultShellResize"}}}},
+        {"if":{"properties":{"method":{"const":"shell.resize"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"required":["result"]}},
         {
           "if": {
             "properties": {
@@ -3350,9 +3343,6 @@
             ]
           },
           "then": {
-            "required": [
-              "target"
-            ],
             "not": {
               "anyOf": [
                 {
@@ -3453,35 +3443,8 @@
         "resources"
       ],
       "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "required": [
-              "sourceTarget"
-            ]
-          },
-          "then": {
-            "properties": {
-              "resources": {
-                "required": [
-                  "checkout"
-                ]
-              }
-            }
-          },
-          "else": {
-            "properties": {
-              "resources": {
-                "not": {
-                  "required": [
-                    "checkout"
-                  ]
-                }
-              }
-            }
-          }
-        }
-      ]
+      "if": {"properties":{"resources":{"required":["checkout"]}}},
+      "then": {"required":["sourceTarget"]}
     },
     "CreationResources": {
       "type": "object",
@@ -4386,12 +4349,8 @@
         "name": {
           "$ref": "#/$defs/Label"
         },
-        "sourceTarget": {
-          "$ref": "#/$defs/Target"
-        },
-        "checkout": {
-          "$ref": "#/$defs/CreationCheckout"
-        }
+        "directoryRef": {"$ref":"#/$defs/Uuid"},
+        "placement": {"$ref":"#/$defs/SessionPlacement"}
       },
       "required": [
         "bootId",
@@ -4400,65 +4359,62 @@
         "provider",
         "name"
       ],
-      "additionalProperties": false,
-      "dependentRequired": {
-        "sourceTarget": [
-          "checkout"
-        ],
-        "checkout": [
-          "sourceTarget"
-        ]
-      }
+      "additionalProperties": false
     },
-    "CreationCheckout": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "new"
-            },
-            "branch": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1024,
-              "x-maxUtf8Bytes": 1024,
-              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
-            },
-            "base": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1024,
-              "x-maxUtf8Bytes": 1024,
-              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "existing"
-            },
-            "branch": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1024,
-              "x-maxUtf8Bytes": 1024,
-              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
-            }
-          },
-          "required": [
-            "kind",
-            "branch"
-          ],
-          "additionalProperties": false
-        }
-      ]
+    "SessionPlacement": {
+      "type":"object",
+      "properties":{"sourceTarget":{"$ref":"#/$defs/Target"}},
+      "required":["sourceTarget"],
+      "additionalProperties":false
+    },
+    "CreationDirectoriesParams": {
+      "type":"object",
+      "properties":{
+        "serverId":{"$ref":"#/$defs/Uuid"},
+        "projectId":{"$ref":"#/$defs/Uuid"},
+        "source":{"$ref":"#/$defs/ArtifactSource"},
+        "parent":{"$ref":"#/$defs/Uuid"},
+        "cursor":{"$ref":"#/$defs/Uuid"},
+        "limit":{"$ref":"#/$defs/Uint","minimum":1,"maximum":100,"default":100}
+      },
+      "required":["serverId","projectId"],
+      "additionalProperties":false
+    },
+    "CreationDirectoryEntry": {
+      "type":"object",
+      "properties":{"reference":{"$ref":"#/$defs/Uuid"},"name":{"$ref":"#/$defs/Label"}},
+      "required":["reference","name"],
+      "additionalProperties":false
+    },
+    "CreationDirectoriesResult": {
+      "type":"object",
+      "properties":{
+        "serverId":{"$ref":"#/$defs/Uuid"},
+        "projectId":{"$ref":"#/$defs/Uuid"},
+        "source":{"$ref":"#/$defs/ArtifactSource"},
+        "entries":{"type":"array","items":{"$ref":"#/$defs/CreationDirectoryEntry"},"maxItems":100,"uniqueItems":true},
+        "nextCursor":{"$ref":"#/$defs/Uuid"}
+      },
+      "required":["serverId","projectId","entries"],
+      "additionalProperties":false
+    },
+    "ResponseCreationDirectoryEntry": {
+      "type":"object",
+      "properties":{"reference":{"$ref":"#/$defs/ResponseUuid"},"name":{"$ref":"#/$defs/ResponseLabel"}},
+      "required":["reference","name"],
+      "additionalProperties":true
+    },
+    "ResponseCreationDirectoriesResult": {
+      "type":"object",
+      "properties":{
+        "serverId":{"$ref":"#/$defs/ResponseUuid"},
+        "projectId":{"$ref":"#/$defs/ResponseUuid"},
+        "source":{"$ref":"#/$defs/ResponseArtifactSource"},
+        "entries":{"type":"array","items":{"$ref":"#/$defs/ResponseCreationDirectoryEntry"},"maxItems":100,"uniqueItems":true},
+        "nextCursor":{"$ref":"#/$defs/ResponseUuid"}
+      },
+      "required":["serverId","projectId","entries"],
+      "additionalProperties":true
     },
     "SessionCreateResult": {
       "type": "object",
@@ -4472,9 +4428,21 @@
       ],
       "additionalProperties": false
     },
+    "SkillSelector": {
+      "type": "object",
+      "properties": {
+        "catalogueGeneration": { "$ref": "#/$defs/Uuid" },
+        "reference": { "$ref": "#/$defs/Uuid" }
+      },
+      "required": ["catalogueGeneration", "reference"],
+      "additionalProperties": false
+    },
     "PromptSubmitParams": {
       "type": "object",
       "properties": {
+        "delivery":{"$ref":"#/$defs/PromptDelivery"},
+        "nativeTurnId":{"$ref":"#/$defs/Id"},
+        "images":{"type":"array","items":{"$ref":"#/$defs/Uuid"},"minItems":1,"maxItems":4,"uniqueItems":true,"x-contextValidation":"Completed peer-owned exact-original uploads; aggregate bytes<=8MiB; actual native current-model image modality"},
         "bootId": {
           "$ref": "#/$defs/Uuid"
         },
@@ -4483,12 +4451,19 @@
         },
         "text": {
           "$ref": "#/$defs/PromptText"
+        },
+        "skill": {
+          "$ref": "#/$defs/SkillSelector"
         }
       },
       "required": [
         "bootId",
         "target",
         "text"
+      ],
+      "allOf": [
+        {"if":{"required":["skill"]},"then":{"properties":{"text":{"const":""},"delivery":false,"nativeTurnId":false,"images":false}}},
+        {"if":{"required":["nativeTurnId"]},"then":{"required":["delivery"],"properties":{"delivery":{"const":"steer"}}}}
       ],
       "additionalProperties": false
     },
@@ -4629,7 +4604,7 @@
       ],
       "additionalProperties": false
     },
-    "TerminalReadParams": {
+    "TerminalGridSubscribeParams": {
       "type": "object",
       "properties": {
         "target": {
@@ -4641,28 +4616,7 @@
       ],
       "additionalProperties": false
     },
-    "TerminalReadResult": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/$defs/Target"
-        },
-        "text": {
-          "$ref": "#/$defs/Text",
-          "maxLength": 16384,
-          "x-utf8MaxBytes": 16384
-        },
-        "truncated": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "target",
-        "text",
-        "truncated"
-      ],
-      "additionalProperties": false
-    },
+    "TerminalGridSubscribeResult":{"type":"object","properties":{"target":{"$ref":"#/$defs/Target"},"subscription":{"$ref":"#/$defs/Uuid"},"seq":{"const":0},"frame":{"$ref":"#/$defs/GridBegin"}},"required":["target","subscription","seq","frame"],"additionalProperties":false,"x-contextValidation":"initial revision0; one viewer per connection"},
     "WorktreesListParams": {
       "type": "object",
       "properties": {
@@ -4717,12 +4671,6 @@
         },
         "isLinkedWorktree": {
           "type": "boolean"
-        },
-        "candidateId": {
-          "$ref": "#/$defs/Uuid"
-        },
-        "managedWorkspaceId": {
-          "$ref": "#/$defs/Id"
         }
       },
       "required": [
@@ -4733,35 +4681,7 @@
         "isLocked",
         "isPrunable"
       ],
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "required": [
-              "candidateId"
-            ]
-          },
-          "then": {
-            "required": [
-              "isLinkedWorktree"
-            ],
-            "properties": {
-              "isLinkedWorktree": {
-                "const": true
-              },
-              "isBare": {
-                "const": false
-              },
-              "isLocked": {
-                "const": false
-              },
-              "isPrunable": {
-                "const": false
-              }
-            }
-          }
-        }
-      ]
+      "additionalProperties": false
     },
     "WorktreesListResult": {
       "type": "object",
@@ -4775,9 +4695,6 @@
             "$ref": "#/$defs/WorktreeEntry"
           },
           "maxItems": 128
-        },
-        "creationScope": {
-          "$ref": "#/$defs/WorktreeCreationScope"
         }
       },
       "required": [
@@ -5582,6 +5499,7 @@
     },
     "ActionResult": {
       "oneOf": [
+        {"$ref":"#/$defs/ActionResultQueue"},
         {
           "$ref": "#/$defs/ActionResultWorkspaceRenamed"
         },
@@ -5603,6 +5521,8 @@
         {
           "$ref": "#/$defs/ActionResultShellInput"
         },
+        {"$ref":"#/$defs/ActionResultShellDispatch"},
+        {"$ref":"#/$defs/ActionResultShellResize"},
         {
           "$ref": "#/$defs/ActionResultAgentRenamed"
         },
@@ -5860,6 +5780,7 @@
     "ResponseCapabilities": {
       "type": "object",
       "properties": {
+        "controls":{"type":"boolean","default":false},
         "history": {
           "type": "boolean"
         },
@@ -5894,19 +5815,11 @@
           "type": "boolean",
           "default": false
         },
-        "worktreeCreate": {
-          "type": "boolean",
-          "default": false
-        },
         "skillsRead": {
           "type": "boolean",
           "default": false
         },
         "agentRename": {
-          "type": "boolean",
-          "default": false
-        },
-        "worktreeRemove": {
           "type": "boolean",
           "default": false
         },
@@ -7115,6 +7028,11 @@
     "ResponseActionMethod": {
       "type": "string",
       "enum": [
+        "session.controls.apply",
+        "session.queue.update",
+        "session.queue.delete",
+        "session.queue.reorder",
+        "session.queue.start",
         "session.create",
         "workspace.rename",
         "prompt.submit",
@@ -7122,6 +7040,7 @@
         "request.respond",
         "shell.create",
         "shell.input",
+        "shell.resize",
         "agent.rename",
         "worktrees.remove",
         "attachments.begin",
@@ -7296,6 +7215,7 @@
     },
     "ResponseActionResult": {
       "oneOf": [
+        {"$ref":"#/$defs/ResponseActionResultQueue"},
         {
           "$ref": "#/$defs/ResponseActionResultWorkspaceRenamed"
         },
@@ -7317,6 +7237,8 @@
         {
           "$ref": "#/$defs/ResponseActionResultShellInput"
         },
+        {"$ref":"#/$defs/ResponseActionResultShellDispatch"},
+        {"$ref":"#/$defs/ResponseActionResultShellResize"},
         {
           "$ref": "#/$defs/ResponseActionResultAgentRenamed"
         },
@@ -7420,35 +7342,8 @@
         "resources"
       ],
       "additionalProperties": true,
-      "allOf": [
-        {
-          "if": {
-            "required": [
-              "sourceTarget"
-            ]
-          },
-          "then": {
-            "properties": {
-              "resources": {
-                "required": [
-                  "checkout"
-                ]
-              }
-            }
-          },
-          "else": {
-            "properties": {
-              "resources": {
-                "not": {
-                  "required": [
-                    "checkout"
-                  ]
-                }
-              }
-            }
-          }
-        }
-      ]
+      "if": {"properties":{"resources":{"required":["checkout"]}}},
+      "then": {"required":["sourceTarget"]}
     },
     "ResponseReceipt": {
       "type": "object",
@@ -7497,13 +7392,23 @@
       ],
       "additionalProperties": true,
       "allOf": [
+        {"if":{"properties":{"method":{"const":"session.controls.apply"}},"required":["method"]},"then":{"required":["target"],"properties":{"creation":false,"result":false}}},
+        {"if":{"properties":{"method":{"enum":["session.queue.update","session.queue.delete","session.queue.reorder","session.queue.start"]}},"required":["method"]},"then":{"required":["target"],"properties":{"creation":false,"result":{"$ref":"#/$defs/ResponseActionResultQueue"}}}},
+        {"if":{"properties":{"method":{"enum":["session.queue.update","session.queue.delete","session.queue.reorder","session.queue.start"]},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"required":["result"]}},
+        {"if":{"properties":{"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["result"]},"then":{"required":["target"],"properties":{"creation":false,"method":{"enum":["prompt.submit","session.queue.update","session.queue.delete","session.queue.reorder","session.queue.start"]}}}},
+        {"if":{"properties":{"method":{"enum":["prompt.submit","session.queue.update"]},"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["method","result"]},"then":{"properties":{"result":{"required":["entryId"],"properties":{"deleted":false,"nativeTurnId":false}}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.delete"},"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["method","result"]},"then":{"properties":{"result":{"required":["entryId"],"properties":{"nativeTurnId":false}}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.delete"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"properties":{"result":{"required":["deleted"]}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.start"},"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["method","result"]},"then":{"properties":{"result":{"required":["entryId"],"properties":{"deleted":false}}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.start"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"properties":{"result":{"required":["nativeTurnId"]}}}},
+        {"if":{"properties":{"method":{"const":"session.queue.reorder"},"result":{"properties":{"kind":{"const":"queue"}},"required":["kind"]}},"required":["method","result"]},"then":{"properties":{"result":{"properties":{"entryId":false,"deleted":false,"nativeTurnId":false}}}}},
         {
           "if": {
             "properties": {
               "method": {
                 "enum": [
                   "shell.create",
-                  "shell.input"
+                  "shell.input","shell.resize"
                 ]
               }
             },
@@ -7538,6 +7443,8 @@
             }
           }
         },
+        {"if":{"properties":{"method":{"const":"shell.resize"}},"required":["method"]},"then":{"properties":{"result":{"$ref":"#/$defs/ResponseActionResultShellResize"}}}},
+        {"if":{"properties":{"method":{"const":"shell.resize"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"required":["result"]}},
         {
           "if": {
             "properties": {
@@ -7627,6 +7534,8 @@
             }
           }
         },
+        {"if":{"properties":{"result":{"properties":{"kind":{"const":"shell_dispatch"}},"required":["kind"]}},"required":["result"]},"then":{"properties":{"method":{"const":"shell.input"},"state":{"not":{"const":"succeeded"}}}}},
+        {"if":{"properties":{"method":{"const":"shell.input"},"state":{"const":"dispatched"},"result":{"properties":{"kind":{"const":"shell_dispatch"}},"required":["kind"]}},"required":["method","state","result"]},"then":{"properties":{"result":{"properties":{"progress":{"required":["frameBytes","socketBytesWritten","frameComplete"],"properties":{"frameComplete":{"const":true}}}}}}}},
         {
           "if": {
             "properties": {
@@ -7845,9 +7754,6 @@
             ]
           },
           "then": {
-            "required": [
-              "target"
-            ],
             "not": {
               "anyOf": [
                 {
@@ -8023,28 +7929,7 @@
       ],
       "additionalProperties": true
     },
-    "ResponseTerminalReadResult": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/$defs/ResponseTarget"
-        },
-        "text": {
-          "$ref": "#/$defs/ResponseText",
-          "maxLength": 16384,
-          "x-utf8MaxBytes": 16384
-        },
-        "truncated": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "target",
-        "text",
-        "truncated"
-      ],
-      "additionalProperties": true
-    },
+    "ResponseTerminalGridSubscribeResult":{"type":"object","properties":{"target":{"$ref":"#/$defs/ResponseTarget"},"subscription":{"$ref":"#/$defs/ResponseUuid"},"seq":{"const":0},"frame":{"$ref":"#/$defs/ResponseGridBegin"}},"required":["target","subscription","seq","frame"],"additionalProperties":true},
     "ResponseWorktreeEntry": {
       "type": "object",
       "properties": {
@@ -8087,12 +7972,6 @@
         },
         "isLinkedWorktree": {
           "type": "boolean"
-        },
-        "candidateId": {
-          "$ref": "#/$defs/ResponseUuid"
-        },
-        "managedWorkspaceId": {
-          "$ref": "#/$defs/ResponseId"
         }
       },
       "required": [
@@ -8103,35 +7982,7 @@
         "isLocked",
         "isPrunable"
       ],
-      "additionalProperties": true,
-      "allOf": [
-        {
-          "if": {
-            "required": [
-              "candidateId"
-            ]
-          },
-          "then": {
-            "required": [
-              "isLinkedWorktree"
-            ],
-            "properties": {
-              "isLinkedWorktree": {
-                "const": true
-              },
-              "isBare": {
-                "const": false
-              },
-              "isLocked": {
-                "const": false
-              },
-              "isPrunable": {
-                "const": false
-              }
-            }
-          }
-        }
-      ]
+      "additionalProperties": true
     },
     "ResponseWorktreesListResult": {
       "type": "object",
@@ -8145,9 +7996,6 @@
             "$ref": "#/$defs/ResponseWorktreeEntry"
           },
           "maxItems": 128
-        },
-        "creationScope": {
-          "$ref": "#/$defs/ResponseWorktreeCreationScope"
         }
       },
       "required": [
@@ -9461,22 +9309,6 @@
         }
       ]
     },
-    "WorktreeCreationScope": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "projectId": {
-          "$ref": "#/$defs/Uuid"
-        },
-        "canCreate": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "projectId",
-        "canCreate"
-      ]
-    },
     "ResponseCreationCheckoutResources": {
       "type": "object",
       "additionalProperties": true,
@@ -9532,22 +9364,6 @@
             }
           }
         }
-      ]
-    },
-    "ResponseWorktreeCreationScope": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "projectId": {
-          "$ref": "#/$defs/ResponseUuid"
-        },
-        "canCreate": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "projectId",
-        "canCreate"
       ]
     },
     "SkillsListParams": {
@@ -9607,6 +9423,9 @@
         },
         "documentRef": {
           "$ref": "#/$defs/Uuid"
+        },
+        "invocationRef": {
+          "$ref": "#/$defs/Uuid"
         }
       },
       "required": [
@@ -9614,6 +9433,10 @@
         "description",
         "scope",
         "enabled"
+      ],
+      "allOf": [
+        {"if":{"required":["invocationRef"]},"then":{"properties":{"enabled":{"const":true},"commandName":false}}},
+        {"if":{"required":["documentRef"]},"then":{"properties":{"enabled":{"const":true}}}}
       ],
       "additionalProperties": false
     },
@@ -9690,6 +9513,7 @@
               "skills": {
                 "items": {
                   "properties": {
+                    "invocationRef": false,
                     "scope": {
                       "const": "enabled"
                     },
@@ -9718,7 +9542,6 @@
                 "items": {
                   "properties": {
                     "commandName": false,
-                    "documentRef": false,
                     "scope": {
                       "enum": [
                         "user",
@@ -9783,6 +9606,9 @@
         },
         "documentRef": {
           "$ref": "#/$defs/Uuid"
+        },
+        "invocationRef": {
+          "$ref": "#/$defs/Uuid"
         }
       },
       "required": [
@@ -9790,6 +9616,10 @@
         "description",
         "scope",
         "enabled"
+      ],
+      "allOf": [
+        {"if":{"required":["invocationRef"]},"then":{"properties":{"enabled":{"const":true},"commandName":false}}},
+        {"if":{"required":["documentRef"]},"then":{"properties":{"enabled":{"const":true}}}}
       ],
       "additionalProperties": true
     },
@@ -9866,6 +9696,7 @@
               "skills": {
                 "items": {
                   "properties": {
+                    "invocationRef": false,
                     "scope": {
                       "const": "enabled"
                     },
@@ -9886,7 +9717,6 @@
                 "items": {
                   "properties": {
                     "commandName": false,
-                    "documentRef": false,
                     "scope": {
                       "enum": [
                         "user",
@@ -9922,6 +9752,7 @@
     "ShellCapabilities": {
       "type": "object",
       "properties": {
+        "grid":{"type":"boolean","default":false},
         "read": {
           "type": "boolean"
         },
@@ -9947,6 +9778,7 @@
       ],
       "additionalProperties": false,
       "allOf": [
+        {"if":{"properties":{"grid":{"const":true}},"required":["grid"]},"then":{"properties":{"read":{"const":true}}}},
         {
           "if": {
             "properties": {
@@ -10068,7 +9900,7 @@
         }
       ]
     },
-    "ShellReadParams": {
+    "ShellGridSubscribeParams": {
       "type": "object",
       "properties": {
         "target": {
@@ -10080,56 +9912,7 @@
       ],
       "additionalProperties": false
     },
-    "ShellReadResult": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/$defs/ShellTarget"
-        },
-        "text": {
-          "$ref": "#/$defs/Text",
-          "maxLength": 16384,
-          "x-utf8MaxBytes": 16384
-        },
-        "truncated": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "target",
-        "text",
-        "truncated"
-      ],
-      "additionalProperties": false
-    },
-    "ShellCreateParams": {
-      "type": "object",
-      "properties": {
-        "bootId": {
-          "$ref": "#/$defs/Uuid"
-        },
-        "target": {
-          "$ref": "#/$defs/ShellTarget"
-        }
-      },
-      "required": [
-        "bootId",
-        "target"
-      ],
-      "additionalProperties": false
-    },
-    "ShellCreateResult": {
-      "type": "object",
-      "properties": {
-        "receipt": {
-          "$ref": "#/$defs/Receipt"
-        }
-      },
-      "required": [
-        "receipt"
-      ],
-      "additionalProperties": false
-    },
+    "ShellGridSubscribeResult":{"type":"object","properties":{"target":{"$ref":"#/$defs/ShellTarget"},"subscription":{"$ref":"#/$defs/Uuid"},"seq":{"const":0},"frame":{"$ref":"#/$defs/GridBegin"}},"required":["target","subscription","seq","frame"],"additionalProperties":false,"x-contextValidation":"initial revision0; one viewer per connection"},
     "ShellCreationResources": {
       "type": "object",
       "properties": {
@@ -10190,6 +9973,7 @@
     "ResponseShellCapabilities": {
       "type": "object",
       "properties": {
+        "grid":{"type":"boolean","default":false},
         "read": {
           "type": "boolean"
         },
@@ -10215,6 +9999,7 @@
       ],
       "additionalProperties": true,
       "allOf": [
+        {"if":{"properties":{"grid":{"const":true}},"required":["grid"]},"then":{"properties":{"read":{"const":true}}}},
         {
           "if": {
             "properties": {
@@ -10336,40 +10121,7 @@
         }
       ]
     },
-    "ResponseShellReadResult": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/$defs/ResponseShellTarget"
-        },
-        "text": {
-          "$ref": "#/$defs/ResponseText",
-          "maxLength": 16384,
-          "x-utf8MaxBytes": 16384
-        },
-        "truncated": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "target",
-        "text",
-        "truncated"
-      ],
-      "additionalProperties": true
-    },
-    "ResponseShellCreateResult": {
-      "type": "object",
-      "properties": {
-        "receipt": {
-          "$ref": "#/$defs/ResponseReceipt"
-        }
-      },
-      "required": [
-        "receipt"
-      ],
-      "additionalProperties": true
-    },
+    "ResponseShellGridSubscribeResult":{"type":"object","properties":{"target":{"$ref":"#/$defs/ResponseShellTarget"},"subscription":{"$ref":"#/$defs/ResponseUuid"},"seq":{"const":0},"frame":{"$ref":"#/$defs/ResponseGridBegin"}},"required":["target","subscription","seq","frame"],"additionalProperties":true},
     "ResponseShellCreationResources": {
       "type": "object",
       "properties": {
@@ -10504,11 +10256,14 @@
         },
         "modifiers": {
           "$ref": "#/$defs/ShellKeyModifiers"
-        }
+        },
+        "phase":{"enum":["press","repeat","release"]},
+        "physicalKeyId":{"type":"integer","minimum":0,"maximum":4294967295}
       },
       "required": [
         "key",
-        "modifiers"
+        "modifiers",
+        "phase"
       ],
       "additionalProperties": false
     },
@@ -10566,6 +10321,7 @@
         "target": {
           "$ref": "#/$defs/ShellTarget"
         },
+        "subscription":{"$ref":"#/$defs/Uuid"},
         "input": {
           "$ref": "#/$defs/ShellInput"
         }
@@ -10573,6 +10329,7 @@
       "required": [
         "bootId",
         "target",
+        "subscription",
         "input"
       ],
       "additionalProperties": false
@@ -10645,6 +10402,15 @@
       ],
       "additionalProperties": false
     },
+    "ShellDispatchProgress":{"type":"object","properties":{"frameBytes":{"type":"integer","minimum":5,"maximum":2097156},"socketBytesWritten":{"type":"integer","minimum":0,"maximum":2097156},"frameComplete":{"type":"boolean"}},"additionalProperties":false,"allOf":[{"if":{"required":["socketBytesWritten"]},"then":{"required":["frameBytes"]}},{"if":{"properties":{"frameComplete":{"const":true}},"required":["frameComplete"]},"then":{"required":["frameBytes","socketBytesWritten"]}}],"x-contextValidation":"Full four-byte-prefix plus native frame; written<=total; complete requires written==total. Monotone facts, never PTY bytes/flush or consumption ACK."},
+    "ResponseShellDispatchProgress":{"type":"object","properties":{"frameBytes":{"type":"integer","minimum":5,"maximum":2097156},"socketBytesWritten":{"type":"integer","minimum":0,"maximum":2097156},"frameComplete":{"type":"boolean"}},"additionalProperties":true,"allOf":[{"if":{"required":["socketBytesWritten"]},"then":{"required":["frameBytes"]}},{"if":{"properties":{"frameComplete":{"const":true}},"required":["frameComplete"]},"then":{"required":["frameBytes","socketBytesWritten"]}}],"x-contextValidation":"written<=total; complete requires equality; full native socket frame, not PTY acknowledgement"},
+    "ActionResultShellDispatch":{"type":"object","properties":{"kind":{"const":"shell_dispatch"},"progress":{"$ref":"#/$defs/ShellDispatchProgress"}},"required":["kind","progress"],"additionalProperties":false},
+    "ResponseActionResultShellDispatch":{"type":"object","properties":{"kind":{"const":"shell_dispatch"},"progress":{"$ref":"#/$defs/ResponseShellDispatchProgress"}},"required":["kind","progress"],"additionalProperties":true},
+    "ShellResizeParams":{"type":"object","properties":{"bootId":{"$ref":"#/$defs/Uuid"},"target":{"$ref":"#/$defs/ShellTarget"},"subscription":{"$ref":"#/$defs/Uuid"},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256}},"required":["bootId","target","subscription","columns","rows"],"additionalProperties":false,"x-contextValidation":"columns*rows<=32768; exact active peer-owned original grid lease; frontend dimensions, not isolated pane geometry"},
+    "ShellResizeResult":{"type":"object","properties":{"receipt":{"$ref":"#/$defs/Receipt"}},"required":["receipt"],"additionalProperties":false},
+    "ResponseShellResizeResult":{"type":"object","properties":{"receipt":{"$ref":"#/$defs/ResponseReceipt"}},"required":["receipt"],"additionalProperties":true},
+    "ActionResultShellResize":{"type":"object","properties":{"kind":{"const":"shell_resize"},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256}},"required":["kind","columns","rows"],"additionalProperties":false,"x-contextValidation":"columns*rows<=32768; only coherent native dimensions confirm success"},
+    "ResponseActionResultShellResize":{"type":"object","properties":{"kind":{"const":"shell_resize"},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256}},"required":["kind","columns","rows"],"additionalProperties":true,"x-contextValidation":"columns*rows<=32768"},
     "ShellInputResult": {
       "type": "object",
       "properties": {
@@ -11004,149 +10770,6 @@
         "pattern": "[^a-z0-9_-]"
       }
     },
-    "WorktreeRemoveReason": {
-      "type": "string",
-      "enum": [
-        "removed",
-        "invalid_operation",
-        "operation_already_consumed",
-        "operation_capacity",
-        "operation_in_progress",
-        "platform_unavailable",
-        "candidate_unavailable",
-        "preview_unavailable",
-        "source_changed_before_effect",
-        "source_changed_after_effect",
-        "deadline_before_effect",
-        "deadline_after_effect",
-        "worker_unavailable_before_effect",
-        "preparation_pending",
-        "preparation_refused",
-        "target_occupied",
-        "target_changed",
-        "target_dirty",
-        "target_masked",
-        "target_submodules",
-        "mutation_uncertain",
-        "cleanup_unproved"
-      ]
-    },
-    "WorktreesRemovePreviewParams": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/$defs/Target"
-        },
-        "candidateId": {
-          "$ref": "#/$defs/Uuid"
-        }
-      },
-      "required": [
-        "target",
-        "candidateId"
-      ],
-      "additionalProperties": false
-    },
-    "WorktreesRemoveParams": {
-      "type": "object",
-      "properties": {
-        "bootId": {
-          "$ref": "#/$defs/Uuid"
-        },
-        "target": {
-          "$ref": "#/$defs/Target"
-        },
-        "candidateId": {
-          "$ref": "#/$defs/Uuid"
-        },
-        "previewId": {
-          "$ref": "#/$defs/Uuid"
-        }
-      },
-      "required": [
-        "bootId",
-        "target",
-        "candidateId",
-        "previewId"
-      ],
-      "additionalProperties": false
-    },
-    "WorktreesRemovePreviewResult": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/$defs/Target"
-        },
-        "candidateId": {
-          "$ref": "#/$defs/Uuid"
-        },
-        "previewId": {
-          "$ref": "#/$defs/Uuid"
-        },
-        "path": {
-          "$ref": "#/$defs/Text",
-          "minLength": 1,
-          "maxLength": 4096,
-          "x-utf8MaxBytes": 4096,
-          "x-noControlCharacters": true,
-          "x-absolutePath": true
-        },
-        "branch": {
-          "$ref": "#/$defs/Text",
-          "minLength": 1,
-          "maxLength": 1024,
-          "x-utf8MaxBytes": 1024,
-          "x-noControlCharacters": true
-        },
-        "head": {
-          "$ref": "#/$defs/Text",
-          "minLength": 1,
-          "maxLength": 1024,
-          "x-utf8MaxBytes": 1024,
-          "x-noControlCharacters": true
-        },
-        "removable": {
-          "type": "boolean"
-        },
-        "reason": {
-          "$ref": "#/$defs/WorktreeRemoveReason"
-        }
-      },
-      "required": [
-        "target",
-        "candidateId",
-        "previewId",
-        "path",
-        "removable"
-      ],
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "removable": {
-                "const": true
-              }
-            },
-            "required": [
-              "removable"
-            ]
-          },
-          "then": {
-            "not": {
-              "required": [
-                "reason"
-              ]
-            }
-          },
-          "else": {
-            "required": [
-              "reason"
-            ]
-          }
-        }
-      ]
-    },
     "WorktreeRemovalProgress": {
       "type": "object",
       "properties": {
@@ -11218,94 +10841,6 @@
       ],
       "additionalProperties": false
     },
-    "WorktreesRemoveResult": {
-      "type": "object",
-      "properties": {
-        "receipt": {
-          "$ref": "#/$defs/Receipt"
-        }
-      },
-      "required": [
-        "receipt"
-      ],
-      "additionalProperties": false
-    },
-    "ResponseWorktreesRemovePreviewResult": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/$defs/ResponseTarget"
-        },
-        "candidateId": {
-          "$ref": "#/$defs/ResponseUuid"
-        },
-        "previewId": {
-          "$ref": "#/$defs/ResponseUuid"
-        },
-        "path": {
-          "$ref": "#/$defs/ResponseText",
-          "minLength": 1,
-          "maxLength": 4096,
-          "x-utf8MaxBytes": 4096,
-          "x-noControlCharacters": true,
-          "x-absolutePath": true
-        },
-        "branch": {
-          "$ref": "#/$defs/ResponseText",
-          "minLength": 1,
-          "maxLength": 1024,
-          "x-utf8MaxBytes": 1024,
-          "x-noControlCharacters": true
-        },
-        "head": {
-          "$ref": "#/$defs/ResponseText",
-          "minLength": 1,
-          "maxLength": 1024,
-          "x-utf8MaxBytes": 1024,
-          "x-noControlCharacters": true
-        },
-        "removable": {
-          "type": "boolean"
-        },
-        "reason": {
-          "$ref": "#/$defs/WorktreeRemoveReason"
-        }
-      },
-      "required": [
-        "target",
-        "candidateId",
-        "previewId",
-        "path",
-        "removable"
-      ],
-      "additionalProperties": true,
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "removable": {
-                "const": true
-              }
-            },
-            "required": [
-              "removable"
-            ]
-          },
-          "then": {
-            "not": {
-              "required": [
-                "reason"
-              ]
-            }
-          },
-          "else": {
-            "required": [
-              "reason"
-            ]
-          }
-        }
-      ]
-    },
     "ResponseWorktreeRemovalProgress": {
       "type": "object",
       "properties": {
@@ -11374,18 +10909,6 @@
         "candidateId",
         "previewId",
         "progress"
-      ],
-      "additionalProperties": true
-    },
-    "ResponseWorktreesRemoveResult": {
-      "type": "object",
-      "properties": {
-        "receipt": {
-          "$ref": "#/$defs/ResponseReceipt"
-        }
-      },
-      "required": [
-        "receipt"
       ],
       "additionalProperties": true
     },
@@ -11629,6 +11152,7 @@
           "minimum": 1,
           "maximum": 8388608
         },
+        "nativePreparation":{"$ref":"#/$defs/NativeImagePreparation"},
         "insertionReady": {
           "type": "boolean",
           "default": false
@@ -11909,6 +11433,7 @@
           "minimum": 1,
           "maximum": 8388608
         },
+        "nativePreparation":{"$ref":"#/$defs/ResponseNativeImagePreparation"},
         "insertionReady": {
           "type": "boolean",
           "default": false
@@ -11975,13 +11500,14 @@
         "bootId": {
           "$ref": "#/$defs/Uuid"
         },
-        "target": {
-          "$ref": "#/$defs/Target"
-        }
+        "serverId":{"$ref":"#/$defs/Uuid"},
+        "workspaceId":{"$ref":"#/$defs/Id"},
+        "projectId":{"$ref":"#/$defs/Uuid"},
+        "directoryRef":{"$ref":"#/$defs/Uuid"},
+        "source":{"$ref":"#/$defs/ArtifactSource"}
       },
       "required": [
-        "bootId",
-        "target"
+        "bootId","serverId","workspaceId","projectId"
       ],
       "additionalProperties": false
     },
@@ -12054,7 +11580,8 @@
     "ArtifactPreviewKind": {
       "enum": [
         "text",
-        "binary"
+        "binary",
+        "unavailable"
       ]
     },
     "ArtifactEntry": {
@@ -12216,6 +11743,15 @@
         "size",
         "sha256",
         "previewKind"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {"previewKind": {"const": "text"}},
+            "required": ["previewKind"]
+          },
+          "then": {"properties": {"size": {"maximum": 1048576}}}
+        }
       ],
       "additionalProperties": false
     },
@@ -12411,7 +11947,8 @@
     "ResponseArtifactPreviewKind": {
       "enum": [
         "text",
-        "binary"
+        "binary",
+        "unavailable"
       ]
     },
     "ResponseArtifactsListResult": {
@@ -12474,6 +12011,15 @@
         "size",
         "sha256",
         "previewKind"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {"previewKind": {"const": "text"}},
+            "required": ["previewKind"]
+          },
+          "then": {"properties": {"size": {"maximum": 1048576}}}
+        }
       ],
       "additionalProperties": true
     },
@@ -12757,7 +12303,38 @@
         "closed"
       ],
       "additionalProperties": true
-    }
+    },
+    "ControlMode":{"enum":["default","plan"]},
+    "PromptDelivery":{"enum":["native","steer","follow_up","aside","queue"]},
+    "SessionControlsReadParams":{"type":"object","properties":{"target":{"$ref":"#/$defs/Target"}},"required":["target"],"additionalProperties":false},
+    "SessionControlModel":{"type":"object","properties":{"reference":{"$ref":"#/$defs/Uuid"},"label":{"$ref":"#/$defs/Label"},"efforts":{"type":"array","items":{"$ref":"#/$defs/Text"},"maxItems":64,"uniqueItems":true}},"required":["reference","label","efforts"],"additionalProperties":false},
+    "ResponseSessionControlModel":{"type":"object","properties":{"reference":{"$ref":"#/$defs/ResponseUuid"},"label":{"$ref":"#/$defs/ResponseLabel"},"efforts":{"type":"array","items":{"$ref":"#/$defs/ResponseText"},"maxItems":64,"uniqueItems":true}},"required":["reference","label","efforts"],"additionalProperties":true},
+    "SessionControlsCurrent":{"type":"object","properties":{"modelRef":{"$ref":"#/$defs/Uuid"},"effort":{"$ref":"#/$defs/Text"},"mode":{"$ref":"#/$defs/ControlMode"}},"additionalProperties":false},
+    "ResponseSessionControlsCurrent":{"type":"object","properties":{"modelRef":{"$ref":"#/$defs/ResponseUuid"},"effort":{"$ref":"#/$defs/ResponseText"},"mode":{"$ref":"#/$defs/ControlMode"}},"additionalProperties":true},
+    "SessionControlsReadResult":{"type":"object","properties":{"target":{"$ref":"#/$defs/Target"},"catalogueGeneration":{"$ref":"#/$defs/Uuid"},"models":{"type":"array","items":{"$ref":"#/$defs/SessionControlModel"},"maxItems":256},"current":{"$ref":"#/$defs/SessionControlsCurrent"},"modes":{"type":"array","items":{"$ref":"#/$defs/ControlMode"},"maxItems":2,"uniqueItems":true},"deliveries":{"type":"array","items":{"$ref":"#/$defs/PromptDelivery"},"maxItems":5,"uniqueItems":true},"queueAvailable":{"type":"boolean"}},"required":["target","catalogueGeneration","models","current","modes","deliveries","queueAvailable"],"additionalProperties":false,"x-contextValidation":"Unique model references; current modelRef belongs to models; <=256KiB encoded; original peer/connection/Target/source absolute5minute publication; unknown current values omitted"},
+    "ResponseSessionControlsReadResult":{"type":"object","properties":{"target":{"$ref":"#/$defs/ResponseTarget"},"catalogueGeneration":{"$ref":"#/$defs/ResponseUuid"},"models":{"type":"array","items":{"$ref":"#/$defs/ResponseSessionControlModel"},"maxItems":256},"current":{"$ref":"#/$defs/ResponseSessionControlsCurrent"},"modes":{"type":"array","items":{"$ref":"#/$defs/ControlMode"},"maxItems":2,"uniqueItems":true},"deliveries":{"type":"array","items":{"$ref":"#/$defs/PromptDelivery"},"maxItems":5,"uniqueItems":true},"queueAvailable":{"type":"boolean"}},"required":["target","catalogueGeneration","models","current","modes","deliveries","queueAvailable"],"additionalProperties":true},
+    "SessionControlsApplyParams":{"type":"object","properties":{"bootId":{"$ref":"#/$defs/Uuid"},"target":{"$ref":"#/$defs/Target"},"catalogueGeneration":{"$ref":"#/$defs/Uuid"},"modelRef":{"$ref":"#/$defs/Uuid"},"effort":{"$ref":"#/$defs/Text"},"mode":{"$ref":"#/$defs/ControlMode"}},"required":["bootId","target","catalogueGeneration"],"anyOf":[{"required":["modelRef"]},{"required":["effort"]},{"required":["mode"]}],"additionalProperties":false,"x-contextValidation":"Exact original current catalogue membership; effort belongs to selected/current native model; mode-only requires authoritative current model; only changed fields; effective same-original confirmation, not queued ACK"},
+    "SessionControlsApplyResult":{"type":"object","properties":{"receipt":{"$ref":"#/$defs/Receipt"}},"required":["receipt"],"additionalProperties":false},
+    "ResponseSessionControlsApplyResult":{"type":"object","properties":{"receipt":{"$ref":"#/$defs/ResponseReceipt"}},"required":["receipt"],"additionalProperties":true},
+    "ControlsChangedEvent":{"type":"object","properties":{"target":{"$ref":"#/$defs/Target"}},"required":["target"],"additionalProperties":false},
+    "QueueChangedEvent":{"type":"object","properties":{"target":{"$ref":"#/$defs/Target"}},"required":["target"],"additionalProperties":false},
+    "SessionQueueListParams":{"type":"object","properties":{"target":{"$ref":"#/$defs/Target"},"cursor":{"$ref":"#/$defs/Id"},"limit":{"$ref":"#/$defs/Uint","minimum":1,"maximum":100,"default":100}},"required":["target"],"additionalProperties":false},
+    "SessionQueueEntry":{"type":"object","properties":{"id":{"$ref":"#/$defs/Id"},"text":{"$ref":"#/$defs/Content"},"editable":{"type":"boolean"}},"required":["id","text","editable"],"additionalProperties":false},
+    "ResponseSessionQueueEntry":{"type":"object","properties":{"id":{"$ref":"#/$defs/ResponseId"},"text":{"$ref":"#/$defs/ResponseContent"},"editable":{"type":"boolean"}},"required":["id","text","editable"],"additionalProperties":true},
+    "SessionQueueListResult":{"type":"object","properties":{"target":{"$ref":"#/$defs/Target"},"entries":{"type":"array","items":{"$ref":"#/$defs/SessionQueueEntry"},"maxItems":100},"nextCursor":{"$ref":"#/$defs/Id"}},"required":["target","entries"],"additionalProperties":false,"x-contextValidation":"Unique entry IDs; <=128 entries/256KiB projected aggregate in original peer/connection/Target/source queue view, absolute5minutes; public limit is a maximum/default100, native reads return one row with scoped opaque continuation; no hidden pagination; partial views cannot reorder; native nontext input remains visible and noneditable"},
+    "ResponseSessionQueueListResult":{"type":"object","properties":{"target":{"$ref":"#/$defs/ResponseTarget"},"entries":{"type":"array","items":{"$ref":"#/$defs/ResponseSessionQueueEntry"},"maxItems":100},"nextCursor":{"$ref":"#/$defs/ResponseId"}},"required":["target","entries"],"additionalProperties":true},
+    "SessionQueueUpdateParams":{"type":"object","properties":{"bootId":{"$ref":"#/$defs/Uuid"},"target":{"$ref":"#/$defs/Target"},"entryId":{"$ref":"#/$defs/Id"},"text":{"$ref":"#/$defs/PromptText"}},"required":["bootId","target","entryId","text"],"additionalProperties":false},
+    "SessionQueueDeleteParams":{"type":"object","properties":{"bootId":{"$ref":"#/$defs/Uuid"},"target":{"$ref":"#/$defs/Target"},"entryId":{"$ref":"#/$defs/Id"}},"required":["bootId","target","entryId"],"additionalProperties":false},
+    "SessionQueueStartParams":{"type":"object","properties":{"bootId":{"$ref":"#/$defs/Uuid"},"target":{"$ref":"#/$defs/Target"},"entryId":{"$ref":"#/$defs/Id"}},"required":["bootId","target","entryId"],"additionalProperties":false},
+    "SessionQueueReorderParams":{"type":"object","properties":{"bootId":{"$ref":"#/$defs/Uuid"},"target":{"$ref":"#/$defs/Target"},"entryIds":{"type":"array","items":{"$ref":"#/$defs/Id"},"maxItems":128,"uniqueItems":true}},"required":["bootId","target","entryIds"],"additionalProperties":false,"x-contextValidation":"Complete current bounded native queue and exact ID permutation, never a partial reorder"},
+    "SessionQueueResult":{"type":"object","properties":{"receipt":{"$ref":"#/$defs/Receipt"}},"required":["receipt"],"additionalProperties":false},
+    "ResponseSessionQueueResult":{"type":"object","properties":{"receipt":{"$ref":"#/$defs/ResponseReceipt"}},"required":["receipt"],"additionalProperties":true},
+    "ActionResultQueue":{"type":"object","properties":{"kind":{"const":"queue"},"entryId":{"$ref":"#/$defs/Id"},"deleted":{"type":"boolean"},"nativeTurnId":{"$ref":"#/$defs/Id"}},"required":["kind"],"additionalProperties":false,"allOf":[{"if":{"anyOf":[{"required":["deleted"]},{"required":["nativeTurnId"]}]},"then":{"required":["entryId"]}},{"not":{"required":["deleted","nativeTurnId"]}}]},
+    "ResponseActionResultQueue":{"type":"object","properties":{"kind":{"const":"queue"},"entryId":{"$ref":"#/$defs/ResponseId"},"deleted":{"type":"boolean"},"nativeTurnId":{"$ref":"#/$defs/ResponseId"}},"required":["kind"],"additionalProperties":true,"allOf":[{"if":{"anyOf":[{"required":["deleted"]},{"required":["nativeTurnId"]}]},"then":{"required":["entryId"]}},{"not":{"required":["deleted","nativeTurnId"]}}]},
+    "ImagePreparationReason":{"type":"string","enum":["pending_original_read","original_source_unavailable","ownership_proof_unavailable","capacity_in_use"]},
+    "ResponseImagePreparationReason":{"$ref":"#/$defs/ImagePreparationReason"},
+    "NativeImagePreparation":{"type":"object","properties":{"reason":{"$ref":"#/$defs/ImagePreparationReason"},"actions":{"type":"array","items":{"$ref":"#/$defs/Uuid"},"maxItems":4,"uniqueItems":true},"peerOwners":{"$ref":"#/$defs/Uint","maximum":4},"hostOwners":{"$ref":"#/$defs/Uint","maximum":16}},"required":["reason","actions"],"additionalProperties":false,"allOf":[{"if":{"properties":{"reason":{"not":{"const":"ownership_proof_unavailable"}}}},"then":{"required":["peerOwners","hostOwners"]}},{"if":{"properties":{"reason":{"enum":["pending_original_read","original_source_unavailable"]}}},"then":{"properties":{"actions":{"minItems":1}}}}],"x-contextValidation":"Only this peer's original action receipt references. Known peerOwners >= action count and hostOwners >= peerOwners. Hard4image-owning actions/peer,16/host, charged through actual FD/Arc drop. Only already-entered unknown native readers may retain this bounded negative obligation beyond ordinary upload/receipt TTL; no new input authority, epoch adoption, replay or TTL-based release."},
+    "ResponseNativeImagePreparation":{"type":"object","properties":{"reason":{"$ref":"#/$defs/ResponseImagePreparationReason"},"actions":{"type":"array","items":{"$ref":"#/$defs/ResponseUuid"},"maxItems":4,"uniqueItems":true},"peerOwners":{"$ref":"#/$defs/ResponseUint","maximum":4},"hostOwners":{"$ref":"#/$defs/ResponseUint","maximum":16}},"required":["reason","actions"],"additionalProperties":true,"allOf":[{"if":{"properties":{"reason":{"not":{"const":"ownership_proof_unavailable"}}}},"then":{"required":["peerOwners","hostOwners"]}},{"if":{"properties":{"reason":{"enum":["pending_original_read","original_source_unavailable"]}}},"then":{"properties":{"actions":{"minItems":1}}}}]}
   },
   "x-framing": {
     "lengthPrefix": "unsigned 32-bit big-endian",
@@ -12768,6 +12345,13 @@
     "canonicalExpansion": "Wire bound is not a canonical-hash byte bound"
   },
   "x-methods": {
+    "session.controls.read":{"params":"SessionControlsReadParams","result":"SessionControlsReadResult","bootRequired":false,"action":false},
+    "session.controls.apply":{"params":"SessionControlsApplyParams","result":"SessionControlsApplyResult","bootRequired":true,"action":true},
+    "session.queue.list":{"params":"SessionQueueListParams","result":"SessionQueueListResult","bootRequired":false,"action":false},
+    "session.queue.update":{"params":"SessionQueueUpdateParams","result":"SessionQueueResult","bootRequired":true,"action":true},
+    "session.queue.delete":{"params":"SessionQueueDeleteParams","result":"SessionQueueResult","bootRequired":true,"action":true},
+    "session.queue.reorder":{"params":"SessionQueueReorderParams","result":"SessionQueueResult","bootRequired":true,"action":true},
+    "session.queue.start":{"params":"SessionQueueStartParams","result":"SessionQueueResult","bootRequired":true,"action":true},
     "pair.confirm": {
       "params": "PairConfirmParams",
       "result": "PairConfirmResult",
@@ -12810,6 +12394,13 @@
       "bootRequired": true,
       "action": true
     },
+    "creation.directories": {
+      "params":"CreationDirectoriesParams",
+      "result":"CreationDirectoriesResult",
+      "bootRequired":false,
+      "action":false,
+      "contextValidation":"Configured creation-root names/navigation only; peer/current connection/server incarnation/project/root/optional original-source scope; absolute five-minute refs/cursors; depth16,1000 examined entries/directory"
+    },
     "prompt.submit": {
       "params": "PromptSubmitParams",
       "result": "PromptSubmitResult",
@@ -12842,13 +12433,14 @@
       "action": false,
       "contextValidation": "offsetBytes <= actual byteLength, including offset=end"
     },
-    "terminal.read": {
-      "params": "TerminalReadParams",
-      "result": "TerminalReadResult",
+    "terminal.grid.subscribe": {
+      "params": "TerminalGridSubscribeParams",
+      "result": "TerminalGridSubscribeResult",
       "bootRequired": false,
       "action": false,
       "contextValidation": "current exact Target with an installed atomic native read identity"
     },
+    "shell.grid.subscribe":{"params":"ShellGridSubscribeParams","result":"ShellGridSubscribeResult","bootRequired":false,"action":false,"contextValidation":"original ShellTarget/read grant and native grid availability; one viewer per connection"},
     "worktrees.list": {
       "params": "WorktreesListParams",
       "result": "WorktreesListResult",
@@ -12910,23 +12502,11 @@
       "result": "SkillsListResult",
       "bootRequired": false,
       "action": false,
-      "contextValidation": "Original provider Target/source/skillsGeneration; Codex pinned-directory catalogue or authenticated OMP enabled command catalogue under independent user-preview grant"
+      "contextValidation": "Original provider Target/source/skillsGeneration; Codex pinned-directory or authenticated OMP enabled catalogue; document roots are independent and never required for catalogue/insertion"
     },
     "agent.rename": {
       "params": "AgentRenameParams",
       "result": "AgentRenameResult",
-      "bootRequired": true,
-      "action": true
-    },
-    "worktrees.remove_preview": {
-      "params": "WorktreesRemovePreviewParams",
-      "result": "WorktreesRemovePreviewResult",
-      "bootRequired": false,
-      "action": false
-    },
-    "worktrees.remove": {
-      "params": "WorktreesRemoveParams",
-      "result": "WorktreesRemoveResult",
       "bootRequired": true,
       "action": true
     },
@@ -12959,21 +12539,21 @@
       "result": "SkillsPreviewOpenResult",
       "bootRequired": false,
       "action": false,
-      "contextValidation": "Original authenticated OMP Target/source/catalogue and native user-preview grant; opaque original document/read ownership, no caller paths"
+      "contextValidation": "Exact currently enabled provider catalogue row; independent configured Skill document roots and original process/namespace/object proof; complete peer-owned snapshot; no phone paths"
     },
     "skills.preview.read": {
       "params": "SkillsPreviewReadParams",
       "result": "SkillsPreviewReadResult",
       "bootRequired": false,
       "action": false,
-      "contextValidation": "Original authenticated OMP Target/source/catalogue and native user-preview grant; opaque original document/read ownership, no caller paths"
+      "contextValidation": "Original peer/read/Target/catalogue, current provider/namespace/object/root proof and complete bounded snapshot; no replacement read or phone paths"
     },
     "skills.preview.close": {
       "params": "SkillsPreviewCloseParams",
       "result": "SkillsPreviewCloseResult",
       "bootRequired": false,
       "action": false,
-      "contextValidation": "Original authenticated OMP Target/source/catalogue and native user-preview grant; opaque original document/read ownership, no caller paths"
+      "contextValidation": "Exact peer-owned original read/Target/catalogue memory cleanup may outlive read readiness; never reopens a file or adopts a replacement"
     }
   },
   "x-formatAuthorities": {

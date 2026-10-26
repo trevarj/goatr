@@ -5,6 +5,13 @@ import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 
 internal fun decodeRequestBody(method: Method, params: JsonElement): RequestBody = when(method) {
+    Method.SessionControlsRead->RequestBody.SessionControlsRead(Protocol.typed(params,true))
+    Method.SessionControlsApply->RequestBody.SessionControlsApply(Protocol.typed(params,true))
+    Method.SessionQueueList->RequestBody.SessionQueueList(Protocol.typed(params,true))
+    Method.SessionQueueUpdate->RequestBody.SessionQueueUpdate(Protocol.typed(params,true))
+    Method.SessionQueueDelete->RequestBody.SessionQueueDelete(Protocol.typed(params,true))
+    Method.SessionQueueReorder->RequestBody.SessionQueueReorder(Protocol.typed(params,true))
+    Method.SessionQueueStart->RequestBody.SessionQueueStart(Protocol.typed(params,true))
     Method.ArtifactsList -> RequestBody.ArtifactsList(Protocol.typed(params,true))
     Method.ArtifactsOpen -> RequestBody.ArtifactsOpen(Protocol.typed(params,true))
     Method.ArtifactsRead -> RequestBody.ArtifactsRead(Protocol.typed(params,true))
@@ -21,9 +28,8 @@ internal fun decodeRequestBody(method: Method, params: JsonElement): RequestBody
     Method.SessionOpen -> RequestBody.SessionOpen(Protocol.typed(params, true))
     Method.SessionHistory -> RequestBody.SessionHistory(Protocol.typed(params, true))
     Method.SessionUnsubscribe -> RequestBody.SessionUnsubscribe(Protocol.typed(params, true))
+    Method.CreationDirectories -> RequestBody.CreationDirectories(Protocol.typed(params,true))
     Method.SessionCreate -> RequestBody.SessionCreate(Protocol.typed(params, true))
-    Method.WorktreesRemovePreview->RequestBody.WorktreesRemovePreview(Protocol.typed(params,true))
-    Method.WorktreesRemove->RequestBody.WorktreesRemove(Protocol.typed(params,true))
     Method.AgentRename -> RequestBody.AgentRename(Protocol.typed(params, true))
     Method.WorkspaceRename -> RequestBody.WorkspaceRename(Protocol.typed(params, true))
     Method.PromptSubmit -> RequestBody.PromptSubmit(Protocol.typed(params, true))
@@ -31,10 +37,10 @@ internal fun decodeRequestBody(method: Method, params: JsonElement): RequestBody
     Method.RequestRespond -> RequestBody.RequestRespond(Protocol.typed(params, true))
     Method.ActionStatus -> RequestBody.ActionStatus(Protocol.typed(params, true))
     Method.ContentRead -> RequestBody.ContentRead(Protocol.typed(params, true))
-    Method.TerminalRead -> RequestBody.TerminalRead(Protocol.typed(params, true))
-    Method.ShellRead -> RequestBody.ShellRead(Protocol.typed(params, true))
-    Method.ShellCreate -> RequestBody.ShellCreate(Protocol.typed(params, true))
+    Method.TerminalGridSubscribe -> RequestBody.TerminalGridSubscribe(Protocol.typed(params, true))
+    Method.ShellGridSubscribe -> RequestBody.ShellGridSubscribe(Protocol.typed(params, true))
     Method.ShellInput -> RequestBody.ShellInput(Protocol.typed(params, true))
+    Method.ShellResize->RequestBody.ShellResize(Protocol.typed(params,true))
     Method.SkillsList -> RequestBody.SkillsList(Protocol.typed(params, true))
     Method.SkillsPreviewOpen->RequestBody.SkillsPreviewOpen(Protocol.typed(params,true))
     Method.SkillsPreviewRead->RequestBody.SkillsPreviewRead(Protocol.typed(params,true))
@@ -50,6 +56,13 @@ internal fun decodeRequestBody(method: Method, params: JsonElement): RequestBody
     Method.DeviceUnpair -> RequestBody.DeviceUnpair(Protocol.typed(params, true))
 }
 internal fun decodeResultBody(method: Method, result: JsonElement): ResultBody = when(method) {
+    Method.SessionControlsRead->ResultBody.SessionControlsRead(Protocol.typed(result,false))
+    Method.SessionControlsApply->ResultBody.SessionControlsApply(Protocol.typed(result,false))
+    Method.SessionQueueList->ResultBody.SessionQueueList(Protocol.typed(result,false))
+    Method.SessionQueueUpdate->ResultBody.SessionQueueUpdate(Protocol.typed(result,false))
+    Method.SessionQueueDelete->ResultBody.SessionQueueDelete(Protocol.typed(result,false))
+    Method.SessionQueueReorder->ResultBody.SessionQueueReorder(Protocol.typed(result,false))
+    Method.SessionQueueStart->ResultBody.SessionQueueStart(Protocol.typed(result,false))
     Method.ArtifactsList -> ResultBody.ArtifactsList(Protocol.typed(result,false))
     Method.ArtifactsOpen -> ResultBody.ArtifactsOpen(Protocol.typed(result,false))
     Method.ArtifactsRead -> ResultBody.ArtifactsRead(Protocol.typed(result,false))
@@ -66,9 +79,8 @@ internal fun decodeResultBody(method: Method, result: JsonElement): ResultBody =
     Method.SessionOpen -> ResultBody.SessionOpen(Protocol.typed(result, false))
     Method.SessionHistory -> ResultBody.SessionHistory(Protocol.typed(result, false))
     Method.SessionUnsubscribe -> ResultBody.SessionUnsubscribe(Protocol.typed(result, false))
+    Method.CreationDirectories -> ResultBody.CreationDirectories(Protocol.typed(result,false))
     Method.SessionCreate -> ResultBody.SessionCreate(Protocol.typed(result, false))
-    Method.WorktreesRemovePreview->ResultBody.WorktreesRemovePreview(Protocol.typed(result,false))
-    Method.WorktreesRemove->ResultBody.WorktreesRemove(Protocol.typed(result,false))
     Method.AgentRename -> ResultBody.AgentRename(Protocol.typed(result, false))
     Method.WorkspaceRename -> ResultBody.WorkspaceRename(Protocol.typed(result, false))
     Method.PromptSubmit -> ResultBody.PromptSubmit(Protocol.typed(result, false))
@@ -76,10 +88,10 @@ internal fun decodeResultBody(method: Method, result: JsonElement): ResultBody =
     Method.RequestRespond -> ResultBody.RequestRespond(Protocol.typed(result, false))
     Method.ActionStatus -> { val o = result.jsonObject; requireWire(("receipt" in o) != ("state" in o)); ResultBody.ActionStatus(if ("receipt" in o) ActionStatusResult.Known(Protocol.typed(result, false)) else ActionStatusResult.Unknown(Protocol.typed(result, false))) }
     Method.ContentRead -> ResultBody.ContentRead(Protocol.typed(result, false))
-    Method.TerminalRead -> ResultBody.TerminalRead(Protocol.typed(result, false))
-    Method.ShellRead -> ResultBody.ShellRead(Protocol.typed(result, false))
-    Method.ShellCreate -> ResultBody.ShellCreate(Protocol.typed(result, false))
+    Method.TerminalGridSubscribe -> ResultBody.TerminalGridSubscribe(Protocol.typed(result, false))
+    Method.ShellGridSubscribe -> ResultBody.ShellGridSubscribe(Protocol.typed(result, false))
     Method.ShellInput -> ResultBody.ShellInput(Protocol.typed(result, false))
+    Method.ShellResize->ResultBody.ShellResize(Protocol.typed(result,false))
     Method.SkillsList -> { requireWire(result.toString().toByteArray(Charsets.UTF_8).size<=256*1024); ResultBody.SkillsList(Protocol.typed(result, false)) }
     Method.SkillsPreviewOpen->ResultBody.SkillsPreviewOpen(Protocol.typed(result,false))
     Method.SkillsPreviewRead->ResultBody.SkillsPreviewRead(Protocol.typed(result,false))
@@ -117,6 +129,11 @@ private fun exactChangesKeys(value: JsonObject, required: Set<String>, allowed: 
     requireWire(required.all { it in value } && value.keys.all { it in allowed })
 }
 internal fun decodeEventBody(kind: String, data: JsonElement): EventBody = when(kind) {
+    "controls.changed"->EventBody.ControlsChanged(Protocol.typed(data,true))
+    "queue.changed"->EventBody.QueueChanged(Protocol.typed(data,true))
+    "grid.begin" -> EventBody.GridBegin(Protocol.typed(data,true))
+    "grid.part" -> EventBody.GridPart(Protocol.gridPart(data))
+    "grid.commit" -> EventBody.GridCommit(Protocol.typed(data,true))
     "host.changed" -> EventBody.HostChanged(Protocol.typed(data, true))
     "session.state" -> EventBody.SessionState(Protocol.typed(data, true))
     "history.upsert" -> EventBody.HistoryUpsert(Protocol.typed(data, true))
@@ -131,12 +148,20 @@ internal fun decodeEventBody(kind: String, data: JsonElement): EventBody = when(
 }
 internal fun requestJson(body: RequestBody): JsonObject {
     val params = when(body) {
+        is RequestBody.SessionControlsRead->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.SessionControlsApply->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.SessionQueueList->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.SessionQueueUpdate->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.SessionQueueDelete->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.SessionQueueReorder->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.SessionQueueStart->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
         is RequestBody.PairConfirm -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.Hello -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.HostSnapshot -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.SessionOpen -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.SessionHistory -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.SessionUnsubscribe -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
+        is RequestBody.CreationDirectories -> {body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
         is RequestBody.SessionCreate -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.ArtifactsList -> {body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
     is RequestBody.ArtifactsOpen -> {body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
@@ -148,8 +173,6 @@ internal fun requestJson(body: RequestBody): JsonObject {
         is RequestBody.AttachmentsComplete->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
         is RequestBody.AttachmentsDiscard->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
         is RequestBody.AttachmentsStatus->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
-        is RequestBody.WorktreesRemovePreview->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
-        is RequestBody.WorktreesRemove->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
         is RequestBody.AgentRename -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.WorkspaceRename -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.PromptSubmit -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
@@ -157,10 +180,10 @@ internal fun requestJson(body: RequestBody): JsonObject {
         is RequestBody.RequestRespond -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.ActionStatus -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.ContentRead -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
-        is RequestBody.TerminalRead -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
-    is RequestBody.ShellRead -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
-    is RequestBody.ShellCreate -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
+        is RequestBody.TerminalGridSubscribe -> {body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.ShellGridSubscribe -> {body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
     is RequestBody.ShellInput -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
+    is RequestBody.ShellResize->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
     is RequestBody.SkillsList -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
     is RequestBody.SkillsPreviewOpen->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
     is RequestBody.SkillsPreviewRead->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
@@ -258,14 +281,45 @@ internal fun validateNotificationsSyncResult(x: NotificationsSyncResult) { requi
 internal fun validateHistoryUpsertEvent(x: HistoryUpsertEvent) { requireWire(x.records.isNotEmpty() && x.records.size <= 100) }
 internal fun validateReceipt(x: Receipt) {
     requireWire(x.createdAt.value <= x.updatedAt.value)
-    requireWire((x.method in listOf(ActionMethod.ShellCreate,ActionMethod.ShellInput))==(x.shellTarget!=null))
+    requireWire((x.method in listOf(ActionMethod.ShellCreate,ActionMethod.ShellInput,ActionMethod.ShellResize))==(x.shellTarget!=null))
     if(x.method==ActionMethod.ShellCreate){requireWire(x.target==null && x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultShellCreation && x.result.resources.complete())}
     if(x.method==ActionMethod.ShellInput){requireWire(x.target==null && x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultShellInput && x.result.progress.accepted())}
+    if(x.method==ActionMethod.ShellResize){requireWire(x.target==null && x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultShellResize)}
     if(x.method in setOf(ActionMethod.AttachmentsBegin,ActionMethod.AttachmentsChunk,ActionMethod.AttachmentsComplete,ActionMethod.AttachmentsDiscard)){requireWire(x.target!=null&&x.creation==null);if(x.result is ActionResultAttachment)requireWire(x.result.target==x.target);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultAttachment)}
-    if(x.method==ActionMethod.TerminalCreate){requireWire(x.target!=null&&x.shellTarget==null&&x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire((x.result as? ActionResultShellCreation)?.resources?.complete()==true)}
+    // Provider-target historical terminal.create receipts remain readable.
+    if(x.method==ActionMethod.TerminalCreate){requireWire(x.shellTarget==null&&x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire((x.result as? ActionResultShellCreation)?.resources?.complete()==true)}
     if(x.method==ActionMethod.WorktreesRemove){requireWire(x.target!=null && x.creation==null);if(x.result is ActionResultWorktreeRemoval)requireWire(x.result.target==x.target);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultWorktreeRemoval && x.result.progress.complete())}
     if(x.method==ActionMethod.AgentRename) {requireWire(x.target!=null && x.creation==null);if(x.result is ActionResultAgentRenamed)requireWire(x.result.target==x.target);if(x.state==ReceiptState.Succeeded) requireWire(x.result is ActionResultAgentRenamed && x.result.target==x.target)}
-    x.result?.let { result -> requireWire(when (x.method) { ActionMethod.TerminalCreate->result is ActionResultShellCreation; ActionMethod.AttachmentsBegin -> result is ActionResultAttachment; ActionMethod.AttachmentsChunk -> result is ActionResultAttachment; ActionMethod.AttachmentsComplete -> result is ActionResultAttachment; ActionMethod.AttachmentsDiscard -> result is ActionResultAttachment; ActionMethod.SessionCreate -> result is ActionResultCreated; ActionMethod.ShellCreate -> result is ActionResultShellCreation; ActionMethod.ShellInput -> result is ActionResultShellInput; ActionMethod.WorktreesRemove->result is ActionResultWorktreeRemoval; ActionMethod.AgentRename -> result is ActionResultAgentRenamed; ActionMethod.WorkspaceRename -> result is ActionResultWorkspaceRenamed; ActionMethod.PromptSubmit -> result is ActionResultPrompt; ActionMethod.TurnCancel -> result is ActionResultCancel; ActionMethod.RequestRespond -> result is ActionResultResponse }) }
+    if(x.method==ActionMethod.SessionControlsApply)requireWire(x.target!=null&&x.creation==null&&x.result==null)
+    if(x.method in setOf(ActionMethod.SessionQueueUpdate,ActionMethod.SessionQueueDelete,ActionMethod.SessionQueueReorder,ActionMethod.SessionQueueStart)) {
+        requireWire(x.target!=null&&x.creation==null)
+        if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultQueue)
+    }
+    x.result?.let { result -> requireWire(when(x.method) {
+        ActionMethod.SessionControlsApply->false
+        ActionMethod.SessionQueueUpdate,ActionMethod.SessionQueueDelete,ActionMethod.SessionQueueReorder,ActionMethod.SessionQueueStart->result is ActionResultQueue
+        ActionMethod.TerminalCreate->result is ActionResultShellCreation
+        ActionMethod.AttachmentsBegin,ActionMethod.AttachmentsChunk,ActionMethod.AttachmentsComplete,ActionMethod.AttachmentsDiscard->result is ActionResultAttachment
+        ActionMethod.SessionCreate->result is ActionResultCreated
+        ActionMethod.ShellCreate->result is ActionResultShellCreation
+        ActionMethod.ShellInput->result is ActionResultShellInput||result is ActionResultShellDispatch
+        ActionMethod.ShellResize->result is ActionResultShellResize
+        ActionMethod.WorktreesRemove->result is ActionResultWorktreeRemoval
+        ActionMethod.AgentRename->result is ActionResultAgentRenamed
+        ActionMethod.WorkspaceRename->result is ActionResultWorkspaceRenamed
+        ActionMethod.PromptSubmit->result is ActionResultPrompt||result is ActionResultQueue
+        ActionMethod.TurnCancel->result is ActionResultCancel
+        ActionMethod.RequestRespond->result is ActionResultResponse
+    })
+        if(result is ActionResultQueue)requireWire(when(x.method) {
+            ActionMethod.PromptSubmit,ActionMethod.SessionQueueUpdate->result.entryId!=null&&result.deleted==null&&result.nativeTurnId==null
+            ActionMethod.SessionQueueDelete->result.entryId!=null&&result.nativeTurnId==null&&(x.state!=ReceiptState.Succeeded||result.deleted!=null)
+            ActionMethod.SessionQueueStart->result.entryId!=null&&result.deleted==null&&(x.state!=ReceiptState.Succeeded||result.nativeTurnId!=null)
+            ActionMethod.SessionQueueReorder->result.entryId==null&&result.deleted==null&&result.nativeTurnId==null
+            else->false
+        })
+        if(result is ActionResultShellDispatch){requireWire(x.state!=ReceiptState.Succeeded);if(x.state==ReceiptState.Dispatched)requireWire(result.progress.complete())}
+    }
     if (x.method == ActionMethod.SessionCreate && x.state == ReceiptState.Succeeded) requireWire(x.result is ActionResultCreated && x.creation?.stage == CreationStage.Ready && x.creation.stageState == StageState.Confirmed)
 }
 internal fun validateFormField(f: FormField) {
@@ -395,12 +449,20 @@ fun validFormat(format: FieldFormat, s: String): Boolean = when(format) { FieldF
 
 
 internal fun resultJson(body: ResultBody): JsonElement = when(body) {
+    is ResultBody.SessionControlsRead->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
+    is ResultBody.SessionControlsApply->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
+    is ResultBody.SessionQueueList->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
+    is ResultBody.SessionQueueUpdate->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
+    is ResultBody.SessionQueueDelete->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
+    is ResultBody.SessionQueueReorder->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
+    is ResultBody.SessionQueueStart->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.PairConfirm -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.Hello -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.HostSnapshot -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.SessionOpen -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.SessionHistory -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.SessionUnsubscribe -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
+    is ResultBody.CreationDirectories -> {body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.SessionCreate -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.ArtifactsList -> {body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.ArtifactsOpen -> {body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
@@ -412,8 +474,6 @@ internal fun resultJson(body: ResultBody): JsonElement = when(body) {
     is ResultBody.AttachmentsComplete->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.AttachmentsDiscard->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.AttachmentsStatus->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
-    is ResultBody.WorktreesRemovePreview->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
-    is ResultBody.WorktreesRemove->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.AgentRename -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.WorkspaceRename -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.PromptSubmit -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
@@ -421,10 +481,10 @@ internal fun resultJson(body: ResultBody): JsonElement = when(body) {
     is ResultBody.RequestRespond -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.ActionStatus -> when(val value = body.result) { is ActionStatusResult.Known -> { value.value.validate(); Protocol.strictJson.encodeToJsonElement(value.value) }; is ActionStatusResult.Unknown -> { value.value.validate(); Protocol.strictJson.encodeToJsonElement(value.value) } }
     is ResultBody.ContentRead -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
-    is ResultBody.TerminalRead -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
-    is ResultBody.ShellRead -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
-    is ResultBody.ShellCreate -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
+    is ResultBody.TerminalGridSubscribe -> {body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
+    is ResultBody.ShellGridSubscribe -> {body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.ShellInput -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
+    is ResultBody.ShellResize->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.SkillsList -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.SkillsPreviewOpen->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.SkillsPreviewRead->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
@@ -441,6 +501,11 @@ internal fun resultJson(body: ResultBody): JsonElement = when(body) {
 }
 internal fun eventJson(body: EventBody): JsonObject {
     val (kind,data) = when(body) {
+        is EventBody.ControlsChanged->{body.data.validate();"controls.changed" to Protocol.strictJson.encodeToJsonElement(body.data)}
+        is EventBody.QueueChanged->{body.data.validate();"queue.changed" to Protocol.strictJson.encodeToJsonElement(body.data)}
+        is EventBody.GridBegin -> {body.data.validate();"grid.begin" to Protocol.strictJson.encodeToJsonElement(body.data)}
+        is EventBody.GridPart -> {body.data.validate();"grid.part" to Protocol.strictJson.encodeToJsonElement(body.data)}
+        is EventBody.GridCommit -> {body.data.validate();"grid.commit" to Protocol.strictJson.encodeToJsonElement(body.data)}
         is EventBody.HostChanged -> { body.data.validate(); "host.changed" to Protocol.strictJson.encodeToJsonElement(body.data) }
         is EventBody.SessionState -> { body.data.validate(); "session.state" to Protocol.strictJson.encodeToJsonElement(body.data) }
         is EventBody.HistoryUpsert -> { body.data.validate(); "history.upsert" to Protocol.strictJson.encodeToJsonElement(body.data) }

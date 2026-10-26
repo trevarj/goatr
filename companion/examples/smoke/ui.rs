@@ -38,6 +38,7 @@ impl InstrumentationEvidence<'_> {
                     "ownerUid":lease.owner_uid,
                     "serial":lease.serial,
                     "avdName":lease.avd_name,
+                    "adbClientHome":lease.adb_client_home,
                     "process":{
                         "linuxBootId":lease.process_identity.linux_boot_id,
                         "pid":lease.process_identity.pid,
@@ -224,6 +225,7 @@ pub(super) async fn adb_command(l: &Lease, args: &[&str]) -> io::Result<tokio::p
         return Err(failure("owned emulator changed before SDK command"));
     }
     let mut c = tokio::process::Command::new(sdk);
+    super::configure_adb_client_home(&mut c,&l.root,&l.adb_client_home)?;
     c.args(super::adb_selector(l)?)
         .args(args)
         .kill_on_drop(true);
@@ -348,6 +350,14 @@ const INSTRUMENTATION_SELECTIONS: &[(&str, &str)] = &[
     (
         "io.github.trevarj.goatr.GoatrConnectionTest#development_feedback_android_to_desktop",
         "development_feedback",
+    ),
+    (
+        "io.github.trevarj.goatr.GoatrConnectionTest#stock_background_persistent_real_native_both_providers",
+        "stock_background_persistent",
+    ),
+    (
+        "io.github.trevarj.goatr.GoatrConnectionTest#stock_background_ntfy_real_native_both_providers",
+        "stock_background_ntfy",
     ),
 ];
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1561,6 +1571,137 @@ pub(super) struct Context<'a> {
     pub(super) history_witnesses: &'a [NativeHistoryWitness],
     pub(super) feedback_presentation: &'a [super::FeedbackPresentation],
 }
+
+/// Reads the original emulator/package/artifact witnesses only; it does not certify delivery,
+/// launch a distributor, select its mode, reset an APK, or create provider resources.
+pub(super) async fn background_preflight(args:&clap::ArgMatches)->io::Result<()> {
+    super::background_mode_environment(args)?;
+    let lease=super::selected_lease(args,"finite background delivery")?;
+    check_emulator(&lease).await?;
+    for (path,pin) in [("apk","expected-apk-sha256"),("test-apk","expected-test-apk-sha256")] {
+        let file=fs::canonicalize(args.get_one::<PathBuf>(path).ok_or_else(||failure("background requires explicit source-qualified APP and TEST APKs"))?)?;
+        development_hash(args,pin,&binary_sha256(&file)?)?;
+    }
+    if super::camera::app_process(&lease).await?.is_some(){return Err(prerequisite("background refuses a prior live Goatr fixture; retain it for Main-reviewed scoped cleanup"));}
+    if args.get_one::<String>("background").map(String::as_str)==Some("ntfy") {
+        let listed=adb(&lease,&["shell","'pm'","'path'","'io.heckel.ntfy'"]).await?;
+        let lines=listed.lines().filter(|line|!line.trim().is_empty()).collect::<Vec<_>>();
+        let path=match lines.as_slice(){[line]=>line.trim().strip_prefix("package:").filter(|path|path.starts_with("/data/app/")&&path.ends_with("/base.apk")&&path.len()<=4096&&!path.chars().any(char::is_control)).ok_or_else(||prerequisite("official ntfy has no single installed base APK witness"))?,_=>return Err(prerequisite("qualified official ntfy must already be installed; no helper install or distributor fallback"))};
+        let quoted_path=shell_literal(path)?;
+        let actual=adb(&lease,&["shell","'sha256sum'",&quoted_path]).await?;
+        if actual.split_whitespace().next()!=args.get_one::<String>("expected-ntfy-apk-sha256").map(String::as_str){return Err(prerequisite("installed ntfy bytes do not match the independently qualified official APK pin"));}
+    }
+    Ok(())
+}
+
+/// A finite real-provider consumer in the existing owned-emulator runner. Its only native
+/// inputs are the already guarded fresh-original marker/dialog choreography. No fault stop,
+/// provider cleanup, forged push, health socket, or mode/distributor fallback is admitted.
+pub(super) async fn background(args:&clap::ArgMatches,evidence:&Path,context:Context<'_>,run:&Uuid)->io::Result<()> {
+    background_preflight(args).await?;
+    let Context{binary,root,socket,config,herdr_socket,herdr_process,mcp,serve,listener:_,endpoint:_,phone,native,history_witnesses:_,feedback_presentation:_}=context;
+    if native.len()!=2||!native.iter().any(|p|p.provider==Provider::Omp)||!native.iter().any(|p|p.provider==Provider::Codex){return Err(failure("background requires both fresh normally-created original proofs"));}
+    serve.recheck()?;
+    for original in native.iter(){original.recheck_processes()?;}
+    let lease=super::selected_lease(args,"finite background delivery")?;
+    let device=check_emulator(&lease).await?;
+    let apk=fs::canonicalize(args.get_one::<PathBuf>("apk").ok_or_else(||failure("background APP APK absent"))?)?;
+    let test=fs::canonicalize(args.get_one::<PathBuf>("test-apk").ok_or_else(||failure("background TEST APK absent"))?)?;
+    let apk_hash=binary_sha256(&apk)?;let test_hash=binary_sha256(&test)?;
+    development_hash(args,"expected-apk-sha256",&apk_hash)?;development_hash(args,"expected-test-apk-sha256",&test_hash)?;
+    let mode=args.get_one::<String>("background").ok_or_else(||failure("background mode absent"))?;
+    reset_owned_apks(&lease).await?;
+    install_owned_apk(&lease,&apk,false).await?;
+    install_owned_apk(&lease,&test,true).await?;
+    let quoted_app=shell_literal(APP)?;
+    adb(&lease,&["shell","'pm'","'grant'",&quoted_app,"'android.permission.POST_NOTIFICATIONS'"]).await?;
+    let control=tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await?;
+    let port=control.local_addr()?.port();let mapping=format!("tcp:{port}");
+    if adb(&lease,&["reverse","--list"]).await?.lines().any(|line|line.split_whitespace().any(|part|part==mapping)){return Err(failure("background refuses an existing control reverse mapping"));}
+    write_json(&evidence.join(format!("background-owner-{}.json",run.0)),&json!({"runId":run,"mode":mode,"device":device,"apk":{"path":apk,"sha256":apk_hash},"testApk":{"path":test,"sha256":test_hash},"ntfy":{"apkSha256":args.get_one::<String>("expected-ntfy-apk-sha256"),"signerSha256":args.get_one::<String>("expected-ntfy-signer-sha256"),"scope":"independently qualified installed package; real registration/probe/ACK remains required"},"native":native.iter().map(NativeProof::evidence).collect::<Vec<_>>(),"reverse":{"local":mapping,"remote":mapping},"resourcesRetained":true,"automaticCleanup":false,"privacy":"original signed instrumentation admission; no keys, endpoints, capability URI, prompt or dialog contents retained"}))?;
+    let class=if mode=="ntfy"{"io.github.trevarj.goatr.GoatrConnectionTest#stock_background_ntfy_real_native_both_providers"}else{"io.github.trevarj.goatr.GoatrConnectionTest#stock_background_persistent_real_native_both_providers"};
+    let (admission,mut admitted)=watch::channel(None);
+    let (retained_epoch,_retained)=watch::channel(None);
+    let provenance=InstrumentationEvidence{cleanup_admission:&retained_epoch,evidence,run,apk:&apk,apk_sha256:&apk_hash,test_apk:&test,test_apk_sha256:&test_hash};
+    let mut child=Box::pin(instrument_owned(&lease,class,Some(port),false,None,&admission,Some(&provenance)));
+    let inputs=NativeInputs{enabled:args.get_flag("automate-native-inputs"),paging_proof:false,config,socket:herdr_socket,herdr:herdr_process,evidence,run,mcp,plan:RefCell::new(None),mcp_dialogs:RefCell::new(HashMap::new())};
+    let host=phone.hello.host_id.clone();
+    let mut completed=HashSet::new();let mut dialogs=HashSet::new();let mut pending=HashMap::<Uuid,Target>::new();let mut complete=false;
+    let result=cancel_on_signal(async {
+        adb(&lease,&["reverse","--no-rebind",&mapping,&mapping]).await?;
+        loop {
+            if admitted.borrow().is_none(){tokio::select!{result=child.as_mut()=>break result,changed=admitted.changed()=>{changed.map_err(|_|failure("background original instrumentation admission closed"))?;}}continue;}
+            let handler=async {
+                let (mut stream,peer)=control.accept().await?;
+                if !peer.ip().is_loopback(){return Ok(());}
+                let epoch=(*admitted.borrow()).ok_or_else(||failure("background original app epoch absent"))?;
+                let public=epoch.public.ok_or_else(||failure("background original signing identity absent"))?;
+                let request=match authenticated_control(&mut stream,&public).await{Ok(request)=>request,Err(_)=>return Ok(())};
+                if super::camera::app_process(&lease).await?!=Some(epoch.process){return Err(failure("background original app process changed; no controller effect admitted"));}
+                serve.recheck()?;
+                let response=match request {
+                    Control::LivePair{}=>{
+                        let b=binary.to_owned();let r=root.to_owned();let s=socket.to_owned();
+                        let mut uri=tokio::task::spawn_blocking(move||terminal_pair(&b,Some(&r),Some(&s))).await.map_err(io::Error::other)??;
+                        let value=json!({"uri":uri,"host":host,"runId":run});unsafe{uri.as_bytes_mut().fill(0)};value
+                    },
+                    Control::LiveInfo{}=>{
+                        let inventory=phone.host().await?;
+                        let sessions=native.iter().map(|proof|inventory.sessions.iter().find(|row|shared_summary_matches(row,proof)).map(|_|json!({"provider":proof.provider,"target":proof.target,"nativeId":proof.native})).ok_or_else(||failure("background original native source disappeared"))).collect::<io::Result<Vec<_>>>()?;
+                        json!({"host":host,"runId":run,"background":mode,"sessions":sessions,"appApkSha256":apk_hash,"testApkSha256":test_hash,"ntfyApkSha256":args.get_one::<String>("expected-ntfy-apk-sha256"),"ntfySignerSha256":args.get_one::<String>("expected-ntfy-signer-sha256")})
+                    },
+                    Control::Desktop{provider}=>{
+                        if !completed.insert(provider){return Err(failure("background native completion cue is once-only; never replay"));}
+                        let original=native.iter().find(|p|p.provider==provider).ok_or_else(||failure("background provider was not selected"))?;
+                        let marker=format!("goatr-ui-background-{}-{provider:?}",&run.0[..8]);
+                        inputs.marker(phone,original,&marker).await?;
+                        wait_history(phone,&original.target,&marker,false).await?;
+                        original.recheck_processes()?;
+                        json!({"marker":marker,"target":original.target,"nativeId":original.native})
+                    },
+                    Control::TriggerDialog{provider,kind}=>{
+                        let expected=if provider==Provider::Omp{PresentationKind::OmpSelect}else{PresentationKind::CodexForm};
+                        if kind!=expected||!dialogs.insert(provider){return Err(failure("background native attention cue is once-only and closed to the selected supported form"));}
+                        let original=native.iter().find(|p|p.provider==provider).ok_or_else(||failure("background provider was not selected"))?;
+                        let request=inputs.trigger_dialog(phone,original,kind,false,None).await?;
+                        if pending.insert(request.request_key.clone(),original.target.clone()).is_some(){return Err(failure("background native pending request repeated"));}
+                        json!({"requestKey":request.request_key,"kind":kind,"target":original.target})
+                    },
+                    Control::DialogClosed{target,request_key,receipt}=>{
+                        if pending.get(&request_key)!=Some(&target)||receipt.target.as_ref()!=Some(&target)||receipt.method!=ActionMethod::RequestRespond{return Err(failure("background answer is not the original native request"));}
+                        let original=native.iter().find(|p|p.target==target).ok_or_else(||failure("background answer changed original Target"))?;
+                        if receipt.error.is_some()||receipt.state!=if original.provider==Provider::Omp{ReceiptState::Dispatched}else{ReceiptState::Succeeded}{return Err(failure("background native answer outcome is not confirmed; retained, never replayed"));}
+                        let deadline=Instant::now()+Duration::from_secs(15);
+                        while phone.open(&target,"background_native_dialog_closed").await?.pending_requests.iter().any(|r|r.request_key==request_key){if Instant::now()>deadline{return Err(failure("background original native request did not close"));}tokio::time::sleep(Duration::from_millis(100)).await;}
+                        inputs.finish_dialog(phone,original,&request_key,false).await?;
+                        pending.remove(&request_key);json!({"verified":true})
+                    },
+                    Control::Complete{}=>{
+                        if completed.len()!=2||dialogs.len()!=2||!pending.is_empty(){return Err(failure("background cannot pass an omitted selected provider or unresolved native request"));}
+                        for original in native.iter(){original.recheck_processes()?;}
+                        complete=true;json!({"complete":true})
+                    },
+                    _=>return Err(failure("background rejects unrelated UI, replay, fault-stop, cleanup or capture controls")),
+                };
+                let mut encoded=serde_json::to_vec(&response).map_err(io::Error::other)?;
+                if encoded.len()>65536{return Err(failure("background control response bound"));}
+                encoded.push(b'\n');tokio::time::timeout(Duration::from_secs(5),stream.write_all(&encoded)).await.map_err(|_|failure("background control reply deadline"))??;encoded.fill(0);
+                Ok::<(),io::Error>(())
+            };
+            match poll_instrumentation_control(child.as_mut(),handler).await {
+                InstrumentationControl::Instrumentation(result)=>break result,
+                InstrumentationControl::Handler(result)=>result?,
+            }
+        }
+    }).await;
+    drop(child);
+    let result=result?;
+    if !complete{return Err(failure("background actual instrumentation omitted the full two-provider completion"));}
+    write_json(&evidence.join(format!("background-{}.json",run.0)),&json!({"gate":"background","status":"pass","mode":mode,"runId":run,"android":result,"providers":native.iter().map(NativeProof::evidence).collect::<Vec<_>>(),"originalApp":admitted.borrow().map(|epoch|json!({"pid":epoch.process.0,"startTicks":epoch.process.1.to_string()})),"resourcesRetained":true,"automaticCleanup":false,"notificationEntry":"system_ui_native_row_click","routerComponents":"busy admission, newer navigation and foreground-loss retirement after a genuine OS tap","scope":"real registration/probe/ACK for ntfy and real native attention/completion with actual SystemUI notification-row clicks and rendered exact-original conversations for both providers; activity-cold and warm, not a process-kill/Wi-Fi/cellular claim"}))?;
+    println!("{}",json!({"gate":"background","mode":mode,"status":"pass","runId":run,"resourcesRetained":true}));
+    Ok(())
+}
+
 pub(super) async fn run(
     args: &clap::ArgMatches,
     evidence: &Path,

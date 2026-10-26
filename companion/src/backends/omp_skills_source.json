@@ -1,10 +1,10 @@
 {
-  "version": "18.8.7",
+  "version": "18.12.5",
   "files": [
     {
       "path": "package.json",
-      "sha256": "a683d52fb3f17780cd3285638a23d53dd7f986eaf5c0c550fedfa30ed5d19334",
-      "size": 17092
+      "sha256": "3d08bdc80e456cf4940bada8937f425e162bcdc5904971eeca3b24bd9b5645cb",
+      "size": 17127
     },
     {
       "path": "LICENSE",
@@ -13,8 +13,8 @@
     },
     {
       "path": "dist/cli.js",
-      "sha256": "2a1f0be0d536031830c2de5abc1a0f7f06948e7c3fdcb77542ef70cba3497481",
-      "size": 29244903
+      "sha256": "49c1fc544e893b0fa2218bc5a1222935e4dacf50147b289ce0582f86d2da4a66",
+      "size": 17872722
     },
     {
       "path": "src/index.ts",
@@ -23,8 +23,8 @@
     },
     {
       "path": "src/extensibility/extensions/types.ts",
-      "sha256": "c0b78c9414ec34ead5617b14a48b4750df0e1d2204eca002a9032c558b20c0ba",
-      "size": 78379
+      "sha256": "d78dccdb66525d46101b65f9464b15f96029a974bd8217b2458e143cb9005e8b",
+      "size": 90872
     },
     {
       "path": "src/extensibility/extensions/loader.ts",
@@ -43,8 +43,8 @@
     },
     {
       "path": "src/modes/controllers/extension-ui-controller.ts",
-      "sha256": "43adde71e2e10945bc113cf385b6c02e653e4fb3d2825744f323f21fac64a010",
-      "size": 51482
+      "sha256": "06c4764b94968f11b00f6b508e2c0f28873c2bc7db404fb2c7128c826bae79d1",
+      "size": 58060
     },
     {
       "path": "src/extensibility/skills.ts",
@@ -58,8 +58,28 @@
     },
     {
       "path": "src/session/session-manager.ts",
-      "sha256": "36fbe849db547e34a86f705f542b9905ab2eab8f579253afb74e239799d3d227",
-      "size": 167701
+      "sha256": "584d861d731dde4d0964f67f991f009480f6d0744e69ecfe843d4fb43ad7c9b2",
+      "size": 173638
+    },
+    {
+      "path": "src/extensibility/extensions/model-api.ts",
+      "sha256": "41ca9b0fcf23430462f23eb68736322fdd5e797271183c2a7ec1cbd2547c64cc",
+      "size": 1720
+    },
+    {
+      "path": "node_modules/@oh-my-pi/pi-catalog/src/types.ts",
+      "sha256": "4cda98a7e7981731beb147faac953dbe025090494668635cdb9b2ec8cfef482f",
+      "size": 83205
+    },
+    {
+      "path": "src/session/model-controls.ts",
+      "sha256": "824386743af04dcbe0cefd27808e31bbc8f45c82fc8d6c5a26f2121db49ce4a6",
+      "size": 35320
+    },
+    {
+      "path": "src/session/agent-session-types.ts",
+      "sha256": "26a5700006a2f489caa0eb686c58dafa6b4bd37d30008281404a4dfddd7aa800",
+      "size": 27719
     }
   ]
 }

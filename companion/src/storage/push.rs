@@ -53,7 +53,7 @@ impl Storage{
  pub(crate) fn push_ack(&mut self,proof:&AuthenticatedPeer,p:PushProbeAckParams,now:u64)->StoreResult<PushProbeAckResult>{
   if p.boot_id!=self.boot_id{return reject(ErrorCode::StaleHost)}let key=self.receipt_key;let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;authorize(&tx,proof)?;
   let mut value=load(&tx,&key,&proof.peer)?.ok_or(StorageError::Policy(ErrorCode::StaleRegistration))?;
-  if value.epoch!=proof.epoch||value.generation!=p.endpoint_generation||value.probe!=p.probe||!value.verified&&(value.disabled||now>=value.deadline){return reject(ErrorCode::StaleRegistration)}
+  if value.epoch!=proof.epoch||value.generation!=p.endpoint_generation||value.probe!=p.probe||value.disabled||!value.verified&&now>=value.deadline{return reject(ErrorCode::StaleRegistration)}
   value.verified=true;save(&tx,&key,&value)?;tx.execute("DELETE FROM push_jobs WHERE peer=?1 AND probe=1",[&proof.peer.0])?;tx.commit()?;Ok(PushProbeAckResult{verified:TrueValue(true)})
  }
  pub(crate) fn push_unregister(&mut self,proof:&AuthenticatedPeer,p:PushUnregisterParams,now:u64)->StoreResult<PushUnregisterResult>{
@@ -128,4 +128,136 @@ impl Storage{
    events=attention_transition_tx(&tx,&AttentionTransition{target:target.clone(),correlation:Id(format!("omp-observed-cycle:{active}")),previous:SessionStatus::Working,current:SessionStatus::Idle,snapshot:false,new_actionable:false},now)?;
   }tx.commit()?;Ok(events)
  }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    fn paired(store: &mut Storage) -> AuthenticatedPeer {
+        let device = PairedDevice {
+            device_id: Uuid::random(),
+            endpoint_id: EndpointId::new(iroh::SecretKey::from_bytes(&[71; 32]).public().to_string()).unwrap(),
+            device_name: Label::new("owned push fixture").unwrap(),
+            paired_at: Uint(0),
+            last_seen_at: None,
+        };
+        let epoch = store.pair_device(&device).unwrap();
+        store.authenticated_hello(&device.device_id, epoch).unwrap()
+    }
+
+    fn registration(store: &Storage) -> PushRegisterParams {
+        PushRegisterParams {
+            boot_id: store.boot_id.clone(),
+            endpoint: "https://ntfy.sh/owned-public-fixture".into(),
+            endpoint_generation: Uuid::random(),
+            push_key: Key32(URL_SAFE_NO_PAD.encode([8; 32])),
+            probe: Uuid::random(),
+        }
+    }
+
+    fn ack(store: &Storage, value: &PushRegisterParams) -> PushProbeAckParams {
+        PushProbeAckParams {boot_id: store.boot_id.clone(), endpoint_generation: value.endpoint_generation.clone(), probe: value.probe.clone()}
+    }
+
+    #[test]
+    fn idempotent_register_and_lost_ack_keep_original_deadline_but_disabled_verified_ack_refuses() {
+        let mut store = Storage::memory([7; 32], 0).unwrap();
+        let peer = paired(&mut store);
+        let params = registration(&store);
+        let (first, changed) = store.push_register(&peer, params.clone(), 100).unwrap();
+        assert!(changed);
+        assert!(!first.verified);
+        let attempt = store.push_next(100, &[]).unwrap().unwrap();
+        assert!(attempt.event.is_none());
+        assert_eq!(attempt.id, params.probe);
+        store.push_finish(attempt, Publication::Accepted, 101).unwrap();
+        let (retry, changed) = store.push_register(&peer, params.clone(), 40000).unwrap();
+        assert!(!changed);
+        assert!(!retry.verified);
+        assert_eq!(load(&store.db, &store.receipt_key, peer.peer_id()).unwrap().unwrap().deadline, 45100);
+        store.push_ack(&peer, ack(&store, &params), 45099).unwrap();
+        // A lost successful ACK reply may retry after the original unverified deadline.
+        store.push_ack(&peer, ack(&store, &params), 90000).unwrap();
+        assert!(store.push_register(&peer, params.clone(), 90001).unwrap().0.verified);
+        let target = Target {session_id: Uuid::random(), generation: Uuid::random()};
+        let working = AttentionTransition {target, correlation: Id("native-working".into()), previous: SessionStatus::Idle, current: SessionStatus::Working, snapshot: true, new_actionable: false};
+        store.attention_transition(&working, 90001).unwrap();
+        let completed = AttentionTransition {correlation: Id("native-completed".into()), previous: SessionStatus::Working, current: SessionStatus::Idle, snapshot: false, ..working};
+        assert_eq!(store.attention_transition(&completed, 90001).unwrap().len(), 1);
+        let attempt = store.push_next(90002, &[]).unwrap().unwrap();
+        assert!(attempt.event.is_some());
+        // This is the real queued publisher result boundary, not a fabricated register result.
+        store.push_finish(attempt, Publication::Disabled, 90002).unwrap();
+        assert!(!store.push_register(&peer, params.clone(), 90003).unwrap().0.verified);
+        assert!(matches!(store.push_ack(&peer, ack(&store, &params), 90004), Err(StorageError::Policy(ErrorCode::StaleRegistration))));
+        let replacement = registration(&store);
+        store.push_register(&peer, replacement.clone(), 90005).unwrap();
+        assert!(matches!(store.push_register(&peer, params, 90006), Err(StorageError::Policy(ErrorCode::PushRejected))));
+        store.revoke_epoch(peer.peer_id(), 90007).unwrap();
+        assert!(matches!(store.push_ack(&peer, ack(&store, &replacement), 90008), Err(StorageError::Policy(ErrorCode::Unauthorized))));
+    }
+
+    #[test]
+    fn observed_omp_cycle_deduplicates_real_start_end_and_excludes_snapshot_retirement_and_foreign_source() {
+        let mut store = Storage::memory([7; 32], 0).unwrap();
+        let peer = paired(&mut store);
+        let target = Target {session_id: Uuid::random(), generation: Uuid::random()};
+        let source = Uuid::random();
+        let connection = Uuid::random();
+        store.omp_cycle_install(&target, &source, &connection, SessionStatus::Working, 0).unwrap();
+        assert!(store.omp_cycle(&target, &source, &connection, false, 1).unwrap().is_empty());
+        assert!(store.omp_cycle(&target, &Uuid::random(), &connection, true, 2).unwrap().is_empty());
+        store.omp_cycle(&target, &source, &connection, true, 3).unwrap();
+        store.omp_cycle(&target, &source, &connection, true, 4).unwrap();
+        let checkpoint = AttentionTransition {target: target.clone(), correlation: Id("registry-checkpoint".into()), previous: SessionStatus::Working, current: SessionStatus::Idle, snapshot: true, new_actionable: false};
+        assert!(store.attention_transition(&checkpoint, 5).unwrap().is_empty());
+        let events = store.omp_cycle(&target, &source, &connection, false, 6).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(&events[0].0, peer.peer_id());
+        assert_eq!(events[0].1.category, AttentionCategory::Completed);
+        assert!(store.omp_cycle(&target, &source, &connection, false, 7).unwrap().is_empty());
+        store.omp_cycle(&target, &source, &connection, true, 8).unwrap();
+        store.omp_cycle_retire(&target, &source, &connection).unwrap();
+        assert!(store.omp_cycle(&target, &source, &connection, false, 9).unwrap().is_empty());
+        store.omp_cycle_install(&target, &source, &Uuid::random(), SessionStatus::Working, 10).unwrap();
+        assert!(store.omp_cycle(&target, &source, &connection, false, 11).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reopening_keeps_unverified_deadline_verified_ack_and_monotonic_cycle_retirement() {
+        use std::os::unix::fs::DirBuilderExt;
+        struct Root(std::path::PathBuf);
+        impl Drop for Root {fn drop(&mut self){std::fs::remove_dir_all(&self.0).unwrap();}}
+        let root = Root(std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(".goatr-push-state-{}", Uuid::random().0)));
+        std::fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
+        let path = root.0.join("state.sqlite");
+        let mut store = Storage::open(&path, [7; 32], 0, crate::pairing::uid()).unwrap();
+        let proof = paired(&mut store);
+        let mut params = registration(&store);
+        store.push_register(&proof, params.clone(), 100).unwrap();
+        let target = Target {session_id: Uuid::random(), generation: Uuid::random()};
+        let source = Uuid::random();
+        let connection = Uuid::random();
+        store.omp_cycle_install(&target, &source, &connection, SessionStatus::Idle, 101).unwrap();
+        store.omp_cycle(&target, &source, &connection, true, 102).unwrap();
+        drop(store);
+        let mut store = Storage::open(&path, [7; 32], 200, crate::pairing::uid()).unwrap();
+        let proof = store.authenticated_hello(proof.peer_id(), proof.epoch()).unwrap();
+        params.boot_id = store.boot_id.clone();
+        assert!(!store.push_register(&proof, params.clone(), 40000).unwrap().0.verified);
+        assert_eq!(load(&store.db, &store.receipt_key, proof.peer_id()).unwrap().unwrap().deadline, 45100);
+        assert!(store.omp_cycle(&target, &source, &connection, false, 40001).unwrap().is_empty());
+        assert!(matches!(store.push_ack(&proof, ack(&store, &params), 45100), Err(StorageError::Policy(ErrorCode::StaleRegistration))));
+        let mut next = registration(&store);
+        store.push_register(&proof, next.clone(), 45101).unwrap();
+        store.push_ack(&proof, ack(&store, &next), 45102).unwrap();
+        drop(store);
+        let mut store = Storage::open(&path, [7; 32], 100000, crate::pairing::uid()).unwrap();
+        let proof = store.authenticated_hello(proof.peer_id(), proof.epoch()).unwrap();
+        next.boot_id = store.boot_id.clone();
+        assert!(store.push_register(&proof, next.clone(), 100001).unwrap().0.verified);
+        store.push_ack(&proof, ack(&store, &next), 100002).unwrap();
+    }
 }

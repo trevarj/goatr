@@ -53,6 +53,7 @@ struct Lease {
     avd_name: String,
     avd_home: PathBuf,
     android_user_home: PathBuf,
+    adb_client_home: PathBuf,
     avd_path: PathBuf,
     process_identity: EmulatorProcess,
 }
@@ -154,6 +155,20 @@ fn adb_selector(l: &Lease) -> io::Result<[&str; 6]> {
     lease_console_port(l)?;
     Ok(["-H", "127.0.0.1", "-P", "5037", "-s", &l.serial])
 }
+/// One recorded console-auth home, used only by ADB/emulator children. No credential bytes
+/// are opened, retained or reported; the ordinary exact console-name proof is unchanged.
+pub(super) fn validate_adb_client_home(root:&Path,home:&Path)->io::Result<()> {
+    if home==root||!home.starts_with(root)||!home.is_absolute()||fs::canonicalize(home)?!=home{return Err(failure("ADB client HOME is not the canonical recorded owned directory"));}
+    private_dir(home,false)?;
+    let metadata=fs::symlink_metadata(home.join(".emulator_console_auth_token"))?;
+    if !metadata.file_type().is_file()||metadata.uid()!=uid()||metadata.mode()&0o7777!=0o600||metadata.nlink()!=1{return Err(failure("ADB console credential metadata is not a private original regular file"));}
+    Ok(())
+}
+pub(super) fn configure_adb_client_home(command:&mut tokio::process::Command,root:&Path,home:&Path)->io::Result<()> {
+    validate_adb_client_home(root,home)?;
+    command.env("HOME",home);
+    Ok(())
+}
 fn lease(path: &Path) -> io::Result<Lease> {
     let source = goatr::setup::ExpectedFile::capture(path)?;
     let bytes = source
@@ -183,6 +198,7 @@ fn lease(path: &Path) -> io::Result<Lease> {
             return Err(failure("emulator AVD/resource ownership mismatch"));
         }
     }
+    validate_adb_client_home(&l.root,&l.adb_client_home)?;
     source.recheck(path)?;
     Ok(l)
 }
@@ -366,6 +382,7 @@ async fn adb(l: &Lease, args: &[&str]) -> io::Result<String> {
         return Err(failure("owned emulator process identity changed"));
     }
     let mut c = tokio::process::Command::new(sdk);
+    configure_adb_client_home(&mut c,&l.root,&l.adb_client_home)?;
     c.args(adb_selector(l)?).args(args);
     String::from_utf8(output(c, 15, 1024 * 1024).await?).map_err(io::Error::other)
 }
@@ -391,7 +408,7 @@ async fn check_emulator(l: &Lease) -> io::Result<Value> {
         ));
     }
     Ok(
-        json!({"runId":l.run_id,"serial":l.serial,"api":api.trim(),"abi":abi.trim(),"pageSize":page.trim(),"process":{"pid":l.process_identity.pid,"start":l.process_identity.start_ticks,"boot":l.process_identity.linux_boot_id,"executable":l.process_identity.executable},"limit":"4096-byte runtime is NOT a real16KiB pass"}),
+        json!({"runId":l.run_id,"serial":l.serial,"adbClientHome":l.adb_client_home,"api":api.trim(),"abi":abi.trim(),"pageSize":page.trim(),"process":{"pid":l.process_identity.pid,"start":l.process_identity.start_ticks,"boot":l.process_identity.linux_boot_id,"executable":l.process_identity.executable},"limit":"4096-byte runtime is NOT a real16KiB pass"}),
     )
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -424,6 +441,7 @@ fn selected_serial_availability(
 async fn selected_serial_is_absent(l: &Lease) -> io::Result<()> {
     let sdk = sdk_adb().await?;
     let mut command = tokio::process::Command::new(sdk);
+    configure_adb_client_home(&mut command,&l.root,&l.adb_client_home)?;
     command
         .args(adb_selector(l)?)
         .arg("get-state")
@@ -496,6 +514,7 @@ async fn prepare(path: &Path, l: &Lease, evidence: &Path) -> io::Result<bool> {
         "2",
     ])
     .env("ANDROID_AVD_HOME", &l.avd_home)
+    .env("HOME",&l.adb_client_home)
     .env("ANDROID_USER_HOME", &l.android_user_home)
     .env("ANDROID_EMULATOR_HOME", &l.android_user_home)
     .env("XDG_RUNTIME_DIR", &runtime)
@@ -507,7 +526,7 @@ async fn prepare(path: &Path, l: &Lease, evidence: &Path) -> io::Result<bool> {
     let parent = herdr::process_evidence(child.id())?;
     write_json(
         &evidence.join(format!("emulator-launch-{}.json", Uuid::random().0)),
-        &json!({"gate":"owned-emulator-prepare","stage":"exact owned launcher before readiness","lease":path,"root":identity(&l.root)?,"launcher":executable,"process":parent,"expectedQemu":l.process_identity.executable,"AVD":l.avd_path,"serial":l.serial}),
+        &json!({"gate":"owned-emulator-prepare","stage":"exact owned launcher before readiness","lease":path,"root":identity(&l.root)?,"launcher":executable,"process":parent,"expectedQemu":l.process_identity.executable,"AVD":l.avd_path,"serial":l.serial,"adbClientHome":l.adb_client_home}),
     )?;
     let deadline = Instant::now() + Duration::from_secs(15);
     let process = loop {
@@ -596,12 +615,357 @@ async fn prepare(path: &Path, l: &Lease, evidence: &Path) -> io::Result<bool> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct GridQualification {
+    version: u32,
+    native_executable: PathBuf,
+    native_sha256: String,
+    native_source_manifest: PathBuf,
+    native_source_sha256: String,
+    native_schema: PathBuf,
+    native_schema_sha256: String,
+    native_lock: PathBuf,
+    native_lock_sha256: String,
+    goatr_source_manifest: PathBuf,
+    goatr_source_sha256: String,
+    goatr_sha256: String,
+    companion_lock_sha256: String,
+    helper_executable: PathBuf,
+    helper_sha256: String,
+    config_sha256: String,
+    resource_parent: PathBuf,
+    providers: Vec<Provider>,
+    omp_sha256: Option<String>,
+    codex_sha256: Option<String>,
+    shell_grant: String,
+    environment: std::collections::BTreeMap<String, String>,
+}
+impl GridQualification {
+    fn immutable_bytes(path: &Path) -> io::Result<Vec<u8>> {
+        if !path.is_absolute()
+            || fs::canonicalize(path).map_err(|_| grid_failure("qualification_path"))? != path
+        {
+            return Err(grid_failure("qualification_path"));
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| grid_failure("qualification_parent"))?;
+        private_dir(parent, false).map_err(|_| grid_failure("qualification_parent"))?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|_| grid_failure("qualification_open"))?;
+        let before = file
+            .metadata()
+            .map_err(|_| grid_failure("qualification_metadata"))?;
+        let stamp = |m: &fs::Metadata| {
+            (
+                m.dev(),
+                m.ino(),
+                m.len(),
+                m.mode(),
+                m.uid(),
+                m.nlink(),
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec(),
+            )
+        };
+        if !before.is_file()
+            || before.uid() != uid()
+            || before.nlink() != 1
+            || before.mode() & 0o7777 != 0o400
+            || before.len() > 65536
+        {
+            return Err(grid_failure("qualification_immutable"));
+        }
+        if stamp(&before)
+            != stamp(
+                &fs::symlink_metadata(path).map_err(|_| grid_failure("qualification_metadata"))?,
+            )
+        {
+            return Err(grid_failure("qualification_changed"));
+        }
+        let mut bytes = Vec::with_capacity(before.len() as usize);
+        (&mut file)
+            .take(65537)
+            .read_to_end(&mut bytes)
+            .map_err(|_| grid_failure("qualification_read"))?;
+        let after = file
+            .metadata()
+            .map_err(|_| grid_failure("qualification_metadata"))?;
+        let named =
+            fs::symlink_metadata(path).map_err(|_| grid_failure("qualification_metadata"))?;
+        if bytes.len() > 65536 || stamp(&before) != stamp(&after) || stamp(&after) != stamp(&named)
+        {
+            return Err(grid_failure("qualification_changed"));
+        }
+        Ok(bytes)
+    }
+    fn read(args: &clap::ArgMatches, evidence: &Path) -> io::Result<(Self, Config)> {
+        let path = args
+            .get_one::<PathBuf>("grid-lease")
+            .ok_or_else(|| grid_failure("qualification_missing"))?;
+        let bytes = Self::immutable_bytes(path)?;
+        let pin: Self =
+            serde_json::from_slice(&bytes).map_err(|_| grid_failure("qualification_shape"))?;
+        let selected = args
+            .get_many::<String>("backend")
+            .ok_or_else(|| grid_failure("providers_missing"))?
+            .map(|p| {
+                if p == "omp" {
+                    Provider::Omp
+                } else {
+                    Provider::Codex
+                }
+            })
+            .collect::<Vec<_>>();
+        let unique = selected.iter().copied().collect::<HashSet<_>>();
+        if pin.version != 1
+            || selected.is_empty()
+            || unique.len() != selected.len()
+            || selected != pin.providers
+            || pin.shell_grant != "read_create_input"
+        {
+            return Err(grid_failure("qualification_scope"));
+        }
+        if owned_omp_capture_requested()
+            || owned_hello_capture_requested()
+            || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").is_some()
+        {
+            return Err(grid_failure("diagnostic_environment"));
+        }
+        let workspace = args
+            .get_one::<PathBuf>("workspace-root")
+            .ok_or_else(|| grid_failure("resource_parent"))?;
+        if workspace != &pin.resource_parent
+            || fs::canonicalize(workspace).map_err(|_| grid_failure("resource_parent"))?
+                != *workspace
+        {
+            return Err(grid_failure("resource_parent"));
+        }
+        private_dir(workspace, false).map_err(|_| grid_failure("resource_parent"))?;
+        if !evidence.starts_with(workspace) || evidence == workspace {
+            return Err(grid_failure("evidence_parent"));
+        }
+        let config = args
+            .get_one::<PathBuf>("config")
+            .ok_or_else(|| grid_failure("configuration"))?;
+        let deployment = Self::configuration(config, &pin.config_sha256)?;
+        if deployment.executables.herdr != pin.native_executable {
+            return Err(grid_failure("native_executable"));
+        }
+        for (path, sha) in [
+            (&pin.native_executable, &pin.native_sha256),
+            (&pin.native_source_manifest, &pin.native_source_sha256),
+            (&pin.native_schema, &pin.native_schema_sha256),
+            (&pin.native_lock, &pin.native_lock_sha256),
+            (&pin.goatr_source_manifest, &pin.goatr_source_sha256),
+            (&pin.helper_executable, &pin.helper_sha256),
+        ] {
+            Self::file(path, sha)?;
+        }
+        if std::env::current_exe().map_err(|_| grid_failure("helper_executable"))?
+            != pin.helper_executable
+            || pin.native_lock_sha256
+                != "a2991470164eadb9d8e4704d7599c5cace436714eef5a8ed69cee501e897207f"
+            || pin.companion_lock_sha256 != transport::lock_sha256()
+            || args.get_one::<String>("expected-companion-lock-sha256")
+                != Some(&pin.companion_lock_sha256)
+            || args.get_one::<String>("expected-goatr-sha256") != Some(&pin.goatr_sha256)
+        {
+            return Err(grid_failure("artifact_join"));
+        }
+        let binary =
+            dev_continuity::frozen_package(args).map_err(|_| grid_failure("goatr_package"))?;
+        Self::file(&binary, &pin.goatr_sha256)?;
+        for (provider, path, sha) in [
+            (
+                Provider::Omp,
+                deployment.executables.omp.as_ref(),
+                pin.omp_sha256.as_ref(),
+            ),
+            (
+                Provider::Codex,
+                deployment.executables.codex.as_ref(),
+                pin.codex_sha256.as_ref(),
+            ),
+        ] {
+            if selected.contains(&provider) {
+                Self::file(
+                    path.ok_or_else(|| grid_failure("provider_wrapper"))?,
+                    sha.ok_or_else(|| grid_failure("provider_wrapper"))?,
+                )?;
+            } else if sha.is_some() {
+                return Err(grid_failure("unselected_wrapper"));
+            }
+        }
+        const ENV: &[&str] = &[
+            "HOME",
+            "PATH",
+            "USER",
+            "LOGNAME",
+            "LANG",
+            "LC_ALL",
+            "XDG_RUNTIME_DIR",
+            "TERM",
+            "COLORTERM",
+            "SHELL",
+            "NIX_SSL_CERT_FILE",
+            "SSL_CERT_FILE",
+        ];
+        let actual = std::env::vars_os().collect::<Vec<_>>();
+        if actual.len() != pin.environment.len() {
+            return Err(grid_failure("environment_scope"));
+        }
+        for (key, value) in actual {
+            use sha2::{Digest, Sha256};
+            use std::os::unix::ffi::OsStrExt;
+            let key = key
+                .to_str()
+                .ok_or_else(|| grid_failure("environment_scope"))?;
+            let hash = hex(&Sha256::digest(value.as_bytes()));
+            if !ENV.contains(&key) || pin.environment.get(key) != Some(&hash) {
+                return Err(grid_failure("environment_scope"));
+            }
+        }
+        if !pin.environment.contains_key("HOME")
+            || !pin.environment.contains_key("PATH")
+            || !pin.environment.contains_key("XDG_RUNTIME_DIR")
+        {
+            return Err(grid_failure("environment_scope"));
+        }
+        Ok((pin, deployment))
+    }
+    fn configuration(path: &Path, sha: &str) -> io::Result<Config> {
+        use sha2::{Digest, Sha256};
+        if sha.len() != 64
+            || !sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(grid_failure("configuration_pin"));
+        }
+        goatr::config::absolute(path).map_err(|_| grid_failure("configuration_path"))?;
+        if fs::canonicalize(path).map_err(|_| grid_failure("configuration_path"))? != path {
+            return Err(grid_failure("configuration_path"));
+        }
+        let parent = path.parent().ok_or_else(|| grid_failure("configuration_parent"))?;
+        private_dir(parent, false).map_err(|_| grid_failure("configuration_parent"))?;
+        let parent_before = fs::symlink_metadata(parent)
+            .map_err(|_| grid_failure("configuration_parent"))?;
+        let named_before = fs::symlink_metadata(path)
+            .map_err(|_| grid_failure("configuration_metadata"))?;
+        let owner = uid();
+        let permitted = |m: &fs::Metadata| m.is_file() && m.uid() == owner && m.nlink() == 1
+            && m.mode() & 0o7777 == 0o400 && m.len() <= goatr::config::CONFIG_BYTES as u64;
+        if !permitted(&named_before) {
+            return Err(grid_failure("configuration_immutable"));
+        }
+        let mut file = OpenOptions::new().read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(path).map_err(|_| grid_failure("configuration_open"))?;
+        let before = file.metadata().map_err(|_| grid_failure("configuration_metadata"))?;
+        let stamp = |m: &fs::Metadata| (
+            m.dev(), m.ino(), m.len(), m.mode(), m.uid(), m.gid(), m.nlink(),
+            m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(),
+        );
+        if !permitted(&before) || stamp(&before) != stamp(&named_before)
+        {
+            return Err(grid_failure("configuration_immutable"));
+        }
+        let mut text = String::with_capacity(before.len() as usize);
+        (&mut file).take((goatr::config::CONFIG_BYTES + 1) as u64)
+            .read_to_string(&mut text).map_err(|_| grid_failure("configuration_read"))?;
+        if text.len() > goatr::config::CONFIG_BYTES {
+            return Err(grid_failure("configuration_bound"));
+        }
+        let hex = b"0123456789abcdef";
+        if Sha256::digest(text.as_bytes()).iter().zip(sha.as_bytes().chunks_exact(2))
+            .any(|(byte, pair)| pair[0] != hex[usize::from(*byte >> 4)]
+                || pair[1] != hex[usize::from(*byte & 15)])
+        {
+            return Err(grid_failure("configuration_sha256"));
+        }
+        let deployment = Config::parse(&text).map_err(|_| grid_failure("configuration"))?;
+        deployment.preflight().map_err(|_| grid_failure("configuration"))?;
+        let after = file.metadata().map_err(|_| grid_failure("configuration_metadata"))?;
+        let named_after = fs::symlink_metadata(path)
+            .map_err(|_| grid_failure("configuration_metadata"))?;
+        let parent_after = fs::symlink_metadata(parent)
+            .map_err(|_| grid_failure("configuration_parent"))?;
+        private_dir(parent, false).map_err(|_| grid_failure("configuration_parent"))?;
+        if !permitted(&after) || !permitted(&named_after)
+            || stamp(&before) != stamp(&after) || stamp(&after) != stamp(&named_after)
+            || stamp(&parent_before) != stamp(&parent_after)
+            || fs::canonicalize(path).map_err(|_| grid_failure("configuration_path"))? != path
+        {
+            return Err(grid_failure("configuration_changed"));
+        }
+        Ok(deployment)
+    }
+    fn file(path: &Path, sha: &str) -> io::Result<()> {
+        if sha.len() != 64
+            || !sha
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !path.is_absolute()
+            || fs::canonicalize(path).map_err(|_| grid_failure("artifact_path"))? != path
+        {
+            return Err(grid_failure("artifact_pin"));
+        }
+        let before = fs::symlink_metadata(path).map_err(|_| grid_failure("artifact_metadata"))?;
+        if !before.is_file() || before.mode() & 0o222 != 0 {
+            return Err(grid_failure("artifact_immutable"));
+        }
+        if binary_sha256(path).map_err(|_| grid_failure("artifact_read"))? != sha {
+            return Err(grid_failure("artifact_sha256"));
+        }
+        let after = fs::symlink_metadata(path).map_err(|_| grid_failure("artifact_metadata"))?;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.len() != after.len()
+            || before.mtime_nsec() != after.mtime_nsec()
+            || before.ctime_nsec() != after.ctime_nsec()
+            || before.mtime() != after.mtime()
+            || before.ctime() != after.ctime()
+        {
+            return Err(grid_failure("artifact_changed"));
+        }
+        Ok(())
+    }
+}
+// No stop authority: the grid runner holds original pidfds and its supervisor after every outcome.
+struct GridHold {
+    originals: Vec<std::os::fd::OwnedFd>,
+    spawned: usize,
+    relays: Vec<Arc<std::net::TcpListener>>,
+    source_control: Option<tokio::io::BufReader<McpStdin>>,
+    source_loss_observed: bool,
+}
+impl GridHold {
+    fn pin_child(&mut self, child: &Child) -> io::Result<()> {
+        use std::os::fd::FromRawFd;
+        self.spawned += 1;
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) } as i32;
+        if fd < 0 {
+            return Err(grid_failure("original_pidfd"));
+        }
+        self.originals
+            .push(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+        Ok(())
+    }
+}
 struct Desktop {
     child: Child,
     process: ProcessEvidence,
 }
 impl Desktop {
-    fn spawn(mut c: std::process::Command) -> io::Result<Self> {
+    fn spawn(c: std::process::Command) -> io::Result<Self> {
+        Self::spawn_held(c, None, None)
+    }
+    fn spawn_held(mut c: std::process::Command, hold: Option<&mut GridHold>, admission_manifest: Option<&Path>) -> io::Result<Self> {
         use std::os::unix::process::CommandExt;
         #[cfg(target_os = "linux")]
         // SAFETY: the shared helper uses only stack values and async-signal-safe syscalls.
@@ -616,7 +980,21 @@ impl Desktop {
             // Retained native work must not share the controller terminal's cancellation group.
             .process_group(0)
             .spawn()?;
+        if let Some(manifest) = admission_manifest {
+            write_json(manifest, &json!({"pid":child.id(),"processProof":"unproved",
+                "cleanupAuthority":false,"proofManifest":manifest.with_extension("proof.json"),
+                "scope":"fresh retained child spawn only; PID alone grants no cleanup authority"}))?;
+            println!("{}",json!({"gate":"admission-owned-herdr-spawn","manifest":manifest}));
+        }
+        if let Some(hold) = hold {
+            hold.pin_child(&child)?;
+        }
         let process = herdr::process_evidence(child.id())?;
+        if let Some(manifest) = admission_manifest {
+            write_json(&manifest.with_extension("proof.json"),
+                &json!({"process":process,"spawnManifest":manifest,
+                    "scope":"captured original child proof; cleanup still requires current identity review"}))?;
+        }
         Ok(Self { child, process })
     }
     fn recheck(&mut self) -> io::Result<()> {
@@ -633,13 +1011,17 @@ impl Desktop {
         Ok(())
     }
 }
-/// Only the companion is stopped by this gate. Desktop creation resources are retained,
-/// never rolled back after unknown outcomes and never lifetime-coupled to companion exit.
+/// Ordinary checkpoints stop only their companion. Admission retains both originals
+/// for identity review; desktop resources are never rolled back or lifetime-coupled.
 struct ServeLaunch<'a> {
     diagnostic_capture: bool,
     codex_startup_terminal_capture: bool,
     herdr_report_capture: Option<&'a herdr_report_capture::Capture>,
     preserve_xdg_config_home: bool,
+    retain_process: bool,
+    hello_capture: bool,
+    grid_hold: Option<&'a mut GridHold>,
+    project_read: Option<&'a ProjectReadFixture>,
 }
 struct Companion {
     child: Child,
@@ -653,6 +1035,7 @@ struct Companion {
     codex_startup_terminal: Option<CodexStartupTerminalResult>,
     codex_startup_journal: Option<CodexStartupJournalContext>,
     codex_startup_journal_admission: Option<CodexStartupJournalAdmission>,
+    retain_process: bool,
 }
 const COMPANION_CLEANUP_BUDGET: Duration = Duration::from_secs(15);
 #[derive(Clone, Copy, Default)]
@@ -1064,7 +1447,7 @@ async fn retained_codex_startup_journal(
         .stderr(Stdio::null())
         .stdout(Stdio::piped());
     let mut child = command.spawn().map_err(|_| "journal_unavailable")?;
-    let mut stdout = child.stdout.take().ok_or("journal_unavailable")?;
+    let stdout = child.stdout.take().ok_or("journal_unavailable")?;
     let mut collected = Vec::new();
     match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
@@ -1224,6 +1607,9 @@ impl Companion {
         Ok(())
     }
     async fn stop_process_until(&mut self, deadline: Instant) -> io::Result<()> {
+        if self.retain_process {
+            return Err(grid_failure("cleanup_not_authorized"));
+        }
         self.codex_cleanup_signal = CleanupSignal::default();
         if self.child.try_wait()?.is_some() {
             return Ok(());
@@ -1255,6 +1641,7 @@ impl Companion {
         &mut self,
         cleanup_context: &'static str,
     ) -> io::Result<()> {
+        if self.retain_process{return Err(grid_failure("cleanup_not_authorized"));}
         let deadline = Instant::now() + COMPANION_CLEANUP_BUDGET;
         self.codex_cleanup_active = true;
         let stopped = self.stop_process_until(deadline).await;
@@ -1360,6 +1747,27 @@ impl Companion {
         }
         Ok(())
     }
+    async fn finish_retained_omp_capture(&self) -> bool {
+        let Some(budget) = &self.omp_capture_budget else {
+            return false;
+        };
+        // A terminal receipt follows the producer's synchronous first-guard write.
+        // Wait for that already-emitted line, not EOF from the retained original.
+        let deadline = Instant::now() + COMPANION_CLEANUP_BUDGET;
+        loop {
+            if budget.shell_probe_captured() {
+                return true;
+            }
+            if Instant::now() >= deadline
+                || self.guard_drain.as_ref().is_none_or(|drain| match drain {
+                    GuardDrain::Codex { worker, .. } | GuardDrain::Other(worker) => worker.is_finished(),
+                })
+            {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     fn finish_guard_drain(&mut self) {
         let Some(drain) = self.guard_drain.take() else {
             return;
@@ -1395,7 +1803,8 @@ impl Drop for Companion {
                 "status":status, "ack":null,
             }));
         }
-        if status.is_ok_and(|s| s.is_none())
+        if !self.retain_process
+            && status.is_ok_and(|s| s.is_none())
             && !self.codex_cleanup_active
             && self.recheck().is_ok()
         {
@@ -1609,6 +2018,9 @@ struct GenerationView {
     record_bytes: HashMap<Id, usize>,
     bytes: usize,
     failed: bool,
+    stream_floor: Option<u64>,
+    streamed_text: bool,
+    streamed_tool: bool,
 }
 impl GenerationView {
     fn new(mut snapshot: SessionOpenResult, expected: &Target) -> io::Result<Self> {
@@ -1626,6 +2038,7 @@ impl GenerationView {
         // original-Target snapshot obtains the real cursor for the separate page gate.
         let mut sequence = goatr::state::ClientSequence::default();
         sequence.snapshot(snapshot.subscription.clone());
+        let stream_floor=snapshot.history.iter().map(|record|record.order.0).max();
         let records = std::mem::take(&mut snapshot.history);
         let mut view = Self {
             sequence,
@@ -1633,6 +2046,9 @@ impl GenerationView {
             record_bytes: HashMap::new(),
             bytes: 0,
             failed: false,
+            stream_floor,
+            streamed_text: false,
+            streamed_tool: false,
         };
         view.upsert(records)?;
         view.bounded()?;
@@ -1745,7 +2161,16 @@ impl GenerationView {
                 }
                 *self.snapshot.state = value.state;
             }
-            EventBody::HistoryUpsert(value) => self.upsert(value.records)?,
+            EventBody::HistoryUpsert(value) => {
+                for record in &value.records {
+                    if self.stream_floor.is_none_or(|floor|record.order.0>floor) {
+                        self.streamed_text|=record.role==Role::Assistant
+                            && matches!(&record.text,Some(Content::Text(text)) if !text.text.0.is_empty());
+                        self.streamed_tool|=record.tool.is_some();
+                    }
+                }
+                self.upsert(value.records)?;
+            }
             EventBody::ActivityUpdate(value) => self.snapshot.state.activity = value.activity,
             EventBody::RequestOpened(value) => {
                 if value.request.provider != self.snapshot.state.summary.provider {
@@ -1784,6 +2209,326 @@ impl GenerationView {
     }
 }
 
+// Private, count-only witness. Production owns coverage, wide-cell validation and pixels.
+#[derive(PartialEq, Eq)]
+enum GridSubject {
+    Pane(Target),
+    Shell(ShellTarget),
+}
+const TERMINAL_MARKER:&str="GOATRSTOCKBEGIN";
+const TERMINAL_DELAYED:&str="GOATRSTOCKDELAYED";
+const TERMINAL_DISCLOSURE:&str="Native control may resize every tab in this Herdr session and let Herdr resume deferred agents. Goatr does not send terminal input to known agent panes. With the sole active frontend this can affect every workspace/tab on this server. Queued native bytes cannot be recalled. Release reapplies surviving controllers, not an assumed saved size.";
+#[derive(Clone,Copy,Default)]
+struct TerminalFixtureFacts {unicode:u8,colors:u8,wide_tails:u32,marker:bool,popup:bool,graphics:bool}
+impl TerminalFixtureFacts {
+    fn complete(self)->bool{self.unicode==31&&self.colors==15&&self.wide_tails>=5&&self.marker&&!self.popup&&!self.graphics}
+    fn evidence(self)->Value {json!({"unicodeCases":self.unicode.count_ones(),"colorCases":self.colors.count_ones(),
+        "cjk":self.unicode&1!=0,"kana":self.unicode&2!=0,"zwj":self.unicode&4!=0,"vs16":self.unicode&8!=0,"flag":self.unicode&16!=0,
+        "namedSgrPalette":self.colors&1!=0,"indexed202":self.colors&2!=0,"rgb112233":self.colors&4!=0,"defaultColor":self.colors&8!=0,
+        "canonicalWideTails":self.wide_tails,"publicMarker":self.marker,"popupBlocked":self.popup,
+        "graphicsOmitted":self.graphics,"fixtureComplete":self.complete()})}
+}
+struct TerminalFixtureWitness {stage:TerminalFixtureFacts,committed:Option<TerminalFixtureFacts>,opening:Option<(u64,bool)>,marker_match:usize,wide_fixture:bool}
+impl TerminalFixtureWitness {
+    fn new()->Self{Self{stage:TerminalFixtureFacts::default(),committed:None,opening:None,marker_match:0,wide_fixture:false}}
+    fn begin(&mut self,frame:&GridBegin){self.stage=TerminalFixtureFacts{popup:frame.popup_blocked,graphics:frame.graphics_omitted,..Default::default()};self.marker_match=0;self.wide_fixture=false;}
+    fn cell(&mut self,cell:&GridCell,row_start:bool) {
+        if row_start{self.marker_match=0;}
+        if cell.width.0==0 {if self.wide_fixture{self.stage.wide_tails+=1;}self.wide_fixture=false;return;}
+        self.wide_fixture=false;
+        if cell.attributes.concealed{return;}
+        for byte in cell.text.bytes(){
+            if byte==TERMINAL_MARKER.as_bytes()[self.marker_match]{self.marker_match+=1;}
+            else{self.marker_match=usize::from(byte==TERMINAL_MARKER.as_bytes()[0]);}
+            if self.marker_match==TERMINAL_MARKER.len(){self.stage.marker=true;self.marker_match=0;}
+        }
+        let unicode=match cell.text.as_str(){"界"=>1,"ｶﾞ"=>2,"👩‍💻"=>4,"❤️"=>8,"🇺🇸"=>16,_=>0};
+        if unicode!=0&&cell.width.0==2{self.stage.unicode|=unicode;self.wide_fixture=true;}
+        if cell.background!=GridColor::Default||cell.attributes.inverse{return;}
+        self.stage.colors|=match (cell.text.as_str(),&cell.foreground){
+            ("R",GridColor::Indexed{index})if index.0==1=>1,
+            ("I",GridColor::Indexed{index})if index.0==202=>2,
+            ("T",GridColor::Rgb{value})if value.0==0x112233=>4,
+            ("D",GridColor::Default)=>8,_=>0,
+        };
+    }
+}
+#[derive(Clone,Copy)]
+enum GridGoal {Commit,Token,TerminalFixture{after:u64},Resized{after:u64,dimensions:(u64,u64)}}
+struct GridWitness {
+    opening: Uuid,
+    subject: GridSubject,
+    subscription: Option<Uuid>,
+    next_seq: u64,
+    revision: u64,
+    parts: u64,
+    seen: u64,
+    cells: usize,
+    cell_limit: usize,
+    bytes: usize,
+    deadline: Option<Instant>,
+    committed: Option<u64>,
+    token: Vec<u8>,
+    prefix: [usize; 64],
+    matched: usize,
+    tentative: bool,
+    token_commit: Option<u64>,
+    previous_cell: Option<(u64, u64)>,
+    retired: bool,
+    columns:u64,
+    rows:u64,
+    committed_dimensions:Option<(u64,u64)>,
+    wide_pending:bool,
+    fixture:Option<TerminalFixtureWitness>,
+}
+#[track_caller]
+fn grid_failure(phase: &'static str) -> io::Error {
+    // Only authored phase labels cross the private terminal boundary.
+    failure(&format!("grid smoke boundary: phase={phase}"))
+}
+#[track_caller]
+fn grid_context(phase: &'static str, error: io::Error) -> io::Error {
+    super::located_message(
+        error.kind(),
+        &format!("grid smoke boundary: phase={phase}"),
+        super::helper_error_location(&error),
+    )
+}
+impl GridWitness {
+    fn pending(opening: Uuid, subject: GridSubject) -> Self {
+        Self {
+            opening,
+            subject,
+            subscription: None,
+            next_seq: 1,
+            revision: 0,
+            parts: 0,
+            seen: 0,
+            cells: 0,
+            cell_limit: 0,
+            bytes: 0,
+            deadline: None,
+            committed: None,
+            token: Vec::new(),
+            prefix: [0; 64],
+            matched: 0,
+            tentative: false,
+            token_commit: None,
+            previous_cell: None,
+            retired: false,
+            columns:0,rows:0,committed_dimensions:None,wide_pending:false,fixture:None,
+        }
+    }
+    fn budget(&mut self, bytes: usize) -> io::Result<()> {
+        if bytes == 0 || self.deadline.is_none_or(|end| Instant::now() >= end) {
+            return Err(grid_failure("transaction_deadline"));
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| grid_failure("transaction_bytes"))?;
+        if self.bytes > 8 * 1024 * 1024 {
+            return Err(grid_failure("transaction_bytes"));
+        }
+        Ok(())
+    }
+    fn begin(&mut self, frame: &GridBegin, bytes: usize, initial: bool) -> io::Result<()> {
+        frame.validate().map_err(|_| grid_failure("descriptor"))?;
+        let expected = if initial {
+            0
+        } else {
+            self.committed
+                .and_then(|n| n.checked_add(1))
+                .ok_or_else(|| grid_failure("revision"))?
+        };
+        if frame.revision.0 != expected || (!initial && self.deadline.is_some()) {
+            return Err(grid_failure("revision"));
+        }
+        self.deadline = Some(Instant::now() + Duration::from_secs(15));
+        self.revision = expected;
+        self.parts = frame.part_count.0;
+        self.seen = 0;
+        self.cells = 0;
+        self.cell_limit = (frame.columns.0 * frame.rows.0) as usize;
+        self.columns=frame.columns.0;self.rows=frame.rows.0;self.wide_pending=false;
+        if let Some(fixture)=&mut self.fixture{fixture.begin(frame);}
+        self.bytes = 0;
+        self.matched = 0;
+        self.tentative = false;
+        self.previous_cell = None;
+        self.budget(bytes)
+    }
+    fn response(
+        &mut self,
+        id: &Uuid,
+        outcome: &Result<ResultBody, WireError>,
+        bytes: usize,
+    ) -> io::Result<()> {
+        if id != &self.opening {
+            return Ok(());
+        }
+        if self.subscription.is_some() {
+            return Err(grid_failure("opening_duplicate"));
+        }
+        let (subscription, frame) = match (&self.subject, outcome) {
+            (GridSubject::Pane(expected), Ok(ResultBody::TerminalGridSubscribe(r)))
+                if &r.target == expected && r.seq.0 == 0 =>
+            {
+                (&r.subscription, &r.frame)
+            }
+            (GridSubject::Shell(expected), Ok(ResultBody::ShellGridSubscribe(r)))
+                if &r.target == expected && r.seq.0 == 0 =>
+            {
+                (&r.subscription, &r.frame)
+            }
+            _ => return Err(grid_failure("opening_response")),
+        };
+        self.subscription = Some(subscription.clone());
+        if self.retired {
+            return Err(grid_failure("opening_retired"));
+        }
+        self.begin(frame, bytes, true)
+    }
+    fn arm(&mut self, token: &str) -> io::Result<()> {
+        if token.is_empty() || token.len() > 64 || !token.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            return Err(grid_failure("token_contract"));
+        }
+        self.token = token.as_bytes().to_vec();
+        self.prefix.fill(0);
+        let mut n = 0;
+        for i in 1..self.token.len() {
+            while n > 0 && self.token[i] != self.token[n] {
+                n = self.prefix[n - 1];
+            }
+            if self.token[i] == self.token[n] {
+                n += 1;
+            }
+            self.prefix[i] = n;
+        }
+        self.matched = 0;
+        self.tentative = false;
+        self.token_commit = None;
+        self.previous_cell = None;
+        Ok(())
+    }
+    fn terminal_opening_commit(&self)->io::Result<u64> {
+        match self.fixture.as_ref().and_then(|fixture|fixture.opening) {
+            Some((revision,false))=>Ok(revision),
+            Some((_,true))=>Err(grid_failure("terminal_delayed_marker_already_in_opening")),
+            None=>Err(grid_failure("terminal_opening_not_committed")),
+        }
+    }
+    fn terminal_fixture_ready(&self,after:u64)->io::Result<bool> {
+        let opening=self.terminal_opening_commit()?;
+        if opening!=after{return Err(grid_failure("terminal_opening_revision_changed"));}
+        Ok(self.token_commit.is_some_and(|revision|revision>opening)
+            &&self.fixture.as_ref().and_then(|fixture|fixture.committed).is_some_and(TerminalFixtureFacts::complete))
+    }
+    fn text(&mut self, text: &str) {
+        if self.token.is_empty() {
+            return;
+        }
+        for byte in text.bytes() {
+            while self.matched > 0 && byte != self.token[self.matched] {
+                self.matched = self.prefix[self.matched - 1];
+            }
+            if byte == self.token[self.matched] {
+                self.matched += 1;
+            }
+            if self.matched == self.token.len() {
+                self.tentative = true;
+                self.matched = self.prefix[self.matched - 1];
+            }
+        }
+    }
+    fn event(&mut self, event: Event, bytes: usize) -> io::Result<()> {
+        let result = self.event_checked(event, bytes);
+        if result.is_err() {
+            self.retired = true;
+            self.token.fill(0);
+            self.token.clear();
+        }
+        result
+    }
+    fn event_checked(&mut self, event: Event, bytes: usize) -> io::Result<()> {
+        if self.retired
+            || self.subscription.as_ref() != Some(&event.subscription)
+            || event.seq.0 != self.next_seq
+        {
+            return Err(grid_failure("subscription_sequence"));
+        }
+        self.next_seq = self
+            .next_seq
+            .checked_add(1)
+            .ok_or_else(|| grid_failure("sequence_limit"))?;
+        match event.body {
+            EventBody::GridBegin(data) => self.begin(&data.frame, bytes, false),
+            EventBody::GridPart(part) => {
+                self.budget(bytes)?;
+                if part.revision.0 != self.revision
+                    || part.index.0 != self.seen
+                    || self.seen >= self.parts
+                {
+                    return Err(grid_failure("part_order"));
+                }
+                for span in part.spans {
+                    for (offset, cell) in span.cells.into_iter().enumerate() {
+                        cell.validate().map_err(|_|grid_failure("selected_cell"))?;
+                        let column=span.column.0+offset as u64;
+                        if span.row.0!=self.cells as u64/self.columns||column!=self.cells as u64%self.columns
+                            || (cell.width.0==0)!=self.wide_pending
+                            || cell.width.0==2&&column+1>=self.columns
+                        {return Err(grid_failure("canonical_selected_coverage"));}
+                        self.wide_pending=cell.width.0==2;
+                        if let Some(fixture)=&mut self.fixture{fixture.cell(&cell,column==0);}
+                        self.cells = self
+                            .cells
+                            .checked_add(1)
+                            .ok_or_else(|| grid_failure("cell_limit"))?;
+                        if self.cells > self.cell_limit {
+                            return Err(grid_failure("cell_limit"));
+                        }
+                        if self.previous_cell != Some((span.row.0, column)) {
+                            self.matched = 0;
+                        }
+                        if cell.width.0 != 0 {
+                            self.text(&cell.text);
+                        }
+                        self.previous_cell = Some((span.row.0, column + 1));
+                    }
+                }
+                self.seen += 1;
+                Ok(())
+            }
+            EventBody::GridCommit(commit) => {
+                self.budget(bytes)?;
+                if commit.revision.0 != self.revision
+                    || self.seen != self.parts
+                    || self.cells != self.cell_limit || self.wide_pending
+                {
+                    return Err(grid_failure("commit_order"));
+                }
+                self.committed = Some(self.revision);
+                self.committed_dimensions=Some((self.columns,self.rows));
+                if let Some(fixture)=&mut self.fixture {
+                    fixture.committed=Some(fixture.stage);
+                    if fixture.opening.is_none(){fixture.opening=Some((self.revision,self.tentative));}
+                }
+                if self.tentative {
+                    self.token_commit = Some(self.revision);
+                }
+                self.deadline = None;
+                self.matched = 0;
+                self.tentative = false;
+                self.previous_cell = None;
+                Ok(())
+            }
+            EventBody::SyncRequired(_) => Err(grid_failure("source_sync_required")),
+            _ => Err(grid_failure("event_family")),
+        }
+    }
+}
 struct Phone {
     connection: iroh::endpoint::Connection,
     send: iroh::endpoint::SendStream,
@@ -1795,6 +2540,7 @@ struct Phone {
     omp_capture_budget: Option<herdr_report_capture::Budget>,
     phone_close_reported: bool,
     codex_close_capture: bool,
+    grid: Option<GridWitness>,
 }
 fn closed_connection_reason(reason: Option<iroh::endpoint::ConnectionError>) -> &'static str {
     match reason {
@@ -1846,12 +2592,19 @@ impl Phone {
         }
     }
     fn event(&mut self, event: Event) -> io::Result<()> {
-        self.events += 1;
-        if let Some(view) = &mut self.generation {
-            // The Phone also has its original host subscription. Only matching
-            // session events feed this view; host/receipt events remain read-only.
-            view.routed_event(event)?;
+        self.event_sized(event,0)
+    }
+    fn event_sized(&mut self,event:Event,bytes:usize)->io::Result<()> {
+        Self::route_event(&mut self.grid,&mut self.events,&mut self.generation,event,bytes)
+    }
+    fn route_event(grid:&mut Option<GridWitness>,events:&mut u64,generation:&mut Option<GenerationView>,event:Event,bytes:usize)->io::Result<()> {
+        let private=matches!(&event.body,EventBody::GridBegin(_)|EventBody::GridPart(_)|EventBody::GridCommit(_))
+            || matches!(&event.body,EventBody::SyncRequired(_))&&grid.as_ref().is_some_and(|g|g.subscription.as_ref()==Some(&event.subscription));
+        if private {
+            return grid.as_mut().ok_or_else(||grid_failure("unowned_grid_event"))?.event(event,bytes);
         }
+        *events+=1;
+        if let Some(view)=generation {view.routed_event(event)?;}
         Ok(())
     }
     async fn request(
@@ -1911,10 +2664,13 @@ impl Phone {
                 request_failure(method, phase, "payload_decode", io::Error::other(error))
             })? {
                 Envelope::Response(r) if r.id == id => {
+                    if let Some(grid) = &mut self.grid {
+                        grid.response(&r.id, &r.outcome, bytes.len())?;
+                    }
                     self.request_phase(method, phase, "response_received");
                     return Ok(r.outcome);
                 }
-                Envelope::Event(event) => self.event(event)?,
+                Envelope::Event(event) => self.event_sized(event, bytes.len())?,
                 _ => {
                     return Err(request_failure(
                         method,
@@ -2138,14 +2894,12 @@ async fn partial_creation(
 ) -> io::Result<(Uuid, RequestBody, Receipt)> {
     let before = surface(socket).await?.1;
     let id = Uuid::random();
-    let body = RequestBody::SessionCreate(SessionCreateParams { source_target: None, checkout: None,
-        boot_id: phone.hello.boot_id.clone(),
-        server_id: server.clone(),
-        project_id: config.projects[0].id.clone(),
-        provider,
-        name: Label::new(format!("partial-{provider:?}-{}", &id.0[..8]))
-            .map_err(io::Error::other)?,
-    });
+    let body = RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: phone.hello.boot_id.clone(),
+    server_id: server.clone(),
+    project_id: config.projects[0].id.clone(),
+    provider,
+    name: Label::new(format!("partial-{provider:?}-{}", &id.0[..8]))
+        .map_err(io::Error::other)?, });
     let mut bytes = encode_payload(&Envelope::Request(Request {
         id: id.clone(),
         body: body.clone(),
@@ -2284,6 +3038,7 @@ async fn connect(
         omp_capture_budget: None,
         phone_close_reported: false,
         codex_close_capture: false,
+        grid: None,
     };
     if let Some(i) = invite {
         p.rpc(
@@ -6620,8 +7375,133 @@ fn owned_herdr_report_binary(
     Ok(Some(canonical))
 }
 
+fn require_shared_backends(args: &clap::ArgMatches) -> io::Result<()> {
+    let mut count=0;
+    let mut omp=0;
+    let mut codex=0;
+    for provider in args.get_many::<String>("backend").into_iter().flatten() {
+        count+=1;
+        omp+=usize::from(provider=="omp");
+        codex+=usize::from(provider=="codex");
+    }
+    if count!=2 || omp!=1 || codex!=1 {
+        return Err(failure("shared-agent-only requires exactly one OMP and one Codex backend"));
+    }
+    Ok(())
+}
+fn project_read_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
+    if !args.get_flag("project-read-only"){return Ok(());}
+    if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE","GOATR_OWNED_OMP_CREATION_CAPTURE",
+        "GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
+        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"]
+        .iter().any(|key|std::env::var_os(key).is_some()) {return Err(failure("project-read-only conflicts with inherited private/provider diagnostic capture"));}
+    Ok(())
+}
+
+fn fresh_shared_evidence(path: &Path) -> io::Result<()> {
+    let parent=path.parent().ok_or_else(||failure("shared-agent evidence parent absent"))?;
+    if fs::canonicalize(parent)?!=parent {
+        return Err(failure("shared-agent evidence parent must be canonical"));
+    }
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    private_dir(path,false)
+}
+fn terminal_frozen_selection(args:&clap::ArgMatches)->io::Result<bool> {
+    match (args.get_one::<String>("expected-goatr-sha256"),args.get_one::<String>("expected-companion-lock-sha256")) {
+        (None,None)=>Ok(false),(Some(_),Some(_))=>Ok(true),
+        _=>Err(failure("terminal-only frozen executable requires both explicit binary and lock hashes")),
+    }
+}
+fn terminal_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
+    if !args.get_flag("terminal-only"){return Ok(());}
+    terminal_frozen_selection(args)?;
+    if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE",
+        "GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE",
+        "GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE","GOATR_OWNED_OMP_PRODUCER_METADATA_READER",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
+        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256"]
+        .iter().any(|key|std::env::var_os(key).is_some()) {
+        return Err(failure("terminal-only conflicts with inherited provider/private diagnostic capture"));
+    }
+    Ok(())
+}
+fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
+    let Some(mode)=args.get_one::<String>("background") else{return Ok(())};
+    require_shared_backends(args).map_err(|_|failure("background requires exactly one OMP and one Codex backend"))?;
+    if args.get_one::<u32>("api")!=Some(&34){return Err(failure("background requires the selected original API34 owned emulator; never a paired physical phone"));}
+    if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_CODEX_STARTUP_TERMINAL_CAPTURE","GOATR_OWNED_OMP_CREATION_CAPTURE",
+        "GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
+        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"]
+        .iter().any(|key|std::env::var_os(key).is_some()){return Err(failure("background conflicts with inherited private/provider diagnostics"));}
+    let pins=["expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"];
+    for pin in pins {
+        match args.get_one::<String>(pin) {
+            Some(value) if mode=="ntfy"&&value.len()==64&&value.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))=>{},
+            None if mode=="persistent"=>{},
+            _=>return Err(failure("ntfy requires both explicit independently qualified lowercase SHA256 pins; persistent accepts neither")),
+        }
+    }
+    Ok(())
+}
 fn arguments_base() -> Command {
     Command::new("smoke")
+        .arg(Arg::new("background").long("background").value_parser(["persistent","ntfy"])
+            .requires_all(["backend","goatr","config","workspace-root","evidence-dir","consent-owned-providers","automate-native-inputs",
+                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-goatr-sha256","expected-companion-lock-sha256","serial","emulator-owner"])
+            .conflicts_with_all(["admission-only","shared-agent-only","terminal-only","project-read-only","grid","grid-lease","ui","camera","ime","setup","prepare-emulator","paging-proof",
+                "codex-invalidation-diagnostic","codex-startup-terminal-capture","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
+                "development-continuity","development-owner-feedback","development-android-only","keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid"])
+            .help("Finite owned-emulator persistent or official ntfy registration/probe/ACK/native attention/dedup/tap gate for BOTH original providers; retains native resources, no fault stop or replay"))
+        .arg(Arg::new("expected-ntfy-apk-sha256").long("expected-ntfy-apk-sha256").requires("background"))
+        .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("background"))
+        .arg(Arg::new("terminal-only").long("terminal-only").action(ArgAction::SetTrue)
+            .requires_all(["goatr","config","workspace-root","evidence-dir","consent-owned-providers","automate-native-inputs"])
+            .conflicts_with_all(["backend","admission-only","shared-agent-only","grid","grid-lease","ui",
+                "camera","ime","setup","prepare-emulator","paging-proof","codex-invalidation-diagnostic",
+                "codex-startup-terminal-capture","omp-creation-diagnostic","physical-hello-capture",
+                "physical-relay-ephemeral","development-continuity","development-owner-feedback",
+                "development-android-only","keep-foreground-for-feedback","defer-retention-crossing",
+                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","serial",
+                "emulator-owner","admin-socket","disposable-uid","api"])
+            .help("Finite stock cells/resize/release, Goatr text/key frame handoff and configured-project terminal creation; one guarded native printf fixture, no providers; originals retained"))
+        .arg(Arg::new("shared-agent-only").long("shared-agent-only").action(ArgAction::SetTrue)
+            .requires_all(["backend","goatr","config","workspace-root","consent-owned-providers","automate-native-inputs"])
+            .conflicts_with_all(["admission-only","grid","ui","camera","ime","setup","prepare-emulator",
+                "paging-proof","codex-invalidation-diagnostic","codex-startup-terminal-capture",
+                "omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
+                "development-continuity","development-owner-feedback","development-android-only",
+                "keep-foreground-for-feedback","defer-retention-crossing","apk","test-apk","serial",
+                "emulator-owner","admin-socket","disposable-uid"])
+            .help("Finite fresh BOTH-provider shared conversation/requests/Stop/reconnect/native-history gate; retains all native resources"))
+        .arg(Arg::new("admission-only").long("admission-only").action(ArgAction::SetTrue)
+            .requires_all(["backend","goatr","config","workspace-root","consent-owned-providers"])
+            .conflicts_with_all(["grid","ui","camera","ime","setup","prepare-emulator","paging-proof",
+                "codex-invalidation-diagnostic","codex-startup-terminal-capture","omp-creation-diagnostic",
+                "physical-hello-capture","physical-relay-ephemeral","development-continuity",
+                "development-owner-feedback","development-android-only","keep-foreground-for-feedback",
+                "defer-retention-crossing","automate-native-inputs","apk","test-apk","serial",
+                "emulator-owner","admin-socket","disposable-uid"])
+            .help("Finite owned Hello/current-source/creation eligibility only; no provider creation or input; resources retained"))
+        .arg(Arg::new("project-read-only").long("project-read-only").action(ArgAction::SetTrue)
+            .requires_all(["backend","goatr","config","workspace-root","evidence-dir","consent-owned-providers"])
+            .conflicts_with_all(["admission-only","shared-agent-only","terminal-only","grid","grid-lease","ui","camera","ime","setup","prepare-emulator","paging-proof",
+                "codex-invalidation-diagnostic","codex-startup-terminal-capture","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
+                "development-continuity","development-owner-feedback","development-android-only","keep-foreground-for-feedback","defer-retention-crossing","automate-native-inputs",
+                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","serial","emulator-owner","admin-socket","disposable-uid","api"])
+            .help("Finite BOTH-provider/read-only Files/Git fixture gate after ordinary admission; existing qualified signed public seed only, no input or new commits; originals retained"))
+        .arg(Arg::new("project-read-seed-pack").long("project-read-seed-pack").value_parser(value_parser!(PathBuf))
+            .requires_all(["project-read-only","project-read-seed-pack-sha256","project-read-seed-commit","project-read-seed-tree","project-read-seed-signature-sha256"]))
+        .arg(Arg::new("project-read-seed-pack-sha256").long("project-read-seed-pack-sha256")
+            .requires_all(["project-read-only","project-read-seed-pack","project-read-seed-commit","project-read-seed-tree","project-read-seed-signature-sha256"]))
+        .arg(Arg::new("project-read-seed-commit").long("project-read-seed-commit")
+            .requires_all(["project-read-only","project-read-seed-pack","project-read-seed-pack-sha256","project-read-seed-tree","project-read-seed-signature-sha256"]))
+        .arg(Arg::new("project-read-seed-tree").long("project-read-seed-tree")
+            .requires_all(["project-read-only","project-read-seed-pack","project-read-seed-pack-sha256","project-read-seed-commit","project-read-seed-signature-sha256"]))
+        .arg(Arg::new("project-read-seed-signature-sha256").long("project-read-seed-signature-sha256")
+            .requires_all(["project-read-only","project-read-seed-pack","project-read-seed-pack-sha256","project-read-seed-commit","project-read-seed-tree"]))
+
         .group(
             ArgGroup::new("frozen-development-package")
                 .args([
@@ -6629,8 +7509,23 @@ fn arguments_base() -> Command {
                     "codex-invalidation-diagnostic",
                     "physical-hello-capture",
                     "omp-creation-diagnostic",
+                    "grid",
+                    "terminal-only",
+                    "project-read-only",
+                    "background",
                 ]),
         )
+        .group(ArgGroup::new("android-artifact-mode").args(["development-continuity","background"]))
+        .arg(Arg::new("grid").long("grid").action(ArgAction::SetTrue)
+            .requires_all(["grid-lease","backend","goatr","config","workspace-root","evidence-dir",
+                "expected-goatr-sha256","expected-companion-lock-sha256","consent-owned-providers","automate-native-inputs"])
+            .conflicts_with_all(["ui","camera","ime","setup","prepare-emulator","paging-proof",
+                "codex-invalidation-diagnostic","codex-startup-terminal-capture","omp-creation-diagnostic",
+                "physical-hello-capture","physical-relay-ephemeral","development-continuity","development-owner-feedback",
+                "development-android-only","keep-foreground-for-feedback","defer-retention-crossing",
+                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","serial","emulator-owner","admin-socket"])
+            .help("Qualified fresh native-to-framed-grid witness only; retains supervisor/resources, never phone or cleanup authority"))
+        .arg(Arg::new("grid-lease").long("grid-lease").value_parser(value_parser!(PathBuf)).requires("grid"))
         .arg(
             Arg::new("paging-proof")
                 .long("paging-proof")
@@ -6741,6 +7636,13 @@ fn arguments_base() -> Command {
                 .help("Owned physical-phone Hello boundary diagnostic only; no pairing, provider creation, or native input"),
         )
         .arg(
+            Arg::new("physical-relay-ephemeral")
+                .long("physical-relay-ephemeral")
+                .action(ArgAction::SetTrue)
+                .requires("physical-hello-capture")
+                .help("Backend-only owned pre-Create capture on one kernel-selected loopback relay port; leaves the paired controller untouched"),
+        )
+        .arg(
             Arg::new("development-continuity")
                 .long("development-continuity")
                 .action(ArgAction::SetTrue)
@@ -6791,6 +7693,7 @@ fn arguments_base() -> Command {
                 .long("expected-goatr-sha256")
                 .value_parser(value_parser!(String))
                 .requires("frozen-development-package")
+                .requires("expected-companion-lock-sha256")
                 .help("Required frozen SHA-256 for the exact development companion binary"),
         )
         .arg(
@@ -6798,21 +7701,22 @@ fn arguments_base() -> Command {
                 .long("expected-companion-lock-sha256")
                 .value_parser(value_parser!(String))
                 .requires("frozen-development-package")
+                .requires("expected-goatr-sha256")
                 .help("Required frozen source lock SHA-256 for the development companion"),
         )
         .arg(
             Arg::new("expected-apk-sha256")
                 .long("expected-apk-sha256")
                 .value_parser(value_parser!(String))
-                .requires("development-continuity")
-                .help("Required frozen SHA-256 for the development debug APK"),
+                .requires("android-artifact-mode")
+                .help("Required frozen SHA-256 for the selected development/background debug APK"),
         )
         .arg(
             Arg::new("expected-test-apk-sha256")
                 .long("expected-test-apk-sha256")
                 .value_parser(value_parser!(String))
-                .requires("development-continuity")
-                .help("Required frozen SHA-256 for the development debug test APK"),
+                .requires("android-artifact-mode")
+                .help("Required frozen SHA-256 for the selected development/background debug test APK"),
         )
         .about("Actual owned packaged OMP/Codex/provider/UI checkpoint; never fixture fallback")
         .arg(
@@ -6880,7 +7784,7 @@ fn arguments_base() -> Command {
             Arg::new("consent-owned-providers")
                 .long("consent-owned-providers")
                 .action(ArgAction::SetTrue)
-                .help("Explicitly create retained named Herdr/project/native provider resources and tiny test turns; never production transitions"),
+                .help("Explicitly create retained fresh named Herdr/project resources; terminal-only creates no provider and permits its guarded public fixture, staged Goatr text/keys and one configured-project tab"),
         )
         .arg(
             Arg::new("automate-native-inputs")
@@ -6888,7 +7792,7 @@ fn arguments_base() -> Command {
                 .requires("consent-owned-providers")
                 .conflicts_with_all(["camera", "ime", "setup", "prepare-emulator"])
                 .action(ArgAction::SetTrue)
-                .help("Consent to once-only guarded inputs in this fresh run's owned native TUIs; uncertain inputs are never replayed"),
+                .help("Consent to once-only guarded owned TUI inputs, or the terminal-only public printf fixture plus Goatr staged text/key handoff; never replay uncertain input"),
         )
         .arg(Arg::new("apk").long("apk").value_parser(value_parser!(PathBuf)))
         .arg(
@@ -6898,8 +7802,13 @@ fn arguments_base() -> Command {
         )
 }
 fn packaged(args: &clap::ArgMatches) -> io::Result<PathBuf> {
+    if args.get_flag("terminal-only")&&terminal_frozen_selection(args)? {
+        return dev_continuity::frozen_package(args);
+    }
     if args.get_flag("codex-invalidation-diagnostic")
         || args.get_flag("omp-creation-diagnostic")
+        || args.get_flag("grid")
+        || args.get_one::<String>("background").is_some()
     {
         return dev_continuity::frozen_package(args);
     }
@@ -7047,6 +7956,7 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
             | "workspace_confirm_created_workspace"
             | "workspace_confirm_terminal"
             | "workspace_confirm_focus"
+            | "workspace_confirm_tab"
             | "final_source_changed"
             | "final_connect"
             | "final_identity"
@@ -7310,6 +8220,7 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
             | "workspace_confirm_created_workspace"
             | "workspace_confirm_terminal"
             | "workspace_confirm_focus"
+            | "workspace_confirm_tab"
             | "final_source_changed"
             | "final_connect"
             | "final_identity"
@@ -7486,7 +8397,7 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
         "workspace_confirm_evidence_epoch"
         | "workspace_confirm_created_workspace"
         | "workspace_confirm_terminal"
-        | "workspace_confirm_focus" => {
+        | "workspace_confirm_focus" | "workspace_confirm_tab" => {
             code == "StaleSession" && io == "invalid_data" && errno == 0
         }
         "result_shell_changed" => {
@@ -7754,15 +8665,25 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
             | "herdr"
             | "transport"
             | "shell_probe"
+            | "coarse_shell"
     ) {
         return None;
     }
     let guard = fields.next()?.strip_prefix("guard=")?;
+    let coarse_shell_guard = matches!(guard,
+        "consent_absent" | "source_lookup" | "reporter_process" | "connect"
+            | "peer_identity" | "process_info" | "shell_absent" | "reported_process"
+            | "shell_executable" | "source_recheck" | "no_candidate" | "record_absent" | "installed"
+    );
+    if phase == "coarse_shell" && !coarse_shell_guard {
+        return None;
+    }
     let launch_preflight_guard = matches!(
         guard,
         "project_lookup" | "project_path" | "creation_overlay" | "creation_overlay_path"
             | "diagnostic_extension_args" | "source_lookup" | "topology_source"
             | "topology_source_changed" | "topology_project" | "topology_focus"
+            | "creation_placement"
             | "measurement_absent" | "wrapper_recheck_failure" | "wrapper_recheck_mismatch"
             | "pane_absent" | "pane_mismatch" | "resource_mismatch" | "resource_pane_absent"
             | "resource_terminal_absent" | "process_connect" | "process_evidence"
@@ -7797,6 +8718,7 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
             | "topology_source"
             | "topology_source_changed"
             | "topology_project"
+            | "creation_placement"
             | "topology_focus"
             | "measurement_absent"
             | "wrapper_recheck_failure"
@@ -7892,6 +8814,7 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
             | "local_absent"
             | "local_storage"
             | "precondition"
+            | "creation_directory"
             | "focus_missing"
             | "authorization"
             | "root_source_recheck_at_deadline"
@@ -7904,16 +8827,6 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
             | "root_agent_session_at_deadline"
             | "root_agent_status_at_deadline"
             | "root_agents_at_deadline"
-            | "root_recheck_source"
-            | "root_recheck_pane"
-            | "root_recheck_workspace"
-            | "root_recheck_terminal"
-            | "root_recheck_focus"
-            | "root_recheck_pane_focused"
-            | "root_recheck_agent"
-            | "root_recheck_agent_session"
-            | "root_recheck_agent_status"
-            | "root_recheck_agents"
             | "source_connect"
             | "process_info"
             | "shell_reporter"
@@ -7945,7 +8858,7 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
             | "result_rejected_kind"
             | "result_rejected_path"
             | "result_unsupported"
-    ) {
+    ) && !(phase == "coarse_shell" && coarse_shell_guard) {
         return None;
     }
     let code = fields.next()?.strip_prefix("code=")?;
@@ -8013,6 +8926,17 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
     ) {
         return None;
     }
+    if phase == "coarse_shell" {
+        let shape = match guard {
+            "installed" => code == "none" && io == "none",
+            "consent_absent" | "peer_identity" | "shell_absent" | "no_candidate" | "record_absent" => code == "NotReady" && io == "none",
+            "source_lookup" => matches!(code, "NotFound" | "NotReady" | "ResourceLimit") && io == "none",
+            _ => matches!(code, "NotReady" | "ResourceLimit") && io != "none",
+        };
+        if !shape || frame != "none" {
+            return None;
+        }
+    }
     let ack = if matches!(guard, "ack_matched" | "ack_mismatch") {
         let mut values = [false; 6];
         for (slot, expected) in values.iter_mut().zip([
@@ -8035,12 +8959,21 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
     } else {
         None
     };
+    let deadline_detail=if phase=="shell_probe"&&guard=="result_deadline" {
+        match fields.next() {
+            None=>None,
+            Some(site)=>Some((site.strip_prefix("deadlineSite=")?,
+                fields.next()?.strip_prefix("observation=")?,fields.next()?.strip_prefix("entryBudget=")?)),
+        }
+    } else {None};
     if fields.next().is_some() {
         return None;
     }
-    Some(
-        json!({"gate":"owned-omp-creation-capture","phase":phase,"guard":guard,"code":code,"io":io,"frame":frame,"ack":ack}),
-    )
+    let mut value=json!({"gate":"owned-omp-creation-capture","phase":phase,"guard":guard,"code":code,"io":io,"frame":frame,"ack":ack});
+    if let Some((site,observation,budget))=deadline_detail {
+        value["deadlineSite"]=json!(site);value["observation"]=json!(observation);value["entryBudget"]=json!(budget);
+    }
+    herdr_report_capture::valid_probe_deadline(&value).then_some(value)
 }
 fn parse_hello_guard_line(line: &[u8]) -> Option<Value> {
     let line = std::str::from_utf8(line).ok()?;
@@ -8110,6 +9043,20 @@ fn parse_hello_guard_line(line: &[u8]) -> Option<Value> {
     )) || (known_code && io == "none" && matches!(
         (phase, guard),
         ("hello_authorization", "rejected") | ("security_guard", "rejected")
+    )) || (phase == "codex_manager_hello" && code == "NotReady" && matches!(
+        guard,
+        "runtime_missing" | "runtime_path" | "runtime_directory" | "socket_before"
+            | "socket_create" | "socket_path" | "connect" | "peer_credentials" | "peer_uid"
+            | "socket_after" | "socket_changed" | "peer_pid" | "process_evidence"
+            | "process_namespace" | "process_stat" | "process_pid" | "process_uid"
+            | "process_boot" | "process_changed"
+    ) && matches!(
+        io,
+        "none" | "not_found" | "permission_denied" | "connection_refused" | "connection_reset"
+            | "connection_aborted" | "not_connected" | "addr_in_use" | "addr_not_available"
+            | "broken_pipe" | "already_exists" | "would_block" | "invalid_input" | "invalid_data"
+            | "timed_out" | "interrupted" | "unexpected_eof" | "unsupported" | "out_of_memory"
+            | "write_zero" | "other"
     ));
     accepted.then(|| json!({"gate":"owned-hello-capture","phase":phase,"guard":guard,"code":code,"io":io}))
 }
@@ -8205,6 +9152,10 @@ fn start_serve_with_codex_capture(
             codex_startup_terminal_capture,
             herdr_report_capture,
             preserve_xdg_config_home: false,
+            retain_process: false,
+            hello_capture: false,
+            grid_hold: None,
+            project_read: None,
         },
     )
 }
@@ -8214,7 +9165,7 @@ fn start_serve_with_capture(
     root: &Path,
     socket: &Path,
     listener: Option<&std::net::TcpListener>,
-    launch: ServeLaunch<'_>,
+    mut launch: ServeLaunch<'_>,
 ) -> io::Result<Companion> {
     let codex_capture = launch.diagnostic_capture
         || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").as_deref()
@@ -8227,7 +9178,7 @@ fn start_serve_with_capture(
     let omp_creation_capture = owned_omp_creation_capture_requested();
     let omp_offline_capture = owned_omp_offline_capture_requested();
     let omp_backend_capture = owned_omp_backend_capture_requested();
-    let hello_capture = owned_hello_capture_requested();
+    let hello_capture = owned_hello_capture_requested() || launch.hello_capture;
     if owned_omp_capture_conflicts() {
         return Err(failure(
             "owned OMP creation, post-Ready offline, and backend-only captures are mutually exclusive",
@@ -8280,6 +9231,7 @@ fn start_serve_with_capture(
                 .join("config"),
         );
     }
+    if let Some(fixture)=launch.project_read {fixture.current()?;fixture.environment(&mut c);}
     c.env("XDG_STATE_HOME", root.join("state"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -8327,14 +9279,36 @@ fn start_serve_with_capture(
     } else {
         None
     };
+    let retain_process = launch.grid_hold.is_some() || launch.retain_process;
+    if retain_process {
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
     let spawned = c.spawn();
-    if let Some((fd, flags)) = inherited
-        && unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0
-    {
+    let pin = if let (Some(hold), Ok(child)) = (launch.grid_hold.as_deref_mut(), &spawned) {
+        hold.pin_child(child)
+    } else {
+        Ok(())
+    };
+    let restored =
+        inherited.is_none_or(|(fd, flags)| unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } >= 0);
+    pin?;
+    if !restored {
         return Err(io::Error::last_os_error());
     }
     let mut child = spawned?;
+    if launch.retain_process {
+        write_json(&root.join("admission-companion-spawn.json"),
+            &json!({"pid":child.id(),"package":binary,"adminSocket":socket,
+                "scope":"fresh owned child; process proof pending; no automatic teardown"}))?;
+    }
     let process = herdr::process_evidence(child.id())?;
+    if launch.retain_process {
+        let manifest = root.join("admission-companion.json");
+        write_json(&manifest, &json!({"process":process,"package":binary,"adminSocket":socket,
+            "scope":"retained fresh owned companion; cleanup requires original identity review"}))?;
+        println!("{}", json!({"gate":"admission-owned-companion","manifest":manifest}));
+    }
     let guard_drain = if capture {
         let stderr = child
             .stderr
@@ -8373,6 +9347,7 @@ fn start_serve_with_capture(
         codex_startup_terminal: None,
         codex_startup_journal: None,
         codex_startup_journal_admission: None,
+        retain_process,
     })
 }
 async fn healthy(serve: &mut Companion, socket: &Path) -> io::Result<()> {
@@ -8397,7 +9372,24 @@ async fn healthy(serve: &mut Companion, socket: &Path) -> io::Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+fn physical_relay_bind_port(ephemeral: bool, physical: bool, mode: OwnedOmpCaptureMode, other_capture: bool) -> io::Result<u16> {
+    if ephemeral && (!physical || mode != OwnedOmpCaptureMode::Backend || other_capture) {
+        return Err(failure("ephemeral physical relay requires only the owned OMP Backend capture"));
+    }
+    Ok(if ephemeral { 0 } else { 7466 })
+}
+fn physical_relay_request(args: &clap::ArgMatches) -> io::Result<u16> {
+    physical_relay_bind_port(
+        args.get_flag("physical-relay-ephemeral"),
+        args.get_flag("physical-hello-capture"),
+        selected_omp_capture_mode(),
+        owned_hello_capture_requested()
+            || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").as_deref() == Some(std::ffi::OsStr::new("1"))
+            || std::env::var_os("GOATR_OWNED_OMP_PRODUCER_CAPTURE").as_deref() == Some(std::ffi::OsStr::new("1")),
+    )
+}
 async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
+    let bind_port = physical_relay_request(args)?;
     let hello_capture = owned_hello_capture_requested();
     let omp_backend_capture = owned_omp_backend_capture_requested();
     if (hello_capture == omp_backend_capture)
@@ -8418,6 +9410,9 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
             .ok_or_else(|| failure("physical Hello capture requires --config"))?,
     )?;
     let config = Config::load(&config_path)?;
+    if omp_backend_capture && config.herdr_sockets.len() != 1 {
+        return Err(failure("owned OMP coarse capture requires exactly one configured Herdr socket"));
+    }
     private_dir(&config.runtime_dir, false)?;
     let root = config
         .runtime_dir
@@ -8449,9 +9444,15 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
         .ok_or_else(|| failure("physical Hello admin parent missing"))?;
     private_dir(admin, false)?;
     goatr::admin::validate_socket_path(&socket, false, false)?;
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 7466))?;
-    if listener.local_addr()?.port() != 7466 {
-        return Err(failure("physical Hello relay listener port changed"));
+    // All selector/config/socket admission precedes the first new owned artifact.
+    private_dir(evidence, true)?;
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, bind_port))?;
+    let address = listener.local_addr()?;
+    if address.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        || address.port() == 0
+        || (bind_port != 0 && address.port() != bind_port)
+    {
+        return Err(failure("physical Hello relay listener address changed"));
     }
     listener.set_nonblocking(true)?;
     let metadata = fs::metadata(format!("/proc/self/fd/{}", listener.as_raw_fd()))?;
@@ -8460,7 +9461,7 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
         fd: listener.as_raw_fd(),
         device: metadata.dev(),
         inode: metadata.ino(),
-        port: 7466,
+        port: address.port(),
         parent: herdr::process_evidence(std::process::id())?,
         runtime_dir: config.runtime_dir.clone(),
     };
@@ -8489,6 +9490,10 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
             herdr_report_capture: None,
             // This controller observes the existing paired desktop configuration.
             preserve_xdg_config_home: true,
+            retain_process: false,
+            hello_capture: false,
+            grid_hold: None,
+            project_read: None,
         },
     )?;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -8930,7 +9935,7 @@ async fn create_feedback(
     run: &Uuid,
 ) -> io::Result<(NativeProof, Receipt, FeedbackPresentation)> {
     let (session, receipt, presentation) =
-        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None)
+        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None, None)
             .await?;
     let session = session.ok_or_else(|| non_succeeded_creation_error(provider, &receipt))?;
     let p = proof(config, socket, &session, None).await?;
@@ -8948,13 +9953,11 @@ async fn create_omp_creation_diagnostic(
     run: &Uuid,
 ) -> io::Result<Receipt> {
     let id = Uuid::random();
-    let params = SessionCreateParams { source_target: None, checkout: None,
-        boot_id: phone.hello.boot_id.clone(),
-        server_id: server.clone(),
-        project_id: config.projects[0].id.clone(),
-        provider: Provider::Omp,
-        name: Label::new(format!("owned-Omp-{}", &id.0[..8])).map_err(io::Error::other)?,
-    };
+    let params = SessionCreateParams { directory_ref: None, placement: None, boot_id: phone.hello.boot_id.clone(),
+    server_id: server.clone(),
+    project_id: config.projects[0].id.clone(),
+    provider: Provider::Omp,
+    name: Label::new(format!("owned-Omp-{}", &id.0[..8])).map_err(io::Error::other)?, };
     let initial = receipt_result(
         phone
             .request_at(
@@ -9018,7 +10021,7 @@ async fn create_session(
     run: &Uuid,
 ) -> io::Result<(SessionSummary, Receipt)> {
     let (session, receipt, _) = create_session_presented(
-        phone, config, socket, provider, server, evidence, run, false, None,
+        phone, config, socket, provider, server, evidence, run, false, None, None,
     )
     .await?;
     session
@@ -9036,7 +10039,7 @@ async fn create_session_feedback(
     run: &Uuid,
 ) -> io::Result<(SessionSummary, Receipt, FeedbackPresentation)> {
     let (session, receipt, presentation) =
-        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None)
+        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None, None)
             .await?;
     let session = session.ok_or_else(|| non_succeeded_creation_error(provider, &receipt))?;
     Ok((
@@ -9079,8 +10082,21 @@ async fn create_session_presented(
     run: &Uuid,
     feedback_presentation: bool,
     mut startup_terminal_capture: Option<(&mut Companion, &CodexStartupTerminalContext<'_>, bool)>,
+    admitted: Option<&AdmittedSource>,
 ) -> io::Result<(Option<SessionSummary>, Receipt, Option<FeedbackPresentation>)> {
+    if let Some(admitted)=admitted {
+        if &admitted.identity.0!=server {
+            return Err(prerequisite("creation server differs from the admitted original"));
+        }
+        admitted.recheck()?;
+    }
     let (before_source, before) = surface(socket).await?;
+    if let Some(admitted)=admitted {
+        if before_source!=admitted.client.evidence {
+            return Err(prerequisite("original creation socket/process source changed"));
+        }
+        admitted.recheck()?;
+    }
     before.no_focus()?;
     let anchor = before
         .focused_pane_id
@@ -9090,13 +10106,11 @@ async fn create_session_presented(
         .await
         .map_err(GeometryFailure::into_io)?;
     let id = Uuid::random();
-    let params = SessionCreateParams { source_target: None, checkout: None,
-        boot_id: phone.hello.boot_id.clone(),
-        server_id: server.clone(),
-        project_id: config.projects[0].id.clone(),
-        provider,
-        name: Label::new(format!("owned-{provider:?}-{}", &id.0[..8])).map_err(io::Error::other)?,
-    };
+    let params = SessionCreateParams { directory_ref: None, placement: None, boot_id: phone.hello.boot_id.clone(),
+    server_id: server.clone(),
+    project_id: config.projects[0].id.clone(),
+    provider,
+    name: Label::new(format!("owned-{provider:?}-{}", &id.0[..8])).map_err(io::Error::other)?, };
     // Earlier provider activity can invalidate coarse topology eligibility. Wait only
     // before this action's first submission; dispatch still owns all native guards.
     let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -9110,6 +10124,9 @@ async fn create_session_presented(
                 break false;
             }
         };
+        let original_current=if let Some(admitted)=admitted {
+            admitted.observation(&before_source,&before,&inventory)?
+        } else {true};
         observed = inventory
             .servers
             .iter()
@@ -9126,7 +10143,7 @@ async fn create_session_presented(
         if tokio::time::Instant::now() >= admission_deadline {
             break false;
         }
-        if observed.is_some_and(|(connectivity, can_create)| {
+        if original_current && observed.is_some_and(|(connectivity, can_create)| {
             connectivity == ServerConnectivity::Online && can_create
         }) {
             break true;
@@ -9142,7 +10159,7 @@ async fn create_session_presented(
             "originalServerPresent":observed.is_some(),
             "connectivity":observed.map(|(connectivity, _)| connectivity),
             "providerCanCreate":observed.map(|(_, can_create)| can_create),
-            "available":available,"snapshotTimedOut":snapshot_timed_out}),
+            "available":available,"snapshotTimedOut":snapshot_timed_out,"originalSourcePinned":admitted.is_some()}),
     )?;
     if !available {
         return Err(prerequisite(
@@ -9152,6 +10169,7 @@ async fn create_session_presented(
     if let Some((companion, _, _)) = startup_terminal_capture.as_mut() {
         companion.pin_codex_startup_journal(&id);
     }
+    if let Some(admitted)=admitted {admitted.recheck()?;}
     let r = receipt_result(
         phone
             .request_at(
@@ -9254,11 +10272,10 @@ async fn prompt_and_stop(
         phone
             .request(
                 id.clone(),
-                RequestBody::PromptSubmit(PromptSubmitParams {
-                    boot_id: phone.hello.boot_id.clone(),
-                    target: p.target.clone(),
-                    text: PromptText(text),
-                }),
+                RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
+                delivery: None, native_turn_id: None, images: None,
+                target: p.target.clone(),
+                text: PromptText(text), }),
             )
             .await?
             .map_err(|e| failure(&format!("actual native prompt rejected: {:?}", e.code)))?,
@@ -9273,17 +10290,26 @@ async fn prompt_and_stop(
     let desktop = format!("goatr-desktop-{}-{:?}", &run.0[..8], p.provider);
     inputs.marker(phone, p, &desktop).await?;
     wait_history(phone, &p.target, &desktop, false).await?;
+    let stop=stop_current_work(phone,p).await?;
+    let Value::Object(stop)=stop else {return Err(failure("Stop evidence object absent"));};
+    let mut result=json!({"prompt":id,"receipt":receipt,"mobileMarker":marker,"desktopMarker":desktop,
+        "historyIds":history.history.iter().map(|r|&r.id).collect::<Vec<_>>(),
+        "toolObserved":history.history.iter().any(|r|r.tool.is_some()),
+        "scope":"real native operations, payloads not retained; no OMP acknowledgment/winner fabricated"});
+    result.as_object_mut().expect("prompt evidence").extend(stop);
+    Ok(result)
+}
+async fn stop_current_work(phone: &mut Phone,p: &NativeProof) -> io::Result<Value> {
     let stop_prompt = Uuid::random();
     phone
         .request(
             stop_prompt.clone(),
-            RequestBody::PromptSubmit(PromptSubmitParams {
-                boot_id: phone.hello.boot_id.clone(),
-                target: p.target.clone(),
-                text: PromptText(
-                    "Run the native shell tool sleep 30, then report done; no file changes.".into(),
-                ),
-            }),
+            RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
+            delivery: None, native_turn_id: None, images: None,
+            target: p.target.clone(),
+            text: PromptText(
+                "Run the native shell tool sleep 30, then report done; no file changes.".into(),
+            ), }),
         )
         .await?
         .map_err(|_| failure("actual native current-work prompt rejected"))?;
@@ -9387,28 +10413,2675 @@ async fn prompt_and_stop(
     }
     p.recheck_processes()?;
     Ok(
-        json!({"prompt":id,"receipt":receipt,"mobileMarker":marker,"desktopMarker":desktop,"historyIds":history.history.iter().map(|r|&r.id).collect::<Vec<_>>(),"toolObserved":history.history.iter().any(|r|r.tool.is_some()),"stopPrompt":stop_prompt,"stopAction":cancel,"stopReceipt":stop,"stopIdleObserved":true,"nativeTurn":state.native_turn_id,"scope":"real native operations, payloads not retained; no OMP acknowledgment/winner fabricated"}),
+        json!({"stopPrompt":stop_prompt,"stopAction":cancel,"stopReceipt":stop,"stopIdleObserved":true,"nativeTurn":state.native_turn_id}),
     )
 }
+
+const SHARED_HISTORY_LIMIT:u64=2;
+const SHARED_HISTORY_ADVANCES:usize=31;
+struct SharedAgentContext<'a> {
+    inputs: NativeInputs<'a>,
+    companion: &'a Companion,
+    endpoint: &'a iroh::Endpoint,
+    source: &'a AdmittedSource,
+}
+fn shared_summary_matches(summary: &SessionSummary,original: &NativeProof) -> bool {
+    target(summary)==original.target && summary.provider==original.provider
+        && summary.native_id==original.native && summary.workspace_id==original.workspace
+        && summary.pane_id==original.pane && summary.terminal_id==original.terminal
+}
+fn shared_user_record<'a>(records: &'a [HistoryRecord],marker: &str) -> io::Result<Option<&'a HistoryRecord>> {
+    let mut matching=records.iter().filter(|record|record.role==Role::User && record.complete
+        && matches!(&record.text,Some(Content::Text(text)) if text.text.0.contains(marker)));
+    let first=matching.next();
+    if matching.next().is_some() {
+        return Err(failure("shared-agent original prompt appeared more than once; no replay"));
+    }
+    Ok(first)
+}
+async fn shared_prompt(
+    phone: &mut Phone,p: &NativeProof,inputs: &NativeInputs<'_>,marker: &str,
+) -> io::Result<(Receipt,Id,Value)> {
+    inputs.idle(phone,p).await?;
+    inputs.current(phone,p).await?;
+    let initial=phone.start_generation(&p.target).await?;
+    if !shared_summary_matches(&initial.state.summary,p)
+        || initial.state.summary.connectivity!=SessionConnectivity::Ready
+        || initial.state.summary.status!=SessionStatus::Idle || !initial.pending_requests.is_empty() {
+        return Err(prerequisite("shared-agent original is not Ready/Idle before its fresh prompt"));
+    }
+    let deadline=tokio::time::Instant::now()+Duration::from_secs(180);
+    let action=Uuid::random();
+    let receipt=receipt_result(phone.request(action.clone(),RequestBody::PromptSubmit(PromptSubmitParams {
+        delivery: None, native_turn_id: None, images: None,
+        skill:None,boot_id:phone.hello.boot_id.clone(),target:p.target.clone(),
+        text:PromptText(format!(
+            "In this exact existing session, run the native shell tool once to execute printf '%s\\n' '{marker}'. Do not write files or create/switch sessions. Then repeat {marker} in your reply."
+        )),
+    })).await?.map_err(|_|failure("shared-agent original prompt rejected; no retry"))?)?;
+    let receipt=if matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Dispatching) {
+        tokio::time::timeout_at(deadline,phone.settled(&action)).await
+            .map_err(|_|prerequisite("shared-agent original prompt receipt did not settle"))??
+    } else {receipt};
+    if receipt.action_id!=action || receipt.target.as_ref()!=Some(&p.target)
+        || receipt.method!=ActionMethod::PromptSubmit || receipt.error.is_some()
+        || !matches!(receipt.state,ReceiptState::Dispatched|ReceiptState::Succeeded) {
+        return Err(prerequisite("shared-agent original prompt did not dispatch"));
+    }
+    let user=loop {
+        p.recheck_processes()?;
+        let view=phone.generation.as_ref().ok_or_else(||failure("shared-agent original stream absent"))?;
+        if view.failed || !shared_summary_matches(&view.snapshot.state.summary,p) {
+            return Err(failure("shared-agent original stream changed; no resnapshot"));
+        }
+        let tool=dev_continuity::completed_tool_output_state(&view.snapshot.history,marker);
+        if tool==dev_continuity::ToolOutputMarkerState::Rejected {
+            return Err(prerequisite("shared-agent completed native tool output failed or was ambiguous"));
+        }
+        let assistant=view.snapshot.history.iter().any(|record|record.role==Role::Assistant&&record.complete
+            && matches!(&record.text,Some(Content::Text(text)) if text.text.0.contains(marker)));
+        if view.streamed_text && view.streamed_tool && assistant
+            && tool==dev_continuity::ToolOutputMarkerState::Ready
+            && view.snapshot.state.summary.connectivity==SessionConnectivity::Ready
+            && view.snapshot.state.summary.status==SessionStatus::Idle
+            && view.snapshot.pending_requests.is_empty()
+            && let Some(user)=shared_user_record(&view.snapshot.history,marker)? {
+            break user.id.clone();
+        }
+        tokio::time::timeout_at(deadline,phone.generation_event()).await
+            .map_err(|_|prerequisite("shared-agent real text/tool stream did not complete within its observation budget"))??;
+    };
+    let latest=phone.finish_generation(&p.target).await?;
+    if !shared_summary_matches(&latest.state.summary,p)
+        || shared_user_record(&latest.history,marker)?.map(|record|&record.id)!=Some(&user) {
+        return Err(failure("shared-agent latest snapshot lost or duplicated its original prompt"));
+    }
+    inputs.current(phone,p).await?;
+    let evidence=json!({"action":action,"receiptState":receipt.state,"originalUserRecord":user,
+        "textEventsObserved":true,"toolEventsObserved":true,"completedNativeToolOutputObserved":true});
+    Ok((receipt,user,evidence))
+}
+async fn shared_history_witness(phone: &mut Phone,p: &NativeProof,inputs: &NativeInputs<'_>) -> io::Result<Id> {
+    inputs.idle(phone,p).await?;
+    let mut witness=if p.provider==Provider::Codex {
+        let mut witness=paging_proof::Witness::connect(p,inputs).await?;
+        witness.admit(p,false).await?;
+        Some(witness)
+    } else {None};
+    let initial=phone.start_generation(&p.target).await?;
+    if !shared_summary_matches(&initial.state.summary,p)
+        || initial.state.summary.connectivity!=SessionConnectivity::Ready
+        || initial.state.summary.status!=SessionStatus::Idle || !initial.pending_requests.is_empty() {
+        return Err(prerequisite("shared-agent history witness lacks original idle state"));
+    }
+    let marker=format!("goatr-shared-earlier-{}-{:?}",&inputs.run.0[..8],p.provider);
+    let command=format!("printf '%s\\n' '{marker}'");
+    let started=Instant::now();
+    let deadline=history_command_deadline(false,p.provider,started+Duration::from_secs(30),started);
+    phone.history_command=Some(HistoryCommandTrace::default());
+    if let Some(observer)=&p.omp_observer {
+        observer.healthy(&p.target)?;
+        observer.state.lock().register(&command,&marker,deadline)?;
+    }
+    let completion=tokio::time::timeout_at(deadline.into(),async {
+        inputs.send(phone,p,NativeInput::Prompt(&format!("!{command}")),None,"shared_earlier_witness").await?;
+        if let Some(witness)=witness.as_mut() {
+            let ((snapshot,id),(native,turn))=tokio::try_join!(
+                inputs.shell_completed(phone,p,&command,&marker),
+                witness.completed(p,&command,&marker,deadline.into())
+            )?;
+            if id!=native || snapshot.history.iter().find(|record|record.id==id)
+                .and_then(|record|record.turn_id.as_ref())!=Some(&turn) {
+                return Err(failure("shared-agent independent native completion IDs disagree"));
+            }
+            Ok(id)
+        } else {
+            if p.omp_observer.is_none() {return Err(prerequisite("shared-agent independent OMP observer absent"));}
+            Ok(inputs.shell_completed(phone,p,&command,&marker).await?.1)
+        }
+    }).await;
+    phone.history_command=None;
+    let id=completion.map_err(|_|prerequisite("shared-agent earlier native witness deadline; no command replay"))??;
+    phone.finish_generation(&p.target).await?;
+    p.recheck_processes()?;
+    Ok(id)
+}
+fn shared_history_page(
+    page: &SessionHistoryResult,view: &Uuid,source: RecordSource,
+    previous: Option<u64>,seen: &mut HashSet<Id>,
+) -> io::Result<Option<u64>> {
+    if page.view_id!=*view || page.records.len()>SHARED_HISTORY_LIMIT as usize
+        || page.records.windows(2).any(|pair|pair[0].order.0>=pair[1].order.0)
+        || previous.is_some_and(|oldest|page.records.last().is_some_and(|row|row.order.0>=oldest)) {
+        return Err(failure("shared-agent native browse view/order/page bound changed"));
+    }
+    for row in &page.records {
+        if !row.complete || row.source!=source || !seen.insert(row.id.clone()) {
+            return Err(failure("shared-agent older page was incomplete, duplicated or not native"));
+        }
+    }
+    Ok(page.records.first().map(|row|row.order.0).or(previous))
+}
+async fn shared_history(
+    phone: &mut Phone,p: &NativeProof,inputs: &NativeInputs<'_>,witness: &Id,
+) -> io::Result<Value> {
+    inputs.current(phone,p).await?;
+    let deadline=tokio::time::Instant::now()+Duration::from_secs(120);
+    let ResultBody::SessionHistory(head)=tokio::time::timeout_at(deadline,phone.rpc(
+        RequestBody::SessionHistory(SessionHistoryParams{target:p.target.clone(),view_id:None,cursor:None,
+            limit:Some(Uint(SHARED_HISTORY_LIMIT))}),"shared_history_head"
+    )).await.map_err(|_|prerequisite("shared-agent native browse deadline"))?? else {
+        return Err(failure("shared-agent history head result mismatch"));
+    };
+    let source=if p.provider==Provider::Omp {RecordSource::Persisted} else {RecordSource::NativePage};
+    let mut seen=HashSet::new();
+    let mut boundary=shared_history_page(&head,&head.view_id,source,None,&mut seen)?;
+    let mut cursor=head.next_cursor;
+    let mut cursors=HashSet::new();
+    let mut older_pages=0;
+    let mut witnessed=false;
+    for _ in 0..SHARED_HISTORY_ADVANCES {
+        let Some(next)=cursor else {break};
+        if !cursors.insert(next.clone()) {return Err(failure("shared-agent native cursor cycle"));}
+        p.recheck_processes()?;
+        let ResultBody::SessionHistory(page)=tokio::time::timeout_at(deadline,phone.rpc(
+            RequestBody::SessionHistory(SessionHistoryParams{target:p.target.clone(),view_id:Some(head.view_id.clone()),
+                cursor:Some(next),limit:Some(Uint(SHARED_HISTORY_LIMIT))}),"shared_history_older"
+        )).await.map_err(|_|prerequisite("shared-agent native browse deadline"))?? else {
+            return Err(failure("shared-agent older history result mismatch"));
+        };
+        boundary=shared_history_page(&page,&head.view_id,source,boundary,&mut seen)?;
+        if !page.records.is_empty() {
+            older_pages+=1;
+            witnessed|=page.records.iter().any(|row|&row.id==witness);
+        }
+        cursor=page.next_cursor;
+        if older_pages>=2 && witnessed {
+            inputs.current(phone,p).await?;
+            return Ok(json!({"viewId":head.view_id,"genuineOlderPages":older_pages,
+                "earlierNativeRecord":witness,"source":source,"boundedRecords":seen.len(),
+                "nativeFixtureCommands":1,"retentionBoundaryClaimed":false}));
+        }
+    }
+    Err(prerequisite("shared-agent two genuine older pages and independently witnessed earlier record unavailable within bound"))
+}
+async fn shared_agent_flow(mut phone: Phone,selected: &[Provider],context: SharedAgentContext<'_>) -> io::Result<bool> {
+    let inputs=&context.inputs;
+    let host=phone.hello.host_id.clone();
+    let boot=phone.hello.boot_id.clone();
+    let device=phone.hello.device_id.clone();
+    let mut originals=Vec::new();
+    let mut observations=Vec::new();
+    let mut completed=HashSet::new();
+    let mut active=None;
+    let mut phase="creation";
+    let result:io::Result<()>=async {
+        dev_continuity::zero_native_caps(inputs.herdr)?;
+        for provider in selected.iter().copied() {
+            active=Some(provider);
+            let (session,receipt,_)=create_session_presented(&mut phone,inputs.config,inputs.socket,provider,
+                &context.source.identity.0,inputs.evidence,inputs.run,false,None,Some(context.source)).await?;
+            write_json(&inputs.evidence.join(format!("shared-create-{}-{provider:?}.json",inputs.run.0)),
+                &json!({"runId":inputs.run,"provider":provider,"receipt":receipt}))?;
+            let session=session.ok_or_else(||non_succeeded_creation_error(provider,&receipt))?;
+            let original=proof(inputs.config,inputs.socket,&session,None).await?;
+            for process in std::iter::once(&original.owner).chain(original.tui.iter()).chain(original.relay.iter()) {
+                dev_continuity::zero_native_caps(process)?;
+            }
+            original.recheck_processes()?;
+            write_json(&inputs.evidence.join(format!("shared-native-{}-{provider:?}.json",inputs.run.0)),
+                &json!({"runId":inputs.run,"proof":original.evidence(),"creationReceipt":receipt}))?;
+            originals.push(original);
+        }
+        let mut witnesses=Vec::new();
+        let mut prompts=Vec::new();
+        for original in &originals {
+            active=Some(original.provider);
+            phase="earlier_native_witness";
+            let witness=shared_history_witness(&mut phone,original,inputs).await?;
+            witnesses.push(witness);
+            phase="phone_stream";
+            let marker=format!("goatr-shared-mobile-{}-{:?}",&inputs.run.0[..8],original.provider);
+            let (receipt,user,evidence)=shared_prompt(&mut phone,original,inputs,&marker).await?;
+            observations.push(json!({"provider":original.provider,"phase":phase,"evidence":evidence}));
+            prompts.push((marker,receipt,user));
+            phase="desktop_continuation";
+            let desktop=format!("goatr-shared-desktop-{}-{:?}",&inputs.run.0[..8],original.provider);
+            inputs.marker(&mut phone,original,&desktop).await?;
+            wait_history(&mut phone,&original.target,&desktop,false).await?;
+            inputs.idle(&mut phone,original).await?;
+            observations.push(json!({"provider":original.provider,"phase":phase,"observed":true}));
+            let kind=if original.provider==Provider::Omp {PresentationKind::OmpSelect} else {PresentationKind::CodexApproval};
+            phase="phone_native_request";
+            let answered=dialog(&mut phone,original,kind,inputs).await?;
+            observations.push(json!({"provider":original.provider,"phase":phase,"evidence":answered}));
+            phase="competing_desktop_resolution";
+            let competing=desktop_dialog(&mut phone,original,kind,inputs).await?;
+            observations.push(json!({"provider":original.provider,"phase":phase,"evidence":competing}));
+            inputs.idle(&mut phone,original).await?;
+            phase="actual_stop";
+            let stopped=stop_current_work(&mut phone,original).await?;
+            inputs.current(&mut phone,original).await?;
+            observations.push(json!({"provider":original.provider,"phase":phase,"evidence":stopped}));
+        }
+        active=None;
+        phase="same_original_reconnect";
+        phone=dev_continuity::reconnect_original(phone,context.endpoint,&host,inputs.config,inputs.socket,&originals).await?;
+        if phone.hello.boot_id!=boot || phone.hello.device_id!=device {
+            return Err(failure("shared-agent reconnect changed original companion boot or paired identity"));
+        }
+        for ((original,witness),(marker,receipt,user)) in originals.iter().zip(&witnesses).zip(&prompts) {
+            active=Some(original.provider);
+            phase="native_older_history";
+            let history=shared_history(&mut phone,original,inputs,witness).await?;
+            observations.push(json!({"provider":original.provider,"phase":phase,"evidence":history}));
+            phase="return_to_latest";
+            let latest=phone.open(&original.target,"shared_return_latest").await?;
+            if !shared_summary_matches(&latest.state.summary,original)
+                || shared_user_record(&latest.history,marker)?.map(|row|&row.id)!=Some(user) {
+                return Err(failure("shared-agent return to latest lost or duplicated the original native prompt"));
+            }
+            let retained=phone.receipt(&receipt.action_id).await?;
+            if retained.action_id!=receipt.action_id || retained.target!=receipt.target
+                || retained.method!=receipt.method || retained.error.is_some()
+                || !matches!(retained.state,ReceiptState::Dispatched|ReceiptState::Succeeded) {
+                return Err(failure("shared-agent original receipt did not reconcile; no resend"));
+            }
+            phase="fresh_phone_after_reconnect";
+            let final_marker=format!("goatr-shared-return-{}-{:?}",&inputs.run.0[..8],original.provider);
+            let (_,_,sent)=shared_prompt(&mut phone,original,inputs,&final_marker).await?;
+            let latest=phone.open(&original.target,"shared_final_latest").await?;
+            if !shared_summary_matches(&latest.state.summary,original)
+                || shared_user_record(&latest.history,marker)?.map(|row|&row.id)!=Some(user) {
+                return Err(failure("shared-agent original prompt duplicated or disappeared after fresh input"));
+            }
+            inputs.current(&mut phone,original).await?;
+            observations.push(json!({"provider":original.provider,"phase":phase,"evidence":sent,
+                "originalPromptStillExactlyOnce":true,"originalReceiptReconciledWithoutResend":true}));
+            completed.insert(original.provider);
+        }
+        active=None;
+        phase="final_original_proof";
+        if completed.len()!=selected.len() {
+            return Err(failure("shared-agent selected provider was not fully exercised"));
+        }
+        context.companion.recheck()?;
+        if herdr::process_evidence(inputs.herdr.pid)?!=*inputs.herdr {
+            return Err(failure("shared-agent original Herdr process changed"));
+        }
+        phone.connection.close(0u32.into(),b"finite shared-agent scenario complete; no action replay");
+        Ok(())
+    }.await;
+    let available=result.is_ok();
+    let results=selected.iter().map(|provider|json!({"gate":"shared-agent-only","runId":inputs.run,
+        "provider":provider,"status":if completed.contains(provider)&&available {"passed"} else {"unavailable"},
+        "reason":if available {"completed"} else if active.is_none()||active==Some(*provider) {
+            "original_native_boundary_unavailable"
+        } else {"scenario_stopped_after_other_boundary"},
+        "phase":if available {"complete"} else {phase},
+    })).collect::<Vec<_>>();
+    let boundary=result.as_ref().err().map(super::helper_error_metadata);
+    write_json(&inputs.evidence.join(format!("shared-agent-{}.json",inputs.run.0)),&json!({
+        "runId":inputs.run,"results":results,"boundary":boundary,"observations":observations,
+        "originals":originals.iter().map(NativeProof::evidence).collect::<Vec<_>>(),
+        "resourcesRetained":true,"androidAcceptance":false,"retentionBoundaryClaimed":false,
+        "scope":"fresh normally created originals only; no replay, native cleanup, cold substitute or manufactured history",
+    }))?;
+    for result in results {println!("{result}");}
+    Ok(available)
+}
+async fn grid_run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
+    let (qualification, deployment) = GridQualification::read(args, evidence)?;
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|error| grid_context("retain_term", error))?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|error| grid_context("retain_interrupt", error))?;
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .map_err(|error| grid_context("retain_hangup", error))?;
+    let control = McpStdin::open().map_err(|error| grid_context("source_control_pipe", error))?;
+    let metadata = control
+        .0
+        .get_ref()
+        .metadata()
+        .map_err(|error| grid_context("source_control_pipe", error))?;
+    if metadata.uid() != uid() || metadata.mode() & 0o077 != 0 {
+        return Err(grid_failure("source_control_private"));
+    }
+    let mut hold = GridHold {
+        originals: Vec::new(),
+        spawned: 0,
+        relays: Vec::new(),
+        source_control: Some(tokio::io::BufReader::new(control)),
+        source_loss_observed: false,
+    };
+    write_json(
+        &evidence.join(format!("grid-qualification-{}.json", Uuid::random().0)),
+        &json!({
+            "gate":"grid","phase":"qualified_inputs","nativeSha256":qualification.native_sha256,
+            "nativeSourceSha256":qualification.native_source_sha256,"nativeSchemaSha256":qualification.native_schema_sha256,
+            "nativeLockSha256":qualification.native_lock_sha256,"goatrSha256":qualification.goatr_sha256,
+            "goatrSourceSha256":qualification.goatr_source_sha256,"helperSha256":qualification.helper_sha256,
+            "companionLockSha256":qualification.companion_lock_sha256,"providers":qualification.providers,
+            "explicitShellInputGrant":true,"cleanupAuthorized":false
+        }),
+    )?;
+    let result = checkpoint_held(args, evidence, Some(&mut hold), Some(deployment)).await;
+    let location = result.as_ref().err().and_then(super::helper_error_location);
+    // A failure's first authored file/line survives, but its potentially private text never does.
+    let record = json!({"gate":"grid","phase":"retained_outcome","scopedFlowCompleted":result.as_ref().is_ok_and(|v|*v),
+        "outcomeKnown":result.is_ok(),"spawnedOriginals":hold.spawned,"heldOriginalPidfds":hold.originals.len(),
+        "heldRelayListeners":hold.relays.len(),"firstFailureFile":location.map(|l|l.file),
+        "firstFailureLine":location.map(|l|l.line),"cleanupAuthorized":false,
+        "failureMetadata":result.as_ref().err().map(super::helper_error_metadata),
+        "nativeSourceEofGate":if hold.source_loss_observed{"observed"}else{"not_reached"},"quantitativeMemoryProof":false});
+    let recorded = write_json(
+        &evidence.join(format!("grid-retained-{}.json", Uuid::random().0)),
+        &record,
+    );
+    let _ = writeln!(std::io::stdout(), "{record}");
+    if hold.spawned == 0 {
+        recorded.map_err(|_| grid_failure("outcome_evidence"))?;
+        return result.map_err(|_| grid_failure("prelaunch_prerequisite"));
+    }
+    // Native owns its PTY masters; both children use null stdio and distinct process groups.
+    // Preserve the original relay fd, pidfds and supervisor even on failure/evidence failure.
+    // Only a separately qualified fresh candidate can authorize a later external stop.
+    loop {
+        tokio::select! {_ = term.recv()=>{},_ = interrupt.recv()=>{},_ = hangup.recv()=>{}}
+    }
+}
+impl Phone {
+    async fn grid_open(&mut self, subject: GridSubject) -> io::Result<()> {
+        self.grid_subscribe(GridWitness::pending(Uuid::random(),subject)).await
+    }
+    async fn grid_subscribe(&mut self,witness:GridWitness)->io::Result<()> {
+        if self.grid.is_some() || self.generation.is_some() {
+            return Err(grid_failure("viewer_busy"));
+        }
+        let id=witness.opening.clone();
+        let body = match &witness.subject {
+            GridSubject::Pane(target) => {
+                RequestBody::TerminalGridSubscribe(TerminalGridSubscribeParams {
+                    target: target.clone(),
+                })
+            }
+            GridSubject::Shell(target) => {
+                RequestBody::ShellGridSubscribe(ShellGridSubscribeParams {
+                    target: target.clone(),
+                })
+            }
+        };
+        self.grid = Some(witness);
+        self.request_at(id, body, "grid_open")
+            .await?
+            .map_err(|_| grid_failure("opening_rejected"))?;
+        self.grid_wait(GridGoal::Commit).await
+    }
+    async fn grid_wait(&mut self, goal:GridGoal) -> io::Result<()> {
+        let phase_end = Instant::now() + Duration::from_secs(45);
+        loop {
+            let witness = self
+                .grid
+                .as_ref()
+                .ok_or_else(|| grid_failure("viewer_missing"))?;
+            if witness.retired {
+                return Err(grid_failure("viewer_retired"));
+            }
+            if match goal {
+                GridGoal::Commit=>witness.committed.is_some(),
+                GridGoal::Token=>witness.token_commit.is_some_and(|revision|revision>0),
+                GridGoal::TerminalFixture{after}=>witness.terminal_fixture_ready(after)?,
+                GridGoal::Resized{after,dimensions}=>witness.committed.is_some_and(|revision|revision>after)
+                    &&witness.committed_dimensions.is_some_and(|actual|actual!=dimensions),
+            } {
+                return Ok(());
+            }
+            let end = witness.deadline.map_or(phase_end, |end| end.min(phase_end));
+            let bytes = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(end),
+                transport::read_frame(&mut self.recv, FRAME_MAX),
+            )
+            .await
+            .map_err(|_| grid_failure("observation_deadline"))?
+            .map_err(|error| {
+                let close=closed_connection_reason(self.connection.close_reason());
+                let method=match &witness.subject {
+                    GridSubject::Shell(_)=>Method::ShellGridSubscribe,
+                    GridSubject::Pane(_)=>Method::TerminalGridSubscribe,
+                };
+                request_failure_with_close(method,"grid_wait","frame_read",error,Some(close))
+            })?;
+            match decode_payload(&bytes, None).map_err(|_| grid_failure("grid_codec"))? {
+                Envelope::Event(event) => self.event_sized(event, bytes.len())?,
+                _ => return Err(grid_failure("unexpected_response")),
+            }
+        }
+    }
+    async fn grid_unsubscribe(&mut self) -> io::Result<()> {
+        let subscription = self
+            .grid
+            .as_ref()
+            .and_then(|g| g.subscription.clone())
+            .ok_or_else(|| grid_failure("unsubscribe_scope"))?;
+        let result = self
+            .rpc(
+                RequestBody::SessionUnsubscribe(SessionUnsubscribeParams { subscription }),
+                "grid_unsubscribe",
+            )
+            .await
+            .map_err(|_| grid_failure("unsubscribe_response"))?;
+        if !matches!(result, ResultBody::SessionUnsubscribe(_)) {
+            return Err(grid_failure("unsubscribe_response"));
+        }
+        let witness = self
+            .grid
+            .as_mut()
+            .ok_or_else(|| grid_failure("unsubscribe_scope"))?;
+        witness.retired = true;
+        witness.deadline = None;
+        // This correlated response drains all earlier frames. Any late retired data is rejected
+        // at the private route before it can enter generic event/history handling.
+        self.host()
+            .await
+            .map_err(|_| grid_failure("unsubscribe_drain"))?;
+        self.grid = None;
+        Ok(())
+    }
+    async fn grid_action(
+        &mut self,
+        id: Uuid,
+        body: RequestBody,
+        slow: bool,
+    ) -> io::Result<Option<Receipt>> {
+        let method = body.method();
+        let outcome = if slow {
+            let mut bytes = encode_payload(&Envelope::Request(Request {
+                id: id.clone(),
+                body,
+            }))
+            .map_err(|_| grid_failure("action_codec"))?;
+            transport::write_frame(&mut self.send, &bytes)
+                .await
+                .map_err(|_| grid_failure("action_write"))?;
+            bytes.fill(0);
+            // Predetermined bounded pause of this sole receiver, not a parallel reader.
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            let end = tokio::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let read =
+                    tokio::time::timeout_at(end, transport::read_frame(&mut self.recv, FRAME_MAX))
+                        .await
+                        .map_err(|_| grid_failure("slow_response_deadline"))?;
+                let bytes = match read {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        use iroh::endpoint::ConnectionError as C;
+                        if matches!(
+                            self.connection.close_reason(),
+                            Some(
+                                C::ApplicationClosed(_)
+                                    | C::ConnectionClosed(_)
+                                    | C::TransportError(_)
+                                    | C::Reset
+                                    | C::TimedOut
+                            )
+                        ) {
+                            return Ok(None);
+                        }
+                        return Err(grid_context("slow_transport_unproved", error));
+                    }
+                };
+                match decode_payload(&bytes, Some(method))
+                    .map_err(|_| grid_failure("slow_codec"))?
+                {
+                    Envelope::Event(event) => self.event_sized(event, bytes.len())?,
+                    Envelope::Response(response) if response.id == id => break response.outcome,
+                    _ => return Err(grid_failure("slow_correlation")),
+                }
+            }
+        } else {
+            // A fatal routing/codec/correlation error is the original failure, not a lost
+            // response to recover on this reader. The recorded action remains status-only.
+            self.request_at(id.clone(), body, "grid_dirty_action")
+                .await?
+        };
+        let result = outcome.map_err(|_| grid_failure("action_rejected"))?;
+        let receipt = match result {
+            ResultBody::PromptSubmit(r) => r.receipt,
+            ResultBody::ShellInput(r) => r.receipt,
+            _ => return Err(grid_failure("action_response")),
+        };
+        if matches!(
+            receipt.state,
+            ReceiptState::Reserved | ReceiptState::Dispatching
+        ) {
+            self.settled_by(&id, Instant::now() + Duration::from_secs(30))
+                .await
+                .map(Some)
+                .map_err(|error| grid_context("original_action_status", error))
+        } else {
+            Ok(Some(receipt))
+        }
+    }
+}
+fn grid_receipt(
+    receipt: &Receipt,
+    id: &Uuid,
+    boot: &Uuid,
+    subject: &GridSubject,
+) -> io::Result<()> {
+    let scope = match subject {
+        GridSubject::Pane(target) => {
+            receipt.method == ActionMethod::PromptSubmit
+                && receipt.target.as_ref() == Some(target)
+                && receipt.shell_target.is_none()
+        }
+        GridSubject::Shell(target) => {
+            receipt.method == ActionMethod::ShellInput
+                && receipt.shell_target.as_ref() == Some(target)
+                && receipt.target.is_none()
+                && receipt.state==ReceiptState::Dispatched
+                && matches!(&receipt.result,Some(ActionResult::ShellDispatch(result))if result.progress.complete())
+        }
+    };
+    if !scope
+        || receipt.action_id != *id
+        || receipt.boot_id != *boot
+        || receipt.error.is_some()
+        || !matches!(
+            receipt.state,
+            ReceiptState::Dispatched | ReceiptState::Succeeded
+        )
+    {
+        return Err(grid_failure("original_action_receipt"));
+    }
+    Ok(())
+}
+// Capacity only: Client pins the peer; its duplicate is the sole I/O adapter.
+// Neither an assembler nor another Goatr viewer. Both descriptors close together.
+async fn grid_native_line(
+    reader: &mut tokio::io::BufReader<tokio::net::UnixStream>,
+    deadline: tokio::time::Instant,
+    total: &mut usize,
+) -> io::Result<Option<Value>> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut bytes = Vec::new();
+    tokio::time::timeout_at(
+        deadline,
+        (&mut *reader)
+            .take(128 * 1024 + 1)
+            .read_until(b'\n', &mut bytes),
+    )
+    .await
+    .map_err(|_| grid_failure("native_transaction_deadline"))?
+    .map_err(|error| grid_context("native_stream_read", error))?;
+    if bytes.len() > 128 * 1024 {
+        return Err(grid_failure("native_line_bound"));
+    }
+    *total = total
+        .checked_add(bytes.len())
+        .ok_or_else(|| grid_failure("native_transaction_bound"))?;
+    if *total > 8 * 1024 * 1024 {
+        return Err(grid_failure("native_transaction_bound"));
+    }
+    // read_until only ends without LF at actual EOF (the size-limit case was rejected).
+    // This is native-FD observation, never a caller declaration or an Iroh-close inference.
+    if bytes.last() != Some(&b'\n') {
+        return Ok(None);
+    }
+    goatr::native_json::parse(&bytes, goatr::native_json::NATIVE)
+        .map(Some)
+        .map_err(|_| grid_failure("native_stream_json"))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct GridSourceIntent {
+    version: u8,
+    run: Uuid,
+    ready: Uuid,
+    trigger: Uuid,
+}
+struct GridSourceLoss {
+    run: Uuid,
+    ready: Uuid,
+    trigger: Option<Uuid>,
+    native_eof: bool,
+    iroh_closed: bool,
+    sync_required: bool,
+    deadline: Option<tokio::time::Instant>,
+}
+impl GridSourceLoss {
+    fn arm(&mut self, intent: GridSourceIntent) -> io::Result<()> {
+        if intent.version != 1
+            || intent.run != self.run
+            || intent.ready != self.ready
+            || self.trigger.is_some()
+            || intent.trigger == self.run
+            || intent.trigger == self.ready
+            || intent.trigger.validate().is_err()
+        {
+            return Err(grid_failure("source_trigger_join"));
+        }
+        self.trigger = Some(intent.trigger);
+        Ok(())
+    }
+    fn upstream_eof(&mut self) -> io::Result<()> {
+        if self.trigger.is_none() || self.native_eof {
+            return Err(grid_failure("source_eof_without_armed_intent"));
+        }
+        self.native_eof = true;
+        self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(15));
+        Ok(())
+    }
+    fn downstream(&mut self, sync: bool) -> io::Result<()> {
+        if self.trigger.is_none() {
+            return Err(grid_failure("source_downstream_before_intent"));
+        }
+        if sync {
+            self.sync_required = true;
+        } else {
+            self.iroh_closed = true;
+        }
+        Ok(())
+    }
+    fn complete(&self) -> bool {
+        self.trigger.is_some()
+            && self.native_eof
+            && (self.iroh_closed || self.sync_required)
+            && self
+                .deadline
+                .is_some_and(|deadline| tokio::time::Instant::now() < deadline)
+    }
+}
+// One readiness seam for the SAME retained futures. Failure/data wins over intent;
+// no branch recreates a partial read_frame or grants process-stop authority.
+enum GridSourceWake<N, C> {
+    Native(N),
+    Closed,
+    ObservationDeadline,
+    TransactionDeadline,
+    Frame(io::Result<Vec<u8>>),
+    Control(C),
+}
+async fn grid_source_wake<N, C, D>(
+    native: impl std::future::Future<Output = N>,
+    closed: impl std::future::Future<Output = D>,
+    observation: impl std::future::Future<Output = ()>,
+    transaction: impl std::future::Future<Output = ()>,
+    frame: impl std::future::Future<Output = io::Result<Vec<u8>>>,
+    control: impl std::future::Future<Output = C>,
+) -> GridSourceWake<N, C> {
+    tokio::select! {biased;
+        _=observation=>GridSourceWake::ObservationDeadline,
+        _=transaction=>GridSourceWake::TransactionDeadline,
+        result=frame=>GridSourceWake::Frame(result),
+        result=native=>GridSourceWake::Native(result),
+        _=closed=>GridSourceWake::Closed,
+        result=control=>GridSourceWake::Control(result),
+    }
+}
+enum GridSourceHandoff {
+    Frame(io::Result<Vec<u8>>),
+    Pending { settled: bool },
+}
+fn grid_source_deadlines(loss: &GridSourceLoss, grid: &Option<GridWitness>) -> io::Result<()> {
+    if loss
+        .deadline
+        .is_some_and(|end| tokio::time::Instant::now() >= end)
+    {
+        return Err(grid_failure("source_downstream_deadline"));
+    }
+    if grid
+        .as_ref()
+        .and_then(|g| g.deadline)
+        .is_some_and(|end| Instant::now() >= end)
+    {
+        return Err(grid_failure("source_grid_transaction_deadline"));
+    }
+    Ok(())
+}
+fn grid_source_handoff(
+    frame: std::pin::Pin<&mut impl std::future::Future<Output = io::Result<Vec<u8>>>>,
+    fin_seen: bool,
+    loss: &GridSourceLoss,
+    grid: &Option<GridWitness>,
+    subscription: &Uuid,
+    subject: &GridSubject,
+) -> io::Result<GridSourceHandoff> {
+    use futures_util::FutureExt;
+    // Consume only a temporary Pin reborrow. Pending preserves the exact original reader.
+    if !fin_seen {
+        if let Some(result) = frame.now_or_never() {
+            return Ok(GridSourceHandoff::Frame(result));
+        }
+    }
+    grid_source_deadlines(loss, grid)?;
+    if !grid
+        .as_ref()
+        .is_some_and(|g| g.subscription.as_ref() == Some(subscription) && &g.subject == subject)
+    {
+        return Err(grid_failure("source_original_scope"));
+    }
+    // Settlement is a point observation at this Pending/actual-FIN rejoin, not a claim
+    // that no failure can ever become ready after this decision.
+    Ok(GridSourceHandoff::Pending {
+        settled: loss.complete(),
+    })
+}
+fn grid_source_fin(armed: bool, error: io::Error) -> io::Result<()> {
+    let eof = matches!(
+        transport::FrameFailure::from_error(&error),
+        Some(transport::FrameFailure {
+            stage: transport::FrameStage::FrameHeader | transport::FrameStage::FramePayload,
+            io: Some(transport::FrameIoKind::UnexpectedEof),
+            code: None,
+        })
+    );
+    if armed && eof { Ok(()) } else { Err(error) }
+}
+async fn grid_source_intent(
+    mut input: tokio::io::BufReader<McpStdin>,
+) -> (tokio::io::BufReader<McpStdin>, io::Result<GridSourceIntent>) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let result = async {
+        let mut bytes = Vec::new();
+        (&mut input)
+            .take(513)
+            .read_until(b'\n', &mut bytes)
+            .await
+            .map_err(|error| grid_context("source_control_read", error))?;
+        if bytes.is_empty() || bytes.len() > 512 || bytes.last() != Some(&b'\n') {
+            return Err(grid_failure("source_control_record"));
+        }
+        let value = goatr::native_json::parse(
+            &bytes,
+            goatr::native_json::Limits {
+                bytes: 512,
+                depth: 4,
+                members: 4,
+            },
+        )
+        .map_err(|_| grid_failure("source_control_record"))?;
+        serde_json::from_value(value).map_err(|_| grid_failure("source_control_shape"))
+    }
+    .await;
+    (input, result)
+}
+async fn grid_source_native(
+    mut native: NativeCapacityReader,
+) -> (NativeCapacityReader, io::Result<bool>) {
+    let result = native.source_next().await;
+    (native, result)
+}
+async fn grid_source_blocked(evidence: &Path, run: &Uuid, error: io::Error) -> io::Result<()> {
+    let frame_failure=transport::FrameFailure::from_error(&error).map(|f|json!({
+        "stage":format!("{:?}",f.stage),"io":f.io.map(|v|format!("{v:?}")),"code":f.code.map(|v|format!("{v:?}"))
+    }));
+    let record = json!({"gate":"grid","phase":"source_loss_blocked","run":run,
+        "failure":super::helper_error_metadata(&error),"frameFailure":frame_failure,"cleanupAuthorized":false,"sameRunHeld":true});
+    let _ = write_json(
+        &evidence.join(format!(
+            "grid-source-loss-blocked-{}.json",
+            Uuid::random().0
+        )),
+        &record,
+    );
+    let _ = writeln!(std::io::stdout(), "{record}");
+    // A fatal reader/authority boundary cannot be repaired by lookup, retarget or replay.
+    // Caller locals still own the exact Phone/endpoint/native reader while Main reviews cleanup.
+    std::future::pending().await
+}
+struct NativeCapacityReader {
+    client: Client,
+    reader: tokio::io::BufReader<tokio::net::UnixStream>,
+    scope: Value,
+    sequence: u64,
+    parts: u64,
+    revision: u64,
+    deadline: tokio::time::Instant,
+    bytes: usize,
+}
+impl NativeCapacityReader {
+    async fn line(&mut self) -> io::Result<Value> {
+        self.client
+            .recheck()
+            .map_err(|_| grid_failure("capacity_original_peer"))?;
+        let value = grid_native_line(&mut self.reader, self.deadline, &mut self.bytes)
+            .await?
+            .ok_or_else(|| grid_failure("capacity_native_eof"))?;
+        self.client
+            .recheck()
+            .map_err(|error| grid_context("capacity_original_peer", error))?;
+        Ok(value)
+    }
+    async fn open(
+        socket: &Path,
+        source: &ServerEvidence,
+        method: &'static str,
+        params: Value,
+        scope: Value,
+    ) -> io::Result<Option<Self>> {
+        use tokio::io::AsyncWriteExt;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let client = tokio::time::timeout_at(deadline, Client::connect(socket))
+            .await
+            .map_err(|_| grid_failure("capacity_connect"))?
+            .map_err(|_| grid_failure("capacity_connect"))?;
+        if &client.evidence != source {
+            return Err(grid_failure("capacity_peer"));
+        }
+        let duplicate = client
+            .fence_socket()
+            .map_err(|_| grid_failure("capacity_fence"))?;
+        let stream = std::os::unix::net::UnixStream::from(duplicate);
+        stream
+            .set_nonblocking(true)
+            .map_err(|_| grid_failure("capacity_adapter"))?;
+        let stream = tokio::net::UnixStream::from_std(stream)
+            .map_err(|_| grid_failure("capacity_adapter"))?;
+        let mut reader = Self {
+            client,
+            reader: tokio::io::BufReader::new(stream),
+            scope,
+            sequence: 1,
+            parts: 0,
+            revision: 0,
+            deadline,
+            bytes: 0,
+        };
+        let id = Uuid::random();
+        let mut bytes = serde_json::to_vec(&json!({"id":id.0,"method":method,"params":params}))
+            .map_err(|_| grid_failure("capacity_request"))?;
+        bytes.push(b'\n');
+        reader
+            .client
+            .recheck()
+            .map_err(|_| grid_failure("capacity_original_peer"))?;
+        tokio::time::timeout_at(deadline, reader.reader.get_mut().write_all(&bytes))
+            .await
+            .map_err(|_| grid_failure("capacity_write"))?
+            .map_err(|_| grid_failure("capacity_write"))?;
+        let opening = reader.line().await?;
+        if opening.get("id").and_then(Value::as_str) != Some(id.0.as_str()) {
+            return Err(grid_failure("capacity_correlation"));
+        }
+        if let Some(error) = opening.get("error") {
+            if error.get("code").and_then(Value::as_str) == Some("grid_resource_limit") {
+                return Ok(None);
+            }
+            return Err(grid_failure("capacity_open_rejected"));
+        }
+        let result = opening
+            .get("result")
+            .ok_or_else(|| grid_failure("capacity_opening"))?;
+        if result["type"] != "grid_subscribed"
+            || result["scope"] != reader.scope
+            || result["sequence"].as_u64() != Some(0)
+            || result["frame"]["revision"].as_u64() != Some(0)
+        {
+            return Err(grid_failure("capacity_opening"));
+        }
+        reader.parts = result["frame"]["part_count"]
+            .as_u64()
+            .filter(|n| (1..=128).contains(n))
+            .ok_or_else(|| grid_failure("capacity_descriptor"))?;
+        Ok(Some(reader))
+    }
+    async fn initial_commit(&mut self) -> io::Result<()> {
+        for index in 0..self.parts {
+            let part = self.line().await?;
+            if part["scope"] != self.scope
+                || part["sequence"].as_u64() != Some(self.sequence)
+                || part["type"] != "grid_part"
+                || part["revision"].as_u64() != Some(0)
+                || part["index"].as_u64() != Some(index)
+            {
+                return Err(grid_failure("capacity_part_order"));
+            }
+            self.sequence = self
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| grid_failure("capacity_sequence"))?;
+        }
+        let commit = self.line().await?;
+        if commit["scope"] != self.scope
+            || commit["sequence"].as_u64() != Some(self.sequence)
+            || commit["type"] != "grid_commit"
+            || commit["revision"].as_u64() != Some(0)
+        {
+            return Err(grid_failure("capacity_commit"));
+        }
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| grid_failure("capacity_sequence"))?;
+        self.client
+            .recheck()
+            .map_err(|_| grid_failure("capacity_original_peer"))
+    }
+    async fn source_next(&mut self) -> io::Result<bool> {
+        use tokio::io::AsyncBufReadExt;
+        // Quiet native source waits for data/actual EOF, never a renewing/idle timer.
+        if self
+            .reader
+            .fill_buf()
+            .await
+            .map_err(|error| grid_context("source_native_read", error))?
+            .is_empty()
+        {
+            return Ok(true);
+        }
+        self.deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        self.bytes = 0;
+        let Some(begin) =
+            grid_native_line(&mut self.reader, self.deadline, &mut self.bytes).await?
+        else {
+            return Ok(true);
+        };
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| grid_failure("source_native_revision"))?;
+        if begin["type"] != "grid_begin"
+            || begin["scope"] != self.scope
+            || begin["sequence"].as_u64() != Some(self.sequence)
+            || begin["frame"]["revision"].as_u64() != Some(revision)
+        {
+            return Err(grid_failure("source_native_begin"));
+        }
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| grid_failure("source_native_sequence"))?;
+        let parts = begin["frame"]["part_count"]
+            .as_u64()
+            .filter(|n| (1..=128).contains(n))
+            .ok_or_else(|| grid_failure("source_native_parts"))?;
+        for index in 0..parts {
+            let Some(part) =
+                grid_native_line(&mut self.reader, self.deadline, &mut self.bytes).await?
+            else {
+                return Ok(true);
+            };
+            if part["type"] != "grid_part"
+                || part["scope"] != self.scope
+                || part["sequence"].as_u64() != Some(self.sequence)
+                || part["revision"].as_u64() != Some(revision)
+                || part["index"].as_u64() != Some(index)
+            {
+                return Err(grid_failure("source_native_part"));
+            }
+            self.sequence = self
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| grid_failure("source_native_sequence"))?;
+        }
+        let Some(commit) =
+            grid_native_line(&mut self.reader, self.deadline, &mut self.bytes).await?
+        else {
+            return Ok(true);
+        };
+        if commit["type"] != "grid_commit"
+            || commit["scope"] != self.scope
+            || commit["sequence"].as_u64() != Some(self.sequence)
+            || commit["revision"].as_u64() != Some(revision)
+        {
+            return Err(grid_failure("source_native_commit"));
+        }
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| grid_failure("source_native_sequence"))?;
+        self.revision = revision;
+        Ok(false)
+    }
+    fn release(self) {
+        let Self { client, reader, .. } = self;
+        drop(reader); // duplicated I/O fd
+        drop(client); // original validated fd: only this final close can establish upstream EOF
+    }
+}
+async fn native_grid_capacity(
+    socket: &Path,
+    source: &ServerEvidence,
+    provider_scope: (Value, Value),
+    shell_scope: Value,
+    evidence: &Path,
+    run: &Uuid,
+) -> io::Result<()> {
+    let (pane_params, pane_scope) = provider_scope;
+    let shell_params = json!({"scope":shell_scope});
+    let shell_scope = json!({"kind":"shell","scope":shell_scope});
+    let first = NativeCapacityReader::open(
+        socket,
+        source,
+        "pane.grid_subscribe_bound",
+        pane_params.clone(),
+        pane_scope.clone(),
+    )
+    .await?
+    .ok_or_else(|| grid_failure("capacity_first_unavailable"))?;
+    let mut survivor = NativeCapacityReader::open(
+        socket,
+        source,
+        "shell.grid_subscribe_bound",
+        shell_params,
+        shell_scope,
+    )
+    .await?
+    .ok_or_else(|| grid_failure("capacity_second_unavailable"))?;
+    if let Some(unexpected) = NativeCapacityReader::open(
+        socket,
+        source,
+        "pane.grid_subscribe_bound",
+        pane_params.clone(),
+        pane_scope.clone(),
+    )
+    .await?
+    {
+        unexpected.release();
+        return Err(grid_failure("capacity_third_not_refused"));
+    }
+    first.release();
+    // ONE fresh admission, never capacity retry/eviction. A final-Drop scheduling race is blocked.
+    let mut fresh = NativeCapacityReader::open(
+        socket,
+        source,
+        "pane.grid_subscribe_bound",
+        pane_params,
+        pane_scope,
+    )
+    .await?
+    .ok_or_else(|| grid_failure("native_final_drop_not_observed"))?;
+    survivor.initial_commit().await?;
+    fresh.initial_commit().await?;
+    survivor.release();
+    fresh.release();
+    write_json(
+        &evidence.join(format!("grid-capacity-{}.json", run.0)),
+        &json!({
+            "phase":"native_capacity","sources":2,"thirdResourceLimit":true,"closedOriginalAndDuplicateFds":true,
+            "freshAdmission":true,"survivingReaderCommitted":true,"freshReaderCommitted":true,
+            "capacityRetry":false,"producerStopClaim":false
+        }),
+    )
+}
+fn grid_source<'a>(
+    inventory: &'a HostSnapshotResult,
+    native: &Snapshot,
+    root: &herdr::Pane,
+    expected: Option<(&Uuid, &Uuid)>,
+) -> io::Result<(&'a Server, &'a Uuid)> {
+    let [graph] = inventory.hierarchy.as_slice() else {
+        return Err(grid_failure("sole_owned_hierarchy"));
+    };
+    let mut associated = None;
+    for server in &inventory.servers {
+        if server.server_id == graph.server_id {
+            if associated.replace(server).is_some() {
+                return Err(grid_failure("duplicate_owned_server"));
+            }
+        } else if server.connectivity != ServerConnectivity::Unavailable {
+            return Err(grid_failure("additional_proved_server"));
+        }
+    }
+    let server = associated.ok_or_else(|| grid_failure("missing_owned_server"))?;
+    if server.connectivity != ServerConnectivity::Online
+        || graph.freshness != NativeFreshness::Current
+        || graph.reason.is_some()
+        || !graph.panes.iter().any(|p| {
+            p.pane_id == root.pane_id
+                && p.terminal_id == root.terminal_id
+                && p.workspace_id == root.workspace_id
+                && p.tab_id == root.tab_id
+        })
+        || native
+            .pane(&root.pane_id)
+            .map_err(|_| grid_failure("root_binding"))?
+            .read_identity
+            != root.read_identity
+        || expected.is_some_and(|(id, incarnation)| {
+            id != &server.server_id || incarnation != &graph.server_incarnation
+        })
+    {
+        return Err(grid_failure("original_owned_source"));
+    }
+    Ok((server, &graph.server_incarnation))
+}
+#[allow(clippy::too_many_arguments)]
+async fn grid_source_loss(
+    phone: &mut Phone,
+    socket: &Path,
+    source: &ServerEvidence,
+    desktop: &ProcessEvidence,
+    target: ShellTarget,
+    native_scope: Value,
+    server: &Uuid,
+    incarnation: &Uuid,
+    evidence: &Path,
+    run: &Uuid,
+    control: tokio::io::BufReader<McpStdin>,
+) -> io::Result<()> {
+    use futures_util::FutureExt;
+    let setup = async {
+        if herdr::process_evidence(desktop.pid)
+            .map_err(|error| grid_context("source_ready_original", error))?
+            != *desktop
+        {
+            return Err(grid_failure("source_ready_original"));
+        }
+        phone.grid_open(GridSubject::Shell(target.clone())).await?;
+        let mut native = NativeCapacityReader::open(
+            socket,
+            source,
+            "shell.grid_subscribe_bound",
+            json!({"scope":native_scope}),
+            json!({"kind":"shell","scope":native_scope}),
+        )
+        .await?
+        .ok_or_else(|| grid_failure("source_witness_resource_limit"))?;
+        native.initial_commit().await?;
+        Ok::<_,io::Error>(native)
+    }.await;
+    let native=match setup{Ok(native)=>native,Err(error)=>return grid_source_blocked(evidence,run,error).await};
+    let subscription=match phone.grid.as_ref().and_then(|g|g.subscription.clone()){
+        Some(subscription)=>subscription,None=>return grid_source_blocked(evidence,run,grid_failure("source_viewer_original")).await,
+    };
+    let ready=Uuid::random();
+    let mut loss=GridSourceLoss {run:run.clone(),ready:ready.clone(),trigger:None,native_eof:false,
+        iroh_closed:false,sync_required:false,deadline:None};
+    let pipe=match control.get_ref().0.get_ref().metadata(){
+        Ok(pipe)=>pipe,Err(error)=>return grid_source_blocked(evidence,run,grid_context("source_control_original",error)).await,
+    };
+    let record=json!({"gate":"grid","phase":"source_loss_ready","run":run,"ready":ready,
+        "serverId":server,"serverIncarnation":incarnation,"shellTarget":target,"subscription":subscription,
+        "nativeSource":source,"nativeProcess":desktop,"nativeScope":native_scope,
+        "control":"original_private_stdin_pipe","pipeDevice":pipe.dev(),"pipeInode":pipe.ino(),
+        "armRecordVersion":1,"mustWaitForArmedRecordBeforeExternalTrigger":true,
+        "cleanupAuthorized":false,"quietIdleTimeout":false,"sourceLossObserved":false});
+    if let Err(error) = write_json(
+        &evidence.join(format!("grid-source-loss-ready-{}.json", run.0)),
+        &record,
+    ) {
+        return grid_source_blocked(evidence, run, grid_context("source_ready_evidence", error))
+            .await;
+    }
+    let _ = writeln!(std::io::stdout(), "{record}");
+    let mut native_wait = Box::pin(grid_source_native(native).fuse());
+    let mut control_wait = Box::pin(grid_source_intent(control).fuse());
+    let mut held_native = None;
+    let mut held_control = None;
+    let mut fin_seen = false;
+    let mut pending_closed = false;
+    let mut pending_intent = None;
+    let original_subject = GridSubject::Shell(target.clone());
+    let Phone {
+        connection,
+        recv,
+        grid,
+        events,
+        generation,
+        ..
+    } = phone;
+    let closed = connection.closed().fuse();
+    tokio::pin!(closed);
+    let observation = tokio::time::sleep(Duration::from_secs(15));
+    tokio::pin!(observation);
+    let transaction = tokio::time::sleep(Duration::from_secs(15));
+    tokio::pin!(transaction);
+    loop {
+        // Preserve this exact read_frame future across native/control readiness. Cancelling
+        // and recreating it on another branch could consume a header then retry a suffix.
+        let received = {
+            // Actual FIN never starts another read_frame, nor polls its completed Fuse.
+            let read = if fin_seen {
+                futures_util::future::Either::Left(std::future::pending::<io::Result<Vec<u8>>>())
+            } else {
+                futures_util::future::Either::Right(transport::read_frame(recv, FRAME_MAX))
+            };
+            let frame = read.fuse();
+            tokio::pin!(frame);
+            loop {
+                if let Err(error) = grid_source_deadlines(&loss, grid) {
+                    return grid_source_blocked(evidence, run, error).await;
+                }
+                if pending_closed {
+                    match grid_source_handoff(
+                        frame.as_mut(),
+                        fin_seen,
+                        &loss,
+                        grid,
+                        &subscription,
+                        &original_subject,
+                    ) {
+                        Ok(GridSourceHandoff::Frame(result)) => break result,
+                        Ok(GridSourceHandoff::Pending { .. }) => {
+                            if let Err(error) = loss.downstream(false) {
+                                return grid_source_blocked(evidence, run, error).await;
+                            }
+                            pending_closed = false;
+                        }
+                        Err(error) => return grid_source_blocked(evidence, run, error).await,
+                    }
+                }
+                if pending_intent.is_some() {
+                    match grid_source_handoff(
+                        frame.as_mut(),
+                        fin_seen,
+                        &loss,
+                        grid,
+                        &subscription,
+                        &original_subject,
+                    ) {
+                        Ok(GridSourceHandoff::Frame(result)) => break result,
+                        Ok(GridSourceHandoff::Pending { .. }) => {
+                            let Some(intent) = pending_intent.take() else {
+                                return grid_source_blocked(
+                                    evidence,
+                                    run,
+                                    grid_failure("source_intent_missing"),
+                                )
+                                .await;
+                            };
+                            if let Err(error) = loss.arm(intent) {
+                                return grid_source_blocked(evidence, run, error).await;
+                            }
+                            let record = json!({"gate":"grid","phase":"source_loss_armed","run":run,"ready":loss.ready,
+                                "trigger":loss.trigger,"sourceLossObserved":false,"cleanupAuthorized":false});
+                            if let Err(error) = write_json(
+                                &evidence.join(format!("grid-source-loss-armed-{}.json", run.0)),
+                                &record,
+                            ) {
+                                return grid_source_blocked(
+                                    evidence,
+                                    run,
+                                    grid_context("source_arm_evidence", error),
+                                )
+                                .await;
+                            }
+                        }
+                        Err(error) => return grid_source_blocked(evidence, run, error).await,
+                    }
+                }
+                if loss.complete() {
+                    match grid_source_handoff(
+                        frame.as_mut(),
+                        fin_seen,
+                        &loss,
+                        grid,
+                        &subscription,
+                        &original_subject,
+                    ) {
+                        Ok(GridSourceHandoff::Frame(result)) => break result,
+                        Ok(GridSourceHandoff::Pending { settled: true }) => {
+                            // No await between final Pending/FIN+scope+deadline rejoin and decision.
+                            let record = json!({"gate":"grid","phase":"source_loss_observed","run":run,"ready":loss.ready,
+                                "trigger":loss.trigger,"subscription":subscription,"nativeOriginalFdEof":true,
+                                "downstreamIrohClosed":loss.iroh_closed,"orderedSyncRequired":loss.sync_required,
+                                "observationBudgetSeconds":15,"cleanupAuthorized":false,"fullAcceptance":false});
+                            if let Err(error) = write_json(
+                                &evidence.join(format!("grid-source-loss-result-{}.json", run.0)),
+                                &record,
+                            ) {
+                                return grid_source_blocked(
+                                    evidence,
+                                    run,
+                                    grid_context("source_result_evidence", error),
+                                )
+                                .await;
+                            }
+                            drop(held_native);
+                            drop(held_control);
+                            return Ok(());
+                        }
+                        Ok(GridSourceHandoff::Pending { settled: false }) => {}
+                        Err(error) => return grid_source_blocked(evidence, run, error).await,
+                    }
+                }
+                let observe_active = loss.native_eof;
+                let transaction_active = grid.as_ref().is_some_and(|g| g.deadline.is_some());
+                let read_active = !fin_seen;
+                let wake = grid_source_wake(
+                    native_wait.as_mut(),
+                    closed.as_mut(),
+                    async {
+                        if observe_active {
+                            observation.as_mut().await
+                        } else {
+                            std::future::pending::<()>().await
+                        }
+                    },
+                    async {
+                        if transaction_active {
+                            transaction.as_mut().await
+                        } else {
+                            std::future::pending::<()>().await
+                        }
+                    },
+                    async {
+                        if read_active {
+                            frame.as_mut().await
+                        } else {
+                            std::future::pending::<io::Result<Vec<u8>>>().await
+                        }
+                    },
+                    control_wait.as_mut(),
+                )
+                .await;
+                match wake {
+                    GridSourceWake::Native((native,result))=>match result {
+                        Ok(true)=>{
+                            held_native=Some(native);
+                            if let Err(error)=loss.upstream_eof(){return grid_source_blocked(evidence,run,error).await;}
+                            if let Some(deadline)=loss.deadline{observation.as_mut().reset(deadline);}
+                            else{return grid_source_blocked(evidence,run,grid_failure("source_observation_cutoff")).await;}
+                        }
+                        Ok(false)=>native_wait=Box::pin(grid_source_native(native).fuse()),
+                        Err(error)=>{
+                            let result=grid_source_blocked(evidence,run,error).await;
+                            drop(native);
+                            return result;
+                        }
+                    },
+                    GridSourceWake::Closed => pending_closed = true,
+                    GridSourceWake::ObservationDeadline => {
+                        return grid_source_blocked(
+                            evidence,
+                            run,
+                            grid_failure("source_downstream_deadline"),
+                        )
+                        .await;
+                    }
+                    GridSourceWake::TransactionDeadline => {
+                        return grid_source_blocked(
+                            evidence,
+                            run,
+                            grid_failure("source_grid_transaction_deadline"),
+                        )
+                        .await;
+                    }
+                    GridSourceWake::Frame(result) => break result,
+                    GridSourceWake::Control((input, result)) => {
+                        held_control = Some(input);
+                        let intent = match result {
+                            Ok(intent) => intent,
+                            Err(error) => return grid_source_blocked(evidence, run, error).await,
+                        };
+                        pending_intent = Some(intent);
+                    }
+                }
+            }
+        };
+        let bytes = match received {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                // read_frame's OUTER kind is InvalidData. Only its closed FrameFailure
+                // metadata distinguishes actual FIN; FIN is not Iroh connection closure.
+                if let Err(error) = grid_source_fin(loss.trigger.is_some(), error) {
+                    return grid_source_blocked(evidence, run, error).await;
+                }
+                fin_seen = true;
+                continue;
+            }
+        };
+        let event=match decode_payload(&bytes,None).map_err(|_|grid_failure("source_phone_codec")){
+            Ok(Envelope::Event(event))=>event,
+            Ok(_)=>return grid_source_blocked(evidence,run,grid_failure("source_phone_correlation")).await,
+            Err(error)=>return grid_source_blocked(evidence,run,error).await,
+        };
+        if event.subscription==subscription&&matches!(&event.body,EventBody::SyncRequired(_)){
+            let Some(witness)=grid.as_mut()else{return grid_source_blocked(evidence,run,grid_failure("source_viewer_missing")).await;};
+            if witness.retired||event.seq.0!=witness.next_seq{return grid_source_blocked(evidence,run,grid_failure("source_sync_order")).await;}
+            witness.retired=true;witness.deadline=None;
+            if let Err(error)=loss.downstream(true){return grid_source_blocked(evidence,run,error).await;}
+        }else if let Err(error)=Phone::route_event(grid,events,generation,event,bytes.len()){
+            return grid_source_blocked(evidence,run,error).await;
+        }
+        if let Some(deadline)=grid.as_ref().and_then(|g|g.deadline){transaction.as_mut().reset(tokio::time::Instant::from_std(deadline));}
+    }
+}
+#[allow(clippy::too_many_arguments)]
+async fn grid_flow(
+    phone: &mut Phone,
+    config: &Config,
+    socket: &Path,
+    desktop: &ProcessEvidence,
+    serve: &mut Companion,
+    evidence: &Path,
+    run: &Uuid,
+    selected: &[Provider],
+    hold: &mut GridHold,
+) -> io::Result<bool> {
+    if config.herdr_sockets.len() != 1 || config.herdr_sockets[0] != socket {
+        return Err(grid_failure("sole_configured_socket"));
+    }
+    let (source, initial) = surface(socket)
+        .await
+        .map_err(|_| grid_failure("native_source"))?;
+    if source.pid != desktop.pid
+        || source.pid_start_ticks != desktop.start_ticks
+        || source.linux_boot_id != desktop.linux_boot_id
+    {
+        return Err(grid_failure("native_peer"));
+    }
+    dev_continuity::zero_native_caps(desktop).map_err(|_| grid_failure("native_capabilities"))?;
+    let [root] = initial.panes.as_slice() else {
+        return Err(grid_failure("fresh_root_pane"));
+    };
+    let native_shell = root
+        .shell
+        .as_ref()
+        .ok_or_else(|| grid_failure("root_shell_grant"))?;
+    if root.agent.is_some()
+        || root.agent_session.is_some()
+        || !initial.agents.is_empty()
+        || !initial.pane_grid_subscribe_bound
+        || !initial.shell_grid_subscribe_bound
+        || !initial.shell_read_bound
+        || !native_shell.read
+        || !native_shell.create
+        || !native_shell.input
+        || native_shell.close
+        || root.read_identity.as_ref() != Some(&native_shell.scope.read_identity)
+        || native_shell.scope.pane_id != root.pane_id
+        || native_shell.scope.terminal_id != root.terminal_id
+        || native_shell.scope.workspace_id != root.workspace_id
+        || native_shell.scope.tab_id != root.tab_id
+    {
+        return Err(grid_failure("root_shell_grant"));
+    }
+    let admission = Instant::now() + Duration::from_secs(30);
+    let (server, incarnation) = loop {
+        let inventory = phone
+            .host()
+            .await
+            .map_err(|_| grid_failure("source_inventory"))?;
+        if let Ok((server, incarnation)) = grid_source(&inventory, &initial, &root, None) {
+            if selected.iter().all(|p| match p {
+                Provider::Omp => server.can_create.omp,
+                Provider::Codex => server.can_create.codex,
+            }) {
+                break (server.server_id.clone(), incarnation.clone());
+            }
+        }
+        if Instant::now() >= admission {
+            return Err(grid_failure("selected_provider_unavailable"));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let inputs = NativeInputs {
+        enabled: true,
+        paging_proof: false,
+        config,
+        socket,
+        herdr: desktop,
+        evidence,
+        run,
+        mcp: None,
+        plan: RefCell::new(None),
+        mcp_dialogs: RefCell::new(HashMap::new()),
+    };
+    let mut capacity_scope = None;
+    for provider in selected.iter().copied() {
+        serve
+            .recheck()
+            .map_err(|_| grid_failure("original_companion"))?;
+        let (proof, created) = create(phone, config, socket, provider, &server, evidence, run)
+            .await
+            .map_err(|error| grid_context("provider_create", error))?;
+        let (current, fresh) = inputs
+            .current_checked(
+                phone,
+                &proof,
+                Instant::now() + Duration::from_secs(30),
+                &Cell::new("grid_guard"),
+            )
+            .await
+            .map_err(|error| grid_context("original_ready", error))?;
+        if !proof.same_input_binding(&fresh) {
+            return Err(grid_failure("original_binding"));
+        }
+        let pane = current
+            .pane(&proof.pane)
+            .map_err(|_| grid_failure("provider_pane"))?;
+        let read_pin = pane
+            .read_identity
+            .clone()
+            .ok_or_else(|| grid_failure("provider_read_pin"))?;
+        if capacity_scope.is_none() {
+            capacity_scope = Some((
+                json!({"pane_id":pane.pane_id,"expected_terminal_id":pane.terminal_id,"expected_read_identity":read_pin}),
+                json!({"kind":"pane","pane_id":pane.pane_id,"terminal_id":pane.terminal_id,
+                    "workspace_id":pane.workspace_id,"tab_id":pane.tab_id,"read_identity":read_pin}),
+            ));
+        }
+        for process in std::iter::once(&proof.owner)
+            .chain(proof.tui.iter())
+            .chain(proof.relay.iter())
+        {
+            use std::os::fd::FromRawFd;
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, process.pid, 0) } as i32;
+            if fd < 0 {
+                return Err(grid_failure("provider_pidfd"));
+            }
+            hold.originals
+                .push(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+            if herdr::process_evidence(process.pid).map_err(|_| grid_failure("provider_process"))?
+                != *process
+            {
+                return Err(grid_failure("provider_process"));
+            }
+        }
+        write_json(
+            &evidence.join(format!("grid-provider-{}-{provider:?}.json", run.0)),
+            &json!({
+                "phase":"original_ready","provider":provider,"creationAction":created.action_id,"target":proof.target,
+                "nativeId":proof.native,"paneId":proof.pane,"terminalId":proof.terminal,"workspaceId":proof.workspace,
+                "nativeSource":source,"readPin":read_pin,"owner":proof.owner,"tui":proof.tui,"relay":proof.relay,
+                "serverId":server,"serverIncarnation":incarnation
+            }),
+        )?;
+        phone
+            .grid_open(GridSubject::Pane(proof.target.clone()))
+            .await?;
+        inputs
+            .current_checked(
+                phone,
+                &proof,
+                Instant::now() + Duration::from_secs(30),
+                &Cell::new("grid_guard"),
+            )
+            .await
+            .map_err(|error| grid_context("original_ready_before_input", error))?;
+        let token = hex(&random32()?[..16]);
+        phone
+            .grid
+            .as_mut()
+            .ok_or_else(|| grid_failure("viewer_missing"))?
+            .arm(&token)?;
+        let action = Uuid::random();
+        let boot = phone.hello.boot_id.clone();
+        write_json(
+            &evidence.join(format!("grid-action-{}.json", action.0)),
+            &json!({
+                "run":run,"action":action,"boot":boot,"method":"prompt.submit","target":proof.target,
+                "uncertainOutcomePolicy":"original_receipt_status_only_no_failed_reader_reuse","replayAuthorized":false
+            }),
+        )?;
+        let receipt = phone
+            .grid_action(
+                action.clone(),
+                RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: boot.clone(),
+                delivery: None, native_turn_id: None, images: None,
+                target: proof.target.clone(),
+                text: PromptText(format!("Reply only with {token}; no tools.")), }),
+                false,
+            )
+            .await?;
+        let receipt = receipt.ok_or_else(|| grid_failure("provider_transport_closed"))?;
+        grid_receipt(
+            &receipt,
+            &action,
+            &boot,
+            &GridSubject::Pane(proof.target.clone()),
+        )?;
+        // Same framed stream: private grid traffic is routed while this ordinary RPC correlates.
+        let inventory = phone
+            .host()
+            .await
+            .map_err(|_| grid_failure("interleaved_rpc"))?;
+        let (now_source, now) = surface(socket)
+            .await
+            .map_err(|_| grid_failure("native_rejoin"))?;
+        if now_source != source {
+            return Err(grid_failure("native_rejoin"));
+        }
+        grid_source(&inventory, &now, &root, Some((&server, &incarnation)))?;
+        phone.grid_wait(GridGoal::Token).await?;
+        write_json(
+            &evidence.join(format!("grid-provider-result-{}-{provider:?}.json", run.0)),
+            &json!({
+                "phase":"committed_dirty","provider":provider,"action":action,"quietInitialCommitted":true,
+                "laterTokenCommitted":true,"ordinaryRpcCorrelated":true,"providerCompletionClaim":false
+            }),
+        )?;
+        phone.grid_unsubscribe().await?;
+    }
+    let (same_source, now) = surface(socket)
+        .await
+        .map_err(|_| grid_failure("shell_source"))?;
+    if same_source != source
+        || now
+            .pane(&root.pane_id)
+            .map_err(|_| grid_failure("root_binding"))?
+            .shell
+            != root.shell
+    {
+        return Err(grid_failure("root_binding"));
+    }
+    let inventory = phone
+        .host()
+        .await
+        .map_err(|_| grid_failure("shell_inventory"))?;
+    grid_source(&inventory, &now, &root, Some((&server, &incarnation)))?;
+    let mut shells = inventory.shells.iter().filter(|s| {
+        s.server_id == server
+            && s.pane_id == root.pane_id
+            && s.terminal_id == root.terminal_id
+            && s.workspace_id == root.workspace_id
+            && s.tab_id == root.tab_id
+    });
+    let shell = shells
+        .next()
+        .ok_or_else(|| grid_failure("exact_root_shell"))?;
+    if shells.next().is_some() {
+        return Err(grid_failure("exact_root_shell"));
+    }
+    if shell.connectivity != SessionConnectivity::Ready
+        || !shell.capabilities.read
+        || !shell.capabilities.grid
+        || !shell.capabilities.input
+        || shell.capabilities.close
+    {
+        return Err(grid_failure("shell_authority"));
+    }
+    let shell_target = shell.target.clone();
+    phone
+        .grid_open(GridSubject::Shell(shell_target.clone()))
+        .await?;
+    let (current_source, current_native) = surface(socket)
+        .await
+        .map_err(|error| grid_context("shell_input_rejoin", error))?;
+    let current_inventory = phone
+        .host()
+        .await
+        .map_err(|error| grid_context("shell_input_inventory", error))?;
+    grid_source(
+        &current_inventory,
+        &current_native,
+        &root,
+        Some((&server, &incarnation)),
+    )?;
+    if current_source != source
+        || current_native
+            .pane(&root.pane_id)
+            .map_err(|error| grid_context("shell_input_root", error))?
+            .shell
+            != root.shell
+        || herdr::process_evidence(desktop.pid)
+            .map_err(|error| grid_context("shell_input_process", error))?
+            != *desktop
+        || !current_inventory.shells.iter().any(|s| {
+            s.target == shell_target
+                && s.server_id == server
+                && s.pane_id == root.pane_id
+                && s.terminal_id == root.terminal_id
+                && s.workspace_id == root.workspace_id
+                && s.tab_id == root.tab_id
+                && s.connectivity == SessionConnectivity::Ready
+                && s.capabilities.read
+                && s.capabilities.grid
+                && s.capabilities.input
+                && !s.capabilities.close
+        })
+    {
+        return Err(grid_failure("shell_input_original_authority"));
+    }
+    let token = hex(&random32()?[..16]);
+    phone
+        .grid
+        .as_mut()
+        .ok_or_else(|| grid_failure("viewer_missing"))?
+        .arm(&token)?;
+    let action = Uuid::random();
+    let boot = phone.hello.boot_id.clone();
+    let subscription=phone.grid.as_ref().and_then(|grid|grid.subscription.clone()).ok_or_else(||grid_failure("shell_input_original_subscription"))?;
+    write_json(
+        &evidence.join(format!("grid-action-{}.json", action.0)),
+        &json!({
+            "run":run,"action":action,"boot":boot,"method":"shell.input","shellTarget":shell_target,
+            "uncertainOutcomePolicy":"original_receipt_status_only_no_failed_reader_reuse","replayAuthorized":false
+        }),
+    )?;
+    let receipt = phone
+        .grid_action(
+            action.clone(),
+            RequestBody::ShellInput(ShellInputParams {
+                boot_id: boot.clone(),
+                target: shell_target.clone(),
+                subscription,
+                input: ShellInput::Text { text: token },
+            }),
+            true,
+        )
+        .await?;
+    let Some(receipt) = receipt else {
+        write_json(
+            &evidence.join(format!("grid-shell-result-{}.json", run.0)),
+            &json!({
+                "phase":"slow_consumer","target":shell_target,"action":action,"quietInitialCommitted":true,
+                "slowConsumerPauseSeconds":6,"slowConsumerOutcome":"closed_transport",
+                "laterTokenCommitted":false,"shellDirtyGate":"blocked","fullAcceptance":false
+            }),
+        )?;
+        return Ok(false);
+    };
+    grid_receipt(
+        &receipt,
+        &action,
+        &boot,
+        &GridSubject::Shell(shell_target.clone()),
+    )?;
+    phone.grid_wait(GridGoal::Token).await?;
+    phone.grid_unsubscribe().await?;
+    write_json(
+        &evidence.join(format!("grid-shell-result-{}.json", run.0)),
+        &json!({
+            "phase":"committed_dirty","target":shell_target,"action":action,"rootPaneId":root.pane_id,
+            "quietInitialCommitted":true,"laterTokenCommitted":true,"inputReceiptAccepted":true,
+            "slowConsumerPauseSeconds":6,"slowConsumerOutcome":"valid_bounded_progress","postUnsubscribeRpc":true,
+            "serverId":server,"serverIncarnation":incarnation,"nativeSource":source,"nativeScope":native_shell.scope
+        }),
+    )?;
+    let shell_scope = serde_json::to_value(&native_shell.scope)
+        .map_err(|_| grid_failure("capacity_shell_scope"))?;
+    native_grid_capacity(
+        socket,
+        &source,
+        capacity_scope.ok_or_else(|| grid_failure("capacity_provider"))?,
+        shell_scope,
+        evidence,
+        run,
+    )
+    .await?;
+    let control = hold
+        .source_control
+        .take()
+        .ok_or_else(|| grid_failure("source_control_missing"))?;
+    let scope =
+        serde_json::to_value(&native_shell.scope).map_err(|_| grid_failure("source_scope"))?;
+    grid_source_loss(
+        phone,
+        socket,
+        &source,
+        desktop,
+        shell_target,
+        scope,
+        &server,
+        &incarnation,
+        evidence,
+        run,
+        control,
+    )
+    .await?;
+    hold.source_loss_observed = true;
+    write_json(
+        &evidence.join(format!("grid-scope-{}.json", run.0)),
+        &json!({
+            "gate":"grid","selectedProvidersCompleted":selected.len(),"separateShellCompleted":true,"nativeCapacityCompleted":true,
+            "nativeSourceEofGate":"observed_original_native_fd_and_downstream","quantitativeMemoryProof":false,
+            "phoneUiQualification":false,"scaleQualification":false,"fullAcceptance":false
+        }),
+    )?;
+    Ok(true)
+}
+fn admission_reason(provider: Provider, backends: &[Backend], server: Option<&Server>, hierarchy: &[NativeHierarchy]) -> &'static str {
+    if backends.iter().filter(|backend| backend.provider == provider).count() != 1 {
+        return "backend_missing_or_ambiguous";
+    }
+    if backends.iter().any(|backend| backend.provider == provider
+        && backend.availability == Availability::Unavailable) {
+        return "backend_unavailable";
+    }
+    let Some(server) = server else { return "source_missing_or_ambiguous" };
+    if server.connectivity != ServerConnectivity::Online { return "source_not_online" }
+    if hierarchy.iter().filter(|source| source.server_id == server.server_id
+        && source.freshness == NativeFreshness::Current).count() != 1 {
+        return "source_not_current";
+    }
+    if match provider { Provider::Omp => server.can_create.omp, Provider::Codex => server.can_create.codex } {
+        "eligible"
+    } else {
+        "creation_unavailable"
+    }
+}
+struct AdmittedSource {
+    identity: (Uuid,Uuid),
+    client: Client,
+    process: ProcessEvidence,
+    native: Snapshot,
+}
+impl AdmittedSource {
+    fn recheck(&self) -> io::Result<()> {
+        self.client.recheck()?;
+        if herdr::process_evidence(self.process.pid)?!=self.process {
+            return Err(prerequisite("original admitted Herdr process/namespace changed"));
+        }
+        Ok(())
+    }
+    fn observation(&self,actual: &ServerEvidence,native: &Snapshot,inventory: &HostSnapshotResult) -> io::Result<bool> {
+        self.recheck()?;
+        creation_source_observation(&self.identity,&self.client.evidence,&self.native,actual,native,inventory)
+            .map_err(prerequisite)
+    }
+}
+fn creation_source_observation(
+    identity: &(Uuid,Uuid),original: &ServerEvidence,initial: &Snapshot,
+    actual: &ServerEvidence,native: &Snapshot,inventory: &HostSnapshotResult,
+) -> Result<bool,&'static str> {
+    if actual!=original {return Err("original creation socket/process source changed");}
+    if !initial.workspaces.iter().all(|row|native.workspaces.iter().any(|current|current.workspace_id==row.workspace_id))
+        || !initial.tabs.iter().all(|row|native.tabs.iter().any(|current|current.tab_id==row.tab_id&&current.workspace_id==row.workspace_id))
+        || !initial.panes.iter().all(|row|native.panes.iter().any(|current|current.pane_id==row.pane_id
+            &&current.terminal_id==row.terminal_id&&current.workspace_id==row.workspace_id&&current.tab_id==row.tab_id)) {
+        return Err("original creation snapshot binding changed");
+    }
+    let mut servers=inventory.servers.iter().filter(|server|server.server_id==identity.0);
+    let Some(server)=servers.next() else {return Ok(false)};
+    if servers.next().is_some() {return Err("original creation server is ambiguous");}
+    match admission_source(inventory,&server.name.0,native,Some(identity)) {
+        Ok(_)=>Ok(true),
+        Err("source_replaced")=>Err("original creation server incarnation changed"),
+        Err(_)=>Ok(false),
+    }
+}
+struct AdmissionSource<'a> {
+    socket: &'a Path,
+    desktop: &'a mut Desktop,
+    original: &'a ServerEvidence,
+    native: Snapshot,
+}
+impl AdmissionSource<'_> {
+    async fn connect(&mut self) -> io::Result<Client> {
+        self.desktop.recheck()?;
+        let client = Client::connect(self.socket).await?;
+        if client.evidence != *self.original {
+            return Err(prerequisite("original admission socket/process source changed"));
+        }
+        self.recheck(&client)?;
+        Ok(client)
+    }
+    fn recheck(&mut self, client: &Client) -> io::Result<()> {
+        client.recheck()?;
+        self.desktop.recheck()
+    }
+}
+fn admission_source<'a>(
+    inventory: &'a HostSnapshotResult,
+    name: &str,
+    native: &Snapshot,
+    pinned: Option<&(Uuid, Uuid)>,
+) -> Result<(&'a Server, &'a Uuid), &'static str> {
+    let mut servers = inventory.servers.iter().filter(|server| server.name.0 == name);
+    let server = servers.next().ok_or("source_missing_or_ambiguous")?;
+    if servers.next().is_some()
+        || inventory.servers.iter().filter(|candidate|candidate.server_id==server.server_id).count()!=1 {
+        return Err("source_missing_or_ambiguous");
+    }
+    let mut graphs = inventory.hierarchy.iter().filter(|graph|graph.server_id==server.server_id);
+    let graph = graphs.next().ok_or("source_not_current")?;
+    if graphs.next().is_some() { return Err("source_not_current"); }
+    if pinned.is_some_and(|(id, incarnation)| *id!=server.server_id || *incarnation!=graph.server_incarnation) {
+        return Err("source_replaced");
+    }
+    if graph.freshness!=NativeFreshness::Current || graph.reason.is_some()
+        || graph.workspaces.len()!=native.workspaces.len()
+        || graph.tabs.len()!=native.tabs.len() || graph.panes.len()!=native.panes.len()
+        || !native.workspaces.iter().all(|row|graph.workspaces.iter().any(|shown|shown.workspace_id==row.workspace_id))
+        || !native.tabs.iter().all(|row|graph.tabs.iter().any(|shown|shown.tab_id==row.tab_id&&shown.workspace_id==row.workspace_id))
+        || !native.panes.iter().all(|row|graph.panes.iter().any(|shown|shown.pane_id==row.pane_id
+            &&shown.terminal_id==row.terminal_id&&shown.tab_id==row.tab_id&&shown.workspace_id==row.workspace_id)) {
+        return Err("source_not_current");
+    }
+    Ok((server,&graph.server_incarnation))
+}
+async fn creation_admission(phone: &mut Phone, selected: &[Provider], name: &str, evidence: &Path, run: &Uuid, mut owned: AdmissionSource<'_>) -> io::Result<Option<AdmittedSource>> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut pinned = None;
+    loop {
+        let original = owned.connect().await?;
+        let inventory = phone.host().await?;
+        owned.recheck(&original)?;
+        let (server, source_reason) = match admission_source(&inventory,name,&owned.native,pinned.as_ref()) {
+            Ok((server, incarnation)) => {
+                if pinned.is_none() {
+                    let manifest=evidence.join(format!("admission-binding-{}.json",run.0));
+                    write_json(&manifest,&json!({"runId":run,"serverId":server.server_id,
+                        "serverIncarnation":incarnation,"originalSource":owned.original,
+                        "originalProcess":owned.desktop.process,"socket":owned.socket,
+                        "scope":"first coherent inventory joined across original kernel process/socket proof; never retargeted"}))?;
+                    println!("{}",json!({"gate":"admission-binding","manifest":manifest}));
+                    pinned=Some((server.server_id.clone(),incarnation.clone()));
+                }
+                (Some(server),None)
+            }
+            Err(reason) => (None,Some(reason)),
+        };
+        let results = selected.iter().map(|provider| {
+            let reason = source_reason.unwrap_or_else(||admission_reason(*provider, &phone.hello.backends, server, &inventory.hierarchy));
+            json!({"gate":"admission-only","runId":run,"provider":provider,
+                "status":if reason=="eligible" {"eligible"} else {"unavailable"},"reason":reason,
+                "serverId":pinned.as_ref().map(|(id,_)|id),
+                "serverIncarnation":pinned.as_ref().map(|(_,incarnation)|incarnation),
+                "scope":"Hello/current source/creation eligibility only; no provider created or input sent"})
+        }).collect::<Vec<_>>();
+        let eligible = results.iter().all(|result|result["status"]=="eligible");
+        if eligible || source_reason==Some("source_replaced") || Instant::now() >= deadline {
+            write_json(&evidence.join(format!("admission-{}.json",run.0)), &json!({"runId":run,"results":results}))?;
+            for result in results { println!("{result}"); }
+            return Ok(if eligible {
+                pinned.map(|identity|AdmittedSource{identity,client:original,process:owned.desktop.process.clone(),native:owned.native})
+            } else {None});
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+fn terminal_native_pane<'a>(native:&'a Snapshot,route:&ShellSummary)->io::Result<&'a herdr::Pane> {
+    let pane=native.pane(&route.pane_id)?;
+    if pane.terminal_id!=route.terminal_id||pane.workspace_id!=route.workspace_id||pane.tab_id!=route.tab_id
+        ||pane.agent.is_some()||pane.display_agent.is_some()||pane.agent_session.is_some()||pane.restore_error.is_some()
+        ||native.agents.iter().any(|agent|agent.pane_id==pane.pane_id||agent.terminal_id==pane.terminal_id)
+        ||native.agents.iter().any(|agent|agent.launch_pending)||native.panes.iter().any(|pane|pane.restore_error.is_some())
+    {return Err(prerequisite("terminal-only original non-agent route or full unsafe-state screen changed"));}
+    Ok(pane)
+}
+fn terminal_select(inventory:&HostSnapshotResult,native:&Snapshot,name:&str,pinned:Option<&(Uuid,Uuid)>)->io::Result<Option<(ShellSummary,Uuid)>> {
+    let (server,incarnation)=match admission_source(inventory,name,native,pinned){
+        Ok(found)=>found,Err("source_replaced")=>return Err(prerequisite("terminal-only original server incarnation changed")),
+        Err(_)=>return Ok(None),
+    };
+    if server.connectivity!=ServerConnectivity::Online{return Ok(None);}
+    if native.workspaces.len()!=1||native.tabs.len()!=1||native.panes.len()!=1||!native.agents.is_empty(){
+        return Err(prerequisite("terminal-only fresh startup must contain exactly one ordinary original root"));
+    }
+    let pane=&native.panes[0];
+    let mut rows=inventory.shells.iter().filter(|shell|shell.server_id==server.server_id
+        &&shell.pane_id==pane.pane_id&&shell.terminal_id==pane.terminal_id
+        &&shell.workspace_id==pane.workspace_id&&shell.tab_id==pane.tab_id);
+    let Some(shell)=rows.next() else{return Ok(None)};
+    if rows.next().is_some(){return Err(prerequisite("terminal-only shell route is ambiguous"));}
+    terminal_native_pane(native,shell)?;
+    let graph=inventory.hierarchy.iter().find(|graph|graph.server_id==server.server_id).ok_or_else(||prerequisite("terminal-only current hierarchy absent"))?;
+    if !graph.panes.iter().any(|shown|shown.pane_id==pane.pane_id&&shown.shell_target.as_ref()==Some(&shell.target)
+        &&shown.target.is_none()&&shown.unbound_row_id.is_none())
+        ||shell.connectivity!=SessionConnectivity::Ready||!shell.capabilities.read||!shell.capabilities.grid
+    {return Ok(None);}
+    Ok(Some((shell.clone(),incarnation.clone())))
+}
+async fn terminal_current(phone:&mut Phone,source:&AdmittedSource,socket:&Path,desktop:&mut Desktop,route:&ShellSummary)->io::Result<Snapshot> {
+    desktop.recheck()?;source.recheck()?;
+    let (actual,native)=surface(socket).await?;
+    let inventory=phone.host().await?;
+    if !source.observation(&actual,&native,&inventory)?{return Err(prerequisite("terminal-only original current source unavailable"));}
+    let selected=terminal_select(&inventory,&native,&inventory.servers.iter().find(|server|server.server_id==source.identity.0).ok_or_else(||prerequisite("terminal-only original server disappeared"))?.name.0,Some(&source.identity))?
+        .ok_or_else(||prerequisite("terminal-only original logical viewer authority unavailable"))?.0;
+    if selected.target!=route.target{return Err(prerequisite("terminal-only original shell generation changed"));}
+    terminal_native_pane(&native,route)?;desktop.recheck()?;source.recheck()?;Ok(native)
+}
+fn terminal_idle_pid(info:&herdr::PaneProcessInfo)->Option<u32> {
+    let pid=info.shell_pid?;
+    (info.foreground_process_group_id==Some(pid)&&!info.foreground_processes.is_empty()
+        &&info.foreground_processes.iter().all(|process|process.pid==pid)).then_some(pid)
+}
+struct TerminalShellProcess {process:ProcessEvidence,reported_pid:u32,executable:File,path:PathBuf,cwd:(u64,u64)}
+impl TerminalShellProcess {
+    fn capture(reporter:&ProcessEvidence,info:&herdr::PaneProcessInfo,project:&Path)->io::Result<Option<Self>> {
+        let Some(pid)=terminal_idle_pid(info) else{return Ok(None)};
+        let process=herdr::reported_process(reporter,pid)?;
+        dev_continuity::zero_native_caps(&process)?;
+        let proc_path=PathBuf::from(format!("/proc/{}/exe",process.pid));
+        let path=fs::read_link(&proc_path)?;
+        if !path.starts_with("/nix/store")||!matches!(path.file_name().and_then(|value|value.to_str()),Some("bash"|"zsh")){
+            return Err(prerequisite("terminal-only fixture requires a proved installed bash/zsh ELF"));
+        }
+        let mut executable=File::open(&proc_path)?;let mut magic=[0;4];executable.read_exact(&mut magic)?;
+        if magic!=[0x7f,b'E',b'L',b'F']{return Err(prerequisite("terminal-only shell executable is not an ELF"));}
+        let held=executable.metadata()?;let selected=fs::metadata(&path)?;
+        if !held.is_file()||(held.dev(),held.ino())!=(selected.dev(),selected.ino()){
+            return Err(prerequisite("terminal-only selected shell executable object unavailable"));
+        }
+        let approved=fs::metadata(project)?;let cwd=fs::metadata(format!("/proc/{}/cwd",process.pid))?;
+        if !approved.is_dir()||(cwd.dev(),cwd.ino())!=(approved.dev(),approved.ino()){
+            return Err(prerequisite("terminal-only fresh shell actual cwd differs from owned project"));
+        }
+        let proof=Self{process,reported_pid:pid,executable,path,cwd:(cwd.dev(),cwd.ino())};proof.recheck()?;
+        if herdr::process_evidence(reporter.pid)?!=*reporter{return Err(prerequisite("terminal-only original reporting process changed"));}
+        Ok(Some(proof))
+    }
+    fn recheck_idle(&self,reporter:&ProcessEvidence,info:&herdr::PaneProcessInfo,pane:&Id)->io::Result<()> {
+        if &info.pane_id!=pane||terminal_idle_pid(info)!=Some(self.reported_pid)
+            ||herdr::reported_process(reporter,self.reported_pid)?!=self.process
+        {return Err(prerequisite("terminal-only original shell foreground/membership changed before input"));}
+        self.recheck()?;
+        if herdr::process_evidence(reporter.pid)?!=*reporter{return Err(prerequisite("terminal-only original idle reporter changed"));}
+        Ok(())
+    }
+    fn recheck(&self)->io::Result<()> {
+        if herdr::process_evidence(self.process.pid)?!=self.process{return Err(prerequisite("terminal-only original shell process changed"));}
+        let current=fs::metadata(format!("/proc/{}/exe",self.process.pid))?;let held=self.executable.metadata()?;
+        let cwd=fs::metadata(format!("/proc/{}/cwd",self.process.pid))?;
+        if (current.dev(),current.ino())!=(held.dev(),held.ino())||(cwd.dev(),cwd.ino())!=self.cwd{
+            return Err(prerequisite("terminal-only shell executable/cwd object changed"));
+        }
+        dev_continuity::zero_native_caps(&self.process)
+    }
+}
+fn terminal_fixture_command()->String {
+    fn octal(value:&str)->String {use std::fmt::Write;let mut encoded=String::with_capacity(value.len()*4);for byte in value.bytes(){write!(&mut encoded,"\\{byte:03o}").expect("String write");}encoded}
+    // Public fixture text is encoded even in the command, so echoed input cannot prove output.
+    let first="\u{1b}[2J\u{1b}[HGOATRSTOCKBEGIN\nGOATRUC: 界|ｶﾞ|👩‍💻|❤️|🇺🇸\nGOATRCOLOR: \u{1b}[31mR\u{1b}[0m|\u{1b}[38;5;202mI\u{1b}[0m|\u{1b}[38;2;17;34;51mT\u{1b}[0m|D\n";
+    format!("builtin printf '{}'; builtin command sleep 20; builtin printf '{}'",octal(first),octal("\nGOATRSTOCKDELAYED\n"))
+}
+async fn terminal_fixture(phone:&mut Phone,config:&Config,socket:&Path,desktop:&mut Desktop,source:&AdmittedSource,route:&ShellSummary,evidence:&Path,run:&Uuid)->io::Result<TerminalShellProcess> {
+    let deadline=Instant::now()+Duration::from_secs(30);
+    let shell=loop {
+        let native=terminal_current(phone,source,socket,desktop,route).await?;
+        let pane=terminal_native_pane(&native,route)?;
+        if native.focused_workspace_id.as_ref()!=Some(&pane.workspace_id)||native.focused_tab_id.as_ref()!=Some(&pane.tab_id)||native.focused_pane_id.as_ref()!=Some(&pane.pane_id){
+            return Err(prerequisite("terminal-only startup root is not the original foreground selection"));
+        }
+        let client=Client::connect(socket).await?;
+        if client.evidence!=source.client.evidence{return Err(prerequisite("terminal-only process-info original source changed"));}
+        let info=client.process_info(&route.pane_id).await?;
+        if let Some(shell)=TerminalShellProcess::capture(&source.process,&info,&config.projects[0].path)?{break shell;}
+        if Instant::now()>=deadline{return Err(prerequisite("terminal-only fresh original shell did not become provably idle"));}
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let native=terminal_current(phone,source,socket,desktop,route).await?;
+    terminal_native_pane(&native,route)?;shell.recheck()?;
+    let client=Client::connect(socket).await?;
+    if client.evidence!=source.client.evidence{return Err(prerequisite("terminal-only fixture input original source changed"));}
+    let input=Uuid::random();let intent=evidence.join(format!("terminal-fixture-{}-{}.json",run.0,input.0));
+    let metadata=shell.executable.metadata()?;
+    write_json(&intent,&json!({"runId":run,"inputId":input,"method":"pane.send_input","state":"dispatching",
+        "shellTarget":route.target,"serverId":route.server_id,"workspaceId":route.workspace_id,"tabId":route.tab_id,
+        "paneId":route.pane_id,"terminalId":route.terminal_id,"originalHerdr":source.process,"source":source.client.evidence,
+        "shell":shell.process,"shellExecutable":{"path":shell.path,"device":metadata.dev(),"inode":metadata.ino(),"bytes":metadata.len()},
+        "fixture":"fixed public printf Unicode/color/delayed-output only; payload not retained","ackMeans":"queued, not execution",
+        "uncertainRule":"never repeat or correct input; retain resources"}))?;
+    // All readiness RPCs/connections precede this last foreground query. Its returned original
+    // process/group/membership proof and synchronous source/object rechecks directly precede input.
+    let final_guard:io::Result<()>=async {
+        let foreground=Client::connect(socket).await?;
+        if foreground.evidence!=source.client.evidence{return Err(prerequisite("terminal-only final foreground source changed"));}
+        let info=foreground.process_info(&route.pane_id).await?;
+        terminal_native_pane(&native,route)?;desktop.recheck()?;source.recheck()?;client.recheck()?;
+        shell.recheck_idle(&source.process,&info,&route.pane_id)?;
+        if Instant::now()>=deadline{return Err(prerequisite("terminal-only original fixture deadline passed before input"));}
+        Ok(())
+    }.await;
+    if let Err(error)=final_guard {
+        write_native_outcome(&intent,&json!({"runId":run,"inputId":input,"state":"not_dispatched","category":"final_idle_guard",
+            "queueAcknowledged":false,"executionProved":false,"replayAllowed":false}))?;
+        return Err(error);
+    }
+    let outcome=client.request("pane.send_input",json!({"pane_id":route.pane_id,"text":terminal_fixture_command(),"keys":["Enter"]}),"ok").await;
+    let ack=outcome.is_ok();
+    let post=if ack{terminal_current(phone,source,socket,desktop,route).await.and_then(|_|shell.recheck())}else{Err(failure("terminal-only fixture input entered outcome unavailable"))};
+    write_native_outcome(&intent,&json!({"runId":run,"inputId":input,"state":if ack&&post.is_ok(){"acknowledged"}else{"uncertain"},
+        "queueAcknowledged":ack,"sameOriginalAfter":post.is_ok(),"executionProved":false,"payloadRetained":false,"replayAllowed":false}))?;
+    if !ack||post.is_err(){return Err(failure("terminal-only fixture outcome uncertain; no correction/replay, originals retained"));}
+    Ok(shell)
+}
+fn terminal_resize_receipt(receipt:&Receipt,id:&Uuid,boot:&Uuid,target:&ShellTarget,columns:u64,rows:u64)->io::Result<()> {
+    receipt.validate().map_err(|_|grid_failure("terminal_resize_receipt"))?;
+    if &receipt.action_id!=id||&receipt.boot_id!=boot||receipt.method!=ActionMethod::ShellResize
+        ||receipt.shell_target.as_ref()!=Some(target)||receipt.target.is_some()||receipt.creation.is_some()
+        ||receipt.state!=ReceiptState::Succeeded||receipt.error.is_some()
+        ||!matches!(&receipt.result,Some(ActionResult::ShellResize(result))if result.columns.0==columns&&result.rows.0==rows)
+    {return Err(grid_failure("terminal_resize_authoritative_dimensions"));}
+    Ok(())
+}
+fn terminal_input_scope(receipt:&Receipt,id:&Uuid,boot:&Uuid,target:&ShellTarget)->io::Result<()> {
+    receipt.validate().map_err(|_|grid_failure("terminal_input_receipt"))?;
+    if receipt.action_id!=*id||receipt.boot_id!=*boot||receipt.method!=ActionMethod::ShellInput
+        ||receipt.shell_target.as_ref()!=Some(target)||receipt.target.is_some()||receipt.creation.is_some()
+    {return Err(grid_failure("terminal_input_original_receipt"));}Ok(())
+}
+async fn terminal_goatr_input(phone:&mut Phone,route:&ShellSummary,subscription:&Uuid,input:ShellInput,evidence:&Path,run:&Uuid,reader_safe:&mut bool)->io::Result<Receipt> {
+    let action=Uuid::random();let boot=phone.hello.boot_id.clone();
+    let kind=match &input{ShellInput::Text{..}=>"text_commit",ShellInput::Keys{..}=>"keys"};
+    let intent=evidence.join(format!("terminal-input-{}-{}.json",run.0,action.0));
+    write_json(&intent,&json!({"runId":run,"actionId":action,"bootId":boot,"method":"shell.input","shellTarget":route.target,
+        "subscription":subscription,"inputKind":kind,"state":"dispatching","payloadRetained":false,"replayAllowed":false,
+        "outcomeMeaning":"complete original native socket frame only; no PTY acceptance/flush/consume acknowledgment"}))?;
+    *reader_safe=false;
+    let outcome=phone.request_at(action.clone(),RequestBody::ShellInput(ShellInputParams{boot_id:boot.clone(),target:route.target.clone(),subscription:subscription.clone(),input}),"terminal_input").await;
+    let receipt=match outcome {
+        Ok(Ok(ResultBody::ShellInput(result)))=>result.receipt,
+        Ok(Err(error))=>{
+            *reader_safe=true;
+            write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"request_rejected","code":error.code,"replayAllowed":false}))?;
+            return Err(grid_failure("terminal_input_request_rejected"));
+        }
+        _=>{
+            write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"uncertain","replayAllowed":false}))?;
+            return Err(grid_failure("terminal_input_entered_unknown"));
+        }
+    };
+    terminal_input_scope(&receipt,&action,&boot,&route.target)?;
+    let receipt=if matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Dispatching) {
+        phone.settled(&action).await?
+    }else{receipt};
+    terminal_input_scope(&receipt,&action,&boot,&route.target)?;*reader_safe=true;
+    write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"receipt":receipt,"payloadRetained":false,"replayAllowed":false}))?;
+    grid_receipt(&receipt,&action,&boot,&GridSubject::Shell(route.target.clone()))?;Ok(receipt)
+}
+fn terminal_creation_scope(receipt:&Receipt,id:&Uuid,boot:&Uuid)->io::Result<()> {
+    receipt.validate().map_err(|_|grid_failure("terminal_create_receipt"))?;
+    if receipt.action_id!=*id||receipt.boot_id!=*boot||receipt.method!=ActionMethod::TerminalCreate
+        ||receipt.target.is_some()||receipt.shell_target.is_some()||receipt.creation.is_some()
+    {return Err(grid_failure("terminal_create_original_receipt"));}Ok(())
+}
+async fn terminal_goatr_create(phone:&mut Phone,config:&Config,socket:&Path,desktop:&mut Desktop,source:&AdmittedSource,route:&ShellSummary,evidence:&Path,run:&Uuid)->io::Result<Value> {
+    let before=terminal_current(phone,source,socket,desktop,route).await?;
+    let action=Uuid::random();let boot=phone.hello.boot_id.clone();let project=&config.projects[0];
+    let intent=evidence.join(format!("terminal-create-{}-{}.json",run.0,action.0));
+    write_json(&intent,&json!({"runId":run,"actionId":action,"bootId":boot,"method":"terminal.create","serverId":route.server_id,
+        "workspaceId":route.workspace_id,"projectId":project.id,"source":ArtifactSource::Shell{target:route.target.clone()},"directory":"configured project root",
+        "state":"dispatching","focus":false,"replayAllowed":false,"resourceCleanup":"retain originals for coordinator review"}))?;
+    let outcome=phone.request_at(action.clone(),RequestBody::TerminalCreate(TerminalCreateParams{boot_id:boot.clone(),server_id:route.server_id.clone(),
+        workspace_id:route.workspace_id.clone(),project_id:project.id.clone(),directory_ref:None,source:Some(ArtifactSource::Shell{target:route.target.clone()})}),"terminal_create").await;
+    let receipt=match outcome {
+        Ok(Ok(ResultBody::TerminalCreate(result)))=>result.receipt,
+        Ok(Err(error))=>{
+            write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"request_rejected","code":error.code,"replayAllowed":false}))?;
+            return Err(grid_failure("terminal_create_request_rejected"));
+        }
+        _=>{
+            write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"uncertain","replayAllowed":false}))?;
+            return Err(grid_failure("terminal_create_entered_unknown"));
+        }
+    };
+    terminal_creation_scope(&receipt,&action,&boot)?;
+    let receipt=if matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Dispatching){phone.settled(&action).await?}else{receipt};
+    terminal_creation_scope(&receipt,&action,&boot)?;
+    // Preserve known resource IDs BEFORE any independent read can fail. Nothing is corrected or closed.
+    write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"receipt":receipt,"replayAllowed":false}))?;
+    let Some(ActionResult::ShellCreation(result))=&receipt.result else{return Err(grid_failure("terminal_create_resource_facts"));};
+    let resources=&result.resources;
+    if receipt.state!=ReceiptState::Succeeded||receipt.error.is_some()||!resources.complete()
+        ||resources.server_id.as_ref()!=Some(&route.server_id)||resources.workspace_id.as_ref()!=Some(&route.workspace_id)
+        ||resources.pane_id.as_ref()==Some(&route.pane_id)||resources.terminal_id.as_ref()==Some(&route.terminal_id)||resources.tab_id.as_ref()==Some(&route.tab_id)
+    {return Err(grid_failure("terminal_create_actual_cwd_or_original_workspace_unproved"));}
+    let target=resources.created_target.as_ref().ok_or_else(||grid_failure("terminal_create_target"))?;
+    let end=Instant::now()+Duration::from_secs(30);
+    let created=loop {
+        desktop.recheck()?;source.recheck()?;
+        let (actual,native)=surface(socket).await?;let inventory=phone.host().await?;
+        if !source.observation(&actual,&native,&inventory)?{return Err(prerequisite("terminal-only created resource current source unavailable"));}
+        terminal_native_pane(&native,route)?;
+        if native.focused_workspace_id!=before.focused_workspace_id||native.focused_tab_id!=before.focused_tab_id||native.focused_pane_id!=before.focused_pane_id {
+            return Err(grid_failure("terminal_create_native_focus_changed"));
+        }
+        if let Some(created)=inventory.shells.iter().find(|shell|&shell.target==target&&shell.connectivity==SessionConnectivity::Ready&&shell.capabilities.read&&shell.capabilities.input) {
+            if resources.pane_id.as_ref()!=Some(&created.pane_id)||resources.terminal_id.as_ref()!=Some(&created.terminal_id)
+                ||resources.tab_id.as_ref()!=Some(&created.tab_id)||created.workspace_id!=route.workspace_id||created.server_id!=route.server_id
+            {return Err(grid_failure("terminal_create_inventory_resource_join"));}
+            terminal_native_pane(&native,created)?;
+            let client=Client::connect(socket).await?;
+            if client.evidence!=source.client.evidence{return Err(grid_failure("terminal_create_process_info_source"));}
+            let info=client.process_info(&created.pane_id).await?;
+            if let Some(shell)=TerminalShellProcess::capture(&source.process,&info,&project.path)? {break shell;}
+        }
+        if Instant::now()>=end{return Err(prerequisite("terminal-only created original shell process/cwd inventory join unavailable"));}
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let executable=created.executable.metadata()?;
+    let manifest=evidence.join(format!("terminal-created-ownership-{}-{}.json",run.0,action.0));
+    write_json(&manifest,&json!({"runId":run,"actionId":action,"receipt":receipt,"serverId":source.identity.0,"serverIncarnation":source.identity.1,
+        "originalHerdr":source.process,"socketSource":source.client.evidence,"createdShell":created.process,
+        "cwdObject":{"device":created.cwd.0,"inode":created.cwd.1},"shellExecutable":{"device":executable.dev(),"inode":executable.ino(),"bytes":executable.len()},
+        "nativeFocusUnchanged":true,"providerLaunched":false,"inputSentToNewShell":false,"cleanup":"retained; coordinator original-identity review required"}))?;
+    Ok(json!({"receipt":receipt,"ownershipManifest":manifest,"sameOriginalWorkspace":true,"actualKernelCwdMatchedConfiguredRoot":true,
+        "nativeFocusUnchanged":true,"inputSentToNewShell":false}))
+}
+
+async fn terminal_flow(phone:&mut Phone,config:&Config,socket:&Path,desktop:&mut Desktop,original:&ServerEvidence,initial:Snapshot,name:&str,evidence:&Path,run:&Uuid)->io::Result<bool> {
+    let end=Instant::now()+Duration::from_secs(30);
+    let (source,route)=loop {
+        desktop.recheck()?;dev_continuity::zero_native_caps(&desktop.process)?;
+        let client=Client::connect(socket).await?;
+        if client.evidence!=*original{return Err(prerequisite("terminal-only original startup source changed"));}
+        let (actual,native)=surface(socket).await?;let inventory=phone.host().await?;
+        if actual!=*original{return Err(prerequisite("terminal-only original source observation changed"));}
+        if let Some((route,incarnation))=terminal_select(&inventory,&native,name,None)? {
+            let identity=(route.server_id.clone(),incarnation);
+            creation_source_observation(&identity,original,&initial,&actual,&native,&inventory).map_err(prerequisite)?.then_some(()).ok_or_else(||prerequisite("terminal-only original source not current"))?;
+            let source=AdmittedSource{identity,client,process:desktop.process.clone(),native:initial};
+            write_json(&evidence.join(format!("terminal-binding-{}.json",run.0)),&json!({"runId":run,"serverId":source.identity.0,"serverIncarnation":source.identity.1,
+                "shellTarget":route.target,"workspaceId":route.workspace_id,"tabId":route.tab_id,"paneId":route.pane_id,"terminalId":route.terminal_id,
+                "source":original,"herdr":source.process,"scope":"actual Hello/current original source and logical shell; no provider eligibility dependency"}))?;
+            break (source,route);
+        }
+        if Instant::now()>=end{return Err(prerequisite("terminal-only ordinary current shell admission unavailable"));}
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let mut reader_safe=false;let mut delayed_marker_observed=false;let mut input_echo_observed=false;
+    let outcome:io::Result<Value>=async {
+        let shell=terminal_fixture(phone,config,socket,desktop,&source,&route,evidence,run).await?;
+        terminal_current(phone,&source,socket,desktop,&route).await?;shell.recheck()?;
+        write_json(&evidence.join(format!("terminal-begin-consent-{}.json",run.0)),&json!({"runId":run,"consented":true,
+            "explicitFlags":["consent-owned-providers","automate-native-inputs"],"disclosure":TERMINAL_DISCLOSURE,"beforeSubscribe":true,
+            "shellTarget":route.target,"serverId":route.server_id,"source":source.client.evidence}))?;
+        let mut witness=GridWitness::pending(Uuid::random(),GridSubject::Shell(route.target.clone()));
+        witness.fixture=Some(TerminalFixtureWitness::new());witness.arm(TERMINAL_DELAYED)?;
+        phone.grid_subscribe(witness).await?;
+        let initial_commit=phone.grid.as_ref().ok_or_else(||grid_failure("terminal_initial_commit"))?.terminal_opening_commit()?;
+        phone.grid_wait(GridGoal::TerminalFixture{after:initial_commit}).await?;
+        delayed_marker_observed=true;
+        let witness=phone.grid.as_ref().ok_or_else(||grid_failure("terminal_fixture_viewer"))?;
+        let facts=witness.fixture.as_ref().and_then(|fixture|fixture.committed).ok_or_else(||grid_failure("terminal_fixture_facts"))?;
+        let before=witness.committed.ok_or_else(||grid_failure("terminal_fixture_commit"))?;
+        let crop=witness.committed_dimensions.ok_or_else(||grid_failure("terminal_fixture_dimensions"))?;
+        let subscription=witness.subscription.clone().ok_or_else(||grid_failure("terminal_fixture_subscription"))?;
+        let native=terminal_current(phone,&source,socket,desktop,&route).await?;shell.recheck()?;
+        let seed=native.layouts.iter().find(|layout|layout.workspace_id==route.workspace_id&&layout.tab_id==route.tab_id)
+            .ok_or_else(||prerequisite("terminal-only current native layout metadata absent"))?;
+        let (columns,rows)=if (seed.area.width,seed.area.height)==(96,32){(112,36)}else{(96,32)};
+        let action=Uuid::random();let boot=phone.hello.boot_id.clone();
+        write_json(&evidence.join(format!("terminal-resize-consent-{}.json",run.0)),&json!({"runId":run,"actionId":action,"consented":true,
+            "disclosure":TERMINAL_DISCLOSURE,"beforeResize":true,"columns":columns,"rows":rows,"dimensionMeaning":"native frontend surface; not selected inner_rect crop"}))?;
+        let intent=evidence.join(format!("terminal-resize-{}-{}.json",run.0,action.0));
+        write_json(&intent,&json!({"runId":run,"actionId":action,"bootId":boot,"method":"shell.resize","shellTarget":route.target,"subscription":subscription,
+            "columns":columns,"rows":rows,"state":"dispatching","replayAllowed":false}))?;
+        let result=phone.request_at(action.clone(),RequestBody::ShellResize(ShellResizeParams{boot_id:boot.clone(),target:route.target.clone(),subscription:subscription.clone(),columns:Uint(columns),rows:Uint(rows)}),"terminal_resize").await;
+        let receipt=match result {
+            Ok(Ok(ResultBody::ShellResize(result)))=>{
+                if matches!(result.receipt.state,ReceiptState::Reserved|ReceiptState::Dispatching){
+                    match phone.settled_by(&action,Instant::now()+Duration::from_secs(125)).await {
+                        Ok(receipt)=>receipt,
+                        Err(error)=>{write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"uncertain","replayAllowed":false}))?;return Err(error);}
+                    }
+                }else{result.receipt}
+            }
+            _=>{write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"uncertain","replayAllowed":false}))?;return Err(grid_failure("terminal_resize_entered_unknown"));}
+        };
+        write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"receipt":receipt,"replayAllowed":false}))?;
+        terminal_resize_receipt(&receipt,&action,&boot,&route.target,columns,rows)?;
+        phone.grid_wait(GridGoal::Resized{after:before,dimensions:crop}).await?;
+        let resized=phone.grid.as_ref().ok_or_else(||grid_failure("terminal_resize_viewer"))?;
+        if resized.subscription.as_ref()!=Some(&subscription)||resized.subject!=GridSubject::Shell(route.target.clone()){return Err(grid_failure("terminal_resize_original_viewer"));}
+        let observed=resized.committed_dimensions.ok_or_else(||grid_failure("terminal_resize_commit"))?;
+        if observed.0>columns||observed.1>rows{return Err(grid_failure("terminal_resize_crop_bounds"));}
+        terminal_current(phone,&source,socket,desktop,&route).await?;shell.recheck()?;reader_safe=true;
+        let marker=format!("GOATRSTOCKRPC{}",Uuid::random().0.replace('-',""));
+        phone.grid.as_mut().ok_or_else(||grid_failure("terminal_input_viewer"))?.arm(&marker)?;
+        let text=terminal_goatr_input(phone,&route,&subscription,ShellInput::Text{text:marker},evidence,run,&mut reader_safe).await?;
+        reader_safe=false;phone.grid_wait(GridGoal::Token).await?;input_echo_observed=true;
+        terminal_current(phone,&source,socket,desktop,&route).await?;shell.recheck()?;reader_safe=true;
+        let modifiers=ShellKeyModifiers{shift:false,ctrl:false,alt:false,super_key:false};
+        let keys=terminal_goatr_input(phone,&route,&subscription,ShellInput::Keys{events:vec![
+            ShellKeyEvent{key:ShellKey::Left,modifiers:modifiers.clone(),phase:ShellKeyPhase::Press,physical_key_id:None},
+            ShellKeyEvent{key:ShellKey::Right,modifiers,phase:ShellKeyPhase::Press,physical_key_id:None},
+        ]},evidence,run,&mut reader_safe).await?;
+        Ok(json!({"gate":"terminal-only","runId":run,"status":"pass","scope":"single-controller stock cells/resize/Goatr input/public release/configured-project creation",
+            "shellTarget":route.target,"serverId":source.identity.0,"serverIncarnation":source.identity.1,
+            "fixture":facts.evidence(),"firstCommit":initial_commit,"openingDelayedMarkerAbsent":true,"fixtureCommit":before,"frontendDimensions":{"columns":columns,"rows":rows},
+            "selectedCropBefore":{"columns":crop.0,"rows":crop.1},"selectedCropAfter":{"columns":observed.0,"rows":observed.1},
+            "authoritativeResizeReceipt":true,"publicReplacementCommit":true,"nativeFixtureInputs":1,
+            "goatrInputActions":[{"receipt":text},{"receipt":keys}],"publicCommittedTextObserved":input_echo_observed,
+            "inputMeaning":"full native socket frames and staged public text echo only; no Enter sent; no execution, PTY acceptance or hardware/IME claim",
+            "nativeTag19":"unproved","multiFrontendGeometry":"unproved","allWorkspacePtyGeometry":"unproved",
+            "sourceLossAndRevoke":"unproved","physicalPhone":"unproved","phase4InputImeHardware":"unproved",
+            "defaultOrRawLogsRead":false,"providerSessionsCreated":0}))
+    }.await;
+    let observation_saved=write_json(&evidence.join(format!("terminal-observation-{}.json",run.0)),&json!({"runId":run,
+        "openingAccepted":phone.grid.as_ref().is_some_and(|grid|grid.subscription.is_some()),
+        "committedRevision":phone.grid.as_ref().and_then(|grid|grid.committed),
+        "openingCommit":phone.grid.as_ref().and_then(|grid|grid.fixture.as_ref()).and_then(|fixture|fixture.opening).map(|(revision,_)|revision),
+        "openingDelayedMarkerPresent":phone.grid.as_ref().and_then(|grid|grid.fixture.as_ref()).and_then(|fixture|fixture.opening).map(|(_,present)|present),
+        "selectedCrop":phone.grid.as_ref().and_then(|grid|grid.committed_dimensions),
+        "delayedMarkerCommitted":delayed_marker_observed,"goatrInputEchoObserved":input_echo_observed,
+        "streamRetired":phone.grid.as_ref().is_some_and(|grid|grid.retired),
+        "committedFixtureFacts":phone.grid.as_ref().and_then(|grid|grid.fixture.as_ref()).and_then(|fixture|fixture.committed).map(TerminalFixtureFacts::evidence),
+        "nativeTag19":"unproved","contentRetained":false}));
+    let had_subscription=phone.grid.as_ref().and_then(|grid|grid.subscription.as_ref()).is_some();
+    let release_requested=had_subscription&&reader_safe;
+    let release=if release_requested {phone.grid_unsubscribe().await}else{
+        if had_subscription{phone.connection.close(0u32.into(),b"original terminal viewer retired");}Ok(())
+    };
+    write_json(&evidence.join(format!("terminal-release-{}.json",run.0)),&json!({"runId":run,"protocolUnsubscribeRequested":release_requested,"protocolUnsubscribeConfirmed":release_requested&&release.is_ok(),
+        "originalReaderTrustedForCleanup":reader_safe,
+        "nativeDeactivationAck":"not_provided","nativeResources":"retained; no pane close/signals/stop",
+        "scope":"temporary local client viewer release only; no claim of a native deactivation or size-restoration acknowledgment"}))?;
+    let mut record=outcome?;observation_saved?;release?;
+    record["terminalCreate"]=terminal_goatr_create(phone,config,socket,desktop,&source,&route,evidence,run).await?;
+    write_json(&evidence.join(format!("terminal-result-{}.json",run.0)),&record)?;println!("{record}");Ok(true)
+}
 async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
+    checkpoint_held(args, evidence, None, None).await
+}
+// This fixture input is public and independently crypto-qualified by the coordinator.
+// The helper checks bytes/objects only; it never signs, unlocks or reads a source repository.
+const PROJECT_PUBLIC_COMMIT:&str="a55cd979cab6a0a47d4c757ac97b97d8535ee9eb";
+const PROJECT_PUBLIC_TREE:&str="fb2fbdd55eed2884f345b23ab25bdfa0f6ce31f8";
+const PROJECT_PACK_LIMIT:usize=16*1024*1024;
+fn project_hash(text:&str)->bool {text.len()==64&&text.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))}
+fn project_stamp(metadata:&fs::Metadata)->(u64,u64,u64,i64,i64,i64,i64,u32,u32) {
+    (metadata.dev(),metadata.ino(),metadata.len(),metadata.mtime(),metadata.mtime_nsec(),metadata.ctime(),metadata.ctime_nsec(),metadata.mode(),metadata.uid())
+}
+fn project_input(path:&Path,maximum:usize,pack:bool)->io::Result<Vec<u8>> {
+    let before=fs::symlink_metadata(path)?;
+    if !path.is_absolute()||fs::canonicalize(path)?!=path||!before.is_file()||before.file_type().is_symlink()
+        ||![0,uid()].contains(&before.uid())||before.mode()&0o222!=0||before.len()>maximum as u64
+        ||pack&&(before.nlink()!=1||before.mode()&0o7777!=0o400){return Err(prerequisite("owned project-read immutable input identity unavailable"));}
+    if pack {private_dir(path.parent().ok_or_else(||failure("public seed parent absent"))?,false)?;}
+    let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK|libc::O_CLOEXEC).open(path)?;
+    if project_stamp(&file.metadata()?)!=project_stamp(&before){return Err(prerequisite("owned project-read immutable input replaced"));}
+    let mut bytes=vec![0u8;before.len() as usize];file.read_exact(&mut bytes)?;let mut extra=[0u8;1];
+    if file.read(&mut extra)?!=0||project_stamp(&file.metadata()?)!=project_stamp(&before)||project_stamp(&fs::symlink_metadata(path)?)!=project_stamp(&before){return Err(prerequisite("owned project-read immutable input changed"));}
+    Ok(bytes)
+}
+fn project_file_hash(path:&Path)->io::Result<String> {
+    use sha2::{Digest,Sha256};
+    let before=fs::symlink_metadata(path)?;
+    if !before.is_file()||before.file_type().is_symlink()||before.len()>128*1024*1024||before.mode()&0o222!=0||![0,uid()].contains(&before.uid()){return Err(prerequisite("immutable selected Git image unavailable"));}
+    let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?;let mut hash=Sha256::new();let mut buffer=[0u8;65536];
+    loop {let count=file.read(&mut buffer)?;if count==0{break;}hash.update(&buffer[..count]);}
+    if project_stamp(&file.metadata()?)!=project_stamp(&before)||project_stamp(&fs::symlink_metadata(path)?)!=project_stamp(&before){return Err(prerequisite("immutable selected Git image changed"));}Ok(hex(&hash.finalize()))
+}
+struct ProjectFixtureGit {executable:PathBuf,exec_path:PathBuf,manifest_sha:String,image_sha:String,stamp:(u64,u64,u64,i64,i64,i64,i64,u32,u32)}
+impl ProjectFixtureGit {
+    fn qualify(binary:&Path)->io::Result<Self> {
+        let binary=fs::canonicalize(binary)?;
+        if !binary.starts_with("/nix/store"){return Err(prerequisite("project-read-only requires the selected immutable packaged companion manifest"));}
+        let path=binary.parent().and_then(Path::parent).ok_or_else(||failure("selected package root absent"))?.join("share/goatr/manifest.json");
+        let bytes=project_input(&path,1024*1024,false)?;let manifest:Value=serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        let compiled=option_env!("GOATR_READ_GIT_MANIFEST").ok_or_else(||prerequisite("project-read-only helper requires the same locked Nix Git manifest"))?;
+        let selected:Value=serde_json::from_slice(&project_input(Path::new(compiled),1024*1024,false)?).map_err(io::Error::other)?;
+        if manifest["kind"]!="direct-rust"||manifest["lockSha256"]!=transport::lock_sha256()||manifest["readGit"]!=selected["readGit"]||manifest["readGit"]["available"]!=true{return Err(prerequisite("selected companion/helper immutable Git identity join unavailable"));}
+        let git=&manifest["readGit"];
+        let executable=PathBuf::from(git["executable"].as_str().ok_or_else(||failure("selected Git image absent"))?);
+        let exec_path=PathBuf::from(git["execPath"].as_str().ok_or_else(||failure("selected Git exec root absent"))?);
+        let image_sha=git["executableSha256"].as_str().filter(|value|project_hash(value)).ok_or_else(||failure("selected Git digest absent"))?.to_owned();
+        if !executable.starts_with("/nix/store")||fs::canonicalize(&executable)?!=executable||project_file_hash(&executable)?!=image_sha{return Err(prerequisite("selected fixture Git is not the exact manifest image"));}
+        let mut image=File::open(&executable)?;let mut magic=[0u8;4];image.read_exact(&mut magic)?;if &magic!=b"\x7fELF"{return Err(prerequisite("selected fixture Git must be a direct ELF, never a wrapper or PATH fallback"));}
+        let stamp=project_stamp(&fs::symlink_metadata(&executable)?);
+        Ok(Self {executable,exec_path,manifest_sha:hex(&sha256(&bytes)),image_sha,stamp})
+    }
+    async fn run(&self,fixture:&ProjectReadFixture,cwd:&Path,args:&[&str],input:Option<&[u8]>,deadline:tokio::time::Instant,limit:usize)->io::Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};use std::os::unix::process::CommandExt as _;
+        fixture.current()?;
+        if !cwd.starts_with(&fixture.read)||fs::canonicalize(cwd)?!=cwd||project_stamp(&fs::symlink_metadata(&self.executable)?)!=self.stamp{return Err(prerequisite("owned fixture cwd or immutable Git image changed"));}
+        let directory=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(cwd)?;
+        let raw=directory.as_raw_fd();let mut command=tokio::process::Command::new(&self.executable);
+        command.args(["--no-pager","-c","core.fsmonitor=false","-c","core.untrackedCache=false","-c","core.preloadIndex=false","-c","gc.auto=0","-c","maintenance.auto=false","-c","pack.threads=1","-c","protocol.allow=never"])
+            .arg("-c").arg(format!("core.hooksPath={}",fixture.hooks.display())).args(args)
+            .env_clear().env("HOME",&fixture.home).env("XDG_CONFIG_HOME",&fixture.home).env("LC_ALL","C")
+            .env("GIT_CONFIG_GLOBAL",&fixture.global).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_ATTR_NOSYSTEM","1")
+            .env("GIT_OPTIONAL_LOCKS","0").env("GIT_NO_LAZY_FETCH","1").env("GIT_TERMINAL_PROMPT","0").env("GIT_EXEC_PATH",&self.exec_path)
+            .stdin(if input.is_some(){Stdio::piped()}else{Stdio::null()}).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        unsafe{command.pre_exec(move||{goatr::codex_relay::drop_inherited_capabilities()?;if libc::fchdir(raw)!=0{return Err(io::Error::last_os_error());}Ok(())});}
+        let mut child=command.spawn()?;let stdout=child.stdout.take().ok_or_else(||failure("owned Git output pipe absent"))?;
+        let mut stdin=child.stdin.take();
+        let transfer=async {
+            let write=async {if let (Some(mut stdin),Some(input))=(stdin.take(),input){stdin.write_all(input).await?;stdin.shutdown().await?;drop(stdin);}Ok::<(),io::Error>(())};
+            let read=async {let mut bytes=Vec::new();stdout.take(limit as u64+1).read_to_end(&mut bytes).await?;if bytes.len()>limit{return Err(failure("owned fixture Git output exceeded its bound"));}Ok::<Vec<u8>,io::Error>(bytes)};
+            let (_,bytes,status)=tokio::try_join!(write,read,child.wait())?;
+            if !status.success(){return Err(prerequisite("owned public seed or fixture Git command refused; no fallback"));}Ok(bytes)
+        };
+        let bytes=tokio::time::timeout_at(deadline,transfer).await.map_err(|_|prerequisite("owned fixture Git aggregate preparation deadline"))??;
+        fixture.current()?;Ok(bytes)
+    }
+}
+struct ProjectSeedPin {pack:PathBuf,pack_sha:String,commit:String,tree:String,signature_sha:String}
+impl ProjectSeedPin {
+    fn parse(args:&clap::ArgMatches)->io::Result<Option<Self>> {
+        let Some(pack)=args.get_one::<PathBuf>("project-read-seed-pack")else{return Ok(None)};
+        let get=|key|args.get_one::<String>(key).cloned().ok_or_else(||prerequisite("complete prequalified public signed seed pins required"));
+        let pin=Self {pack:pack.clone(),pack_sha:get("project-read-seed-pack-sha256")?,commit:get("project-read-seed-commit")?,tree:get("project-read-seed-tree")?,signature_sha:get("project-read-seed-signature-sha256")?};
+        if !project_hash(&pin.pack_sha)||!project_hash(&pin.signature_sha)||pin.commit!=PROJECT_PUBLIC_COMMIT||pin.tree!=PROJECT_PUBLIC_TREE{return Err(prerequisite("fixture seed must be the explicitly qualified existing public Goatr commit/tree"));}Ok(Some(pin))
+    }
+}
+struct ProjectReadFixture {read:PathBuf,creation_only:PathBuf,global:PathBuf,home:PathBuf,hooks:PathBuf,folder:String,binary:PathBuf,pin:Option<ProjectSeedPin>,root_object:(u64,u64),creation_object:(u64,u64)}
+struct ProjectReadFacts {renamed:String,original:String,conflict:String,binary:String,submodule:String,linked:PathBuf}
+impl ProjectReadFixture {
+    fn prepare(args:&clap::ArgMatches,root:&Path,binary:&Path,run:&Uuid)->io::Result<Self> {
+        let read=root.join("project");let creation_only=root.join("creation-only");fs::DirBuilder::new().mode(0o700).create(&creation_only)?;
+        let home=read.join(format!(".goatr-fixture-home-{}",&run.0[..8]));let hooks=home.join("hooks");
+        fs::DirBuilder::new().mode(0o700).create(&home)?;fs::DirBuilder::new().mode(0o700).create(&hooks)?;
+        let global=home.join("global.config");OpenOptions::new().write(true).create_new(true).mode(0o600).open(&global)?.sync_all()?;
+        let a=fs::symlink_metadata(&read)?;let b=fs::symlink_metadata(&creation_only)?;
+        Ok(Self {read,creation_only,global,home,hooks,folder:format!("goatr-owned-review-{}",&run.0[..8]),binary:binary.to_owned(),pin:ProjectSeedPin::parse(args)?,root_object:(a.dev(),a.ino()),creation_object:(b.dev(),b.ino())})
+    }
+    fn current(&self)->io::Result<()> {
+        for (path,object) in [(&self.read,self.root_object),(&self.creation_only,self.creation_object)] {
+            private_dir(path,false)?;let metadata=fs::symlink_metadata(path)?;
+            if fs::canonicalize(path)?!=*path||(metadata.dev(),metadata.ino())!=object{return Err(prerequisite("owned project fixture root replaced"));}
+        }Ok(())
+    }
+    fn environment(&self,command:&mut std::process::Command) {command.env("GIT_CONFIG_GLOBAL",&self.global).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_ATTR_NOSYSTEM","1");}
+    async fn seed(&self,git:&ProjectFixtureGit,cwd:&Path,pack:&[u8],pin:&ProjectSeedPin,deadline:tokio::time::Instant)->io::Result<()> {
+        git.run(self,cwd,&["init","--quiet","--object-format=sha1"],None,deadline,4096).await?;
+        git.run(self,cwd,&["unpack-objects","-q"],Some(pack),deadline,4096).await?;
+        git.run(self,cwd,&["fsck","--strict","--no-reflogs","--no-dangling",&pin.commit],None,deadline,65536).await?;
+        git.run(self,cwd,&["update-ref","refs/heads/goatr-fixture",&pin.commit],None,deadline,4096).await?;
+        git.run(self,cwd,&["symbolic-ref","HEAD","refs/heads/goatr-fixture"],None,deadline,4096).await?;
+        git.run(self,cwd,&["read-tree","--reset","-u",&pin.commit],None,deadline,4096).await?;Ok(())
+    }
+    async fn build(&self,evidence:&Path,run:&Uuid)->io::Result<ProjectReadFacts> {
+        self.current()?;let pin=self.pin.as_ref().ok_or_else(||prerequisite("project-read-only requires the independently crypto-qualified existing public signed object pack and complete byte/object pins; no provider created"))?;
+        let git=ProjectFixtureGit::qualify(&self.binary)?;
+        let pack=project_input(&pin.pack,PROJECT_PACK_LIMIT,true)?;
+        if hex(&sha256(&pack))!=pin.pack_sha||pack.len()<12||&pack[..4]!=b"PACK"{return Err(prerequisite("qualified complete public seed pack byte pin mismatch"));}
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(30);
+        self.seed(&git,&self.read,&pack,pin,deadline).await?;
+        let commit=git.run(self,&self.read,&["cat-file","commit",&pin.commit],None,deadline,128*1024).await?;
+        let (tree,signature)=project_commit_fields(&commit)?;
+        if tree!=pin.tree||hex(&sha256(signature.as_bytes()))!=pin.signature_sha{return Err(prerequisite("existing public commit tree or signature-block bytes mismatch"));}
+        let rows=git.run(self,&self.read,&["ls-tree","-r","-z",&pin.tree],None,deadline,256*1024).await?;
+        let files=project_seed_files(&rows)?;
+        if files.len()<3{return Err(prerequisite("qualified existing public seed needs three distinct regular blob fixtures"));}
+        let folder=self.read.join(&self.folder);fs::DirBuilder::new().mode(0o700).create(&folder)?;
+        let pages=folder.join("pages");fs::DirBuilder::new().mode(0o700).create(&pages)?;
+        for index in 0..105 {fs::write(pages.join(format!("row-{index:03}")),b"public bounded page\n")?;}
+        fs::write(folder.join("complete.txt"),vec![b'x';65536+7])?;fs::write(folder.join("binary.bin"),b"binary\0first")?;
+        fs::write(folder.join("empty.txt"),b"")?;File::create(folder.join("large.bin"))?.set_len(1024*1024+1)?;
+        let renamed=format!("{}.goatr-renamed",files[0].0);fs::rename(self.read.join(&files[0].0),self.read.join(&renamed))?;
+        let binary=format!("{}/binary.bin",self.folder);
+        git.run(self,&self.read,&["add","--force","--",&files[0].0,&renamed,&binary],None,deadline,4096).await?;
+        fs::write(self.read.join(&binary),b"binary\0second")?;
+        OpenOptions::new().append(true).open(self.read.join(&files[1].0))?.write_all(b"\nGOATR owned unstaged reference fixture\n")?;
+        let zero="0".repeat(pin.commit.len());let conflict=files[2].0.clone();
+        let index=format!("0 {zero}\t{conflict}\n100644 {} 1\t{conflict}\n100644 {} 2\t{conflict}\n100644 {} 3\t{conflict}\n",files[2].1,files[0].1,files[1].1);
+        git.run(self,&self.read,&["update-index","--index-info"],Some(index.as_bytes()),deadline,4096).await?;
+        let nested=folder.join("submodule");fs::DirBuilder::new().mode(0o700).create(&nested)?;self.seed(&git,&nested,&pack,pin,deadline).await?;
+        fs::write(nested.join("GOATR_UNTRACKED_NATIVE"),b"owned submodule dirtiness\n")?;
+        let submodule=format!("{}/submodule",self.folder);let cache=format!("160000,{},{}",pin.commit,submodule);
+        git.run(self,&self.read,&["update-index","--add","--cacheinfo",&cache],None,deadline,4096).await?;
+        let linked=folder.join("linked-worktree");let linked_text=linked.to_str().ok_or_else(||failure("owned linked fixture path unrepresentable"))?;
+        git.run(self,&self.read,&["worktree","add","--detach","--no-checkout",linked_text,&pin.commit],None,deadline,4096).await?;
+        fs::write(self.creation_only.join("outside.config"),b"[core]\nquotePath=false\n")?;
+        write_json(&evidence.join(format!("project-read-seed-{}.json",run.0)),&json!({"runId":run,"packSha256":pin.pack_sha,"existingCommit":pin.commit,"existingTree":pin.tree,"signatureBlockSha256":pin.signature_sha,
+            "byteObjectPinsChecked":true,"cryptoVerification":"separate coordinator-qualified existing public evidence; not performed or fabricated by helper","newCommitsOrTags":false,"sourceRepositoryOrCredentialsRead":false,
+            "fixtureGitManifestSha256":git.manifest_sha,"fixtureGitImageSha256":git.image_sha,"fixtureRoot":self.read,"creationOnlySibling":self.creation_only,"scope":"owned blob/index/working-tree/gitlink/worktree setup only; no phone producer mutations; retained, no automatic cleanup"}))?;
+        Ok(ProjectReadFacts {renamed,original:files[0].0.clone(),conflict,binary,submodule,linked})
+    }
+}
+fn project_commit_fields(bytes:&[u8])->io::Result<(String,String)> {
+    let text=std::str::from_utf8(bytes).map_err(io::Error::other)?;let header=text.split_once("\n\n").ok_or_else(||failure("complete existing commit header absent"))?.0;
+    let tree=header.lines().next().and_then(|line|line.strip_prefix("tree ")).ok_or_else(||failure("existing commit tree absent"))?.to_owned();
+    let mut signature=String::new();let mut capturing=false;
+    for line in header.lines().skip(1) {
+        if let Some(first)=line.strip_prefix("gpgsig "){if capturing||!signature.is_empty(){return Err(failure("ambiguous existing signature block"));}signature.push_str(first);capturing=true;}
+        else if capturing {if let Some(next)=line.strip_prefix(' '){signature.push('\n');signature.push_str(next);}else{capturing=false;}}
+    }
+    if !signature.starts_with("-----BEGIN PGP SIGNATURE-----\n")||!signature.ends_with("-----END PGP SIGNATURE-----"){return Err(prerequisite("qualified existing PGP signature block unavailable"));}
+    Ok((tree,signature))
+}
+fn project_seed_files(bytes:&[u8])->io::Result<Vec<(String,String)>> {
+    if bytes.len()>256*1024||bytes.last()!=Some(&0){return Err(failure("bounded complete public seed tree absent"));}
+    let text=std::str::from_utf8(bytes).map_err(io::Error::other)?;let mut files=Vec::new();let mut blobs=HashSet::new();
+    for row in text.split_terminator('\0') {
+        let (metadata,path)=row.split_once('\t').ok_or_else(||failure("public seed row invalid"))?;let mut fields=metadata.split(' ');
+        let mode=fields.next().ok_or_else(||failure("public seed mode absent"))?;let kind=fields.next().ok_or_else(||failure("public seed type absent"))?;let oid=fields.next().ok_or_else(||failure("public seed object absent"))?;
+        if fields.next().is_some()||path.is_empty()||path.len()>4096||Path::new(path).is_absolute()||path.chars().any(char::is_control)||Path::new(path).components().any(|part|!matches!(part,std::path::Component::Normal(_)))
+            ||!matches!(mode,"100644"|"100755")||kind!="blob"||oid.len()!=40||!oid.bytes().all(|byte|byte.is_ascii_hexdigit()){return Err(prerequisite("public seed requires bounded ordinary regular tree objects; no unsafe alias or submodule adoption"));}
+        if files.len()<3&&mode=="100644"&&blobs.insert(oid){files.push((path.to_owned(),oid.to_owned()));}
+    }Ok(files)
+}
+struct ProjectReadRun<'a> {fixture:&'a ProjectReadFixture,config:&'a Config,socket:&'a Path,desktop:&'a Desktop,source:&'a AdmittedSource,evidence:&'a Path,run:&'a Uuid}
+async fn project_create(phone:&mut Phone,context:&ProjectReadRun<'_>,provider:Provider,project:&ConfiguredProject)->io::Result<NativeProof> {
+    context.fixture.current()?;context.source.recheck()?;dev_continuity::zero_native_caps(&context.desktop.process)?;
+    let action=Uuid::random();let params=SessionCreateParams {boot_id:phone.hello.boot_id.clone(),server_id:context.source.identity.0.clone(),project_id:project.id.clone(),provider,
+        name:Label::new(format!("owned-read-{provider:?}-{}",&action.0[..8])).map_err(io::Error::other)?,directory_ref:None,placement:None};
+    write_json(&context.evidence.join(format!("project-read-create-intent-{}-{}.json",context.run.0,action.0)),&json!({"runId":context.run,"actionId":action,"provider":provider,"projectId":project.id,"readGrant":project.allow_read_tools,"scope":"one first native creation; entered results status-only; never mutation replay or automatic close"}))?;
+    let initial=receipt_result(phone.request_at(action.clone(),RequestBody::SessionCreate(params),"project_read_create").await?.map_err(|error|failure(&format!("project-read creation refused: {:?}",error.code)))?)?;
+    let receipt=if matches!(initial.state,ReceiptState::Reserved|ReceiptState::Dispatching){phone.creation_settled(&action,provider).await?}else{initial};
+    write_json(&context.evidence.join(format!("project-read-create-receipt-{}-{}.json",context.run.0,action.0)),&json!({"runId":context.run,"receipt":receipt,"resourcesRetained":true}))?;
+    if receipt.state!=ReceiptState::Succeeded{return Err(non_succeeded_creation_error(provider,&receipt));}
+    context.source.recheck()?;let inventory=phone.host().await?;
+    let session=inventory.sessions.iter().find(|session|receipt.creation.as_ref().is_some_and(|creation|created_session_matches(&creation.resources,session,provider))).ok_or_else(||prerequisite("exact owned read original is not NativeReady"))?;
+    let original=proof(context.config,context.socket,session,None).await?;original.recheck_processes()?;
+    write_json(&context.evidence.join(format!("project-read-original-{}-{}.json",context.run.0,action.0)),&json!({"runId":context.run,"proof":original.evidence(),"creationAction":action,"scope":"original process/session or shared owner/thread only; no prompt, PTY or replay"}))?;
+    Ok(original)
+}
+async fn project_refused(phone:&mut Phone,body:RequestBody)->io::Result<()> {
+    match phone.request_at(Uuid::random(),body,"project_read_refusal").await? {
+        Err(error)if matches!(error.code,ErrorCode::NotReady|ErrorCode::StaleSession|ErrorCode::CursorExpired|ErrorCode::NotFound)=>Ok(()),
+        _=>Err(failure("owned project negative did not refuse at its actual supported boundary")),
+    }
+}
+async fn project_list(phone:&mut Phone,source:&ArtifactSource,parent:Option<Uuid>)->io::Result<Vec<ArtifactEntry>> {
+    let mut cursor=None;let mut rows=Vec::new();let mut seen=HashSet::new();
+    loop {
+        let body=RequestBody::ArtifactsList(ArtifactsListParams {source:source.clone(),parent:if cursor.is_none(){parent.clone()}else{None},cursor:cursor.clone(),limit:Uint(100)});
+        let ResultBody::ArtifactsList(page)=phone.rpc(body,"project_read_list").await?else{return Err(failure("actual artifact page result absent"))};
+        if &page.source!=source{return Err(failure("artifact original source changed"));}
+        for row in page.entries {if rows.len()==1000||!seen.insert(uuid::Uuid::parse_str(&row.reference.0).map_err(io::Error::other)?){return Err(failure("artifact complete listing exceeded or repeated its bound"));}rows.push(row);}
+        match page.next_cursor {None=>return Ok(rows),Some(next)if Some(&next)!=cursor.as_ref()=>cursor=Some(next),_=>return Err(failure("artifact cursor made no progress"))}
+    }
+}
+async fn project_open(phone:&mut Phone,source:&ArtifactSource,row:&ArtifactEntry)->io::Result<ArtifactsOpenResult> {
+    let ResultBody::ArtifactsOpen(open)=phone.rpc(RequestBody::ArtifactsOpen(ArtifactsOpenParams {source:source.clone(),file:row.reference.clone()}),"project_read_open").await?else{return Err(failure("actual artifact snapshot absent"))};
+    if &open.source!=source||open.name!=row.name||Some(open.size)!=row.size{return Err(failure("artifact snapshot differs from the selected immutable row"));}Ok(open)
+}
+async fn project_close(phone:&mut Phone,source:&ArtifactSource,read:&Uuid)->io::Result<()> {
+    let ResultBody::ArtifactsClose(closed)=phone.rpc(RequestBody::ArtifactsClose(ArtifactsCloseParams {source:source.clone(),read_id:read.clone()}),"project_read_close").await?else{return Err(failure("artifact memory close result absent"))};
+    if closed.source!=*source||closed.read_id!=*read||!closed.closed{return Err(failure("selected artifact read owner was not released"));}Ok(())
+}
+async fn project_artifacts(phone:&mut Phone,source:&ArtifactSource,fixture:&ProjectReadFixture)->io::Result<()> {
+    use base64::Engine as _;use sha2::{Digest,Sha256};
+    let root=project_list(phone,source,None).await?;let folder=root.iter().find(|row|row.name==fixture.folder&&row.kind==ArtifactKind::Directory).ok_or_else(||failure("owned bounded artifact directory absent"))?;
+    let rows=project_list(phone,source,Some(folder.reference.clone())).await?;
+    let pages=rows.iter().find(|row|row.name=="pages"&&row.kind==ArtifactKind::Directory).ok_or_else(||failure("owned paginated artifact directory absent"))?;
+    if project_list(phone,source,Some(pages.reference.clone())).await?.len()!=105{return Err(failure("real native artifact cursor did not return the complete two-page directory"));}
+    for (name,kind) in [("complete.txt",ArtifactPreviewKind::Text),("empty.txt",ArtifactPreviewKind::Text),("binary.bin",ArtifactPreviewKind::Binary),("large.bin",ArtifactPreviewKind::Unavailable)] {
+        let row=rows.iter().find(|row|row.name==name&&row.kind==ArtifactKind::File).ok_or_else(||failure("owned artifact fixture row absent"))?;
+        let open=project_open(phone,source,row).await?;if open.preview_kind!=kind{return Err(failure("text, binary and unavailable complete snapshots were conflated"));}
+        let mut offset=0u64;let mut hash=Sha256::new();
+        loop {
+            let ResultBody::ArtifactsRead(chunk)=phone.rpc(RequestBody::ArtifactsRead(ArtifactsReadParams {source:source.clone(),read_id:open.read_id.clone(),offset:Uint(offset),limit:Uint(65536)}),"project_read_chunk").await?else{return Err(failure("artifact chunk absent"))};
+            let mut bytes=base64::engine::general_purpose::STANDARD.decode(&chunk.data.0).map_err(io::Error::other)?;
+            if chunk.source!=*source||chunk.read_id!=open.read_id||chunk.offset.0!=offset||bytes.len()>65536||offset+bytes.len() as u64>open.size.0||bytes.is_empty()&&!chunk.eof{return Err(failure("artifact exact chunk offset/size ownership mismatch"));}
+            offset+=bytes.len() as u64;hash.update(&bytes);bytes.fill(0);if chunk.eof{break;}
+        }
+        let mut local=File::open(fixture.read.join(&fixture.folder).join(name))?;let mut local_hash=Sha256::new();let mut buffer=[0u8;65536];let size=local.metadata()?.len();
+        loop {let count=local.read(&mut buffer)?;if count==0{break;}local_hash.update(&buffer[..count]);}
+        if offset!=open.size.0||size!=offset||hex(&hash.finalize())!=open.sha256||hex(&local_hash.finalize())!=open.sha256{return Err(failure("complete artifact host export-equivalent size/digest mismatch"));}
+        project_close(phone,source,&open.read_id).await?;
+    }Ok(())
+}
+fn project_changes_facts(result:&ChangesReadResult,original:&NativeProof,facts:&ProjectReadFacts,pin:&ProjectSeedPin)->io::Result<()> {
+    if result.target!=original.target||result.changes.repository_context.as_ref().and_then(|context|context.latest_commit.as_ref()).map(|commit|&commit.oid)!=Some(&pin.commit)
+        ||!result.changes.entries.iter().any(|entry|matches!(entry,ChangeEntry::Tracked {path,original_path:Some(old),index:ChangeState::Renamed,..} if path==&facts.renamed&&old==&facts.original))
+        ||!result.changes.entries.iter().any(|entry|matches!(entry,ChangeEntry::Tracked {path,index:ChangeState::Unmerged,..} if path==&facts.conflict))
+        ||!result.changes.entries.iter().any(|entry|matches!(entry,ChangeEntry::Tracked {path,staged_binary:true,unstaged_binary:true,..} if path==&facts.binary))
+        ||!result.changes.entries.iter().any(|entry|matches!(entry,ChangeEntry::Tracked {path,submodule:Some(submodule),..} if path==&facts.submodule&&submodule.untracked_dirty))
+        ||result.changes.staged_patch.is_empty()||result.changes.unstaged_patch.is_empty(){return Err(failure("actual native staged/unstaged/rename/binary/conflict/submodule/reference facts incomplete"));}
+    Ok(())
+}
+async fn project_read_flow(mut phone:Phone,selected:&[Provider],context:ProjectReadRun<'_>)->io::Result<bool> {
+    let mut completed=HashSet::new();let mut observations=Vec::new();let mut proved_read_originals=0;let mut proved_creation_originals=0;let mut pinned_files_panes=0;
+    let outcome:io::Result<()>=async {
+        if context.config.allow_terminal_control||context.config.projects.len()!=2||!context.config.projects[0].allow_read_tools||context.config.projects[1].allow_read_tools{return Err(failure("owned project read and creation-only grants were not independent"));}
+        let facts=context.fixture.build(context.evidence,context.run).await?;let pin=context.fixture.pin.as_ref().ok_or_else(||failure("qualified public seed pin absent"))?;
+        let inventory=phone.host().await?;let native=context.source.native.panes.first().filter(|_|context.source.native.panes.len()==1&&context.source.native.agents.is_empty()).ok_or_else(||prerequisite("one original startup Files pane required"))?;
+        let shell=inventory.shells.iter().find(|shell|shell.server_id==context.source.identity.0&&shell.pane_id==native.pane_id&&shell.terminal_id==native.terminal_id&&shell.workspace_id==native.workspace_id&&shell.tab_id==native.tab_id).ok_or_else(||prerequisite("exact original startup Files source absent"))?;
+        if !shell.capabilities.artifacts||shell.capabilities.input||shell.capabilities.grid||shell.capabilities.create{return Err(failure("Files source borrowed native terminal input/grid authority"));}
+        let shell_source=ArtifactSource::Shell {target:shell.target.clone()};
+        pinned_files_panes=1;
+        let mut originals=Vec::new();
+        for provider in selected.iter().copied() {originals.push(project_create(&mut phone,&context,provider,&context.config.projects[0]).await?);proved_read_originals+=1;}
+        for original in &originals {
+            original.recheck_processes()?;let source=ArtifactSource::Session {target:original.target.clone()};project_artifacts(&mut phone,&source,context.fixture).await?;
+            let ResultBody::ChangesRead(changes)=phone.rpc(RequestBody::ChangesRead(ChangesReadParams {target:original.target.clone()}),"project_read_changes").await?else{return Err(failure("actual Changes response absent"))};
+            project_changes_facts(&changes,original,&facts,pin)?;
+            let ResultBody::WorktreesList(worktrees)=phone.rpc(RequestBody::WorktreesList(WorktreesListParams {target:original.target.clone()}),"project_read_worktrees").await?else{return Err(failure("actual worktree response absent"))};
+            if worktrees.target!=original.target||!worktrees.worktrees.iter().any(|row|Path::new(&row.path)==context.fixture.read&&row.is_linked_worktree==Some(false))
+                ||!worktrees.worktrees.iter().any(|row|Path::new(&row.path)==facts.linked&&row.is_linked_worktree==Some(true)){return Err(failure("complete native worktree/admin inventory facts absent"));}
+            observations.push(json!({"provider":original.provider,"completeArtifacts":true,"hostExportEquivalentOnly":true,"stagedPatchSha256":hex(&sha256(changes.changes.staged_patch.as_bytes())),"unstagedPatchSha256":hex(&sha256(changes.changes.unstaged_patch.as_bytes())),"changesEntries":changes.changes.entries.len(),"worktrees":worktrees.worktrees.len(),"referenceFacts":"immutable native path/stage/binary/conflict/gitlink metadata; Android draft/UI separately required"}));completed.insert(original.provider);
+        }
+        project_artifacts(&mut phone,&shell_source,context.fixture).await?;
+        let creation=project_create(&mut phone,&context,Provider::Omp,&context.config.projects[1]).await?;
+        proved_creation_originals=1;
+        project_refused(&mut phone,RequestBody::ArtifactsList(ArtifactsListParams {source:ArtifactSource::Session {target:creation.target.clone()},parent:None,cursor:None,limit:Uint(100)})).await?;
+        // Existing mutable Git configuration is data, not a grant. An outside
+        // include must refuse the COMPLETE observation for each original provider.
+        let include=format!("[include]\npath = {}\n",context.fixture.creation_only.join("outside.config").display());fs::write(&context.fixture.global,include)?;
+        for original in &originals {project_refused(&mut phone,RequestBody::ChangesRead(ChangesReadParams {target:original.target.clone()})).await?;}
+        fs::write(&context.fixture.global,b"")?;
+        let root=project_list(&mut phone,&shell_source,None).await?;let directory=root.iter().find(|row|row.name==context.fixture.folder).ok_or_else(||failure("owned artifact directory absent"))?.reference.clone();
+        let folder=context.fixture.read.join(&context.fixture.folder);
+        for special in ["outside-alias","special-fifo"] {
+            let path=folder.join(special);
+            if special=="outside-alias" {std::os::unix::fs::symlink(context.fixture.creation_only.join("outside.config"),&path)?;}else{
+                let path=std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;if unsafe{libc::mkfifo(path.as_ptr(),0o600)}!=0{return Err(io::Error::last_os_error());}
+            }
+            project_refused(&mut phone,RequestBody::ArtifactsList(ArtifactsListParams {source:shell_source.clone(),parent:Some(directory.clone()),cursor:None,limit:Uint(100)})).await?;
+            fs::remove_file(path)?;
+        }
+        let rows=project_list(&mut phone,&shell_source,Some(directory.clone())).await?;let old=rows.iter().find(|row|row.name=="complete.txt").ok_or_else(||failure("owned changed-file row absent"))?;
+        fs::rename(folder.join("complete.txt"),folder.join("retired-complete.txt"))?;fs::write(folder.join("complete.txt"),vec![b'y';65536+7])?;
+        project_refused(&mut phone,RequestBody::ArtifactsOpen(ArtifactsOpenParams {source:shell_source.clone(),file:old.reference.clone()})).await?;
+        let rows=project_list(&mut phone,&shell_source,Some(directory)).await?;let row=rows.iter().find(|row|row.name=="complete.txt").ok_or_else(||failure("replacement snapshot row absent"))?;
+        let open=project_open(&mut phone,&shell_source,row).await?;
+        // The already-open snapshot remains charged, but no data may be published
+        // after its original approved root is retired. Never stop originals or restore it.
+        let retired=context.fixture.read.parent().ok_or_else(||failure("owned root parent absent"))?.join("retired-read-root");fs::rename(&context.fixture.read,&retired)?;fs::DirBuilder::new().mode(0o700).create(&context.fixture.read)?;
+        write_json(&context.evidence.join(format!("project-read-retired-root-{}.json",context.run.0)),&json!({"runId":context.run,"originalObject":context.fixture.root_object,"retiredRoot":retired,"replacementRoot":context.fixture.read,"scope":"owned root-object invalidation only; original provider/shell processes retained; no restore, signal, input, pane close or replay"}))?;
+        project_refused(&mut phone,RequestBody::ArtifactsRead(ArtifactsReadParams {source:shell_source.clone(),read_id:open.read_id.clone(),offset:Uint(0),limit:Uint(65536)})).await?;
+        project_close(&mut phone,&shell_source,&open.read_id).await?;
+        for original in &originals {original.recheck_processes()?;project_refused(&mut phone,RequestBody::ChangesRead(ChangesReadParams {target:original.target.clone()})).await?;}
+        creation.recheck_processes()?;context.source.recheck()?;
+        Ok(())
+    }.await;
+    let available=outcome.is_ok();let results=selected.iter().map(|provider|json!({"gate":"project-read-only","provider":provider,"status":if available&&completed.contains(provider){"passed"}else{"unavailable"},"reason":if available{"completed"}else{"original_read_boundary_or_fixture_prerequisite_unavailable"},"originalsRetained":true,"terminalInputOrGrid":false,"androidSafOrUiProof":false})).collect::<Vec<_>>();
+    write_json(&context.evidence.join(format!("project-read-results-{}.json",context.run.0)),&json!({"runId":context.run,"results":results,"observations":observations,"provedCounts":{"readGrantedOriginals":proved_read_originals,"creationOnlyOriginals":proved_creation_originals,"startupFilesPanes":pinned_files_panes},"expectedCounts":{"readGrantedProviders":2,"creationOnlyOmpOriginal":1,"ordinaryStartupFilesPane":1},"scope":"host framed workflows and immutable native reference facts only; no Android SAF/UI/native-input acceptance claimed; all entered results retained/status-only; entered unproved resources are recorded separately, never inferred absent"}))?;
+    for result in results {println!("{result}");}phone.connection.close(0u32.into(),b"finite project read complete");outcome.map(|()|true)
+}
+
+
+async fn checkpoint_held(
+    args: &clap::ArgMatches,
+    evidence: &Path,
+    mut grid_hold: Option<&mut GridHold>,
+    qualified_config: Option<Config>,
+) -> io::Result<bool> {
+    let project_read_only=args.get_flag("project-read-only");
+    let finite_admission=args.get_flag("admission-only")||args.get_flag("shared-agent-only")||project_read_only||args.get_one::<String>("background").is_some();
+    let terminal_only=args.get_flag("terminal-only");
+    terminal_mode_environment(args)?;
+    project_read_mode_environment(args)?;
+    background_mode_environment(args)?;
+    if args.get_one::<String>("background").is_some(){ui::background_preflight(args).await?;}
+    let retain_process=finite_admission||terminal_only||args.get_flag("omp-creation-diagnostic");
+    if args.get_flag("grid") != grid_hold.is_some()
+        || args.get_flag("grid") != qualified_config.is_some()
+    {
+        return Err(grid_failure("retention_construction"));
+    }
     if !args.get_flag("consent-owned-providers") {
         return Err(failure(
             "explicit --consent-owned-providers required before owned desktop/provider effects",
         ));
     }
-    let selected = args
+    let selected=if terminal_only {Vec::new()}else{args
         .get_many::<String>("backend")
-        .ok_or_else(|| {
-            failure("select --backend omp --backend codex; missing backend is not silently skipped")
-        })?
-        .map(|s| {
-            if s == "omp" {
-                Provider::Omp
-            } else {
-                Provider::Codex
-            }
-        })
-        .collect::<Vec<_>>();
+        .ok_or_else(||failure("select --backend omp --backend codex; missing backend is not silently skipped"))?
+        .map(|provider|if provider=="omp"{Provider::Omp}else{Provider::Codex}).collect::<Vec<_>>()};
     if args.get_flag("paging-proof") && selected != vec![Provider::Codex] {
         return Err(failure("paging proof requires only one Codex backend"));
     }
@@ -9423,7 +13096,10 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
             "OMP creation diagnostic requires only one OMP backend",
         ));
     }
-    if omp_creation_diagnostic && selected_omp_capture_mode() != OwnedOmpCaptureMode::Backend {
+    if omp_creation_diagnostic
+        && (selected_omp_capture_mode() != OwnedOmpCaptureMode::Backend
+            || owned_hello_capture_requested())
+    {
         return Err(failure(
             "OMP creation diagnostic requires only GOATR_OWNED_OMP_BACKEND_CAPTURE=1",
         ));
@@ -9433,16 +13109,32 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         return Err(failure("duplicate selected backend"));
     }
     require_both_checkpoint_providers(args, &selected)?;
-    let deployment=Config::load(args.get_one::<PathBuf>("config").ok_or_else(||failure("actual deployment --config with preserved installed outer wrappers/source roots required"))?)?;
+    if finite_admission
+        && (owned_omp_capture_requested()
+            || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").is_some()
+            || std::env::var_os("GOATR_OWNED_OMP_PRODUCER_CAPTURE").is_some()
+            || std::env::var_os("GOATR_OWNED_HERDR_REPORT_BIN").is_some()
+            || std::env::var_os("GOATR_OWNED_HERDR_REPORT_SHA256").is_some())
+    {
+        return Err(failure("finite owned mode conflicts with provider/private diagnostic capture"));
+    }
+    let deployment = match qualified_config {
+        Some(deployment) => deployment,
+        None => Config::load(args.get_one::<PathBuf>("config").ok_or_else(||failure("actual deployment --config with preserved installed outer wrappers/source roots required"))?)?,
+    };
     for p in &selected {
-        if let Some(reason) = deployment.backend_reason(*p)? {
+        if !finite_admission
+            && let Some(reason) = deployment.backend_reason(*p)? {
             return Err(prerequisite(reason));
         }
     }
-    if !deployment.allow_scoped_shell_probe {
+    if !terminal_only&&!deployment.allow_scoped_shell_probe {
         return Err(failure(
             "explicit local scoped probe consent must be saved by actual setup before stock creation gate",
         ));
+    }
+    if terminal_only&&!deployment.allow_terminal_control {
+        return Err(prerequisite("terminal-only requires explicit saved local allow_terminal_control=true"));
     }
     let binary = packaged(args)?;
     let workspace = fs::canonicalize(
@@ -9460,9 +13152,9 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
     write_json(
         &evidence.join(format!("native-input-consent-{}.json", run.0)),
         &json!({"runId":run,"automateNativeInputs":args.get_flag("automate-native-inputs"),
-            "exhaustivePaging":exhaustive_paging(args),
-            "diagnosticOnly":selected.len()==1,"finalBothProviderAndroidAcceptanceRequired":true,
-            "scope":"only this fresh run's explicitly owned native TUIs; no existing work adoption",
+            "exhaustivePaging":if args.get_one::<String>("background").is_some(){"not_part_of_finite_background_workflow"}else{exhaustive_paging(args)},
+            "diagnosticOnly":selected.len()==1,"terminalOnly":terminal_only,"finalBothProviderAndroidAcceptanceRequired":true,
+            "scope":if terminal_only{"one fixed public printf fixture in this fresh owned idle shell only; no provider or existing work adoption"}else{"only this fresh run's explicitly owned native TUIs; no existing work adoption"},
             "acknowledgmentIsNotEffect":true,"uncertainInputsNeverReplayed":true}),
     )?;
     let suffix = hex(&random32()?[..6]);
@@ -9522,10 +13214,17 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         },
         &workspace,
     )?;
+    let project_fixture=if project_read_only {Some(ProjectReadFixture::prepare(args,&root,&binary,&run)?)}else{None};
     let mut config = deployment.clone();
     config.runtime_dir = root.join("runtime");
     config.runtime_dir_agent = config.runtime_dir.clone();
     config.herdr_sockets = vec![herdr_socket.clone()];
+    if project_read_only {config.allow_terminal_control=false;config.allow_attachments=false;}
+    if terminal_only {
+        config.allow_scoped_shell_probe=false;config.allow_attachments=false;
+        config.omp_registry_dir=None;config.omp_blob_root=None;config.omp_session_roots.clear();
+        config.omp_skills_package_root=None;config.executables.omp=None;config.executables.codex=None;
+    }
     if let Some(private_herdr) = private_herdr {
         // Every owned-run proof below observes this exact private diagnostic binary.
         config.executables.herdr = private_herdr;
@@ -9537,10 +13236,15 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         config.executables.omp = None;
     }
     config.projects = vec![ConfiguredProject {
+        allow_read_tools: false,
         id: Uuid::random(),
         label: Label::new("Owned checkpoint project").map_err(io::Error::other)?,
         path: root.join("project"),
     }];
+    if let Some(fixture)=&project_fixture {
+        config.projects[0].allow_read_tools=true;
+        config.projects.push(ConfiguredProject {id:Uuid::random(),label:Label::new("Owned creation-only sibling").map_err(io::Error::other)?,path:fixture.creation_only.clone(),allow_read_tools:false});
+    }
     if selected.contains(&Provider::Codex) {
         let owner = CodexOwner {
             id: Uuid::random(),
@@ -9555,7 +13259,9 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         config.codex_owners.clear();
         config.default_codex_owner_id = None;
     }
-    let native_mcp = if !args.get_flag("paging-proof")
+    let native_mcp = if !args.get_flag("grid")
+        && !args.get_flag("shared-agent-only")
+        && !args.get_flag("paging-proof")
         && args.get_flag("automate-native-inputs")
         && selected.contains(&Provider::Codex)
         && !args.get_flag("codex-invalidation-diagnostic")
@@ -9564,6 +13270,16 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
     } else {
         None
     };
+    if args.get_flag("grid") {
+        let native_config = admin.join("config/herdr/config.toml");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&native_config)?;
+        file.write_all(b"[terminal]\nmobile_shell_access = \"read_create_input\"\n")?;
+        file.sync_all()?;
+    }
     let config_path = root.join("config.toml");
     let config_lock = goatr::setup::SetupLock::acquire(&root)?;
     config_lock.publish(
@@ -9572,14 +13288,25 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         config.serialized()?.as_bytes(),
     )?;
     drop(config_lock);
-    let listener = if args.get_flag("paging-proof") {
+    if args.get_flag("shared-agent-only") {
+        config=Config::load(&config_path)?;
+        for provider in &selected {
+            if let Some(reason)=config.backend_reason(*provider)? {
+                return Err(prerequisite(reason));
+            }
+        }
+    }
+    let listener = if args.get_flag("paging-proof")||terminal_only {
         None
     } else {
-        Some(std::net::TcpListener::bind((
+        Some(Arc::new(std::net::TcpListener::bind((
             std::net::Ipv4Addr::LOCALHOST,
             0,
-        ))?)
+        ))?))
     };
+    if let (Some(hold), Some(listener)) = (grid_hold.as_deref_mut(), listener.as_ref()) {
+        hold.relays.push(listener.clone());
+    }
     let (port, listener_record, listener_source) = if let Some(listener) = &listener {
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
@@ -9639,6 +13366,8 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         &json!({"runId":run,"herdrReportCapture":herdr_report_capture.is_some(),"ompBackendCapture":omp_backend_capture,"root":identity(&root)?,"adminParent":identity(&admin)?,"adminSocket":socket,"herdrSocket":herdr_socket,"herdrName":name,"config":identity(&config_path)?,"runtimeUnchanged":runtime,"package":binary,"packageSha256":binary_sha256(&binary)?,"companionLockSha256":transport::lock_sha256(),"OMPownedPort":port,"listener":listener_record,"listenerSource":listener_source,"nativeCreationResources":"retained; never automatically rollback/kill desktop work","stage":"owned roots/exact kernel listener source before process effects"}),
     )?;
     let mut command = std::process::Command::new(&config.executables.herdr);
+    if let Some(fixture)=&project_fixture {fixture.environment(&mut command);}
+    if terminal_only{command.env_remove("HERDR_RENDER_PROF");}
     command
         .args(["--session", &name, "server"])
         .current_dir(&config.projects[0].path)
@@ -9665,7 +13394,8 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         .map_err(io::Error::other)?;
         command.env("PATH", path);
     }
-    let mut desktop = Desktop::spawn(command)?;
+    let spawn_manifest = retain_process.then(||evidence.join(format!("herdr-spawn-{}.json",run.0)));
+    let mut desktop = Desktop::spawn_held(command, grid_hold.as_deref_mut(), spawn_manifest.as_deref())?;
     if let Some(capture) = &herdr_report_capture {
         capture.pin(&desktop.process);
     }
@@ -9673,10 +13403,14 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         &evidence.join(format!("herdr-{}.json", run.0)),
         &json!({"runId":run,"process":desktop.process,"executable":config.executables.herdr,"outerSha256":binary_sha256(&config.executables.herdr)?,"socket":herdr_socket,"cwd":config.projects[0].path,"XDG_CONFIG_HOME":admin.join("config"),"XDG_RUNTIME_DIR":runtime}),
     )?;
+    if retain_process {
+        println!("{}",json!({"gate":"admission-owned-herdr",
+            "manifest":evidence.join(format!("herdr-{}.json",run.0))}));
+    }
     let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if surface(&herdr_socket).await.is_ok() {
-            break;
+    let (source_evidence, admission_native) = loop {
+        if let Ok(source) = surface(&herdr_socket).await {
+            break source;
         }
         if Instant::now() > deadline {
             return Err(prerequisite(
@@ -9684,31 +13418,131 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    if retain_process {
+        let manifest = evidence.join(format!("admission-source-{}.json",run.0));
+        write_json(&manifest, &json!({"runId":run,"herdr":desktop.process,
+            "source":source_evidence,"socket":identity(&herdr_socket)?,
+            "scope":"retained fresh owned Herdr; original kernel process and validated socket source"}))?;
+        println!("{}",json!({"gate":"admission-source","manifest":manifest}));
+        if source_evidence.linux_boot_id != desktop.process.linux_boot_id
+            || source_evidence.pid != desktop.process.pid
+            || source_evidence.pid_start_ticks != desktop.process.start_ticks
+        {
+            return Err(prerequisite("owned Herdr source does not match original child"));
+        }
     }
-    let mut serve = start_serve_with_codex_capture(
-        &binary,
-        &config_path,
-        &root,
-        &socket,
-        listener.as_ref(),
-        args.get_flag("codex-invalidation-diagnostic"),
-        codex_startup_terminal_capture,
-        herdr_report_capture.as_ref(),
-    )?;
+    let mut serve = if args.get_flag("grid") || retain_process {
+        start_serve_with_capture(
+            &binary,
+            &config_path,
+            &root,
+            &socket,
+            listener.as_deref(),
+            ServeLaunch {
+                diagnostic_capture: false,
+                codex_startup_terminal_capture: false,
+                herdr_report_capture: None,
+                preserve_xdg_config_home: false,
+                retain_process,
+                hello_capture: finite_admission,
+                grid_hold: grid_hold.as_deref_mut(),
+                project_read: project_fixture.as_ref(),
+            },
+        )?
+    } else {
+        start_serve_with_codex_capture(
+            &binary,
+            &config_path,
+            &root,
+            &socket,
+            listener.as_deref(),
+            args.get_flag("codex-invalidation-diagnostic"),
+            codex_startup_terminal_capture,
+            herdr_report_capture.as_ref(),
+        )?
+    };
     healthy(&mut serve, &socket).await?;
     write_json(
         &evidence.join(format!("serve-{}.json", run.0)),
         &json!({"runId":run,"process":serve.process,"adminSocket":identity(&socket)?,"absoluteConfig":config_path,"OMPownedPort":port,"serveArgument":"--admin-socket identical on pair/list/revoke/restart","scope":"ordinary configured packaged serve, not hidden transport smoke"}),
     )?;
-    println!(
-        "{}",
-        json!({"gate":"owned-runtime-ready","runId":run,"root":root,"herdrSocket":herdr_socket,"OMPownedPort":port,"scope":"sanitized resource rendezvous; relay is live, no provider readiness claimed"}),
-    );
+    if retain_process {
+        let manifest = evidence.join(format!("admission-ownership-{}.json",run.0));
+        write_json(&manifest,
+            &json!({"runId":run,"herdr":desktop.process,"source":source_evidence,
+                "herdrSocket":identity(&herdr_socket)?,"companion":serve.process,
+                "adminSocket":identity(&socket)?,"root":root,"config":config_path,
+                "scope":"retained fresh originals; no automatic teardown; review exact identities before cleanup"}))?;
+        println!("{}",json!({"gate":"admission-ownership","manifest":manifest}));
+    }
+    let ready = json!({"gate":"owned-runtime-ready","runId":run,"root":root,"herdrSocket":herdr_socket,"OMPownedPort":port,"scope":if terminal_only{"retained provider-independent owned stock source; no provider relay or readiness dependency"}else{"sanitized resource rendezvous; relay is live, no provider readiness claimed"}});
+    if args.get_flag("grid") {
+        let _ = writeln!(std::io::stdout(), "{ready}");
+    } else {
+        println!("{ready}");
+    }
     let endpoint = goatr::endpoint_builder(iroh::SecretKey::from_bytes(&random32()?))
         .bind()
         .await
         .map_err(io::Error::other)?;
     let mut phone = pair(&binary, &root, &socket, &endpoint).await?;
+    if terminal_only {
+        let result=terminal_flow(&mut phone,&config,&herdr_socket,&mut desktop,&source_evidence,admission_native,&name,evidence,&run).await;
+        phone.connection.close(0u32.into(),b"finite terminal workflow complete");
+        return result;
+    }
+    if args.get_flag("grid") {
+        return grid_flow(
+            &mut phone,
+            &config,
+            &herdr_socket,
+            &desktop.process,
+            &mut serve,
+            evidence,
+            &run,
+            &selected,
+            grid_hold
+                .as_deref_mut()
+                .ok_or_else(|| grid_failure("retention_missing"))?,
+        )
+        .await;
+    }
+    if finite_admission {
+        let server=creation_admission(&mut phone, &selected, &name, evidence, &run,
+            AdmissionSource{socket:&herdr_socket,desktop:&mut desktop,original:&source_evidence,native:admission_native}).await?;
+        if args.get_flag("admission-only") {
+            phone.connection.close(0u32.into(), b"finite admission complete");
+            return Ok(server.is_some());
+        }
+        if args.get_one::<String>("background").is_some(){
+            let server=server.ok_or_else(||prerequisite("background finite both-provider admission unavailable"))?;
+            let mut originals=Vec::with_capacity(2);
+            for provider in selected.iter().copied(){
+                server.recheck()?;
+                let (original,receipt)=create(&mut phone,&config,&herdr_socket,provider,&server.identity.0,evidence,&run).await?;
+                if provider==Provider::Codex&&let Some(mcp)=&native_mcp {
+                    mcp.bind_owner(&original)?;
+                }
+                write_json(&evidence.join(format!("background-original-{}-{provider:?}.json",run.0)),&json!({"runId":run,"mode":args.get_one::<String>("background"),"creationReceipt":receipt,"proof":original.evidence(),"resourcesRetained":true,"cleanupAuthorized":false}))?;
+                originals.push(original);
+            }
+            ui::background(args,evidence,ui::Context {binary:&binary,root:&root,socket:&socket,config:&config,herdr_socket:&herdr_socket,herdr_process:&desktop.process,
+                mcp:native_mcp.as_ref(),serve:&mut serve,listener:listener.as_deref().ok_or_else(||failure("background owned listener absent"))?,endpoint:&endpoint,phone:&mut phone,native:&mut originals,history_witnesses:&[],feedback_presentation:&[]},&run).await?;
+            return Ok(true);
+        }
+        if let Some(fixture)=&project_fixture {
+            let server=server.ok_or_else(||prerequisite("project-read-only finite creation admission unavailable"))?;
+            return project_read_flow(phone,&selected,ProjectReadRun {fixture,config:&config,socket:&herdr_socket,desktop:&desktop,source:&server,evidence,run:&run}).await;
+        }
+        let server=server.ok_or_else(||prerequisite("shared-agent creation admission unavailable"))?;
+        return shared_agent_flow(phone, &selected, SharedAgentContext {
+            inputs:NativeInputs{enabled:true,paging_proof:false,config:&config,socket:&herdr_socket,
+                herdr:&desktop.process,evidence,run:&run,mcp:None,plan:RefCell::new(None),
+                mcp_dialogs:RefCell::new(HashMap::new())},
+            companion:&serve,endpoint:&endpoint,source:&server,
+        }).await;
+    }
     phone.codex_close_capture = args.get_flag("codex-invalidation-diagnostic");
     if let Some(budget) = serve.omp_capture_budget.clone() {
         phone.set_omp_capture(budget);
@@ -9773,15 +13607,25 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
             phone
                 .connection
                 .close(0u32.into(), b"OMP creation diagnostic complete");
-            serve.stop().await?;
+            let probe_disposition = if receipt.creation.as_ref().is_some_and(|creation| {
+                creation.stage == CreationStage::Workspace && receipt.state != ReceiptState::Succeeded
+            }) {
+                if serve.finish_retained_omp_capture().await { "observed" } else { "unavailable" }
+            } else {
+                "not_required_by_receipt"
+            };
+            serve.finish_guard_drain();
+            let succeeded = receipt.state == ReceiptState::Succeeded;
             println!(
                 "{}",
                 json!({"gate":"omp-creation-diagnostic","runId":run,
                     "action":receipt.action_id,"state":format!("{:?}", receipt.state),
                     "stage":stage,"stageState":stage_state,"errorCode":error_code,
-                    "status":"closed"}),
+                    "status":if succeeded {"succeeded"} else {"not_succeeded"},
+                    "probeDisposition":probe_disposition,"resourcesRetained":true,
+                    "cleanupAuthorized":false}),
             );
-            return Ok(true);
+            return Ok(succeeded);
         }
         if p == Provider::Codex && args.get_flag("codex-invalidation-diagnostic") {
             // Preserve the original helper result while the selected capture reaches EOF.
@@ -9803,6 +13647,7 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
             &run,
             false,
             Some((&mut serve, &startup_terminal, codex_startup_terminal_capture)),
+            None,
         )
         .await?;
         let session = session.ok_or_else(|| non_succeeded_creation_error(p, &receipt))?;
@@ -10090,15 +13935,14 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
     let mut replay = Vec::new();
     for p in &native {
         let id = Uuid::random();
-        let req = RequestBody::PromptSubmit(PromptSubmitParams {
-            boot_id: phone.hello.boot_id.clone(),
-            target: p.target.clone(),
-            text: PromptText(format!(
-                "Reply only goatr-once-{}-{:?}",
-                &run.0[..8],
-                p.provider
-            )),
-        });
+        let req = RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
+        delivery: None, native_turn_id: None, images: None,
+        target: p.target.clone(),
+        text: PromptText(format!(
+            "Reply only goatr-once-{}-{:?}",
+            &run.0[..8],
+            p.provider
+        )), });
         let receipt = receipt_result(
             phone
                 .request(id.clone(), req.clone())
@@ -10129,7 +13973,7 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
     for p in &native {
         p.recheck_processes()?;
     }
-    serve = start_serve(&binary, &config_path, &root, &socket, listener.as_ref())?;
+    serve = start_serve(&binary, &config_path, &root, &socket, listener.as_deref())?;
     healthy(&mut serve, &socket).await?;
     phone.connection.close(0u32.into(), b"companion restart");
     phone = connect(&endpoint, &host_id, None).await?;
@@ -10228,7 +14072,7 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
         config.serialized()?.as_bytes(),
     )?;
     drop(config_lock);
-    serve = start_serve(&binary, &config_path, &root, &socket, listener.as_ref())?;
+    serve = start_serve(&binary, &config_path, &root, &socket, listener.as_deref())?;
     healthy(&mut serve, &socket).await?;
     phone
         .connection
@@ -10258,7 +14102,7 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
             for p in &native {
                 p.recheck_processes()?;
             }
-            serve = start_serve(&binary, &config_path, &root, &socket, listener.as_ref())?;
+            serve = start_serve(&binary, &config_path, &root, &socket, listener.as_deref())?;
             healthy(&mut serve, &socket).await?;
             phone
                 .connection
@@ -10360,7 +14204,7 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
             for p in &native {
                 p.recheck_processes()?;
             }
-            serve = start_serve(&binary, &config_path, &root, &socket, listener.as_ref())?;
+            serve = start_serve(&binary, &config_path, &root, &socket, listener.as_deref())?;
             healthy(&mut serve, &socket).await?;
             // The passed phone/actions stay revoked. A fresh read peer obtains this
             // boot's authoritative Targets without reusing subscriptions or requests.
@@ -10456,13 +14300,110 @@ async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool
 }
 pub async fn run() -> io::Result<bool> {
     let args = arguments();
+    terminal_mode_environment(&args)?;
+    project_read_mode_environment(&args)?;
+    background_mode_environment(&args)?;
+    // Reject an invalid ephemeral selector before even creating its evidence directory.
+    physical_relay_request(&args)?;
     let evidence = std::path::absolute(
         args.get_one::<PathBuf>("evidence-dir")
             .expect("required evidence"),
     )?;
-    private_dir(&evidence, true)?;
+    if args.get_flag("shared-agent-only")||args.get_flag("terminal-only")||args.get_flag("project-read-only")||args.get_one::<String>("background").is_some() {
+        if args.get_flag("shared-agent-only"){require_shared_backends(&args)?;}
+        if args.get_flag("project-read-only"){require_shared_backends(&args).map_err(|_|failure("project-read-only requires exactly one OMP and one Codex backend"))?;}
+        fresh_shared_evidence(&evidence)?;
+    }
     if args.get_flag("physical-hello-capture") {
         return physical_hello_capture(&args, &evidence).await;
+    }
+    private_dir(&evidence, true)?;
+    if args.get_one::<String>("background").is_some(){
+        let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result=tokio::select!{
+            result=checkpoint(&args,&evidence)=>result,
+            _=tokio::signal::ctrl_c()=>Err(failure("background cancelled; original providers/receipts retained; no replay or automatic native cleanup")),
+            _=terminate.recv()=>Err(failure("background cancelled; original providers/receipts retained; no replay or automatic native cleanup")),
+        };
+        if let Err(error)=&result {
+            let unavailable=args.get_many::<String>("backend").into_iter().flatten().map(|provider|json!({"gate":"background","mode":args.get_one::<String>("background"),"provider":provider,"status":"unavailable","reason":"preparation_or_real_delivery_boundary","boundary":super::helper_error_metadata(error),"resourcesRetained":true,"cleanupAuthorized":false})).collect::<Vec<_>>();
+            write_json(&evidence.join(format!("background-unavailable-{}.json",Uuid::random().0)),&json!({"results":unavailable}))?;
+            for row in unavailable{println!("{row}");}
+        }
+        return result;
+    }
+    if args.get_flag("project-read-only") {
+        let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result=tokio::select! {
+            result=checkpoint(&args,&evidence)=>result,
+            _=tokio::signal::ctrl_c()=>Err(failure("project-read-only cancelled; originals and entered receipts retained, never replayed")),
+            _=terminate.recv()=>Err(failure("project-read-only cancelled; originals and entered receipts retained, never replayed")),
+        };
+        if let Err(error)=&result {
+            let results=args.get_many::<String>("backend").into_iter().flatten().map(|provider|json!({"gate":"project-read-only","provider":provider,"status":"unavailable","reason":"preparation_or_original_read_boundary","boundary":super::helper_error_metadata(error),"scope":"retained originals/receipts; no input, replay, native closure or cleanup; not Android SAF/UI proof"})).collect::<Vec<_>>();
+            write_json(&evidence.join(format!("project-read-unavailable-{}.json",Uuid::random().0)),&json!({"results":results}))?;
+            for result in results {println!("{result}");}
+        }
+        return result;
+    }
+
+    if args.get_flag("terminal-only") {
+        let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result=tokio::select!{
+            result=checkpoint(&args,&evidence)=>result,
+            _=tokio::signal::ctrl_c()=>Err(failure("terminal-only cancelled; original resources retained, no input replay")),
+            _=terminate.recv()=>Err(failure("terminal-only cancelled; original resources retained, no input replay")),
+        };
+        if let Err(error)=&result {
+            let record=json!({"gate":"terminal-only","status":"unavailable","reason":"preparation_or_observation",
+                "boundary":super::helper_error_metadata(error),"resources":"retained originals; no stop/closure/rollback",
+                "nativeTag19":"unproved","phase4Input":"unproved","scope":"finite single-controller stock interoperability only"});
+            write_json(&evidence.join(format!("terminal-unavailable-{}.json",Uuid::random().0)),&record)?;
+            println!("{record}");
+        }
+        return result;
+    }
+    if args.get_flag("admission-only") {
+        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result = tokio::select! {
+            result=checkpoint(&args,&evidence)=>result,
+            _=tokio::signal::ctrl_c()=>Err(failure("admission cancelled; fresh owned resources retained")),
+            _=terminate.recv()=>Err(failure("admission cancelled; fresh owned resources retained")),
+        };
+        if result.is_err() {
+            let results = args.get_many::<String>("backend").into_iter().flatten().map(|provider|
+                json!({"gate":"admission-only","provider":provider,"status":"unavailable",
+                    "reason":"preparation_unavailable","scope":"no provider creation or input admitted"})
+            ).collect::<Vec<_>>();
+            write_json(&evidence.join(format!("admission-unavailable-{}.json",Uuid::random().0)),
+                &json!({"results":results}))?;
+            for result in results { println!("{result}"); }
+            return Err(prerequisite("finite admission preparation unavailable; fresh ownership evidence retained"));
+        }
+        return result;
+    }
+    if args.get_flag("shared-agent-only") {
+        let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result=tokio::select! {
+            result=checkpoint(&args,&evidence)=>result,
+            _=tokio::signal::ctrl_c()=>Err(failure("shared-agent cancelled; original receipts/resources retained")),
+            _=terminate.recv()=>Err(failure("shared-agent cancelled; original receipts/resources retained")),
+        };
+        if let Err(error)=result {
+            let results=args.get_many::<String>("backend").into_iter().flatten().map(|provider|
+                json!({"gate":"shared-agent-only","provider":provider,"status":"unavailable",
+                    "reason":"preparation_or_cancellation","boundary":super::helper_error_metadata(&error),
+                    "scope":"retained original jobs/receipts; inspect only, never replay or automatic cleanup"})
+            ).collect::<Vec<_>>();
+            write_json(&evidence.join(format!("shared-agent-unavailable-{}.json",Uuid::random().0)),
+                &json!({"results":results}))?;
+            for result in results {println!("{result}");}
+            return Ok(false);
+        }
+        return result;
+    }
+    if args.get_flag("grid") {
+        return grid_run(&args, &evidence).await;
     }
     if args.get_flag("development-continuity") {
         selected_lease(&args, "development Android consumer")?;
@@ -10504,6 +14445,635 @@ pub async fn run() -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    fn background_args(mode:&str)->Vec<String> {
+        let mut args=vec!["smoke".into(),format!("--background={mode}"),"--backend=omp".into(),"--backend=codex".into(),
+            "--goatr=/nix/store/example/bin/goatr".into(),"--config=/private/config.toml".into(),"--workspace-root=/workspace".into(),
+            "--evidence-dir=/private/fresh".into(),"--consent-owned-providers".into(),"--automate-native-inputs".into(),
+            "--serial=emulator-5594".into(),"--emulator-owner=/private/run.json".into(),"--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
+        for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
+        if mode=="ntfy"{for field in ["expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"]{args.push(format!("--{field}={}","2".repeat(64)));}}
+        args
+    }
+    #[test]
+    fn finite_background_parser_accepts_both_explicit_modes_and_refuses_effectful_mixed_routes() {
+        for mode in ["persistent","ntfy"] {
+            let args=background_args(mode);
+            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+            assert_eq!(parsed.get_one::<String>("background").map(String::as_str),Some(mode));
+            background_mode_environment(&parsed).unwrap();
+            for required in ["--goatr=","--config=","--workspace-root=","--evidence-dir=","--emulator-owner=","--serial=","--apk=","--test-apk=","--expected-apk-sha256=","--expected-test-apk-sha256="] {
+                let reduced=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();
+                assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err());
+            }
+            for conflict in ["--review-fixture","--transport=direct","--transport=relay","--owned-mcp-stdio","--admission-only","--shared-agent-only","--terminal-only","--project-read-only","--grid","--ui","--camera","--ime","--setup","--prepare-emulator","--paging-proof","--physical-hello-capture","--physical-relay-ephemeral","--codex-invalidation-diagnostic","--codex-startup-terminal-capture","--omp-creation-diagnostic","--development-continuity","--development-owner-feedback","--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing"] {
+                let mut mixed=args.clone();mixed.push(conflict.into());
+                assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).is_err());
+            }
+            for backends in [vec!["--backend=omp"],vec!["--backend=codex"],vec!["--backend=omp","--backend=omp"]] {
+                let mut invalid=args.iter().filter(|arg|!arg.starts_with("--backend=")).cloned().collect::<Vec<_>>();
+                invalid.extend(backends.into_iter().map(str::to_owned));
+                let parsed=feedback_arguments(arguments_base()).try_get_matches_from(invalid).unwrap();
+                assert!(background_mode_environment(&parsed).is_err());
+            }
+        }
+        let missing=background_args("ntfy").into_iter().filter(|arg|!arg.starts_with("--expected-ntfy-")).collect::<Vec<_>>();
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(missing).unwrap();
+        assert!(background_mode_environment(&parsed).is_err());
+        let mut unwanted=background_args("persistent");unwanted.extend(["--expected-ntfy-apk-sha256=bad".into(),"--expected-ntfy-signer-sha256=bad".into()]);
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(unwanted).unwrap();
+        assert!(background_mode_environment(&parsed).is_err());
+    }
+
+    fn project_read_args()->Vec<String> {
+        ["smoke","--project-read-only","--backend","omp","--backend","codex","--goatr","/nix/store/example/bin/goatr","--config","/private/config.toml","--workspace-root","/workspace","--evidence-dir","/private/fresh","--consent-owned-providers"].into_iter().map(str::to_owned).collect()
+    }
+    #[test]
+    fn project_read_cli_requires_both_original_backends_and_explicit_fresh_owned_scope_without_input() {
+        let args=project_read_args();let matches=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();require_shared_backends(&matches).unwrap();assert!(!matches.get_flag("automate-native-inputs"));assert!(ProjectSeedPin::parse(&matches).unwrap().is_none());
+        for required in ["--goatr","--config","--workspace-root","--evidence-dir","--consent-owned-providers"] {
+            let mut reduced=args.clone();let index=reduced.iter().position(|arg|arg==required).unwrap();reduced.drain(index..index+if required=="--consent-owned-providers"{1}else{2});
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err());
+        }
+        let mut single=args.clone();let index=single.iter().position(|arg|arg=="codex").unwrap();single.drain(index-1..=index);
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(single).unwrap();assert!(require_shared_backends(&parsed).is_err());
+        let mut duplicate=args.clone();*duplicate.iter_mut().find(|arg|arg.as_str()=="codex").unwrap()="omp".into();let parsed=feedback_arguments(arguments_base()).try_get_matches_from(duplicate).unwrap();assert!(require_shared_backends(&parsed).is_err());
+        for conflict in ["--admission-only","--shared-agent-only","--terminal-only","--grid","--ui","--camera","--ime","--setup","--prepare-emulator","--paging-proof","--automate-native-inputs","--codex-invalidation-diagnostic","--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral","--development-continuity","--development-owner-feedback","--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing"] {
+            let mut args=args.clone();args.push(conflict.into());assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
+        }
+    }
+    #[test]
+    fn project_read_seed_pins_are_complete_and_never_claim_signature_verification() {
+        let mut args=project_read_args();args.extend(["--project-read-seed-pack".into(),"/private/existing-public.pack".into()]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(&args).is_err());
+        args.extend(["--project-read-seed-pack-sha256".into(),"1".repeat(64),"--project-read-seed-commit".into(),PROJECT_PUBLIC_COMMIT.into(),"--project-read-seed-tree".into(),PROJECT_PUBLIC_TREE.into(),"--project-read-seed-signature-sha256".into(),"2".repeat(64)]);
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();assert!(ProjectSeedPin::parse(&parsed).unwrap().is_some());
+        let index=args.iter().position(|arg|arg=="--project-read-seed-commit").unwrap()+1;args[index]="3".repeat(40);
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();assert!(ProjectSeedPin::parse(&parsed).is_err());
+        // Byte-field parsing is deliberately NOT a fake cryptographic verifier.
+        let signature="-----BEGIN PGP SIGNATURE-----\npublic parser fixture\n-----END PGP SIGNATURE-----";
+        let commit=format!("tree {PROJECT_PUBLIC_TREE}\nauthor public fixture\ngpgsig {}\n\npublic subject\n",signature.replace('\n',"\n "));
+        let (tree,block)=project_commit_fields(commit.as_bytes()).unwrap();assert_eq!(tree,PROJECT_PUBLIC_TREE);assert_eq!(block,signature);
+        assert!(project_commit_fields(b"tree missing\n\nunsigned subject\n").is_err());
+    }
+    #[test]
+    fn project_read_input_type_alias_mode_and_byte_bounds_are_checked_before_read() {
+        struct Fixture(PathBuf);impl Drop for Fixture{fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
+        let parent=fs::canonicalize(std::env::temp_dir()).unwrap();let fixture=Fixture(parent.join(format!("goatr-public-seed-input-{}",Uuid::random().0)));
+        fs::DirBuilder::new().mode(0o700).create(&fixture.0).unwrap();let path=fixture.0.join("existing-public.pack");fs::write(&path,b"public immutable bytes").unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o400)).unwrap();
+        assert_eq!(project_input(&path,64,true).unwrap(),b"public immutable bytes");assert!(project_input(&path,4,true).is_err());
+        let alias=fixture.0.join("alias");std::os::unix::fs::symlink(&path,&alias).unwrap();assert!(project_input(&alias,64,true).is_err());
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();assert!(project_input(&path,64,true).is_err());
+        let fifo=fixture.0.join("fifo");let name=std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o400)},0);assert!(project_input(&fifo,64,true).is_err());
+    }
+    #[test]
+    fn project_read_seed_tree_requires_real_distinct_regular_rows_without_path_escape() {
+        let valid=format!("100644 blob {}\tfile-a\x00100644 blob {}\tdir/file-b\x00100644 blob {}\tfile-c\x00","1".repeat(40),"2".repeat(40),"3".repeat(40));
+        let rows=project_seed_files(valid.as_bytes()).unwrap();assert_eq!(rows.len(),3);
+        for invalid in [valid.replace("file-a","../outside"),valid.replace("100644","120000"),valid.replace("file-a","bad\nname"),valid.trim_end_matches('\0').to_owned()] {assert!(project_seed_files(invalid.as_bytes()).is_err());}
+    }
+
+
+    fn terminal_args()->Vec<&'static str> {
+        vec!["smoke","--terminal-only","--goatr","/nix/store/example/bin/goatr",
+            "--config","/private/config.toml","--workspace-root","/workspace",
+            "--evidence-dir","/private/fresh","--consent-owned-providers","--automate-native-inputs"]
+    }
+    #[test]
+    fn terminal_cli_requires_owned_fixture_consents_rejects_backends_and_pairs_frozen_hashes() {
+        let args=terminal_args();
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+        assert!(!terminal_frozen_selection(&parsed).unwrap());
+        for required in ["--goatr","--config","--workspace-root","--evidence-dir","--consent-owned-providers","--automate-native-inputs"] {
+            let mut reduced=args.clone();let index=reduced.iter().position(|arg|*arg==required).unwrap();
+            reduced.drain(index..index+if matches!(required,"--consent-owned-providers"|"--automate-native-inputs"){1}else{2});
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");
+        }
+        for backend in ["omp","codex"]{let mut conflict=args.clone();conflict.extend(["--backend",backend]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflict).is_err());}
+        for mode in ["--admission-only","--shared-agent-only","--grid","--ui","--camera","--ime","--setup",
+            "--prepare-emulator","--paging-proof","--codex-invalidation-diagnostic","--codex-startup-terminal-capture",
+            "--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral","--development-continuity",
+            "--development-owner-feedback","--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing"] {
+            let mut conflict=args.clone();conflict.push(mode);assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflict).is_err(),"{mode}");
+        }
+        let mut api=args.clone();api.extend(["--api","35"]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(api).is_err());
+        for flag in ["--expected-goatr-sha256","--expected-companion-lock-sha256"] {
+            let mut incomplete=args.clone();incomplete.extend([flag,"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(incomplete).is_err());
+        }
+        let mut frozen=args;frozen.extend(["--expected-goatr-sha256","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--expected-companion-lock-sha256","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(frozen).unwrap();
+        assert!(terminal_frozen_selection(&parsed).unwrap());
+    }
+    fn terminal_test_cells()->Vec<GridCell> {
+        fn cell(text:&str,width:u64,foreground:GridColor)->GridCell {
+            GridCell{text:text.into(),width:Uint(width),foreground,background:GridColor::Default,
+                attributes:GridAttributes{bold:false,faint:false,italic:false,blink:false,strike:false,inverse:false,concealed:false,underline:GridUnderline::None,underline_color:None}}
+        }
+        let mut cells=TERMINAL_MARKER.chars().map(|value|cell(&value.to_string(),1,GridColor::Default)).collect::<Vec<_>>();
+        for text in ["界","ｶﾞ","👩‍💻","❤️","🇺🇸"] {cells.push(cell(text,2,GridColor::Default));cells.push(cell("",0,GridColor::Default));}
+        for (text,color) in [("R",GridColor::Indexed{index:Uint(1)}),("I",GridColor::Indexed{index:Uint(202)}),("T",GridColor::Rgb{value:Uint(0x112233)}),("D",GridColor::Default)]{cells.push(cell(text,1,color));}
+        cells
+    }
+    fn terminal_test_witness(columns:usize)->(GridWitness,Uuid) {
+        let opening=Uuid::random();let subscription=Uuid::random();let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
+        let mut witness=GridWitness::pending(opening.clone(),GridSubject::Shell(target.clone()));witness.fixture=Some(TerminalFixtureWitness::new());
+        witness.response(&opening,&Ok(ResultBody::ShellGridSubscribe(ShellGridSubscribeResult{target,subscription:subscription.clone(),seq:ZeroValue(0),
+            frame:GridBegin{mode:GridMode::Replace,revision:Uint(0),columns:Uint(columns as u64),rows:Uint(1),cursor:None,
+                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2)}})),128).unwrap();
+        (witness,subscription)
+    }
+    #[test]
+    fn grid_transaction_clock_starts_at_each_accepted_descriptor_and_never_renews_on_progress() {
+        fn route(grid:&mut Option<GridWitness>,events:&mut u64,generation:&mut Option<GenerationView>,event:Event)->io::Result<()> {
+            let envelope=Envelope::Event(event);
+            let bytes=goatr::protocol::encode_payload(&envelope).unwrap().len();
+            let Envelope::Event(event)=envelope else {unreachable!()};
+            Phone::route_event(grid,events,generation,event,bytes)
+        }
+        for duplicate in [true,false] {
+            let opening=Uuid::random();let subscription=Uuid::random();
+            let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
+            let mut witness=GridWitness::pending(opening.clone(),GridSubject::Shell(target.clone()));
+            witness.fixture=Some(TerminalFixtureWitness::new());
+            assert!(witness.deadline.is_none());witness.arm("TransactionA").unwrap();assert!(witness.deadline.is_none());
+            let mut cells=terminal_test_cells();let columns=cells.len();let first=cells[0].clone();
+            let split=TERMINAL_MARKER.len()+1;let tail=cells.split_off(split);
+            let mut frame=GridBegin{mode:GridMode::Replace,revision:Uint(0),columns:Uint(columns as u64),rows:Uint(1),cursor:None,
+                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2)};
+            let envelope=Envelope::Response(Response{id:opening,outcome:Ok(ResultBody::ShellGridSubscribe(ShellGridSubscribeResult{
+                target,subscription:subscription.clone(),seq:ZeroValue(0),frame:frame.clone()}))});
+            let bytes=goatr::protocol::encode_payload(&envelope).unwrap().len();
+            let Envelope::Response(response)=envelope else {unreachable!()};
+            let before=Instant::now();witness.response(&response.id,&response.outcome,bytes).unwrap();let after=Instant::now();
+            let initial=witness.deadline.unwrap();
+            assert!(initial>=before+Duration::from_secs(15)&&initial<=after+Duration::from_secs(15));
+            let mut grid=Some(witness);let mut events=0;let mut generation=None;
+            let part=|sequence,revision,index,column,cells|Event{subscription:subscription.clone(),seq:Uint(sequence),
+                body:EventBody::GridPart(GridPart{revision:Uint(revision),index:Uint(index),spans:vec![GridSpan{row:Uint(0),column:Uint(column),cells}]})};
+            route(&mut grid,&mut events,&mut generation,part(1,0,0,0,cells)).unwrap();
+            assert_eq!(grid.as_ref().unwrap().deadline,Some(initial));assert!(grid.as_ref().unwrap().committed.is_none());
+            grid.as_mut().unwrap().arm("TransactionB").unwrap();assert_eq!(grid.as_ref().unwrap().deadline,Some(initial));
+            route(&mut grid,&mut events,&mut generation,part(2,0,1,split as u64,tail)).unwrap();
+            assert_eq!(grid.as_ref().unwrap().deadline,Some(initial));
+            assert!(grid.as_ref().unwrap().fixture.as_ref().unwrap().committed.is_none());
+            route(&mut grid,&mut events,&mut generation,Event{subscription:subscription.clone(),seq:Uint(3),
+                body:EventBody::GridCommit(GridCommit{revision:Uint(0)})}).unwrap();
+            assert_eq!(grid.as_ref().unwrap().committed,Some(0));assert!(grid.as_ref().unwrap().deadline.is_none());
+            assert!(grid.as_ref().unwrap().fixture.as_ref().unwrap().committed.is_some());
+            frame.revision=Uint(1);
+            let next=Event{subscription:subscription.clone(),seq:Uint(4),body:EventBody::GridBegin(GridBeginEvent{frame:frame.clone()})};
+            let before=Instant::now();route(&mut grid,&mut events,&mut generation,next).unwrap();let after=Instant::now();
+            let deadline=grid.as_ref().unwrap().deadline.unwrap();
+            assert!(deadline>=before+Duration::from_secs(15)&&deadline<=after+Duration::from_secs(15));
+            let unchanged=if duplicate {
+                let duplicate=Event{subscription:subscription.clone(),seq:Uint(5),body:EventBody::GridBegin(GridBeginEvent{frame})};
+                assert!(route(&mut grid,&mut events,&mut generation,duplicate).is_err());deadline
+            }else{
+                let expired=Instant::now();grid.as_mut().unwrap().deadline=Some(expired);
+                let error=route(&mut grid,&mut events,&mut generation,part(5,1,0,0,vec![first])).unwrap_err();
+                assert!(error.to_string().contains("phase=transaction_deadline"));expired
+            };
+            let witness=grid.as_ref().unwrap();
+            assert!(witness.retired);assert_eq!(witness.deadline,Some(unchanged));assert_eq!(witness.committed,Some(0));
+            assert!(witness.token_commit.is_none());assert_eq!(events,0);assert!(generation.is_none());
+        }
+    }
+    #[test]
+    fn terminal_fixture_facts_require_complete_selected_coverage_and_cross_part_wide_tails() {
+        let cells=terminal_test_cells();let (mut witness,subscription)=terminal_test_witness(cells.len());let split=TERMINAL_MARKER.len()+1;
+        let part=|sequence,index,column,cells|Event{subscription:subscription.clone(),seq:Uint(sequence),body:EventBody::GridPart(GridPart{revision:Uint(0),index:Uint(index),spans:vec![GridSpan{row:Uint(0),column:Uint(column),cells}]})};
+        witness.event(part(1,0,0,cells[..split].to_vec()),256).unwrap();
+        assert!(witness.fixture.as_ref().unwrap().committed.is_none());
+        witness.event(part(2,1,split as u64,cells[split..].to_vec()),256).unwrap();
+        witness.event(Event{subscription:subscription.clone(),seq:Uint(3),body:EventBody::GridCommit(GridCommit{revision:Uint(0)})},32).unwrap();
+        assert!(witness.fixture.as_ref().unwrap().committed.unwrap().complete());
+        assert_eq!(witness.committed_dimensions,Some((cells.len() as u64,1)));
+        let (mut wrong,subscription)=terminal_test_witness(cells.len());
+        assert!(wrong.event(Event{subscription,seq:Uint(1),body:EventBody::GridPart(GridPart{revision:Uint(0),index:Uint(0),spans:vec![GridSpan{row:Uint(0),column:Uint(1),cells:cells.clone()}]})},256).is_err());
+        assert!(wrong.retired&&wrong.committed.is_none());
+        let (mut wrong,subscription)=terminal_test_witness(cells.len());
+        let mut malformed=cells;malformed[TERMINAL_MARKER.len()+1].text="not a tail".into();malformed[TERMINAL_MARKER.len()+1].width=Uint(1);
+        assert!(wrong.event(Event{subscription,seq:Uint(1),body:EventBody::GridPart(GridPart{revision:Uint(0),index:Uint(0),spans:vec![GridSpan{row:Uint(0),column:Uint(0),cells:malformed}]})},256).is_err());
+        assert!(wrong.retired&&wrong.committed.is_none());
+    }
+    #[test]
+    fn terminal_idle_snapshot_refuses_changed_foreground_group_or_membership() {
+        let mut info:herdr::PaneProcessInfo=serde_json::from_value(json!({"pane_id":"p1","shell_pid":17,
+            "foreground_process_group_id":17,"foreground_processes":[{"pid":17,"name":"zsh"}]})).unwrap();
+        assert_eq!(terminal_idle_pid(&info),Some(17));
+        info.foreground_process_group_id=Some(18);assert_eq!(terminal_idle_pid(&info),None);
+        info.foreground_process_group_id=Some(17);
+        let mut child=info.foreground_processes[0].clone();child.pid=18;info.foreground_processes.push(child);
+        assert_eq!(terminal_idle_pid(&info),None);
+        info.foreground_processes.clear();assert_eq!(terminal_idle_pid(&info),None);
+        info.shell_pid=None;assert_eq!(terminal_idle_pid(&info),None);
+    }
+    #[test]
+    fn terminal_delayed_marker_requires_absent_opening_and_later_complete_commit() {
+        let cells=|present:bool| {
+            let mut cells=terminal_test_cells();
+            for value in TERMINAL_DELAYED.chars() {
+                let mut cell=cells[0].clone();cell.text=if present{value.to_string()}else{" ".into()};cells.push(cell);
+            }
+            cells
+        };
+        for opening_contains_marker in [true,false] {
+            let opening_cells=cells(opening_contains_marker);let later_cells=cells(true);
+            let (mut witness,subscription)=terminal_test_witness(opening_cells.len());witness.arm(TERMINAL_DELAYED).unwrap();
+            let split=TERMINAL_MARKER.len()+1;
+            let part=|sequence,revision,index,column,cells|Event{subscription:subscription.clone(),seq:Uint(sequence),
+                body:EventBody::GridPart(GridPart{revision:Uint(revision),index:Uint(index),spans:vec![GridSpan{row:Uint(0),column:Uint(column),cells}]})};
+            witness.event(part(1,0,0,0,opening_cells[..split].to_vec()),256).unwrap();
+            witness.event(part(2,0,1,split as u64,opening_cells[split..].to_vec()),256).unwrap();
+            assert!(witness.fixture.as_ref().unwrap().opening.is_none());
+            assert!(witness.fixture.as_ref().unwrap().committed.is_none());
+            assert!(witness.terminal_opening_commit().is_err());
+            witness.event(Event{subscription:subscription.clone(),seq:Uint(3),body:EventBody::GridCommit(GridCommit{revision:Uint(0)})},32).unwrap();
+            assert_eq!(witness.fixture.as_ref().unwrap().opening,Some((0,opening_contains_marker)));
+            if opening_contains_marker {
+                assert!(witness.terminal_fixture_ready(0).is_err());
+            }else{
+                assert_eq!(witness.terminal_opening_commit().unwrap(),0);
+                assert!(!witness.terminal_fixture_ready(0).unwrap());
+            }
+            witness.event(Event{subscription:subscription.clone(),seq:Uint(4),body:EventBody::GridBegin(GridBeginEvent{frame:GridBegin{
+                mode:GridMode::Replace,revision:Uint(1),columns:Uint(later_cells.len() as u64),rows:Uint(1),cursor:None,
+                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2)}})},128).unwrap();
+            witness.event(part(5,1,0,0,later_cells[..split].to_vec()),256).unwrap();
+            witness.event(part(6,1,1,split as u64,later_cells[split..].to_vec()),256).unwrap();
+            if !opening_contains_marker{assert!(!witness.terminal_fixture_ready(0).unwrap());}
+            witness.event(Event{subscription:subscription.clone(),seq:Uint(7),body:EventBody::GridCommit(GridCommit{revision:Uint(1)})},32).unwrap();
+            assert_eq!(witness.token_commit,Some(1));
+            assert_eq!(witness.fixture.as_ref().unwrap().opening,Some((0,opening_contains_marker)));
+            if opening_contains_marker {
+                assert!(witness.terminal_fixture_ready(0).is_err());
+            }else{
+                assert!(witness.terminal_fixture_ready(0).unwrap());
+            }
+        }
+    }
+    #[test]
+    fn terminal_resize_result_binds_action_boot_shell_and_native_surface_not_crop() {
+        let action=Uuid::random();let boot=Uuid::random();let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
+        let receipt:Receipt=serde_json::from_value(json!({"actionId":action,"bootId":boot,"method":"shell.resize","shellTarget":target,
+            "createdAt":0,"updatedAt":1,"state":"succeeded","result":{"kind":"shell_resize","columns":96,"rows":32}})).unwrap();
+        terminal_resize_receipt(&receipt,&action,&boot,&target,96,32).unwrap();
+        assert!(terminal_resize_receipt(&receipt,&Uuid::random(),&boot,&target,96,32).is_err());
+        assert!(terminal_resize_receipt(&receipt,&action,&Uuid::random(),&target,96,32).is_err());
+        assert!(terminal_resize_receipt(&receipt,&action,&boot,&target,96,30).is_err());
+        let mut unknown=receipt.clone();unknown.state=ReceiptState::Uncertain;
+        assert!(terminal_resize_receipt(&unknown,&action,&boot,&target,96,32).is_err());
+        let mut foreign=receipt;foreign.shell_target=Some(ShellTarget{shell_id:Uuid::random(),generation:target.generation.clone()});
+        assert!(terminal_resize_receipt(&foreign,&action,&boot,&target,96,32).is_err());
+    }
+    #[test]
+    fn terminal_input_gate_accepts_only_complete_original_frame_dispatch_not_historical_pty_success() {
+        let action=Uuid::random();let boot=Uuid::random();let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
+        let receipt:Receipt=serde_json::from_value(json!({"actionId":action,"bootId":boot,"method":"shell.input","shellTarget":target,
+            "createdAt":0,"updatedAt":1,"state":"dispatched","result":{"kind":"shell_dispatch","progress":{"frameBytes":19,"socketBytesWritten":19,"frameComplete":true}}})).unwrap();
+        terminal_input_scope(&receipt,&action,&boot,&target).unwrap();
+        grid_receipt(&receipt,&action,&boot,&GridSubject::Shell(target.clone())).unwrap();
+        assert!(terminal_input_scope(&receipt,&Uuid::random(),&boot,&target).is_err());
+        assert!(terminal_input_scope(&receipt,&action,&Uuid::random(),&target).is_err());
+        assert!(terminal_input_scope(&receipt,&action,&boot,&ShellTarget{shell_id:Uuid::random(),generation:target.generation.clone()}).is_err());
+        let mut partial=receipt.clone();partial.state=ReceiptState::Uncertain;
+        partial.result=Some(ActionResult::ShellDispatch(ActionResultShellDispatch{progress:ShellDispatchProgress{frame_bytes:Some(19),socket_bytes_written:Some(7),frame_complete:Some(false)}}));
+        terminal_input_scope(&partial,&action,&boot,&target).unwrap();
+        assert!(grid_receipt(&partial,&action,&boot,&GridSubject::Shell(target.clone())).is_err());
+        let historical:Receipt=serde_json::from_value(json!({"actionId":action,"bootId":boot,"method":"shell.input","shellTarget":target,
+            "createdAt":0,"updatedAt":1,"state":"succeeded","result":{"kind":"shell_input","progress":{"encodedBytes":13,"writtenBytes":13,"flushCompleted":true}}})).unwrap();
+        historical.validate().unwrap();
+        assert!(grid_receipt(&historical,&action,&boot,&GridSubject::Shell(target)).is_err());
+    }
+    #[test]
+    fn configured_terminal_gate_never_adopts_a_provider_target_from_a_historical_factory_receipt() {
+        let action=Uuid::random();let boot=Uuid::random();
+        let receipt:Receipt=serde_json::from_value(json!({"actionId":action,"bootId":boot,"method":"terminal.create",
+            "createdAt":0,"updatedAt":1,"state":"reserved"})).unwrap();
+        terminal_creation_scope(&receipt,&action,&boot).unwrap();
+        assert!(terminal_creation_scope(&receipt,&Uuid::random(),&boot).is_err());
+        assert!(terminal_creation_scope(&receipt,&action,&Uuid::random()).is_err());
+        let mut historical=receipt;historical.target=Some(Target{session_id:Uuid::random(),generation:Uuid::random()});
+        historical.validate().unwrap();
+        assert!(terminal_creation_scope(&historical,&action,&boot).is_err());
+    }
+
+    fn admission_args() -> Vec<&'static str> {
+        vec!["smoke","--admission-only","--backend","omp","--backend","codex",
+            "--goatr","/nix/store/example/bin/goatr","--config","/private/config.toml",
+            "--workspace-root","/workspace","--consent-owned-providers","--evidence-dir","/private/evidence"]
+    }
+    fn shared_args() -> Vec<&'static str> {
+        let mut args=admission_args();
+        args[1]="--shared-agent-only";
+        args.push("--automate-native-inputs");
+        args
+    }
+    #[test]
+    fn shared_agent_cli_requires_both_unique_backends_and_explicit_owned_inputs() {
+        let args=shared_args();
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+        require_shared_backends(&parsed).unwrap();
+        for backends in [vec!["omp"],vec!["codex"],vec!["omp","omp"],vec!["codex","codex"],vec!["omp","codex","omp"]] {
+            let mut reduced=args.clone();
+            let first=reduced.iter().position(|arg|*arg=="--backend").unwrap();
+            reduced.drain(first..first+4);
+            for backend in backends {reduced.extend(["--backend",backend]);}
+            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(reduced).unwrap();
+            assert!(require_shared_backends(&parsed).is_err());
+        }
+        for required in ["--backend","--goatr","--config","--workspace-root","--consent-owned-providers","--automate-native-inputs","--evidence-dir"] {
+            let mut reduced=args.clone();
+            let at=reduced.iter().position(|arg|*arg==required).unwrap();
+            let count=if required=="--backend" {4}
+                else if matches!(required,"--consent-owned-providers"|"--automate-native-inputs") {1} else {2};
+            reduced.drain(at..at+count);
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");
+        }
+        for conflict in ["--admission-only","--grid","--ui","--camera","--ime","--setup",
+            "--prepare-emulator","--paging-proof","--codex-invalidation-diagnostic","--codex-startup-terminal-capture",
+            "--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral",
+            "--development-continuity","--development-owner-feedback","--development-android-only",
+            "--keep-foreground-for-feedback","--defer-retention-crossing"] {
+            let mut conflicting=args.clone();conflicting.push(conflict);
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflicting).is_err(),"{conflict}");
+        }
+    }
+    #[test]
+    fn shared_agent_evidence_is_exclusive_and_never_adopts_an_existing_scope() {
+        let root=fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("goatr-shared-evidence-{}",Uuid::random().0));
+        struct Root(PathBuf);
+        impl Drop for Root {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
+        let _root=Root(root.clone());
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path=root.join("fresh");
+        fresh_shared_evidence(&path).unwrap();
+        private_dir(&path,false).unwrap();
+        assert_eq!(fresh_shared_evidence(&path).unwrap_err().kind(),io::ErrorKind::AlreadyExists);
+    }
+    #[test]
+    fn shared_effective_config_uses_real_owned_scope_without_adopting_template_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        fn published(path: &Path,config: &Config) -> io::Result<Config> {
+            let lock=goatr::setup::SetupLock::acquire(path.parent().unwrap())?;
+            lock.publish(path,&goatr::setup::ExpectedFile::Absent,config.serialized()?.as_bytes())?;
+            drop(lock);
+            Config::load(path)
+        }
+        struct Root(PathBuf);
+        impl Drop for Root {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
+        let home=fs::canonicalize(PathBuf::from(std::env::var_os("HOME").unwrap())).unwrap();
+        let root=Root(home.join(format!(".scfg-{}",&Uuid::random().0[..12])));
+        fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
+        for directory in ["template-runtime","registry","sessions","blobs","owned","owned/runtime","owned/runtime/b","owned/project"] {
+            fs::DirBuilder::new().mode(0o700).create(root.0.join(directory)).unwrap();
+        }
+        let wrapper=root.0.join("wrapper");
+        let mut file=OpenOptions::new().write(true).create_new(true).mode(0o700).open(&wrapper).unwrap();
+        file.write_all(b"#!/bin/sh\nexit 99\n").unwrap();
+        drop(file);
+        let template=Config::parse(&format!(
+            "version=1\nallow_scoped_shell_probe=true\nruntime_dir={:?}\nruntime_dir_agent={:?}\nomp_registry_dir={:?}\nomp_blob_root={:?}\nomp_session_roots=[{:?}]\n[executables]\nherdr={wrapper:?}\nomp={wrapper:?}\ncodex={wrapper:?}\n",
+            root.0.join("template-runtime"),root.0.join("template-runtime"),
+            root.0.join("registry"),root.0.join("blobs"),root.0.join("sessions"),
+        )).unwrap();
+        let template=published(&root.0.join("deployment.toml"),&template).unwrap();
+        assert!(template.codex_owners.is_empty());
+        assert!(template.backend_reason(Provider::Codex).unwrap().is_some());
+        let mut effective=template.clone();
+        effective.runtime_dir=root.0.join("owned/runtime");
+        effective.runtime_dir_agent=effective.runtime_dir.clone();
+        effective.herdr_sockets=vec![root.0.join("owned/h.sock")];
+        effective.projects=vec![ConfiguredProject{id:Uuid::random(),
+            allow_read_tools:false,
+            label:Label::new("Owned fixture project").unwrap(),path:root.0.join("owned/project")}];
+        let owner=CodexOwner{id:Uuid::random(),socket_host:effective.runtime_dir.join("c.sock"),
+            socket_agent:effective.runtime_dir.join("c.sock"),bindings_dir:effective.runtime_dir.join("b"),
+            unit:"goatr-config-fixture.service".into()};
+        effective.default_codex_owner_id=Some(owner.id.clone());
+        effective.codex_owners=vec![owner];
+        let effective=published(&root.0.join("owned/config.toml"),&effective).unwrap();
+        for provider in [Provider::Omp,Provider::Codex] {
+            assert!(effective.backend_reason(provider).unwrap().is_none());
+        }
+        // Configuration trust/attempt eligibility is not a fabricated native owner.
+        assert!(!effective.codex_owners[0].socket_host.try_exists().unwrap());
+        assert!(fs::read_dir(&effective.codex_owners[0].bindings_dir).unwrap().next().is_none());
+        let mut missing=effective.clone();
+        missing.codex_owners[0].bindings_dir=effective.runtime_dir.join("missing-bindings");
+        let missing=published(&root.0.join("owned/missing-bindings.toml"),&missing).unwrap();
+        assert!(missing.backend_reason(Provider::Codex).unwrap().is_some());
+        let mut missing=effective.clone();
+        missing.executables.omp=Some(root.0.join("missing-outer-wrapper"));
+        let missing=published(&root.0.join("owned/missing-wrapper.toml"),&missing).unwrap();
+        assert!(missing.backend_reason(Provider::Omp).unwrap().is_some());
+        let mut missing=effective.clone();
+        missing.omp_registry_dir=Some(root.0.join("missing-registry"));
+        let missing=published(&root.0.join("owned/missing-registry.toml"),&missing).unwrap();
+        assert!(missing.backend_reason(Provider::Omp).unwrap().is_some());
+        let mut missing=effective.clone();
+        missing.runtime_dir=root.0.join("missing-runtime");
+        assert!(published(&root.0.join("owned/missing-runtime.toml"),&missing).is_err());
+        let unsafe_bindings=root.0.join("unsafe-bindings");
+        fs::DirBuilder::new().mode(0o700).create(&unsafe_bindings).unwrap();
+        fs::set_permissions(&unsafe_bindings,fs::Permissions::from_mode(0o755)).unwrap();
+        let mut unsafe_scope=effective.clone();
+        unsafe_scope.codex_owners[0].bindings_dir=unsafe_bindings;
+        assert!(published(&root.0.join("owned/unsafe-bindings.toml"),&unsafe_scope).is_err());
+        let unsafe_wrapper=root.0.join("unsafe-wrapper");
+        fs::write(&unsafe_wrapper,b"#!/bin/sh\nexit 99\n").unwrap();
+        fs::set_permissions(&unsafe_wrapper,fs::Permissions::from_mode(0o777)).unwrap();
+        let mut unsafe_scope=effective.clone();
+        unsafe_scope.executables.codex=Some(unsafe_wrapper);
+        assert!(published(&root.0.join("owned/unsafe-wrapper.toml"),&unsafe_scope).is_err());
+    }
+    #[test]
+    fn shared_agent_native_page_admission_rejects_changed_views_duplicates_and_live_cache_rows() {
+        let view=Uuid::random();
+        let mut first=generation_record(5);first.source=RecordSource::NativePage;
+        let page=SessionHistoryResult{view_id:view.clone(),records:vec![first],next_cursor:None};
+        let mut seen=HashSet::new();
+        assert_eq!(shared_history_page(&page,&view,RecordSource::NativePage,Some(6),&mut seen).unwrap(),Some(5));
+        assert!(shared_history_page(&page,&view,RecordSource::NativePage,Some(6),&mut seen).is_err());
+        assert!(shared_history_page(&page,&Uuid::random(),RecordSource::NativePage,None,&mut HashSet::new()).is_err());
+        let mut cached=page.clone();cached.records[0].source=RecordSource::Live;
+        assert!(shared_history_page(&cached,&view,RecordSource::NativePage,None,&mut HashSet::new()).is_err());
+        assert!(shared_history_page(&page,&view,RecordSource::NativePage,Some(5),&mut HashSet::new()).is_err());
+    }
+    #[test]
+    fn shared_agent_stream_admission_requires_new_events_not_the_open_snapshot() {
+        let mut snapshot=generation_snapshot();
+        snapshot.history.push(generation_record(1));
+        let expected=target(&snapshot.state.summary);
+        let mut view=GenerationView::new(snapshot,&expected).unwrap();
+        assert!(!view.streamed_text&&!view.streamed_tool);
+        view.routed_event(generation_event(&view,1,EventBody::HistoryUpsert(HistoryUpsertEvent{
+            records:vec![generation_record(1)],
+        }))).unwrap();
+        assert!(!view.streamed_tool);
+        let assistant:HistoryRecord=serde_json::from_value(json!({"id":"assistant","order":2,
+            "role":"assistant","kind":"message","text":{"kind":"text","text":"fixture"},
+            "source":"live","complete":true,"sourceTruncated":false})).unwrap();
+        view.routed_event(generation_event(&view,2,EventBody::HistoryUpsert(HistoryUpsertEvent{
+            records:vec![assistant],
+        }))).unwrap();
+        assert!(view.streamed_text&&!view.streamed_tool);
+        view.routed_event(generation_event(&view,3,EventBody::HistoryUpsert(HistoryUpsertEvent{
+            records:vec![generation_record(3)],
+        }))).unwrap();
+        assert!(view.streamed_text&&view.streamed_tool);
+    }
+    #[test]
+    fn shared_agent_prompt_admission_distinguishes_assistant_echo_from_duplicate_native_input() {
+        let user:HistoryRecord=serde_json::from_value(json!({"id":"user","order":1,
+            "role":"user","kind":"message","text":{"kind":"text","text":"owned-marker"},
+            "source":"live","complete":true,"sourceTruncated":false})).unwrap();
+        let mut assistant=user.clone();
+        assistant.id=Id("assistant".into());
+        assistant.role=Role::Assistant;
+        assert!(shared_user_record(&[user.clone(),assistant],"owned-marker").unwrap().is_some());
+        let mut duplicate=user.clone();duplicate.id=Id("duplicate".into());
+        assert!(shared_user_record(&[user,duplicate],"owned-marker").is_err());
+    }
+    #[test]
+    fn finite_admission_cli_requires_explicit_inputs_and_rejects_effectful_modes() {
+        let args = admission_args();
+        assert!(feedback_arguments(arguments_base()).try_get_matches_from(&args).is_ok());
+        for required in ["--backend","--goatr","--config","--workspace-root","--consent-owned-providers"] {
+            let mut missing = Vec::new();
+            let mut skip = false;
+            for arg in &args {
+                if skip { skip = false; continue; }
+                if *arg == required {
+                    skip = required != "--consent-owned-providers";
+                } else { missing.push(*arg); }
+            }
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(missing).is_err(),"{required}");
+        }
+        for conflict in ["--grid","--ui","--camera","--ime","--setup","--prepare-emulator",
+            "--paging-proof","--codex-invalidation-diagnostic","--codex-startup-terminal-capture",
+            "--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral",
+            "--development-continuity","--development-owner-feedback","--development-android-only",
+            "--keep-foreground-for-feedback","--defer-retention-crossing","--automate-native-inputs"] {
+            let mut conflicting = args.clone(); conflicting.push(conflict);
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflicting).is_err(),"{conflict}");
+        }
+    }
+    #[test]
+    fn finite_admission_needs_current_source_and_each_selected_provider_eligibility() {
+        let server = Server { server_id:Uuid::random(), name:Label::new("owned").unwrap(),
+            connectivity:ServerConnectivity::Online, can_create:CanCreate{omp:true,codex:false}, reason:None };
+        let mut source = NativeHierarchy {server_id:server.server_id.clone(),server_incarnation:Uuid::random(),
+            freshness:NativeFreshness::Current,reason:None,workspaces:vec![],tabs:vec![],panes:vec![]};
+        let backends = [Provider::Omp,Provider::Codex].map(|provider|Backend{
+            provider,version:"source fixture".into(),availability:Availability::SetupRequired,reason:None});
+        assert_eq!(admission_reason(Provider::Omp,&backends,Some(&server),&[source.clone()]),"eligible");
+        assert_eq!(admission_reason(Provider::Codex,&backends,Some(&server),&[source.clone()]),"creation_unavailable");
+        let mut unavailable=backends.clone();
+        unavailable[0].availability=Availability::Unavailable;
+        assert_eq!(admission_reason(Provider::Omp,&unavailable,Some(&server),&[source.clone()]),"backend_unavailable");
+        source.freshness=NativeFreshness::Stale;
+        assert_eq!(admission_reason(Provider::Omp,&backends,Some(&server),&[source]),"source_not_current");
+        assert_eq!(admission_reason(Provider::Omp,&[],Some(&server),&[]),"backend_missing_or_ambiguous");
+        assert_eq!(admission_reason(Provider::Omp,&backends,None,&[]),"source_missing_or_ambiguous");
+    }
+    #[test]
+    fn shared_creation_admission_keeps_original_source_before_first_and_second_provider() {
+        let identity=(Uuid::random(),Uuid::random());
+        let original=ServerEvidence{linux_boot_id:Uuid::random(),pid:17,pid_start_ticks:3,
+            socket_device:1,socket_inode:10};
+        let mut initial=None;
+        for created in 0..=1 {
+            let mut workspaces=Vec::new();
+            let mut tabs=Vec::new();
+            let mut panes=Vec::new();
+            let mut shown_workspaces=Vec::new();
+            let mut shown_tabs=Vec::new();
+            let mut shown_panes=Vec::new();
+            for index in 0..=created {
+                let workspace=format!("workspace-{index}");
+                let tab=format!("tab-{index}");
+                let pane=format!("pane-{index}");
+                let terminal=format!("terminal-{index}");
+                workspaces.push(json!({"workspace_id":workspace,"number":index+1,"label":"fixture",
+                    "focused":index==0,"active_tab_id":tab,"agent_status":"idle"}));
+                tabs.push(json!({"tab_id":tab,"workspace_id":workspace,"number":1,
+                    "label":"fixture","focused":index==0,"agent_status":"idle"}));
+                panes.push(json!({"pane_id":pane,"terminal_id":terminal,"workspace_id":workspace,
+                    "tab_id":tab,"focused":index==0,"agent_status":"idle"}));
+                shown_workspaces.push(json!({"workspaceId":workspace,"number":index+1,"label":"fixture",
+                    "focused":index==0,"activeTabId":tab,"agentStatus":"idle"}));
+                shown_tabs.push(json!({"tabId":tab,"workspaceId":workspace,"number":1,
+                    "label":"fixture","focused":index==0,"agentStatus":"idle"}));
+                shown_panes.push(json!({"paneId":pane,"terminalId":terminal,"workspaceId":workspace,
+                    "tabId":tab,"focused":index==0,"agentStatus":"idle"}));
+            }
+            let native:Snapshot=serde_json::from_value(json!({"version":"0.9.1","protocol":22,
+                "focused_workspace_id":"workspace-0","focused_tab_id":"tab-0","focused_pane_id":"pane-0",
+                "workspaces":workspaces,"tabs":tabs,"panes":panes,"agents":[]})).unwrap();
+            let inventory:HostSnapshotResult=serde_json::from_value(json!({"subscription":Uuid::random(),"seq":0,
+                "servers":[{"serverId":identity.0,"name":"owned","connectivity":"online","canCreate":{"omp":true,"codex":true}}],
+                "projects":[],"sessions":[],"unbound":[],
+                "hierarchy":[{"serverId":identity.0,"serverIncarnation":identity.1,"freshness":"current",
+                    "workspaces":shown_workspaces,"tabs":shown_tabs,"panes":shown_panes}]})).unwrap();
+            native.validate().unwrap();
+            inventory.validate().unwrap();
+            let initial=initial.get_or_insert_with(||native.clone());
+            assert_eq!(creation_source_observation(&identity,&original,initial,&original,&native,&inventory),Ok(true));
+            let mut replaced=original.clone();replaced.socket_inode+=1;
+            assert!(creation_source_observation(&identity,&original,initial,&replaced,&native,&inventory).is_err());
+            replaced=original.clone();replaced.pid+=1;replaced.pid_start_ticks+=1;
+            assert!(creation_source_observation(&identity,&original,initial,&replaced,&native,&inventory).is_err());
+            let mut successor=inventory.clone();
+            successor.hierarchy[0].server_incarnation=Uuid::random();
+            assert!(creation_source_observation(&identity,&original,initial,&original,&native,&successor).is_err());
+            let mut rebound=native.clone();
+            rebound.panes[0].pane_id=Id("replacement".into());
+            rebound.panes[0].terminal_id=Id("replacement-terminal".into());
+            rebound.focused_pane_id=Some(Id("replacement".into()));
+            let mut rebound_inventory=inventory.clone();
+            rebound_inventory.hierarchy[0].panes[0].pane_id=Id("replacement".into());
+            rebound_inventory.hierarchy[0].panes[0].terminal_id=Id("replacement-terminal".into());
+            rebound.validate().unwrap();
+            rebound_inventory.validate().unwrap();
+            assert!(creation_source_observation(&identity,&original,initial,&original,&rebound,&rebound_inventory).is_err());
+        }
+    }
+    #[test]
+    fn admission_refuses_a_current_same_name_successor_instead_of_retargeting() {
+        let server=Uuid::random();
+        let incarnation=Uuid::random();
+        let native:Snapshot=serde_json::from_value(json!({"version":"0.9.1","protocol":22,
+            "workspaces":[],"tabs":[],"panes":[],"agents":[]})).unwrap();
+        let mut inventory:HostSnapshotResult=serde_json::from_value(json!({
+            "subscription":Uuid::random(),"seq":0,
+            "servers":[{"serverId":server,"name":"owned","connectivity":"online","canCreate":{"omp":true,"codex":true}}],
+            "projects":[],"sessions":[],"unbound":[],
+            "hierarchy":[{"serverId":server,"serverIncarnation":incarnation,"freshness":"current",
+                "workspaces":[],"tabs":[],"panes":[]}]})).unwrap();
+        native.validate().unwrap();
+        inventory.validate().unwrap();
+        let pinned=(server,incarnation);
+        assert!(admission_source(&inventory,"owned",&native,Some(&pinned)).is_ok());
+        inventory.hierarchy[0].server_incarnation=Uuid::random();
+        assert_eq!(admission_source(&inventory,"owned",&native,Some(&pinned)).unwrap_err(),"source_replaced");
+        inventory.servers[0].server_id=Uuid::random();
+        inventory.hierarchy[0].server_id=inventory.servers[0].server_id.clone();
+        assert_eq!(admission_source(&inventory,"owned",&native,Some(&pinned)).unwrap_err(),"source_replaced");
+    }
+    #[test]
+    fn hello_manager_capture_accepts_only_closed_first_guard_fields() {
+        let line = b"goatr_hello_capture phase=codex_manager_hello guard=runtime_path code=NotReady io=none";
+        let value = parse_hello_guard_line(line).unwrap();
+        assert_eq!(value["guard"],"runtime_path");
+        for line in [
+            b"goatr_hello_capture phase=codex_manager_hello guard=/private/path code=NotReady io=none".as_slice(),
+            b"goatr_hello_capture phase=codex_manager_hello guard=runtime_path code=NotReady io=private_error",
+            b"goatr_hello_capture phase=codex_manager_hello guard=runtime_path code=NotReady io=none secret=payload",
+            b"goatr_hello_capture phase=codex_manager_hello guard=runtime_path code=Unauthorized io=none",
+        ] { assert!(parse_hello_guard_line(line).is_none()); }
+    }
 
     #[test]
     fn codex_guard_parser_accepts_original_presence_guard_only_as_closed_line() {
@@ -10598,6 +15168,51 @@ mod tests {
     }
 
     #[test]
+    fn physical_ephemeral_relay_requires_explicit_backend_only_context() {
+        assert_eq!(physical_relay_bind_port(false, true, OwnedOmpCaptureMode::Backend, false).unwrap(), 7466);
+        assert_eq!(physical_relay_bind_port(false, true, OwnedOmpCaptureMode::None, true).unwrap(), 7466);
+        assert_eq!(physical_relay_bind_port(true, true, OwnedOmpCaptureMode::Backend, false).unwrap(), 0);
+        assert!(physical_relay_bind_port(true, false, OwnedOmpCaptureMode::Backend, false).is_err());
+        assert!(physical_relay_bind_port(true, true, OwnedOmpCaptureMode::Backend, true).is_err());
+        for mode in [OwnedOmpCaptureMode::None, OwnedOmpCaptureMode::Creation, OwnedOmpCaptureMode::Offline, OwnedOmpCaptureMode::Conflict] {
+            assert!(physical_relay_bind_port(true, true, mode, false).is_err());
+        }
+    }
+
+    #[test]
+    fn physical_ephemeral_relay_argument_requires_physical_capture() {
+        let accepted = ["smoke", "--physical-hello-capture", "--physical-relay-ephemeral",
+            "--config", "/owned/config.toml", "--goatr", "/nix/store/owned-goatr/bin/goatr",
+            "--admin-socket", "/owned/runtime/admin.sock", "--expected-goatr-sha256", "00",
+            "--expected-companion-lock-sha256", "00", "--evidence-dir", "/owned/evidence"];
+        assert!(feedback_arguments(arguments_base()).try_get_matches_from(accepted).is_ok());
+        assert!(feedback_arguments(arguments_base()).try_get_matches_from(accepted.into_iter().filter(|arg| *arg != "--physical-hello-capture")).is_err());
+    }
+
+    #[test]
+    fn coarse_shell_parser_accepts_only_closed_settlement_shapes() {
+        for line in [
+            "goatr_omp_first_guard phase=coarse_shell guard=installed code=none io=none frame=none",
+            "goatr_omp_first_guard phase=coarse_shell guard=process_info code=NotReady io=permission_denied frame=none",
+            "goatr_omp_first_guard phase=coarse_shell guard=source_lookup code=NotFound io=none frame=none",
+        ] {
+            assert!(parse_omp_guard_line(line.as_bytes()).is_some());
+        }
+        for line in [
+            "goatr_omp_first_guard phase=coarse_shell guard=unknown code=NotReady io=none frame=none",
+            "goatr_omp_first_guard phase=coarse_shell guard=installed code=NotReady io=none frame=none",
+            "goatr_omp_first_guard phase=coarse_shell guard=process_info code=none io=permission_denied frame=none",
+            "goatr_omp_first_guard phase=coarse_shell guard=source_lookup code=Unauthorized io=none frame=none",
+            "goatr_omp_first_guard phase=coarse_shell guard=shell_absent code=NotReady io=invalid_data frame=none",
+            "goatr_omp_first_guard phase=coarse_shell guard=process_info code=NotReady io=raw_native_error frame=none",
+            "goatr_omp_first_guard phase=coarse_shell guard=installed code=none io=none frame=frame_cap",
+            "goatr_omp_first_guard phase=coarse_shell guard=installed code=none io=none frame=none pid=1",
+        ] {
+            assert!(parse_omp_guard_line(line.as_bytes()).is_none());
+        }
+    }
+
+    #[test]
     fn connection_output_creation_progress_remains_parseable() {
         for guard in [
             "dispatch_returned",
@@ -10612,6 +15227,47 @@ mod tests {
             assert_eq!(value["guard"], guard);
             assert_eq!(value["frame"], "none");
         }
+    }
+
+    #[test]
+    fn omp_result_deadline_detail_is_closed_and_keeps_one_backend_budget_slot() {
+        let prefix="goatr_omp_first_guard phase=shell_probe guard=result_deadline code=Timeout io=none frame=none";
+        let budget=herdr_report_capture::Budget::new_backend();
+        for detail in [
+            "deadlineSite=loop_check observation=not_read entryBudget=expired",
+            "deadlineSite=loop_check observation=empty_only entryBudget=le_1s",
+            "deadlineSite=after_authorization observation=partial_seen entryBudget=le_5s",
+            "deadlineSite=complete_before_parse observation=complete_seen entryBudget=gt_5s",
+            "deadlineSite=parsed_success observation=complete_seen entryBudget=gt_5s",
+        ] {
+            let parsed=parse_omp_guard_line(format!("{prefix} {detail}").as_bytes()).unwrap();
+            assert!(parsed["deadlineSite"].is_string()&&parsed["observation"].is_string()&&parsed["entryBudget"].is_string());
+            budget.omp(parsed);
+        }
+        assert_eq!(budget.creation_counts().0,1);
+        assert!(budget.shell_probe_captured());
+        for detail in [
+            "deadlineSite=unknown observation=not_read entryBudget=expired",
+            "deadlineSite=loop_check observation=raw entryBudget=le_1s",
+            "deadlineSite=loop_check observation=partial_seen entryBudget=119634",
+            "deadlineSite=loop_check observation=not_read",
+            "deadlineSite=parsed_success observation=empty_only entryBudget=gt_5s",
+            "deadlineSite=after_authorization observation=not_read entryBudget=expired",
+            "deadlineSite=loop_check observation=not_read entryBudget=expired extra=x",
+            "deadlineSite=loop_check observation=not_read entryBudget=expired name=1 kind=1 pane=1 terminal=1 workspace=1 argv=1",
+        ] {assert!(parse_omp_guard_line(format!("{prefix} {detail}").as_bytes()).is_none());}
+        assert!(parse_omp_guard_line(format!("{} deadlineSite=loop_check observation=partial_seen entryBudget=le_1s",
+            prefix.replace("result_deadline","result_read_failed")).as_bytes()).is_none());
+        let plain=parse_omp_guard_line(prefix.as_bytes()).unwrap();
+        let legacy=herdr_report_capture::Budget::new(false);legacy.omp(plain.clone());
+        assert_eq!(legacy.creation_counts().0,1,"ordinary Creation reporting stays unchanged");
+        let backend=herdr_report_capture::Budget::new_backend();backend.omp(plain);
+        assert_eq!(backend.creation_counts().0,0,"Backend deadline requires the complete closed detail");
+        let mut extra=parse_omp_guard_line(format!("{prefix} deadlineSite=loop_check observation=partial_seen entryBudget=le_1s").as_bytes()).unwrap();
+        let creation=herdr_report_capture::Budget::new(false);creation.omp(extra.clone());
+        assert_eq!(creation.creation_counts().0,0,"Backend-only details do not enter ordinary Creation capture");
+        extra["unknown"]=json!("not admitted");backend.omp(extra);
+        assert_eq!(backend.creation_counts().0,0,"unknown fields cannot bypass the parser through the shared budget");
     }
 
     #[test]
@@ -10886,6 +15542,7 @@ mod tests {
             serial: serial.into(),
             avd_name: "owned-avd".into(),
             android_user_home: root.join("android-user"),
+            adb_client_home: root.join("home"),
             avd_path: avd_home.join("owned-avd.avd"),
             avd_home,
             process_identity: EmulatorProcess {
@@ -10896,6 +15553,55 @@ mod tests {
             },
         }
     }
+    #[tokio::test]
+    async fn recorded_adb_home_is_consumed_only_by_the_child_and_unsafe_credential_metadata_refuses() {
+        const CHILD:&str="GOATR_ADB_HOME_METADATA_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(std::env::var_os("HOME"),std::env::var_os("GOATR_ADB_HOME_EXPECTED"));
+            let runtime=std::env::var_os("XDG_RUNTIME_DIR");
+            if std::env::var_os("GOATR_ADB_RUNTIME_ABSENT").is_some(){assert!(runtime.is_none());}else{assert_eq!(runtime,std::env::var_os("GOATR_ADB_RUNTIME_EXPECTED"));}
+            println!("owned_adb_child_home_confirmed");
+            return;
+        }
+        struct Root(PathBuf);impl Drop for Root{fn drop(&mut self){fs::remove_dir_all(&self.0).unwrap();}}
+        let before_home=std::env::var_os("HOME");let before_runtime=std::env::var_os("XDG_RUNTIME_DIR");
+        let root=Root(fs::canonicalize(PathBuf::from(before_home.clone().unwrap())).unwrap().join(format!(".goatr-adb-home-{}",Uuid::random().0)));
+        fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
+        let home=root.0.join("home");fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let credential=home.join(".emulator_console_auth_token");
+        // A nonsecret test fixture: the production validator must use metadata, not contents.
+        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&credential).unwrap().write_all(b"public metadata-only fixture").unwrap();
+        let lease_path=root.0.join("run.json");
+        let mut recorded=json!({"schema":1,"runId":"8bd5376a-b170-4fa3-80c0-d449834fed4d","ownerUid":uid(),"root":root.0,
+            "serial":"emulator-5594","avdName":"owned-avd","avdHome":home,"androidUserHome":home,"avdPath":home,
+            "processIdentity":{"linuxBootId":Uuid::random(),"pid":1,"startTicks":"1","executable":"/nix/store/owned/qemu"}});
+        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&lease_path).unwrap().write_all(&serde_json::to_vec(&recorded).unwrap()).unwrap();
+        assert!(lease(&lease_path).is_err());
+        recorded["adbClientHome"]=json!(home);
+        fs::write(&lease_path,serde_json::to_vec(&recorded).unwrap()).unwrap();
+        let selected=lease(&lease_path).unwrap();
+        let mut child=tokio::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact","live::tests::recorded_adb_home_is_consumed_only_by_the_child_and_unsafe_credential_metadata_refuses","--nocapture"])
+            .env(CHILD,"1").env("GOATR_ADB_HOME_EXPECTED",&home);
+        if let Some(runtime)=&before_runtime{child.env("GOATR_ADB_RUNTIME_EXPECTED",runtime);}else{child.env("GOATR_ADB_RUNTIME_ABSENT","1");}
+        configure_adb_client_home(&mut child,&selected.root,&selected.adb_client_home).unwrap();
+        let consumed=output(child,15,65536).await.unwrap();
+        assert!(consumed.windows(b"owned_adb_child_home_confirmed".len()).any(|part|part==b"owned_adb_child_home_confirmed"));
+        assert_eq!(std::env::var_os("HOME"),before_home);assert_eq!(std::env::var_os("XDG_RUNTIME_DIR"),before_runtime);
+        let alias=root.0.join("alias");std::os::unix::fs::symlink(&home,&alias).unwrap();
+        assert!(validate_adb_client_home(&root.0,&alias).is_err());
+        fs::set_permissions(&credential,fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(validate_adb_client_home(&root.0,&home).is_err());
+        fs::set_permissions(&credential,fs::Permissions::from_mode(0o600)).unwrap();
+        let hardlink=home.join("duplicate");fs::hard_link(&credential,&hardlink).unwrap();
+        assert!(validate_adb_client_home(&root.0,&home).is_err());fs::remove_file(hardlink).unwrap();
+        fs::remove_file(&credential).unwrap();
+        let name=std::ffi::CString::new(credential.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o600)},0);
+        assert!(validate_adb_client_home(&root.0,&home).is_err());
+    }
+
+
     #[test]
     fn selected_emulator_selector_is_lease_local_and_closed() {
         let first = selected_emulator_lease(
@@ -10969,6 +15675,998 @@ mod tests {
                 "desktopSelection":"bound_launch_thread","activity":{"state":"idle"}}
         }))
         .unwrap()
+    }
+    #[test]
+    fn grid_immutable_configuration_admits_exact_bytes_and_owns_deployment() {
+        use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+        struct Root(PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Root(PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(format!(".grid-config-{}", Uuid::random().0)));
+        fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
+        let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let text = format!(
+            "version=1\nruntime_dir={:?}\nruntime_dir_agent={:?}\nherdr_sockets=[]\n[executables]\nherdr={executable:?}\n",
+            root.0, root.0
+        );
+        let path = root.0.join("config.toml");
+        let mut file = OpenOptions::new().write(true).create_new(true)
+            .mode(0o600).open(&path).unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        Config::load(&path).expect("ordinary0600 deployment must parse and pass real preflight");
+        let sha = binary_sha256(&path).unwrap();
+        assert!(GridQualification::configuration(&path, &sha).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(Config::load(&path).is_err(), "ordinary loader still requires0600");
+        let mut wrong = sha.clone();
+        wrong.replace_range(..1, if sha.starts_with('0') { "1" } else { "0" });
+        assert!(GridQualification::configuration(&path, &wrong).is_err());
+        let alias = root.0.join("alias.toml");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(GridQualification::configuration(&alias, &sha).is_err());
+        fs::remove_file(&alias).unwrap();
+        let linked = root.0.join("linked.toml");
+        fs::hard_link(&path, &linked).unwrap();
+        assert!(GridQualification::configuration(&path, &sha).is_err());
+        fs::remove_file(&linked).unwrap();
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(GridQualification::configuration(&path, &sha).is_err());
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700)).unwrap();
+        let fifo = root.0.join("writer-free.fifo");
+        let fifo_name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the owned path is NUL-terminated and remains live for mkfifo.
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o400) }, 0);
+        let (finished, result) = std::sync::mpsc::channel();
+        let read_fifo = fifo.clone();
+        let read_sha = sha.clone();
+        let reader = std::thread::spawn(move || {
+            let rejected = GridQualification::configuration(&read_fifo, &read_sha).is_err();
+            let _ = finished.send(rejected);
+        });
+        let rejected = match result.recv_timeout(Duration::from_secs(5)) {
+            Ok(rejected) => {
+                reader.join().unwrap();
+                rejected
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                fs::set_permissions(&fifo, fs::Permissions::from_mode(0o600)).unwrap();
+                let writer = OpenOptions::new().read(true).write(true)
+                    .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(&fifo).expect("owned nonblocking FIFO cleanup writer");
+                let released = result.recv_timeout(Duration::from_secs(5));
+                drop(writer);
+                if released.is_ok() {
+                    reader.join().unwrap();
+                }
+                panic!("writer-free FIFO admission blocked; cleanup released reader: {}",
+                    released.is_ok());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                reader.join().unwrap();
+                panic!("owned FIFO reader did not return an admission result");
+            }
+        };
+        assert!(rejected, "nonregular configuration admitted");
+        fs::remove_file(&fifo).unwrap();
+        let deployment = GridQualification::configuration(&path, &sha)
+            .expect("valid immutable0400 deployment must be admitted");
+        fs::remove_file(&path).unwrap();
+        deployment.preflight().unwrap();
+    }
+
+    #[test]
+    fn grid_immutable_admission_reads_owned_0400_and_rejects_permission_aliases() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("goatr-grid-admission-{}", Uuid::random().0));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path = root.join("qualification.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"{\"version\":1}\n").unwrap();
+        drop(file);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        let bytes = GridQualification::immutable_bytes(&path).unwrap();
+        let read: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            read["version"] == 1,
+            "owned0400 admission did not read original data"
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            GridQualification::immutable_bytes(&path).is_err(),
+            "mutable0600 lease admitted"
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        let alias = root.join("alias.json");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(
+            GridQualification::immutable_bytes(&alias).is_err(),
+            "symlink lease admitted"
+        );
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            GridQualification::immutable_bytes(&path).is_err(),
+            "nonprivate lease parent admitted"
+        );
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn grid_action_interleaved_fault_preserves_first_boundary_without_lookup() {
+        let host = goatr::endpoint_builder(iroh::SecretKey::from_bytes(&[71; 32]))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let peer = goatr::endpoint_builder(iroh::SecretKey::from_bytes(&[72; 32]))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let (client, server) = tokio::join!(peer.connect(host.addr(), goatr::ALPN), async {
+            host.accept().await.unwrap().await.unwrap()
+        });
+        let client = client.unwrap();
+        let (mut send, recv) = client.open_bi().await.unwrap();
+        send.write_all(&[0]).await.unwrap();
+        let (mut host_send, mut host_recv) = server.accept_bi().await.unwrap();
+        let mut probe = [0];
+        host_recv.read_exact(&mut probe).await.unwrap();
+        let expected = target(&generation_snapshot().state.summary);
+        let opening = Uuid::random();
+        let mut witness =
+            GridWitness::pending(opening.clone(), GridSubject::Pane(expected.clone()));
+        let descriptor = ResultBody::TerminalGridSubscribe(TerminalGridSubscribeResult {
+            target: expected.clone(),
+            subscription: Uuid::random(),
+            seq: ZeroValue(0),
+            frame: GridBegin {
+                mode: GridMode::Replace,
+                revision: Uint(0),
+                columns: Uint(1),
+                rows: Uint(1),
+                cursor: None,
+                alternate_screen: false,
+                graphics_omitted: false,
+                popup_blocked: false,
+                part_count: Uint(1),
+            },
+        });
+        let encoded = encode_payload(&Envelope::Response(Response {
+            id: opening,
+            outcome: Ok(descriptor),
+        }))
+        .unwrap();
+        let Envelope::Response(response) =
+            decode_payload(&encoded, Some(Method::TerminalGridSubscribe)).unwrap()
+        else {
+            panic!("opening family");
+        };
+        witness
+            .response(&response.id, &response.outcome, encoded.len())
+            .unwrap();
+        let mut phone = Phone {
+            connection: client,
+            send,
+            recv,
+            hello: HelloResult {
+                host_id: EndpointId(host.id().to_string()),
+                device_id: Uuid::random(),
+                boot_id: Uuid::random(),
+                protocol: ProtocolVersion(2),
+                backends: vec![],
+            },
+            events: 0,
+            generation: None,
+            history_command: None,
+            omp_capture_budget: None,
+            phone_close_reported: false,
+            codex_close_capture: false,
+            grid: Some(witness),
+        };
+        let body = RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
+        delivery: None, native_turn_id: None, images: None,
+        target: expected,
+        text: PromptText("owned boundary fixture".into()), });
+        let server_side = async {
+            let first = transport::read_frame(&mut host_recv, FRAME_MAX)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    decode_payload(&first, None).unwrap(),
+                    Envelope::Request(Request {
+                        body: RequestBody::PromptSubmit(_),
+                        ..
+                    })
+                ),
+                "initial action family"
+            );
+            let cell:GridCell=serde_json::from_value(json!({"text":"PRIVATEBOUNDARY","width":1,"foreground":{"kind":"default"},
+                "background":{"kind":"default"},"attributes":{"bold":false,"faint":false,"italic":false,"blink":false,"strike":false,"underline":"none"}})).unwrap();
+            let fault = Envelope::Event(Event {
+                subscription: Uuid::random(),
+                seq: Uint(1),
+                body: EventBody::GridPart(GridPart {
+                    revision: Uint(0),
+                    index: Uint(0),
+                    spans: vec![GridSpan {
+                        row: Uint(0),
+                        column: Uint(0),
+                        cells: vec![cell],
+                    }],
+                }),
+            });
+            transport::write_frame(&mut host_send, &encode_payload(&fault).unwrap())
+                .await
+                .unwrap();
+            let lookup = tokio::time::timeout(
+                Duration::from_secs(1),
+                transport::read_frame(&mut host_recv, FRAME_MAX),
+            )
+            .await;
+            let looked_up = matches!(lookup, Ok(Ok(_)));
+            server.close(0u32.into(), b"owned regression complete");
+            looked_up
+        };
+        let action = async {
+            let error = phone
+                .grid_action(Uuid::random(), body, false)
+                .await
+                .err()
+                .expect("private fault must fail");
+            let original = error.to_string() == "grid smoke boundary: phase=subscription_sequence"
+                && super::super::helper_error_location(&error).is_some()
+                && phone.grid.as_ref().is_some_and(|g| g.retired);
+            phone
+                .connection
+                .close(0u32.into(), b"owned regression complete");
+            original
+        };
+        let (original, looked_up) = tokio::join!(action, server_side);
+        assert!(original, "original routing boundary was replaced");
+        assert!(!looked_up, "fatal action reader issued another request");
+        goatr::close_endpoint(&peer).await.unwrap();
+        goatr::close_endpoint(&host).await.unwrap();
+    }
+    #[test]
+    fn grid_source_associates_the_original_graph_without_adopting_logical_rows() {
+        let server_id = Uuid::random();
+        let incarnation = Uuid::random();
+        let logical_id = Uuid::random();
+        let native: Snapshot = serde_json::from_value(json!({
+            "version":"0.9.1","protocol":22,
+            "focused_workspace_id":"workspace","focused_tab_id":"tab","focused_pane_id":"pane",
+            "workspaces":[{"workspace_id":"workspace","number":1,"label":"fixture","focused":true,"active_tab_id":"tab","agent_status":"idle"}],
+            "tabs":[{"tab_id":"tab","workspace_id":"workspace","number":1,"label":"fixture","focused":true,"agent_status":"idle"}],
+            "panes":[{"pane_id":"pane","terminal_id":"terminal","workspace_id":"workspace","tab_id":"tab","focused":true,"agent_status":"idle",
+                "read_identity":{"herdr_incarnation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime_epoch":1,"binding_epoch":2}}],
+            "agents":[]
+        })).unwrap();
+        native.validate().unwrap();
+        let root = native.panes[0].clone();
+        let mut inventory: HostSnapshotResult = serde_json::from_value(json!({
+            "subscription":Uuid::random(),"seq":0,
+            "servers":[
+                {"serverId":server_id,"name":"proved","connectivity":"online","canCreate":{"omp":false,"codex":true}},
+                {"serverId":logical_id,"name":"logical","connectivity":"unavailable","canCreate":{"omp":true,"codex":false}}
+            ],
+            "projects":[],"sessions":[],"shells":[],"unbound":[],
+            "hierarchy":[{"serverId":server_id,"serverIncarnation":incarnation,"freshness":"current",
+                "workspaces":[{"workspaceId":"workspace","number":1,"label":"fixture","focused":true,"activeTabId":"tab","agentStatus":"idle"}],
+                "tabs":[{"tabId":"tab","workspaceId":"workspace","number":1,"label":"fixture","focused":true,"agentStatus":"idle"}],
+                "panes":[{"paneId":"pane","terminalId":"terminal","workspaceId":"workspace","tabId":"tab","focused":true,"agentStatus":"idle"}]}]
+        })).unwrap();
+        inventory.validate().unwrap();
+        for _ in 0..2 {
+            let (associated, actual_incarnation) = grid_source(
+                &inventory, &native, &root, Some((&server_id, &incarnation)),
+            ).expect("original proved source beside an unavailable logical row");
+            assert_eq!((&associated.server_id, actual_incarnation), (&server_id, &incarnation));
+            assert!(!associated.can_create.omp);
+            assert!(associated.can_create.codex);
+            inventory.servers.reverse();
+        }
+        for connectivity in [ServerConnectivity::Online, ServerConnectivity::Offline] {
+            let mut other_source = inventory.clone();
+            other_source.servers[1].connectivity = connectivity;
+            assert!(grid_source(&other_source, &native, &root, None).is_err());
+        }
+        let mut duplicate = inventory.clone();
+        duplicate.servers.push(duplicate.servers[0].clone());
+        assert!(grid_source(&duplicate, &native, &root, None).is_err());
+        let mut missing = inventory.clone();
+        missing.servers.remove(0);
+        assert!(grid_source(&missing, &native, &root, None).is_err());
+        assert!(grid_source(&inventory, &native, &root, Some((&logical_id, &incarnation))).is_err());
+        let mut other_graph = inventory.clone();
+        let mut graph = other_graph.hierarchy[0].clone();
+        graph.server_id = logical_id;
+        other_graph.hierarchy.push(graph);
+        assert!(grid_source(&other_graph, &native, &root, None).is_err());
+        for field in 0..4 {
+            let mut changed = inventory.clone();
+            let pane = &mut changed.hierarchy[0].panes[0];
+            match field {
+                0 => pane.pane_id = Id("other".into()),
+                1 => pane.terminal_id = Id("other".into()),
+                2 => pane.workspace_id = Id("other".into()),
+                _ => pane.tab_id = Id("other".into()),
+            }
+            assert!(grid_source(&changed, &native, &root, None).is_err());
+        }
+        let mut changed_native = native.clone();
+        changed_native.panes[0].read_identity.as_mut().unwrap().binding_epoch += 1;
+        assert!(grid_source(&inventory, &changed_native, &root, None).is_err());
+        changed_native.panes.clear();
+        assert!(grid_source(&inventory, &changed_native, &root, None).is_err());
+        let mut stale = inventory.clone();
+        stale.hierarchy[0].freshness = NativeFreshness::Stale;
+        assert!(grid_source(&stale, &native, &root, None).is_err());
+        stale.hierarchy[0].freshness = NativeFreshness::Current;
+        stale.hierarchy[0].reason = Some(NativeUnavailableReason::SourceUnavailable);
+        assert!(grid_source(&stale, &native, &root, None).is_err());
+        assert!(grid_source(&inventory, &native, &root, Some((&server_id, &Uuid::random()))).is_err());
+    }
+    #[tokio::test]
+    async fn grid_source_loss_requires_joined_intent_and_independent_native_eof() {
+        use std::os::fd::FromRawFd;
+        use tokio::io::AsyncWriteExt;
+        let run = Uuid::random();
+        let ready = Uuid::random();
+        let trigger = Uuid::random();
+        let mut fds = [0; 2];
+        assert!(
+            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } == 0,
+            "owned pipe"
+        );
+        let input = unsafe { File::from_raw_fd(fds[0]) };
+        let mut output = unsafe { File::from_raw_fd(fds[1]) };
+        let mut bytes =
+            serde_json::to_vec(&json!({"version":1,"run":run,"ready":ready,"trigger":trigger}))
+                .unwrap();
+        bytes.push(b'\n');
+        output.write_all(&bytes).unwrap();
+        let input =
+            tokio::io::BufReader::new(McpStdin(tokio::io::unix::AsyncFd::new(input).unwrap()));
+        let (_input, intent) = grid_source_intent(input).await;
+        let mut loss = GridSourceLoss {
+            run,
+            ready,
+            trigger: None,
+            native_eof: false,
+            iroh_closed: false,
+            sync_required: false,
+            deadline: None,
+        };
+        loss.arm(intent.unwrap()).unwrap();
+        loss.downstream(false).unwrap();
+        assert!(
+            !loss.complete(),
+            "Iroh closure/intent alone claimed native EOF"
+        );
+        let (reader, mut writer) = tokio::net::UnixStream::pair().unwrap();
+        let mut reader = tokio::io::BufReader::new(reader);
+        writer.write_all(b"{}\n").await.unwrap();
+        let mut total = 0;
+        let line = grid_native_line(
+            &mut reader,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            &mut total,
+        )
+        .await
+        .unwrap();
+        assert!(
+            line.is_some() && total == 3,
+            "actual native LF accounting changed"
+        );
+        assert!(!loss.complete(), "native metadata data was treated as EOF");
+        drop(writer);
+        assert!(
+            grid_native_line(
+                &mut reader,
+                tokio::time::Instant::now() + Duration::from_secs(15),
+                &mut total
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "original native fd did not observe EOF"
+        );
+        loss.upstream_eof().unwrap();
+        let cutoff = loss.deadline;
+        assert!(
+            loss.complete(),
+            "joined independently observed source loss did not settle"
+        );
+        loss.downstream(true).unwrap();
+        assert!(
+            loss.deadline == cutoff,
+            "downstream progress renewed the source observation bound"
+        );
+    }
+    #[tokio::test]
+    async fn grid_source_selector_and_real_fin_cannot_retroactively_arm_or_infer_connection_close()
+    {
+        let run = Uuid::random();
+        let ready = Uuid::random();
+        let intent = || GridSourceIntent {
+            version: 1,
+            run: run.clone(),
+            ready: ready.clone(),
+            trigger: Uuid::random(),
+        };
+        let (native, writer) = tokio::net::UnixStream::pair().unwrap();
+        drop(writer);
+        let mut native = tokio::io::BufReader::new(native);
+        let mut total = 0;
+        let already_eof = grid_native_line(
+            &mut native,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            &mut total,
+        )
+        .await
+        .unwrap();
+        let wake = grid_source_wake(
+            std::future::ready(already_eof),
+            std::future::pending::<()>(),
+            std::future::pending::<()>(),
+            std::future::pending::<()>(),
+            std::future::pending::<io::Result<Vec<u8>>>(),
+            std::future::ready(intent()),
+        )
+        .await;
+        let mut before_arm = GridSourceLoss {
+            run: run.clone(),
+            ready: ready.clone(),
+            trigger: None,
+            native_eof: false,
+            iroh_closed: false,
+            sync_required: false,
+            deadline: None,
+        };
+        match wake {
+            GridSourceWake::Native(None) => assert!(
+                before_arm.upstream_eof().is_err(),
+                "old EOF admitted an arm"
+            ),
+            _ => panic!("queued intent won over already-ready original native EOF"),
+        }
+        assert!(
+            before_arm.trigger.is_none() && !before_arm.complete(),
+            "old termination retroactively qualified"
+        );
+        for fin in [false, true] {
+            let host = goatr::endpoint_builder(iroh::SecretKey::from_bytes(&[73; 32]))
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .unwrap();
+            let peer = goatr::endpoint_builder(iroh::SecretKey::from_bytes(&[74; 32]))
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .unwrap();
+            let (client, server) = tokio::join!(peer.connect(host.addr(), goatr::ALPN), async {
+                host.accept().await.unwrap().await.unwrap()
+            });
+            let client = client.unwrap();
+            let (mut send, mut recv) = client.open_bi().await.unwrap();
+            send.write_all(&[0]).await.unwrap();
+            let (mut host_send, mut host_recv) = server.accept_bi().await.unwrap();
+            let mut probe = [0];
+            host_recv.read_exact(&mut probe).await.unwrap();
+            let mut loss = GridSourceLoss {
+                run: run.clone(),
+                ready: ready.clone(),
+                trigger: None,
+                native_eof: false,
+                iroh_closed: false,
+                sync_required: false,
+                deadline: None,
+            };
+            if fin {
+                loss.arm(intent()).unwrap();
+                host_send.finish().unwrap();
+                let error = transport::read_frame(&mut recv, FRAME_MAX)
+                    .await
+                    .err()
+                    .expect("FIN must end the frame reader");
+                assert!(
+                    error.kind() == io::ErrorKind::InvalidData,
+                    "outer frame metadata contract changed"
+                );
+                assert!(
+                    client.close_reason().is_none(),
+                    "fixture closed connection instead of only FIN"
+                );
+                grid_source_fin(true, error).unwrap();
+                assert!(
+                    !loss.iroh_closed && !loss.complete(),
+                    "FIN promoted to Iroh closure"
+                );
+                let (native, writer) = tokio::net::UnixStream::pair().unwrap();
+                drop(writer);
+                let mut native = tokio::io::BufReader::new(native);
+                let mut count = 0;
+                assert!(
+                    grid_native_line(
+                        &mut native,
+                        tokio::time::Instant::now() + Duration::from_secs(15),
+                        &mut count
+                    )
+                    .await
+                    .unwrap()
+                    .is_none(),
+                    "independent original native EOF missing"
+                );
+                loss.upstream_eof().unwrap();
+                assert!(
+                    !loss.complete(),
+                    "native EOF plus FIN settled without actual connection closure"
+                );
+                server.close(0u32.into(), b"owned FIN regression complete");
+                client.closed().await;
+                loss.downstream(false).unwrap();
+                assert!(loss.complete(), "actual later closure failed to settle");
+            } else {
+                host_send
+                    .write_all(&((FRAME_MAX + 1) as u32).to_be_bytes())
+                    .await
+                    .unwrap();
+                let error = transport::read_frame(&mut recv, FRAME_MAX)
+                    .await
+                    .err()
+                    .expect("oversized header must fail");
+                let original = transport::FrameFailure::from_error(&error);
+                let wake = grid_source_wake(
+                    std::future::pending::<()>(),
+                    std::future::pending::<()>(),
+                    std::future::pending::<()>(),
+                    std::future::pending::<()>(),
+                    std::future::ready(Err(error)),
+                    std::future::ready(intent()),
+                )
+                .await;
+                let error = match wake {
+                    GridSourceWake::Frame(Err(error)) => error,
+                    _ => panic!("intent won over already-ready framed failure"),
+                };
+                let error = grid_source_fin(false, error)
+                    .err()
+                    .expect("pre-arm failure must remain fatal");
+                let error = grid_source_fin(true, error)
+                    .err()
+                    .expect("non-EOF framed failure must remain fatal");
+                assert!(
+                    transport::FrameFailure::from_error(&error) == original,
+                    "first closed frame metadata replaced"
+                );
+                assert!(
+                    loss.trigger.is_none() && !loss.complete(),
+                    "framed fault armed the observer"
+                );
+                server.close(0u32.into(), b"owned pre-arm regression complete");
+                client.closed().await;
+                let wake = grid_source_wake(
+                    std::future::pending::<()>(),
+                    std::future::ready(()),
+                    std::future::pending::<()>(),
+                    std::future::pending::<()>(),
+                    std::future::pending::<io::Result<Vec<u8>>>(),
+                    std::future::ready(intent()),
+                )
+                .await;
+                match wake {
+                    GridSourceWake::Closed => assert!(
+                        loss.downstream(false).is_err(),
+                        "old connection closure admitted arm"
+                    ),
+                    _ => panic!("intent won over already-ready actual downstream closure"),
+                }
+                assert!(
+                    loss.trigger.is_none() && !loss.complete(),
+                    "old closure retroactively qualified"
+                );
+            }
+            client.close(0u32.into(), b"owned regression complete");
+            goatr::close_endpoint(&peer).await.unwrap();
+            goatr::close_endpoint(&host).await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn grid_source_combined_ready_frame_fault_wins_closure_handoff_and_settlement() {
+        use futures_util::FutureExt;
+        for final_settlement in [false, true] {
+            let host = goatr::endpoint_builder(iroh::SecretKey::from_bytes(&[75; 32]))
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .unwrap();
+            let peer = goatr::endpoint_builder(iroh::SecretKey::from_bytes(&[76; 32]))
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .unwrap();
+            let (client, server) = tokio::join!(peer.connect(host.addr(), goatr::ALPN), async {
+                host.accept().await.unwrap().await.unwrap()
+            });
+            let client = client.unwrap();
+            let (mut send, mut recv) = client.open_bi().await.unwrap();
+            send.write_all(&[0]).await.unwrap();
+            let (mut host_send, mut host_recv) = server.accept_bi().await.unwrap();
+            let mut probe = [0];
+            host_recv.read_exact(&mut probe).await.unwrap();
+            host_send
+                .write_all(&(FRAME_MAX as u32).to_be_bytes())
+                .await
+                .unwrap();
+            let actual = transport::read_frame(&mut recv, FRAME_MAX - 1).await;
+            let original = actual
+                .as_ref()
+                .err()
+                .and_then(transport::FrameFailure::from_error);
+            assert!(
+                matches!(
+                    original,
+                    Some(transport::FrameFailure {
+                        stage: transport::FrameStage::FrameCap,
+                        ..
+                    })
+                ),
+                "fixture did not retain actual FrameCap failure"
+            );
+            // This barrier retains the ACTUAL Iroh/read_frame result, not a fabricated error.
+            let released = Cell::new(false);
+            let mut result = Some(actual);
+            let retained = std::future::poll_fn(|_| {
+                if released.get() {
+                    std::task::Poll::Ready(result.take().expect("one actual reader result"))
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .fuse();
+            tokio::pin!(retained);
+            let target = target(&generation_snapshot().state.summary);
+            let subject = GridSubject::Pane(target.clone());
+            let subscription = Uuid::random();
+            let opening = Uuid::random();
+            let mut witness =
+                GridWitness::pending(opening.clone(), GridSubject::Pane(target.clone()));
+            let response = Envelope::Response(Response {
+                id: opening,
+                outcome: Ok(ResultBody::TerminalGridSubscribe(
+                    TerminalGridSubscribeResult {
+                        target,
+                        subscription: subscription.clone(),
+                        seq: ZeroValue(0),
+                        frame: GridBegin {
+                            mode: GridMode::Replace,
+                            revision: Uint(0),
+                            columns: Uint(1),
+                            rows: Uint(1),
+                            cursor: None,
+                            alternate_screen: false,
+                            graphics_omitted: false,
+                            popup_blocked: false,
+                            part_count: Uint(1),
+                        },
+                    },
+                )),
+            });
+            let bytes = encode_payload(&response).unwrap();
+            let Envelope::Response(response) =
+                decode_payload(&bytes, Some(Method::TerminalGridSubscribe)).unwrap()
+            else {
+                panic!("opening family");
+            };
+            witness
+                .response(&response.id, &response.outcome, bytes.len())
+                .unwrap();
+            let cell:GridCell=serde_json::from_value(json!({"text":"x","width":1,"foreground":{"kind":"default"},
+                "background":{"kind":"default"},"attributes":{"bold":false,"faint":false,"italic":false,"blink":false,"strike":false,"underline":"none"}})).unwrap();
+            for (seq, body) in [
+                (
+                    1,
+                    EventBody::GridPart(GridPart {
+                        revision: Uint(0),
+                        index: Uint(0),
+                        spans: vec![GridSpan {
+                            row: Uint(0),
+                            column: Uint(0),
+                            cells: vec![cell],
+                        }],
+                    }),
+                ),
+                (2, EventBody::GridCommit(GridCommit { revision: Uint(0) })),
+            ] {
+                let bytes = encode_payload(&Envelope::Event(Event {
+                    subscription: subscription.clone(),
+                    seq: Uint(seq),
+                    body,
+                }))
+                .unwrap();
+                let Envelope::Event(event) = decode_payload(&bytes, None).unwrap() else {
+                    panic!("grid family");
+                };
+                witness.event(event, bytes.len()).unwrap();
+            }
+            let grid = Some(witness);
+            let run = Uuid::random();
+            let ready = Uuid::random();
+            let mut loss = GridSourceLoss {
+                run: run.clone(),
+                ready: ready.clone(),
+                trigger: None,
+                native_eof: false,
+                iroh_closed: false,
+                sync_required: false,
+                deadline: None,
+            };
+            loss.arm(GridSourceIntent {
+                version: 1,
+                run,
+                ready,
+                trigger: Uuid::random(),
+            })
+            .unwrap();
+            let (native, writer) = tokio::net::UnixStream::pair().unwrap();
+            drop(writer);
+            let mut native = tokio::io::BufReader::new(native);
+            let mut count = 0;
+            assert!(
+                grid_native_line(
+                    &mut native,
+                    tokio::time::Instant::now() + Duration::from_secs(15),
+                    &mut count
+                )
+                .await
+                .unwrap()
+                .is_none(),
+                "actual independent native EOF missing"
+            );
+            loss.upstream_eof().unwrap();
+            server.close(0u32.into(), b"owned combined regression complete");
+            let actual_closed = client.closed().await;
+            let wake = grid_source_wake(
+                std::future::pending::<()>(),
+                std::future::ready(actual_closed),
+                std::future::pending::<()>(),
+                std::future::pending::<()>(),
+                retained.as_mut(),
+                std::future::pending::<()>(),
+            )
+            .await;
+            assert!(
+                matches!(wake, GridSourceWake::Closed),
+                "actual closure fact missing"
+            );
+            if final_settlement {
+                match grid_source_handoff(
+                    retained.as_mut(),
+                    false,
+                    &loss,
+                    &grid,
+                    &subscription,
+                    &subject,
+                )
+                .unwrap()
+                {
+                    GridSourceHandoff::Pending { settled: false } => {
+                        loss.downstream(false).unwrap()
+                    }
+                    _ => panic!("barrier was not pending at closure acceptance"),
+                }
+                assert!(loss.complete(), "final-settlement facts not present");
+            }
+            released.set(true);
+            let mut observed = false;
+            let mut original_fatal = false;
+            match grid_source_handoff(
+                retained.as_mut(),
+                false,
+                &loss,
+                &grid,
+                &subscription,
+                &subject,
+            )
+            .unwrap()
+            {
+                GridSourceHandoff::Frame(Err(error)) => {
+                    let error = grid_source_fin(true, error)
+                        .err()
+                        .expect("original FrameCap must remain fatal");
+                    assert!(
+                        transport::FrameFailure::from_error(&error) == original,
+                        "original closed failure replaced"
+                    );
+                    original_fatal = true;
+                }
+                GridSourceHandoff::Pending { settled } => observed = settled,
+                _ => panic!("actual fatal reader result disappeared"),
+            }
+            assert!(
+                original_fatal && !observed,
+                "closure/final settlement erased an already-ready actual frame failure"
+            );
+            client.close(0u32.into(), b"owned regression complete");
+            goatr::close_endpoint(&peer).await.unwrap();
+            goatr::close_endpoint(&host).await.unwrap();
+        }
+    }
+    #[test]
+    fn grid_private_codec_route_commits_without_history_or_stale_reappearance() {
+        const TOKEN: &str = "SAFEGRIDBOUNDARY";
+        let snapshot = generation_snapshot();
+        let expected = target(&snapshot.state.summary);
+        let mut history = Some(GenerationView::new(snapshot, &expected).unwrap());
+        let original_history_seq = history.as_ref().unwrap().snapshot.seq.0;
+        let opening = Uuid::random();
+        let subscription = Uuid::random();
+        let frame = GridBegin {
+            mode: GridMode::Replace,
+            revision: Uint(0),
+            columns: Uint(TOKEN.len() as u64),
+            rows: Uint(1),
+            cursor: None,
+            alternate_screen: false,
+            graphics_omitted: false,
+            popup_blocked: false,
+            part_count: Uint(1),
+        };
+        let response = Envelope::Response(Response {
+            id: opening.clone(),
+            outcome: Ok(ResultBody::TerminalGridSubscribe(
+                TerminalGridSubscribeResult {
+                    target: expected.clone(),
+                    subscription: subscription.clone(),
+                    seq: ZeroValue(0),
+                    frame: frame.clone(),
+                },
+            )),
+        });
+        let encoded = encode_payload(&response).unwrap();
+        let Envelope::Response(decoded) =
+            decode_payload(&encoded, Some(Method::TerminalGridSubscribe)).unwrap()
+        else {
+            panic!("response family");
+        };
+        let mut witness =
+            GridWitness::pending(opening.clone(), GridSubject::Pane(expected.clone()));
+        witness.arm(TOKEN).unwrap();
+        witness
+            .response(&decoded.id, &decoded.outcome, encoded.len())
+            .unwrap();
+        let mut grid = Some(witness);
+        let mut events = 0;
+        let part = GridPart {
+            revision: Uint(0),
+            index: Uint(0),
+            spans: vec![GridSpan {
+                row: Uint(0),
+                column: Uint(0),
+                cells: TOKEN
+                    .chars()
+                    .map(|c| GridCell {
+                        text: c.to_string(),
+                        width: Uint(1),
+                        foreground: GridColor::Default,
+                        background: GridColor::Default,
+                        attributes: GridAttributes {
+                            bold: false,
+                            faint: false,
+                            italic: false,
+                            blink: false,
+                            strike: false,
+                            inverse: false,
+                            concealed: false,
+                            underline: GridUnderline::None,
+                            underline_color: None,
+                        },
+                    })
+                    .collect(),
+            }],
+        };
+        let mut private = Envelope::Event(Event {
+            subscription: subscription.clone(),
+            seq: Uint(1),
+            body: EventBody::GridPart(part),
+        });
+        let encoded = encode_payload(&private).unwrap();
+        let Envelope::Event(decoded) = decode_payload(&encoded, None).unwrap() else {
+            panic!("event family");
+        };
+        Phone::route_event(&mut grid, &mut events, &mut history, decoded, encoded.len()).unwrap();
+        assert!(
+            events == 0
+                && history.as_ref().unwrap().snapshot.seq.0 == original_history_seq
+                && history.as_ref().unwrap().snapshot.history.is_empty(),
+            "private route changed history"
+        );
+        assert!(
+            grid.as_ref().unwrap().token_commit.is_none(),
+            "part published tentative token"
+        );
+        let commit = Envelope::Event(Event {
+            subscription: subscription.clone(),
+            seq: Uint(2),
+            body: EventBody::GridCommit(GridCommit { revision: Uint(0) }),
+        });
+        let encoded = encode_payload(&commit).unwrap();
+        let Envelope::Event(decoded) = decode_payload(&encoded, None).unwrap() else {
+            panic!("commit family");
+        };
+        Phone::route_event(&mut grid, &mut events, &mut history, decoded, encoded.len()).unwrap();
+        assert!(
+            grid.as_ref().unwrap().token_commit == Some(0),
+            "complete commit did not promote token"
+        );
+        grid.as_mut().unwrap().retired = true; // production unsubscribe ACK retires before its RPC drain
+        if let Envelope::Event(event) = &mut private {
+            event.seq = Uint(3);
+        }
+        let encoded = encode_payload(&private).unwrap();
+        let Envelope::Event(decoded) = decode_payload(&encoded, None).unwrap() else {
+            panic!("stale event family");
+        };
+        assert!(
+            Phone::route_event(&mut grid, &mut events, &mut history, decoded, encoded.len())
+                .is_err(),
+            "retired private data accepted"
+        );
+        assert!(
+            events == 0 && history.as_ref().unwrap().snapshot.history.is_empty(),
+            "stale data reached history"
+        );
+        // A fault before opening followed by a queued success retains the original correlation,
+        // captures only its subscription for the original connection's teardown, never retargets.
+        let mut canceled = GridWitness::pending(opening, GridSubject::Pane(expected));
+        let wrong = Envelope::Event(Event {
+            subscription: Uuid::random(),
+            seq: Uint(1),
+            body: EventBody::GridBegin(GridBeginEvent { frame }),
+        });
+        let bytes = encode_payload(&wrong).unwrap();
+        let Envelope::Event(event) = decode_payload(&bytes, None).unwrap() else {
+            panic!("fault family");
+        };
+        assert!(
+            canceled.event(event, bytes.len()).is_err(),
+            "unowned opening data accepted"
+        );
+        let bytes = encode_payload(&response).unwrap();
+        let Envelope::Response(response) =
+            decode_payload(&bytes, Some(Method::TerminalGridSubscribe)).unwrap()
+        else {
+            panic!("late response family");
+        };
+        assert!(
+            canceled
+                .response(&response.id, &response.outcome, bytes.len())
+                .is_err(),
+            "retired opening revived"
+        );
+        assert!(
+            canceled.retired && canceled.subscription.is_some() && canceled.committed.is_none(),
+            "late response changed original ownership"
+        );
     }
     fn generation_record(index: u64) -> HistoryRecord {
         let marker = format!("goatr-history-fixture-{index}");
