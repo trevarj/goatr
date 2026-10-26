@@ -243,6 +243,7 @@ enum class ActionMethod {
     @SerialName("shell.create") ShellCreate,
     @SerialName("shell.input") ShellInput,
     @SerialName("shell.resize") ShellResize,
+    @SerialName("shell.scroll") ShellScroll,
     @SerialName("worktrees.remove") WorktreesRemove,
     @SerialName("agent.rename") AgentRename,
     @SerialName("workspace.rename") WorkspaceRename,
@@ -337,6 +338,7 @@ enum class Method {
     @SerialName("session.create") SessionCreate,
     @SerialName("shell.input") ShellInput,
     @SerialName("shell.resize") ShellResize,
+    @SerialName("shell.scroll") ShellScroll,
     @SerialName("agent.rename") AgentRename,
     @SerialName("workspace.rename") WorkspaceRename,
     @SerialName("prompt.submit") PromptSubmit,
@@ -1253,7 +1255,7 @@ data class HelloParams(
 }
 
 @Serializable
-data class HelloFeatures(val agentAnsi:Boolean=false)
+data class HelloFeatures(val agentAnsi:Boolean=false,val shellHistory:Boolean=false)
 @Serializable
 data class HelloResult(
     val hostId: EndpointId,
@@ -1626,11 +1628,19 @@ data class GridCursor(val column:Uint,val row:Uint,val visible:Boolean,val shape
 @Serializable
 enum class GridMode {@SerialName("replace") Replace}
 @Serializable
-data class GridBegin(val mode:GridMode,val revision:Uint,val columns:Uint,val rows:Uint,val cursor:GridCursor?=null,val alternateScreen:Boolean,val graphicsOmitted:Boolean,val partCount:Uint,val popupBlocked:Boolean=false):WireValue {
+data class GridBegin(val mode:GridMode,val revision:Uint,val columns:Uint,val rows:Uint,val cursor:GridCursor?=null,val alternateScreen:Boolean,val graphicsOmitted:Boolean,val partCount:Uint,val popupBlocked:Boolean=false,val scroll:GridScroll?=null):WireValue {
     override fun validate(){
         requireWire(columns.value in 1..512 && rows.value in 1..256 && columns.value*rows.value<=32768 && partCount.value in 1..128)
         cursor?.let {requireWire(it.column.value<columns.value && it.row.value<rows.value && it.shape.value<=6)}
+        scroll?.validate()
     }
+}
+@Serializable
+data class GridScroll(val offsetFromBottom:Uint,val maxOffsetFromBottom:Uint,val viewportRows:Uint):WireValue {
+    override fun validate(){validateGridScroll(offsetFromBottom,maxOffsetFromBottom,viewportRows)}
+}
+private fun validateGridScroll(offset:Uint,maximum:Uint,rows:Uint) {
+    offset.validate();maximum.validate();rows.validate();requireWire(offset.value<=maximum.value && rows.value in 1..256)
 }
 @Serializable
 data class GridSpan(val row:Uint,val column:Uint,val cells:List<GridCell>)
@@ -2090,6 +2100,7 @@ sealed interface RequestBody {
     data class ShellGridSubscribe(val params:ShellGridSubscribeParams):RequestBody {override val method=Method.ShellGridSubscribe}
     data class ShellInput(val params: ShellInputParams) : RequestBody { override val method = Method.ShellInput }
     data class ShellResize(val params:ShellResizeParams):RequestBody {override val method=Method.ShellResize}
+    data class ShellScroll(val params:ShellScrollParams):RequestBody {override val method=Method.ShellScroll}
     data class WorktreesList(val params: WorktreesListParams) : RequestBody { override val method = Method.WorktreesList }
     data class ChangesRead(val params: ChangesReadParams) : RequestBody { override val method = Method.ChangesRead }
     data class SkillsList(val params: SkillsListParams) : RequestBody { override val method = Method.SkillsList }
@@ -2142,6 +2153,7 @@ sealed interface ResultBody {
     data class ShellGridSubscribe(val result:ShellGridSubscribeResult):ResultBody
     data class ShellInput(val result: ShellInputResult) : ResultBody
     data class ShellResize(val result:ShellResizeResult):ResultBody
+    data class ShellScroll(val result:ShellScrollResult):ResultBody
     data class WorktreesList(val result: WorktreesListResult) : ResultBody
     data class ChangesRead(val result: ChangesReadResult) : ResultBody
     data class SkillsList(val result: SkillsListResult) : ResultBody
@@ -2259,7 +2271,7 @@ internal fun ShellSummary.sameLogicalIdentity(other:ShellSummary):Boolean =
     target==other.target && serverId==other.serverId && workspaceId==other.workspaceId &&
     tabId==other.tabId && paneId==other.paneId && terminalId==other.terminalId
 @Serializable
-data class ShellGridSubscribeParams(val target:ShellTarget):WireValue {override fun validate(){target.validateWire()}}
+data class ShellGridSubscribeParams(val target:ShellTarget,val history:Boolean=false):WireValue {override fun validate(){target.validateWire()}}
 @Serializable
 data class ShellGridSubscribeResult(val target:ShellTarget,val subscription:Uuid,val seq:ZeroValue,val frame:GridBegin):WireValue {override fun validate(){target.validateWire();subscription.validateWire();seq.validateWire();frame.validate();requireWire(frame.revision.value==0L)}}
 @Serializable
@@ -2271,6 +2283,16 @@ private fun validateShellDimensions(columns:Uint,rows:Uint){requireWire(columns.
 data class ShellResizeResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validate()}}
 @Serializable @SerialName("shell_resize")
 data class ActionResultShellResize(val columns:Uint,val rows:Uint):ActionResult {override fun validate(){validateShellDimensions(columns,rows)}}
+@Serializable
+data class ShellScrollParams(val bootId:Uuid,val target:ShellTarget,val subscription:Uuid,val offsetFromBottom:Uint):WireValue {
+    override fun validate(){bootId.validate();target.validate();subscription.validate();offsetFromBottom.validate()}
+}
+@Serializable
+data class ShellScrollResult(val receipt:Receipt):WireValue {override fun validate(){receipt.validate();requireWire(receipt.method==ActionMethod.ShellScroll)}}
+@Serializable @SerialName("shell_scroll")
+data class ActionResultShellScroll(val offsetFromBottom:Uint,val maxOffsetFromBottom:Uint,val viewportRows:Uint):ActionResult {
+    override fun validate(){validateGridScroll(offsetFromBottom,maxOffsetFromBottom,viewportRows)}
+}
 @Serializable
 data class ShellCreationResources(val serverId:Uuid?=null,val workspaceId:Id?=null,val tabId:Id?=null,val paneId:Id?=null,val terminalId:Id?=null,val createdTarget:ShellTarget?=null):WireValue {
     fun complete()=serverId!=null && workspaceId!=null && tabId!=null && paneId!=null && terminalId!=null

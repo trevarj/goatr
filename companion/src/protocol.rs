@@ -730,6 +730,12 @@ fn request_body_value(body:&RequestBody)->ValidationResult<Value> {
         if params.ansi_observer{fields.insert("ansiObserver".into(),Value::Bool(true));}
         value["params"]=Value::Object(fields);
     }
+    if let RequestBody::ShellGridSubscribe(params)=body {
+        let mut fields=serde_json::Map::new();
+        fields.insert("target".into(),serde_json::to_value(&params.target).map_err(|_|invalid())?);
+        if params.history{fields.insert("history".into(),Value::Bool(true));}
+        value["params"]=Value::Object(fields);
+    }
     Ok(value)
 }
 pub fn canonical_request(request: &Request) -> ValidationResult<Vec<u8>> {
@@ -900,6 +906,7 @@ pub fn encode_payload(envelope: &Envelope) -> ValidationResult<Vec<u8>> {
                         ResultBody::ShellGridSubscribe(x) => value(x)?,
                         ResultBody::ShellInput(x) => value(x)?,
                         ResultBody::ShellResize(x)=>value(x)?,
+                        ResultBody::ShellScroll(x)=>value(x)?,
                         ResultBody::ArtifactsList(x)=>value(x)?,
                         ResultBody::ArtifactsOpen(x)=>value(x)?,
                         ResultBody::ArtifactsRead(x)=>value(x)?,

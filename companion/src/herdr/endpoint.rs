@@ -135,15 +135,18 @@ impl Rect {
     fn point(self, x: u16, y: u16) -> bool { x >= self.x && y >= self.y && u32::from(x) < self.right() && u32::from(y) < self.bottom() }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PaneGeometry { id: String, content: u64, rect: Rect, inner: Rect, scrollbar: Option<Rect>, focused: bool, alternate: bool, pixel_width: u32, pixel_height: u32 }
+struct PaneGeometry { id: String, content: u64, rect: Rect, inner: Rect, scrollbar: Option<Rect>, scroll:Option<NativeScroll>, focused: bool, alternate: bool, pixel_width: u32, pixel_height: u32 }
 impl PaneGeometry {
     fn read(d: &mut Decoder<'_>) -> Result<Self> {
         let id = d.string()?; require(!id.is_empty() && id.len() <= 4096)?;
         let content = d.u64()?; let rect = Rect::read(d)?; let inner = Rect::read(d)?; let scrollbar = d.option(Rect::read)?;
-        d.option(|d| { let offset = d.u64()?; let maximum = d.u64()?; d.u64()?; require(offset <= maximum) })?;
+        let scroll=d.option(|d| {
+            let value=NativeScroll{offset_from_bottom:d.u64()?,max_offset_from_bottom:d.u64()?,viewport_rows:d.u64()?};
+            require(value.offset_from_bottom<=value.max_offset_from_bottom)?;Ok(value)
+        })?;
         let focused = d.boolean()?; d.boolean()?; d.boolean()?; let alternate = d.boolean()?; let pixel_width = d.u32()?; let pixel_height = d.u32()?;
         require(rect.contains(inner) && scrollbar.is_none_or(|value| rect.contains(value)))?;
-        Ok(Self { id:id.to_owned(), content, rect, inner, scrollbar, focused, alternate, pixel_width, pixel_height })
+        Ok(Self { id:id.to_owned(), content, rect, inner, scrollbar, scroll, focused, alternate, pixel_width, pixel_height })
     }
     fn same_geometry(&self, other: &Self) -> bool {
         self.id == other.id && self.rect == other.rect && self.inner == other.inner && self.focused == other.focused && self.pixel_width == other.pixel_width && self.pixel_height == other.pixel_height
@@ -334,8 +337,12 @@ impl Surface {
         }
         require(self.popup||self.cursor.is_none_or(|cursor|!cursor.visible||crop.point(cursor.x,cursor.y)))?;
         let cursor=self.cursor.filter(|c|crop.point(c.x,c.y)).map(|c|GridCursor{column:Uint(u64::from(c.x-crop.x)),row:Uint(u64::from(c.y-crop.y)),visible:c.visible&&!self.popup,shape:Uint(u64::from(c.shape))});
-        let begin=GridBegin{mode:GridMode::Replace,revision:Uint(revision),columns:Uint(u64::from(crop.width)),rows:Uint(u64::from(crop.height)),cursor,alternate_screen:selected.alternate,graphics_omitted:self.graphics,popup_blocked:self.popup,part_count:Uint(cells.len().div_ceil(512) as u64)};
+        let begin=GridBegin{mode:GridMode::Replace,revision:Uint(revision),columns:Uint(u64::from(crop.width)),rows:Uint(u64::from(crop.height)),cursor,alternate_screen:selected.alternate,graphics_omitted:self.graphics,popup_blocked:self.popup,part_count:Uint(cells.len().div_ceil(512) as u64),scroll:None};
         begin.validate().map_err(|_|ErrorCode::NotReady)?;Ok(Projection{begin,cells})
+    }
+    pub(super) fn scroll(&self)->Option<&NativeScroll> {
+        let selected=&self.panes[self.selected];
+        if selected.alternate||self.popup{None}else{selected.scroll.as_ref()}
     }
     pub(super) fn dimensions(&self)->(u16,u16){(self.width,self.height)}
     pub(super) fn popup(&self)->bool{self.popup}
@@ -523,31 +530,41 @@ impl Session {
         self.reader.deadline.expect("only a complete native message has a transaction")
     }
     pub(super) fn read_in_progress(&self)->bool {self.reader.header_read!=0||!self.reader.payload.is_empty()}
-    pub(super) async fn send_input(&mut self,bytes:&[u8],owner:&pairing::ShellInputProgressOwner,reply:&tokio::sync::oneshot::Sender<grid::InputCompletion>)->Result<()> {
-        require(!self.frame_incomplete)?;
+    pub(super) async fn send_input(&mut self,bytes:&[u8],keys:&[ShellKeyEvent],owner:&pairing::ShellInputProgressOwner,reply:&tokio::sync::oneshot::Sender<grid::InputCompletion>,deadline:Instant,started:&mut bool)->Result<grid::InputPlan> {
+        *started=false;require(!self.frame_incomplete)?;
         let lease=self.lease.upgrade().ok_or(ErrorCode::StaleSession)?;
         let mut progress=owner.progress()?;let mut written=0usize;
-        while written<bytes.len() {
-            std::future::poll_fn(|cx|{
+        let mut plan=lease.input_plan(keys)?;
+        while written<plan.bytes(bytes).len() {
+            let advanced=std::future::poll_fn(|cx|{
                 use std::task::Poll;
                 if reply.is_closed(){return Poll::Ready(Err(ErrorCode::StaleSession));}
-                if let Err(code)=self.auth.live_connection().and_then(|()|lease.input_ready()).and_then(|()|self.recheck()){
-                    return Poll::Ready(Err(code));
-                }
-                match tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(self.client.reader.get_mut()),cx,&bytes[written..]) {
+                let first=written==0;
+                if let Err(code)=grid::before(deadline).and_then(|()|self.auth.live_connection()).and_then(|()|self.recheck())
+                    .and_then(|()|if first{Ok(())}else{lease.input_authority()}) {return Poll::Ready(Err(code));}
+                let frame=plan.bytes(bytes);
+                let mut write=||match tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(self.client.reader.get_mut()),cx,&frame[written..]) {
                     Poll::Pending=>Poll::Pending,
                     Poll::Ready(Ok(0))=>Poll::Ready(Err(ErrorCode::NotReady)),
                     Poll::Ready(Err(error))=>Poll::Ready(Err(policy(error))),
                     Poll::Ready(Ok(count))=>{
-                        written+=count;progress.socket_bytes_written=Some(written as u32);
-                        progress.frame_complete=Some(written==bytes.len());
-                        self.frame_incomplete=written!=bytes.len();
+                        *started=true;written+=count;
+                        progress.frame_bytes=Some(frame.len() as u32);progress.socket_bytes_written=Some(written as u32);
+                        progress.frame_complete=Some(written==frame.len());self.frame_incomplete=written!=frame.len();
                         Poll::Ready(owner.retain(&progress))
+                    },
+                };
+                if first {
+                    match lease.poll_input(keys,&plan,write) {
+                        Ok(Some(polled))=>polled.map(|result|result.map(|()|true)),
+                        Ok(None)=>Poll::Ready(Ok(false)),
+                        Err(code)=>Poll::Ready(Err(code)),
                     }
-                }
+                }else{write().map(|result|result.map(|()|true))}
             }).await?;
+            if !advanced{plan=lease.input_plan(keys)?;}
         }
-        Ok(())
+        Ok(plan)
     }
     pub(super) async fn send(&mut self,bytes:&[u8])->Result<()> {
         require(!self.frame_incomplete)?;
@@ -735,17 +752,21 @@ pub(crate) mod fixture {
         put_string(out,text);put_uint(out,u64::from(fg));put_uint(out,u64::from(bg));put_uint(out,u64::from(modifier));out.push(u8::from(skip));out.push(0);
     }
     fn rect(out:&mut Vec<u8>,value:Rect){for n in [value.x,value.y,value.width,value.height]{put_uint(out,u64::from(n));}}
-    pub fn pane(out:&mut Vec<u8>,id:&str,area:Rect,inner:Rect,focused:bool) {
-        put_string(out,id);out.push(2);rect(out,area);rect(out,inner);
-        out.extend_from_slice(&[0,0,u8::from(focused),0,0,0,0,0]);
+    pub fn pane_scroll(out:&mut Vec<u8>,id:&str,area:Rect,inner:Rect,focused:bool,scroll:Option<[u64;3]>,alternate:bool) {
+        put_string(out,id);out.push(2);rect(out,area);rect(out,inner);out.push(0);
+        out.push(u8::from(scroll.is_some()));if let Some(metrics)=scroll{for value in metrics{put_uint(out,value);}}
+        out.extend_from_slice(&[u8::from(focused),0,0,u8::from(alternate),0,0]);
     }
     pub fn surface(columns:u16,revision:u64,projection:u64,cells:&[(&str,u32,u32,u16,bool)],crop:Rect,popup_present:bool)->Vec<u8> {
+        surface_with_scroll(columns,revision,projection,cells,crop,popup_present,None,None,false)
+    }
+    pub fn surface_with_scroll(columns:u16,revision:u64,projection:u64,cells:&[(&str,u32,u32,u16,bool)],crop:Rect,popup_present:bool,selected:Option<[u64;3]>,sibling:Option<[u64;3]>,alternate:bool)->Vec<u8> {
         let mut out=vec![13];put_string(&mut out,"b");put_uint(&mut out,projection);put_uint(&mut out,revision);
         put_uint(&mut out,cells.len() as u64);for &(text,fg,bg,modifier,skip) in cells {cell_bytes(&mut out,text,fg,bg,modifier,skip);}
         put_uint(&mut out,u64::from(columns));out.extend_from_slice(&[1,0,0,0]);
         out.push(if crop.x>0{2}else{1});
-        if crop.x>0{let left=Rect{x:0,y:0,width:crop.x,height:1};pane(&mut out,"sibling",left,left,false);}
-        pane(&mut out,"p",crop,crop,true);out.push(0);out.push(u8::from(popup_present));
+        if crop.x>0{let left=Rect{x:0,y:0,width:crop.x,height:1};pane_scroll(&mut out,"sibling",left,left,false,sibling,false);}
+        pane_scroll(&mut out,"p",crop,crop,true,selected,alternate);out.push(0);out.push(u8::from(popup_present));
         if popup_present {
             put_string(&mut out,"popup");put_string(&mut out,"private");out.extend_from_slice(&[0,0,1]);
             cell_bytes(&mut out,"x",0,0,0,false);out.extend_from_slice(&[1,1,0,0,0,0,0,0,0]);
@@ -753,9 +774,12 @@ pub(crate) mod fixture {
         out.extend_from_slice(&[0,0,0]);out
     }
     pub fn patch(base:u64,rows:&[(u16,Vec<(&str,u32,u32,u16,bool)>)],crop:Rect)->Vec<u8> {
+        patch_with_scroll(base,rows,crop,None,None)
+    }
+    pub fn patch_with_scroll(base:u64,rows:&[(u16,Vec<(&str,u32,u32,u16,bool)>)],crop:Rect,selected:Option<[u64;3]>,sibling:Option<[u64;3]>)->Vec<u8> {
         let mut out=vec![19];put_string(&mut out,"b");out.push(1);put_uint(&mut out,base);put_uint(&mut out,base+1);put_uint(&mut out,rows.len() as u64);
         for (x,cells) in rows {put_uint(&mut out,u64::from(*x));out.push(0);put_uint(&mut out,cells.len() as u64);for &(text,fg,bg,modifier,skip) in cells{cell_bytes(&mut out,text,fg,bg,modifier,skip);}}
-        out.push(if crop.x>0{2}else{1});if crop.x>0{let left=Rect{x:0,y:0,width:crop.x,height:1};pane(&mut out,"sibling",left,left,false);}pane(&mut out,"p",crop,crop,true);out.push(0);out
+        out.push(if crop.x>0{2}else{1});if crop.x>0{let left=Rect{x:0,y:0,width:crop.x,height:1};pane_scroll(&mut out,"sibling",left,left,false,sibling,false);}pane_scroll(&mut out,"p",crop,crop,true,selected,false);out.push(0);out
     }
     pub fn packet(payload:&[u8])->Vec<u8>{let mut bytes=(payload.len() as u32).to_le_bytes().to_vec();bytes.extend_from_slice(payload);bytes}
 }
@@ -867,6 +891,31 @@ mod tests {
         {let pending=decoder.read(&mut read);tokio::pin!(pending);assert!(futures_util::poll!(&mut pending).is_pending());}
         write.write_all(&[0,0,8,0,0]).await.unwrap();assert_eq!(decoder.read(&mut read).await.unwrap(),vec![8,0,0]);
         write.write_all(&((MAX_FRAME as u32)+1).to_le_bytes()).await.unwrap();assert!(decoder.read(&mut read).await.is_err());assert!(decoder.payload.is_empty());
+    }
+    #[test]
+    fn selected_history_metrics_and_metadata_only_updates_keep_original_cells() {
+        let crop=Rect{x:1,y:0,width:2,height:1};let mut baseline=None;
+        decode(&surface_with_scroll(3,1,1,&[("s",0,0,0,false),("a",0,0,0,false),("b",0,0,0,false)],crop,false,Some([0,9,1]),Some([5,99,1]),false),"p",&mut baseline).unwrap();
+        let first=baseline.as_ref().unwrap().projection(0).unwrap();
+        assert_eq!(first.begin.columns,Uint(2));assert_eq!(baseline.as_ref().unwrap().scroll().unwrap().offset_from_bottom,0);
+        decode(&patch_with_scroll(1,&[],crop,Some([4,9,1]),Some([8,99,1])),"p",&mut baseline).unwrap();
+        let moved=baseline.as_ref().unwrap().projection(1).unwrap();
+        assert_eq!(moved.cells,first.cells);assert_eq!(baseline.as_ref().unwrap().scroll().unwrap().metrics().unwrap(),GridScroll{offset_from_bottom:Uint(4),max_offset_from_bottom:Uint(9),viewport_rows:Uint(1)});
+        decode(&surface_with_scroll(3,3,1,&[("s",0,0,0,false),("a",0,0,0,false),("b",0,0,0,false)],crop,false,Some([0,9,1]),Some([8,99,1]),true),"p",&mut baseline).unwrap();
+        let alternate=baseline.as_ref().unwrap().projection(2).unwrap();assert!(alternate.begin.alternate_screen);assert!(alternate.begin.scroll.is_none());
+        assert!(baseline.as_ref().unwrap().scroll().is_none());
+    }
+    #[test]
+    fn native_history_bounds_fail_only_for_qualified_metrics_without_changing_legacy_decode() {
+        let crop=Rect{x:0,y:0,width:1,height:1};
+        for metrics in [[2,1,1],[0,1,0],[0,1,257],[0,UINT_MAX+1,1],[UINT_MAX+1,UINT_MAX+1,1]] {
+            let bytes=surface_with_scroll(1,1,1,&[("x",0,0,0,false)],crop,false,Some(metrics),None,false);
+            let mut baseline=None;let decoded=decode(&bytes,"p",&mut baseline);
+            if metrics[0]>metrics[1]{assert!(decoded.is_err());}else{
+                decoded.unwrap();let surface=baseline.as_ref().unwrap();assert!(surface.projection(0).unwrap().begin.scroll.is_none());
+                assert!(surface.scroll().unwrap().metrics().is_err());
+            }
+        }
     }
 }
 

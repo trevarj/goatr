@@ -57,10 +57,13 @@ internal class TerminalInputOwner(
     private val stopped:(TerminalInputPause)->Unit,
 ) {
     private class HeldRelease(val physical:Long,val gesture:Any)
+    private class SentHold(val event:ShellKeyEvent,val gesture:Any)
     private data class Pending(val input:ShellInput,val revision:Long?,val events:Int,val bytes:Int) {
         fun text()=input.terminalTextSnapshot()?.let {TerminalPendingText(it,revision)}
         override fun toString()="PendingTerminalInput(redacted)"
         var releases:MutableList<HeldRelease>?=null
+        var presses:MutableList<SentHold>?=null
+        var cleanup=false
     }
     private val gate=Any()
     private val waiting=ArrayDeque<Pending>()
@@ -70,6 +73,12 @@ internal class TerminalInputOwner(
     private var writing=false
     private var deferredText=emptyList<TerminalPendingText>()
     private val held=mutableMapOf<Long,Any>()
+    private val sentHeld=mutableMapOf<Long,SentHold>()
+    private val cleanupQueued=mutableSetOf<Long>()
+    private val historyChanged=Channel<Unit>(Channel.CONFLATED)
+    private var historyIdle=CompletableDeferred<Unit>().also {it.complete(Unit)}
+    var historyBlocked by mutableStateOf(false);private set
+    var historyUsed=false;private set
     private var events=0;private var bytes=0
     private var retired=false;private var discardText=false
     val committedContext=TerminalCommittedContext()
@@ -77,9 +86,53 @@ internal class TerminalInputOwner(
     var pendingEvents by mutableStateOf(0);private set
     var pendingTextBytes by mutableStateOf(0);private set
     fun retained()=synchronized(gate){!retired&&!paused}&&!job.isCompleted&&current()
-    fun accepting()=retained()&&ready()
+    fun accepting()=retained()&&!historyBlocked&&ready()
     fun hardwareOutstanding()=synchronized(gate){held.isNotEmpty()}
+    fun ownsHardware(id:Long)=synchronized(gate){id in held}
     fun unavailable(){pause(TerminalInputPause.SourceLost)}
+    /** Reversible: preserve this owner, discard only known-unsent offers, release proven holds. */
+    fun blockForHistory(blocked:Boolean) {
+        val texts=synchronized(gate) {
+            if(retired||paused||historyBlocked==blocked)return
+            historyBlocked=blocked;committedContext.invalidate()
+            if(!blocked){historyChanged.tryReceive();wake.trySend(Unit);return}
+            historyUsed=true
+            historyIdle=CompletableDeferred()
+            val recovered=buildList {
+                fun collect(pending:Pending){(pending.input as? ShellInput.Text)?.let {add(TerminalPendingText(it.text,pending.revision))}}
+                readyPending?.let(::collect);waiting.forEach(::collect)
+            }
+            readyPending?.let {events-=it.events;bytes-=it.bytes};readyPending=null
+            waiting.forEach {events-=it.events;bytes-=it.bytes};waiting.clear();cleanupQueued.clear()
+            held.clear();sentHeld.forEach {(id,hold)->held[id]=hold.gesture}
+            pendingEvents=events;pendingTextBytes=bytes
+            if(!writing)queueHistoryReleases()
+            if(writing){deferredText=deferredText+recovered;emptyList()}else recovered
+        }
+        historyChanged.trySend(Unit);wake.trySend(Unit)
+        if(texts.isNotEmpty())retain(texts)
+    }
+    suspend fun historyBarrier() {
+        blockForHistory(true)
+        val idle=synchronized(gate){if(retired||paused)throw StorePolicy(ErrorCode.NotReady);historyIdle}
+        idle.await();if(!retained())throw StorePolicy(ErrorCode.NotReady)
+    }
+    private fun queueHistoryReleases() {
+        if(!historyBlocked||writing||paused||retired)return
+        if(sentHeld.isEmpty()){
+            if(waiting.isEmpty()&&readyPending==null)historyIdle.complete(Unit)
+            return
+        }
+        val releases=sentHeld.entries.filter {it.key !in cleanupQueued}
+        for(batch in releases.chunked(32)) {
+            val input=ShellInput.Keys(batch.map {it.value.event.copy(phase=ShellKeyPhase.Release)})
+            val size=input.events.sumOf {utf8Size(it.key.value.orEmpty())}
+            val pending=Pending(input,null,batch.size,size).also {it.cleanup=true;it.releases=batch.map {entry->HeldRelease(entry.key,entry.value.gesture)}.toMutableList()}
+            // At most128 confirmed releases reuse the reserved recovery space; never replay text.
+            batch.forEach {cleanupQueued.add(it.key)};waiting.addLast(pending);events+=pending.events;bytes+=size
+        }
+        pendingEvents=events;pendingTextBytes=bytes
+    }
     fun limit(){pause(TerminalInputPause.Limit)}
     fun refuse(text:String?=null) {
         val pending=text?.takeIf {it.isNotEmpty()&&validUnicode(it)&&utf8Size(it)<=16384}?.let {Pending(ShellInput.Text(it),null,1,utf8Size(it))}
@@ -100,9 +153,10 @@ internal class TerminalInputOwner(
             readyPending?.let {events-=it.events;bytes-=it.bytes};readyPending=null
             for(pending in waiting){events-=pending.events;bytes-=pending.bytes}
             waiting.clear();pendingEvents=events;pendingTextBytes=bytes
-            if(writing){deferredText=recovered;emptyList()}else recovered
+            if(writing){deferredText=deferredText+recovered;emptyList()}else recovered
         }
         stopping.complete(Unit);wake.close()
+        historyIdle.complete(Unit)
         if(texts.isNotEmpty())retain(texts)
         stopped(reason)
     }
@@ -125,8 +179,9 @@ internal class TerminalInputOwner(
         val pending=Pending(input,revision,count,size)
         if(!current()){pause(TerminalInputPause.SourceLost,pending);return false}
         val ownedRelease=synchronized(gate){input is ShellInput.Keys&&input.events.all {event->
-            event.phase==ShellKeyPhase.Release&&event.physicalKeyId?.value?.let(held::containsKey)==true}}
-        if(!ready()&&!ownedRelease)return false
+            event.phase==ShellKeyPhase.Release&&event.physicalKeyId?.value?.let {id->if(historyBlocked)id in sentHeld&&id !in cleanupQueued else id in held}==true}
+            &&input.events.mapNotNull {it.physicalKeyId?.value}.distinct().size==input.events.size}
+        if((historyBlocked||!ready())&&!ownedRelease)return false
         val accepted=synchronized(gate) {
             if(retired||paused)return false
             val keys=(input as? ShellInput.Keys)?.events.orEmpty()
@@ -135,10 +190,11 @@ internal class TerminalInputOwner(
             if(events+count>128||bytes+size>49152||draftBytes()+bytes+size>49152)false
             else{
                 for(event in keys)event.physicalKeyId?.let {id->when(event.phase) {
-                    ShellKeyPhase.Press->held[id.value]=Any()
+                    ShellKeyPhase.Press->{val gesture=Any();held[id.value]=gesture;val presses=pending.presses ?: ArrayList<SentHold>().also {pending.presses=it};presses.add(SentHold(event,gesture))}
                     ShellKeyPhase.Release->held[id.value]?.let {gesture->
                         val releases=pending.releases ?: ArrayList<HeldRelease>().also {pending.releases=it}
                         releases.add(HeldRelease(id.value,gesture))
+                        if(historyBlocked){pending.cleanup=true;cleanupQueued.add(id.value)}
                     }
                     ShellKeyPhase.Repeat->Unit
                 }}
@@ -154,11 +210,12 @@ internal class TerminalInputOwner(
         if(!accepted){pause(TerminalInputPause.Capacity,pending);return false}
         wake.trySend(Unit);return true
     }
-    private suspend fun waitReady():Boolean {
+    private suspend fun waitReady(cleanup:Boolean):Boolean {
         if(ready())return current()
         return coroutineScope {
             val readiness=async(start=CoroutineStart.UNDISPATCHED){awaitReady()}
-            try {select {stopping.onAwait {false};readiness.onAwait {current()&&ready()}}}
+            try {if(cleanup)select {stopping.onAwait {false};readiness.onAwait {current()&&ready()}}
+                else select {stopping.onAwait {false};readiness.onAwait {current()&&ready()};historyChanged.onReceiveCatching {false}}}
             finally {readiness.cancel()}
         }
     }
@@ -167,23 +224,35 @@ internal class TerminalInputOwner(
             for(signal in wake) {
                 while(true) {
                     val pending=synchronized(gate){if(retired||paused)null else waiting.removeFirstOrNull()?.also {readyPending=it}} ?: break
-                    if(!current()||!waitReady()){pause(TerminalInputPause.SourceLost);break}
-                    val entered=synchronized(gate){if(retired||paused)false else{readyPending=null;writing=true;true}}
-                    if(!entered)break
+                    if(!current()){pause(TerminalInputPause.SourceLost);break}
+                    if(!waitReady(pending.cleanup)){
+                        if(synchronized(gate){readyPending!==pending})continue
+                        pause(TerminalInputPause.SourceLost);break
+                    }
+                    val entered=synchronized(gate){if(retired||paused||readyPending!==pending||historyBlocked&&!pending.cleanup)false else{readyPending=null;writing=true;true}}
+                    if(!entered)continue
                     val receipt=try {write(pending.input,pending.revision)}catch(_:Exception){null}
                     val dispatched=receipt?.shellDispatched()==true
                     if(!dispatched)pause(if(receipt?.state==ReceiptState.Failed)TerminalInputPause.Refused else TerminalInputPause.Uncertain)
                     val texts=synchronized(gate) {
                         writing=false
                         events-=pending.events;bytes-=pending.bytes;pendingEvents=events;pendingTextBytes=bytes
-                        if(dispatched)for(release in pending.releases.orEmpty())
-                            if(held[release.physical]===release.gesture)held.remove(release.physical)
-                        val recovered=if(paused&&!discardText) {
+                        if(dispatched) {
+                            for(press in pending.presses.orEmpty())press.event.physicalKeyId?.let {id->sentHeld[id.value]=press;if(historyBlocked)held[id.value]=press.gesture}
+                            for(release in pending.releases.orEmpty()) {
+                                if(held[release.physical]===release.gesture)held.remove(release.physical)
+                                if(sentHeld[release.physical]?.gesture===release.gesture)sentHeld.remove(release.physical)
+                                cleanupQueued.remove(release.physical)
+                            }
+                        }
+                        val recovered=if((paused||historyBlocked)&&!discardText) {
                             if(receipt?.state==ReceiptState.Failed)buildList<TerminalPendingText> {
-                                pending.text()?.let(::add);addAll(deferredText)
+                                if(historyBlocked)(pending.input as? ShellInput.Text)?.let {add(TerminalPendingText(it.text,pending.revision))}else pending.text()?.let(::add)
+                                addAll(deferredText)
                             }else deferredText
                         }else emptyList()
                         deferredText=emptyList()
+                        if(historyBlocked)queueHistoryReleases()
                         recovered
                     }
                     if(texts.isNotEmpty())retain(texts)
@@ -342,7 +411,7 @@ internal class DirectTerminalInputView(context:android.content.Context):android.
     }
     override fun dispatchKeyEvent(event:android.view.KeyEvent):Boolean {
         // Observe only a real release for this retained owner while new input is disabled.
-        // The bounded writer still waits for current proof; no synthetic cleanup keys.
+        // The original writer alone releases receipt-confirmed holds; this view invents no key phases.
         if(!active())return event.action==android.view.KeyEvent.ACTION_UP&&owner?.retained()==true&&hardware(event)
         return super.dispatchKeyEvent(event)
     }
@@ -373,11 +442,13 @@ internal class DirectTerminalInputView(context:android.content.Context):android.
             if(deadKeys[id]==event.downTime){deadKeys.remove(id);return true}
             val held=pressed[id]?.takeIf {it.downTime==event.downTime} ?: return true
             pressed.remove(id)
+            if(owner?.historyUsed==true&&owner?.ownsHardware(id)!=true)return true
             return offer(ShellInput.Keys(listOf(ShellKeyEvent(held.key,modifiers(event),ShellKeyPhase.Release,Uint(id)))),ownedRelease=true)
         }
         if(owner?.accepting()!=true)return false
         if(event.action!=android.view.KeyEvent.ACTION_DOWN)return false
         val phase=if(event.repeatCount>0)ShellKeyPhase.Repeat else ShellKeyPhase.Press
+        if(phase==ShellKeyPhase.Repeat&&id!=null&&owner?.historyUsed==true&&owner?.ownsHardware(id)!=true)return true
         if(phase==ShellKeyPhase.Repeat&&id!=null&&pressed[id]?.downTime!=event.downTime){owner?.refuse();return true}
         if(phase==ShellKeyPhase.Press&&id!=null)deadKeys.remove(id)
         val key=key(event,id) ?: return true
@@ -623,6 +694,22 @@ private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSna
                     }
                     model.actions[snapshot.selection.host].orEmpty().lastOrNull {it.metadata.method==ActionMethod.ShellResize&&it.metadata.shellTarget==snapshot.selection.target}?.let {action->item{ReceiptPanel(snapshot.selection.host,action,model)}}
                     item {
+                        val history=snapshot.history;val metrics=history.metrics
+                        val enabled=!model.busy&&model.shellHistoryAllowed(scope)
+                        Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                            UiText(when(history.mode){ShellHistoryMode.Live->if(metrics==null)"History unavailable · Live input unchanged" else "Live · confirmed bottom"
+                                ShellHistoryMode.Browsing->"History · Live input paused";ShellHistoryMode.Pending->"History movement pending · input paused";ShellHistoryMode.Uncertain->"History outcome uncertain · input paused"},style=MaterialTheme.typography.labelMedium,modifier=Modifier.testTag("shell_history_mode"))
+                            metrics?.let {UiText("Confirmed ${it.offsetFromBottom.value} / ${it.maxOffsetFromBottom.value} rows from bottom · viewport ${it.viewportRows.value}",style=MaterialTheme.typography.bodySmall)}
+                            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick={metrics?.let {model.scrollShell(scope,(it.offsetFromBottom.value+it.viewportRows.value).coerceAtMost(it.maxOffsetFromBottom.value))}},enabled=enabled&&metrics!=null&&metrics.offsetFromBottom.value<metrics.maxOffsetFromBottom.value,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_older")){UiText("Older")}
+                                TextButton(onClick={metrics?.let {model.scrollShell(scope,(it.offsetFromBottom.value-it.viewportRows.value).coerceAtLeast(0))}},enabled=enabled&&metrics!=null&&metrics.offsetFromBottom.value>0,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_newer")){UiText("Newer")}
+                                TextButton(onClick={model.scrollShell(scope,0)},enabled=enabled,modifier=Modifier.heightIn(min=48.dp).testTag("shell_history_bottom")){UiText("Bottom")}
+                            }
+                            UiText("History is the shared native viewport, not a private phone history. Live resumes only after an explicit bottom receipt and a current committed bottom grid; neither alone resumes typing.",style=MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    model.actions[snapshot.selection.host].orEmpty().lastOrNull {it.metadata.actionId==snapshot.history.action&&it.metadata.method==ActionMethod.ShellScroll&&it.metadata.shellTarget==snapshot.selection.target}?.let {action->item{ReceiptPanel(snapshot.selection.host,action,model)}}
+                    item {
                         UiText("Live grid · pan and pinch locally",style=MaterialTheme.typography.labelMedium)
                         Box(Modifier.fillMaxWidth().height(360.dp)) {
                             when {
@@ -660,7 +747,7 @@ private fun ShellInputPanel(snapshot:ShellSnapshot,model:GoatrViewModel) {
     val gate=model.shellInputGate?.takeIf {it.scope==scope}
     val owner=model.terminalOwner(scope)
     val enabled=model.shellInputAllowed(scope)
-    LaunchedEffect(scope,snapshot.controlBegun,snapshot.grid,gate?.loaded,gate?.pending,gate?.observation){model.prepareTerminalInput(scope)}
+    LaunchedEffect(scope,snapshot.controlBegun,snapshot.grid,snapshot.history.mode,gate?.loaded,gate?.pending,gate?.observation){model.prepareTerminalInput(scope)}
     Surface(tonalElevation=3.dp) {
         Column(Modifier.fillMaxWidth().imePadding().padding(horizontal=16.dp,vertical=8.dp).heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             gate?.prior?.let {action->
@@ -690,7 +777,8 @@ private fun ShellInputPanel(snapshot:ShellSnapshot,model:GoatrViewModel) {
             if(model.terminalInputPause!=null)UiText("Input is paused. Known-unsent text stays in this original target’s draft; possibly entered text is retained separately below. Unsent key gestures are discarded, never automatically replayed. Begin fresh control and inspect uncertain receipts.",style=MaterialTheme.typography.bodySmall)
             if(!snapshot.controlBegun)UiText("Drafts stay local. Begin control explicitly before any direct input or Send.",style=MaterialTheme.typography.bodySmall)
             if(snapshot.grid?.begin?.popupBlocked==true)UiText("Native popup needs desktop attention. No terminal input is forwarded.",style=MaterialTheme.typography.bodySmall)
-            if(owner!=null&&!enabled&&model.terminalInputPause==null&&snapshot.grid?.begin?.popupBlocked!=true)
+            if(snapshot.history.mode!=ShellHistoryMode.Live)UiText("History pauses new input without releasing this control owner. Known-unsent text is retained in the original draft; unsent keys are dropped. Return explicitly to confirmed bottom to resume.",style=MaterialTheme.typography.bodySmall)
+            else if(owner!=null&&!enabled&&model.terminalInputPause==null&&snapshot.grid?.begin?.popupBlocked!=true)
                 UiText("Input is disabled until this same original source/view is current. Already queued input stays local and bounded; no new input is admitted.",style=MaterialTheme.typography.bodySmall)
             FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected=draft.direct,onClick={model.shellInputMode(scope,true)},label={UiText("Direct")})

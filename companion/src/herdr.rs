@@ -1530,10 +1530,20 @@ pub struct Pane {
     pub focused: bool,
     pub agent_status: NativeAgentStatus,
     #[serde(default)]
+    pub scroll:Option<NativeScroll>,
+    #[serde(default)]
     pub read_identity: Option<PaneReadIdentity>,
     #[serde(default)]
     pub shell: Option<NativeShellInfo>,
     #[serde(default,deserialize_with="optional_artifact_shell_scope")]pub artifact_shell_scope:Option<artifacts::NativeArtifactScope>,
+}
+#[derive(Clone,Debug,Deserialize,PartialEq,Eq)]
+pub struct NativeScroll {pub offset_from_bottom:u64,pub max_offset_from_bottom:u64,pub viewport_rows:u64}
+impl NativeScroll {
+    fn metrics(&self)->SecurityResult<GridScroll> {
+        let value=GridScroll{offset_from_bottom:Uint(self.offset_from_bottom),max_offset_from_bottom:Uint(self.max_offset_from_bottom),viewport_rows:Uint(self.viewport_rows)};
+        value.validate().map_err(|_|ErrorCode::NotReady)?;Ok(value)
+    }
 }
 /// Host-local opaque native epoch values. They never enter the Goatr wire model.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -2384,6 +2394,33 @@ impl Client {
         let mut result=self.request("workspace.rename",json!({"workspace_id":workspace,"label":label.0}),"workspace_info").await?;
         let workspace=result.get_mut("workspace").ok_or_else(||ApiError::Unavailable(invalid("native workspace result absent")))?.take();
         serde_json::from_value(workspace).map_err(|_|ApiError::Unavailable(invalid("invalid native workspace result")))
+    }
+    async fn pane_scroll<F>(mut self,pane:&Id,offset:u64,started:&mut bool,admit:F)->Result<Pane,ApiError>
+    where F:Fn()->SecurityResult<()> {
+        let read=async {
+            self.recheck()?;
+            let id=Uuid::random().0;
+            let mut request=serde_json::to_vec(&json!({"id":id,"method":"pane.scroll","params":{"pane_id":pane,"offset_from_bottom":offset}})).map_err(io::Error::from)?;
+            if request.len()+1>FRAME_MAX{return Err(ApiError::Unavailable(limit()));}request.push(b'\n');
+            let mut written=0;
+            while written<request.len() {
+                let count=std::future::poll_fn(|cx|{
+                    if admit().is_err(){return std::task::Poll::Ready(Err(invalid("original history write admission lost")));}
+                    tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(self.reader.get_mut()),cx,&request[written..])
+                }).await?;
+                if count==0{return Err(ApiError::Unavailable(invalid("history socket write ended")));}
+                *started=true;written+=count;
+            }
+            let bytes=read_line(&mut self.reader).await?;
+            let response=response(&bytes,&id,"pane_info");
+            let mut result=match (response,self.recheck()) {
+                (Ok(value),Ok(()))=>value,(Ok(value),Err(_))=>return Err(ApiError::Changed(value)),
+                (Err(error),Ok(()))=>return Err(error),(_,Err(error))=>return Err(ApiError::Unavailable(error)),
+            };
+            let pane=result.get_mut("pane").ok_or_else(||ApiError::Unavailable(invalid("native pane result absent")))?.take();
+            serde_json::from_value(pane).map_err(|_|ApiError::Unavailable(invalid("invalid native pane result")))
+        };
+        tokio::time::timeout(READ_TIMEOUT,read).await.map_err(|_|ApiError::Unavailable(invalid("history response timeout")))?
     }
     /// Public reported PIDs remain in Herdr's namespace; callers must prove translation
     /// using actual kernel peer/process evidence before treating them as proc pathnames.

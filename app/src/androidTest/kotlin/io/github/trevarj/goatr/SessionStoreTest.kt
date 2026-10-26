@@ -69,6 +69,34 @@ class SessionStoreTest {
             }finally {key.fill(0)}
         }
     }
+    @Test fun shellScrollKeepsExactProtectedIdentityAndActualReceiptAcrossDb8Reopen()=runBlocking {
+        withStore {store,name,clock,advance->
+            val key=ByteArray(32){7};val target=ShellTarget(Uuid.random(),Uuid.random());val boot=Uuid.random()
+            val params=ShellScrollParams(boot,target,Uuid.random(),Uint(500));val request=Request(Uuid.random(),RequestBody.ShellScroll(params))
+            try {
+                assertTrue(store.preSend(HOST,request,key) is PreSendDecision.NewAction)
+                val metadata=checkNotNull(store.localAction(HOST,request.id)).metadata
+                assertEquals(ActionMethod.ShellScroll,metadata.method);assertEquals(target,metadata.shellTarget);assertNull(metadata.target)
+                assertTrue(store.preSend(HOST,request,key) is PreSendDecision.ExistingAction)
+                expectPolicy(ErrorCode.ActionIdConflict){store.matchingAction(HOST,request.copy(body=RequestBody.ShellScroll(params.copy(offsetFromBottom=Uint(0)))),key)}
+                expectPolicy(ErrorCode.ActionIdConflict){store.matchingAction(HOST,request.copy(body=RequestBody.ShellScroll(params.copy(subscription=Uuid.random()))),key)}
+                advance(2)
+                val actual=Receipt(request.id,ActionMethod.ShellScroll,boot,createdAt=Uint(0),updatedAt=Uint(1),state=ReceiptState.Succeeded,
+                    shellTarget=target,result=ActionResultShellScroll(Uint(20),Uint(20),Uint(1)))
+                store.receipt(HOST,actual,true);assertEquals(actual,store.localAction(HOST,request.id)?.receipt)
+                store.receipt(HOST,actual.copy(updatedAt=Uint(2),state=ReceiptState.Uncertain,result=null),true)
+                assertEquals(actual,store.localAction(HOST,request.id)?.receipt)
+                store.close()
+                val reopened=SessionStore(context,name,clock)
+                try {
+                    reopened.open();val retained=checkNotNull(reopened.localAction(HOST,request.id))
+                    assertEquals(metadata,retained.metadata);assertEquals(actual,retained.receipt)
+                    assertTrue(reopened.matchingAction(HOST,request,key));assertTrue(reopened.preSend(HOST,request,key) is PreSendDecision.ExistingAction)
+                    android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->assertEquals(8,db.version)}
+                }finally{reopened.close()}
+            }finally{key.fill(0)}
+        }
+    }
 
     private fun referenced(n: Long, reference: ContentRef): SafeDisplayHistory = SafeDisplayHistory.redacted(record(n).record.copy(text=reference))
     @Test fun presentationTransactionsCommitExpiryBeforeOsPostAndPublishAfterLaterPolicyFailure() = runBlocking {

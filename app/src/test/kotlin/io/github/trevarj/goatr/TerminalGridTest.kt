@@ -129,4 +129,79 @@ class TerminalGridTest {
         assertFalse(readOnlyAgentTerminal(current,summary,pane.copy(target=Target(id,Uuid.random())),true))
         assertFalse(readOnlyAgentTerminal(null,summary,pane,true))
     }
+    private fun historyGrid(offset:Long?,revision:Long=0,alternate:Boolean=false)=TerminalGrid(frame(revision,false).copy(
+        alternateScreen=alternate,scroll=offset?.let {GridScroll(Uint(it),Uint(20),Uint(1))}),listOf(cell(),cell()),false)
+    private fun scrollReceipt(action:Uuid,offset:Long=0,state:ReceiptState=ReceiptState.Succeeded)=Receipt(
+        actionId=action,method=ActionMethod.ShellScroll,bootId=Uuid.random(),shellTarget=ShellTarget(Uuid.random(),Uuid.random()),
+        createdAt=Uint(1),updatedAt=Uint(2),state=state,
+        result=if(state==ReceiptState.Succeeded)ActionResultShellScroll(Uint(offset),Uint(20),Uint(1))else null)
+    @Test fun negotiatedShellHistoryMetricsCommitWithCellsAndNeverReachAgentOrOldReducer() {
+        val begin=historyGrid(0).begin;val id=Uuid.random()
+        for(reducer in listOf(TerminalGridReducer(),TerminalGridReducer(ansiObserver=true,history=true)))assertTrue(runCatching {reducer.open(begin,1)}.isFailure)
+        val reducer=TerminalGridReducer(history=true);reducer.open(begin,1)
+        fun cells(seq:Long,revision:Long)=Event(id,Uint(seq),EventBody.GridPart(GridPart(Uint(revision),Uint(0),listOf(GridSpan(Uint(0),Uint(0),listOf(cell(),cell()))))))
+        assertFalse(reducer.event(cells(1,0),1));assertNull(reducer.committed)
+        assertTrue(reducer.event(Event(id,Uint(2),EventBody.GridCommit(GridCommit(Uint(0)))),1))
+        assertEquals(0L,reducer.committed!!.begin.scroll!!.offsetFromBottom.value)
+        val changed=begin.copy(revision=Uint(1),scroll=GridScroll(Uint(7),Uint(20),Uint(1)))
+        assertFalse(reducer.event(Event(id,Uint(3),EventBody.GridBegin(GridBeginEvent(changed))),1))
+        assertEquals(0L,reducer.committed!!.begin.scroll!!.offsetFromBottom.value)
+        assertFalse(reducer.event(cells(4,1),1));assertEquals(0L,reducer.committed!!.begin.scroll!!.offsetFromBottom.value)
+        assertTrue(reducer.event(Event(id,Uint(5),EventBody.GridCommit(GridCommit(Uint(1)))),1))
+        assertEquals(7L,reducer.committed!!.begin.scroll!!.offsetFromBottom.value)
+        for(metrics in listOf(GridScroll(Uint(2),Uint(1),Uint(1)),GridScroll(Uint(0),Uint(1),Uint(0)),GridScroll(Uint(0),Uint(1),Uint(257))))assertTrue(runCatching {metrics.validate()}.isFailure)
+        assertTrue(runCatching {TerminalGridReducer(history=true).open(begin.copy(alternateScreen=true),1)}.isFailure)
+        assertTrue(runCatching {TerminalGridReducer(history=true).open(begin.copy(popupBlocked=true),1)}.isFailure)
+        TerminalGridReducer(history=true).open(begin.copy(alternateScreen=true,scroll=null),1)
+    }
+    @Test fun explicitBottomNeedsSameLeaseAckAndCurrentCommitEitherOrderIncludingNoop() {
+        for(ackFirst in listOf(false,true)) {
+            val history=ShellHistoryState();val lease=TerminalGridLease(Job());history.committed(historyGrid(7),lease)
+            history.committed(historyGrid(0),lease);assertEquals(ShellHistoryMode.Browsing,history.mode)
+            history.committed(historyGrid(null,alternate=true),lease);assertEquals(ShellHistoryMode.Browsing,history.mode)
+            history.committed(historyGrid(7),lease);val id=Uuid.random();history.begin(id,0)
+            if(ackFirst){history.receipt(scrollReceipt(id));assertEquals(ShellHistoryMode.Browsing,history.mode);history.committed(historyGrid(0),lease)}
+            else {history.committed(historyGrid(0),lease);assertEquals(ShellHistoryMode.Pending,history.mode);history.receipt(scrollReceipt(id))}
+            assertEquals(ShellHistoryMode.Live,history.mode)
+            history.committed(historyGrid(7),lease);history.committed(historyGrid(0),lease)
+            history.receipt(scrollReceipt(id));assertEquals("An old duplicate ACK must not re-arm return-to-bottom",ShellHistoryMode.Browsing,history.mode)
+            val noOp=Uuid.random();history.begin(noOp,0);history.receipt(scrollReceipt(noOp))
+            assertEquals("Already committed bottom needs no later revision/frame",ShellHistoryMode.Live,history.mode)
+            val uncertain=Uuid.random();history.begin(uncertain,5);history.uncertain()
+            history.committed(historyGrid(null),lease);history.committed(historyGrid(0),lease);assertEquals(ShellHistoryMode.Uncertain,history.mode)
+            val recover=Uuid.random();history.begin(recover,0)
+            history.receipt(scrollReceipt(uncertain));assertEquals(ShellHistoryMode.Pending,history.mode)
+            history.receipt(scrollReceipt(recover));assertEquals(ShellHistoryMode.Live,history.mode)
+            val clamped=Uuid.random();history.begin(clamped,999);history.receipt(scrollReceipt(clamped))
+            assertEquals("Older clamped to zero is not explicit bottom",ShellHistoryMode.Browsing,history.mode)
+        }
+    }
+    @Test fun retiredOrReplacedHistoryGridCannotPublishBottomOrResumeInput() {
+        val shown=shellSnapshot();val state=mutableStateOf<ShellSnapshot?>(shown);val lease=TerminalGridLease(Job())
+        publishShellGrid(state,shown.selection,shown.source,shown.ticket,true,lease,historyGrid(7));lease.close()
+        publishShellGrid(state,shown.selection,shown.source,shown.ticket,true,lease,historyGrid(0))
+        assertEquals(7L,shown.history.metrics!!.offsetFromBottom.value);assertEquals(ShellHistoryMode.Browsing,shown.history.mode)
+        val replacement=shown.copy(ticket=shown.ticket+1,history=ShellHistoryState());state.value=replacement
+        publishShellGrid(state,shown.selection,shown.source,shown.ticket,true,TerminalGridLease(Job()),historyGrid(0))
+        assertSame(replacement,state.value);assertNull(replacement.history.metrics)
+    }
+    @Test fun lateBottomAckCannotUseARetiredCurrentlyBottomGrid() {
+        val shown=shellSnapshot();val state=mutableStateOf<ShellSnapshot?>(shown);val lease=TerminalGridLease(Job())
+        publishShellGrid(state,shown.selection,shown.source,shown.ticket,true,lease,historyGrid(7))
+        val action=Uuid.random();shown.history.begin(action,0)
+        publishShellGrid(state,shown.selection,shown.source,shown.ticket,true,lease,historyGrid(0))
+        assertEquals(ShellHistoryMode.Pending,shown.history.mode)
+        lease.close();shown.history.receipt(scrollReceipt(action))
+        assertEquals(ShellHistoryMode.Browsing,shown.history.mode);assertFalse(shown.history.active())
+    }
+    @Test fun shellHistorySubscriptionBuildersPreserveLegacyCanonicalAndWireBytes() {
+        val id=Uuid.random();val target=ShellTarget(id,id)
+        val old=Request(id,RequestBody.ShellGridSubscribe(ShellGridSubscribeParams(target)))
+        val explicit=Request(id,RequestBody.ShellGridSubscribe(ShellGridSubscribeParams(target,history=false)))
+        assertArrayEquals(Protocol.canonicalRequest(old),Protocol.canonicalRequest(explicit))
+        val bytes=Protocol.encodePayload(Envelope.RequestFrame(explicit))
+        assertFalse(bytes.toString(Charsets.UTF_8).contains("\"history\""))
+        val enabled=Protocol.encodePayload(Envelope.RequestFrame(Request(id,RequestBody.ShellGridSubscribe(ShellGridSubscribeParams(target,history=true)))))
+        assertTrue(enabled.toString(Charsets.UTF_8).contains("\"history\":true"))
+    }
 }

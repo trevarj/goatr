@@ -403,3 +403,27 @@ fn observer_hello_defaults_and_subscription_builders_preserve_old_bytes() {
     assert!(params.ansi_observer);
     assert_eq!(parse_raw_json(&encode_payload(&Envelope::Request(negotiated)).unwrap()).unwrap()["params"]["ansiObserver"],true);
 }
+
+#[test]
+fn shell_history_negotiation_preserves_old_bytes_and_success_only_actual_metrics() {
+    let corpus=corpus();let frames=corpus["frames"].as_array().unwrap();
+    let old=frames.iter().find(|case|case["name"]=="result hello").unwrap();
+    let Envelope::Response(response)=decode_payload(&input(old),Some(Method::Hello)).unwrap() else{panic!()};
+    let Ok(ResultBody::Hello(hello))=response.outcome else{panic!()};assert!(!hello.features.shell_history);
+    let old=frames.iter().find(|case|case["name"]=="request shell.grid.subscribe").unwrap();
+    let Envelope::Request(old_request)=decode_payload(&input(old),None).unwrap() else{panic!()};
+    let old_bytes=encode_payload(&Envelope::Request(old_request.clone())).unwrap();
+    assert!(parse_raw_json(&old_bytes).unwrap()["params"].get("history").is_none());
+    for enabled in [false,true] {
+        let mut request=old_request.clone();let RequestBody::ShellGridSubscribe(params)=&mut request.body else{panic!()};params.history=enabled;
+        let wire=encode_payload(&Envelope::Request(request.clone())).unwrap();
+        if !enabled {assert_eq!(wire,old_bytes);assert_eq!(canonical_request(&request).unwrap(),old["canonical"].as_str().unwrap().as_bytes());}
+        else {assert_eq!(parse_raw_json(&wire).unwrap()["params"]["history"],true);}
+    }
+    let case=frames.iter().find(|case|case["name"]=="shell.scroll succeeded reports actual clamped metrics").unwrap();
+    let mut wire:Value=serde_json::from_slice(&input(case)).unwrap();
+    for state in ["reserved","dispatching","dispatched","failed","uncertain"] {
+        wire["result"]["receipt"]["state"]=json!(state);
+        assert!(decode_payload(&serde_json::to_vec(&wire).unwrap(),Some(Method::ShellScroll)).is_err());
+    }
+}

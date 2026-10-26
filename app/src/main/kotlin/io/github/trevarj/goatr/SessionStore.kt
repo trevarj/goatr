@@ -918,6 +918,7 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
             is RequestBody.TerminalCreate->Triple(ActionMethod.TerminalCreate,body.params.bootId,null)
             is RequestBody.ShellInput -> Triple(ActionMethod.ShellInput,body.params.bootId,null)
             is RequestBody.ShellResize->Triple(ActionMethod.ShellResize,body.params.bootId,null)
+            is RequestBody.ShellScroll->Triple(ActionMethod.ShellScroll,body.params.bootId,null)
             is RequestBody.AttachmentsBegin->Triple(ActionMethod.AttachmentsBegin,body.params.bootId,body.params.target)
             is RequestBody.AttachmentsChunk->Triple(ActionMethod.AttachmentsChunk,body.params.bootId,body.params.target)
             is RequestBody.AttachmentsComplete->Triple(ActionMethod.AttachmentsComplete,body.params.bootId,body.params.target)
@@ -928,7 +929,7 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
         }
         return ActionMetadata(request.id,method,boot,target,Uint(time),
             sourceTarget=(request.body as? RequestBody.SessionCreate)?.params?.placement?.sourceTarget,
-            shellTarget=when(val body=request.body){is RequestBody.ShellInput->body.params.target;is RequestBody.ShellResize->body.params.target;else->null},
+            shellTarget=when(val body=request.body){is RequestBody.ShellInput->body.params.target;is RequestBody.ShellResize->body.params.target;is RequestBody.ShellScroll->body.params.target;else->null},
             attachmentUpload=request.body.attachmentUpload())
     }
     private fun markPartial(db: SQLiteDatabase,host: String,session: String) { db.execSQL("UPDATE sessions SET partial=1 WHERE host=? AND session=?",arrayOf(host,session)) }

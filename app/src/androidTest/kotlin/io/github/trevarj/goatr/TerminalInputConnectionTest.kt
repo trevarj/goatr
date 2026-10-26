@@ -207,4 +207,109 @@ class TerminalInputConnectionTest {
             instrumentation.runOnMainSync {view.release();owner.retire(discard=true);scope.cancel()}
         }
     }
+    @Test fun focusedHistoryCleanupReleasesOnlyItsConfirmedSdkHold() {
+        val instrumentation=InstrumentationRegistry.getInstrumentation()
+        val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
+        val releaseAck=kotlinx.coroutines.CompletableDeferred<Unit>();val writes=mutableListOf<ShellInput>();var stops=0
+        lateinit var view:DirectTerminalInputView;lateinit var owner:TerminalInputOwner
+        lateinit var originalPress:KeyEvent
+        ui.setContent {
+            AndroidView(modifier=Modifier.fillMaxWidth().height(64.dp).testTag("terminal-history-cleanup"),factory={context->
+                owner=TerminalInputOwner(scope,{true},{true},{},{0},{input,_->
+                    writes.add(input);if((input as? ShellInput.Keys)?.events?.any {it.phase==ShellKeyPhase.Release}==true)releaseAck.await()
+                    receipt()
+                },{_,_->},{},{stops++})
+                DirectTerminalInputView(context).also {view=it;it.bind(owner)}
+            })
+        }
+        lateinit var root:View;lateinit var window:Window
+        ui.runOnIdle {
+            var context=view.context
+            while(context is android.content.ContextWrapper&&context !is android.app.Activity){val parent=context.baseContext;check(parent!==context);context=parent}
+            window=(context as android.app.Activity).window;root=window.decorView.rootView
+        }
+        try {
+            ui.waitUntil(10000){var ready=false;instrumentation.runOnMainSync{ready=view.isAttachedToWindow&&view.rootView===root&&window.decorView.rootView===root&&view.hasWindowFocus()};ready}
+            ui.onNodeWithTag("terminal-history-cleanup").performTouchInput {click()}
+            ui.runOnIdle {
+                val now=android.os.SystemClock.uptimeMillis()
+                originalPress=KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_DPAD_LEFT,0,0,1,21,0,android.view.InputDevice.SOURCE_KEYBOARD)
+                assertTrue(view.dispatchKeyEvent(originalPress))
+            }
+            ui.waitUntil(10000){var done=false;instrumentation.runOnMainSync{done=writes.size==1&&owner.pendingEvents==0};done}
+            ui.runOnIdle {
+                owner.blockForHistory(true);view.bind(owner)
+                assertTrue(owner.retained());assertFalse(owner.accepting());assertFalse(owner.paused);assertEquals(0,stops)
+                assertTrue(view.isEnabled&&view.isFocused&&view.isAttachedToWindow&&view.hasWindowFocus())
+            }
+            ui.waitUntil(10000){var done=false;instrumentation.runOnMainSync{done=writes.size==2};done}
+            ui.runOnIdle {
+                val press=(writes[0] as ShellInput.Keys).events.single();val release=(writes[1] as ShellInput.Keys).events.single()
+                assertEquals(ShellKeyPhase.Press,press.phase);assertEquals(ShellKeyPhase.Release,release.phase)
+                assertNotNull(press.physicalKeyId);assertEquals(press.physicalKeyId,release.physicalKeyId);assertEquals(press.key,release.key)
+                assertTrue(owner.hardwareOutstanding());assertTrue(owner.retained());assertEquals(0,stops)
+                releaseAck.complete(Unit)
+            }
+            ui.waitUntil(10000){var done=false;instrumentation.runOnMainSync{done=owner.pendingEvents==0};done}
+            ui.runOnIdle {
+                assertFalse(owner.hardwareOutstanding());assertTrue(owner.retained());assertFalse(owner.paused);assertEquals(2,writes.size)
+                owner.blockForHistory(false);assertTrue(owner.accepting());assertEquals(0,stops)
+                view.bind(owner)
+                val repeat=KeyEvent(originalPress.downTime,android.os.SystemClock.uptimeMillis(),KeyEvent.ACTION_DOWN,originalPress.keyCode,1,0,originalPress.deviceId,originalPress.scanCode,0,android.view.InputDevice.SOURCE_KEYBOARD)
+                val up=KeyEvent(originalPress.downTime,android.os.SystemClock.uptimeMillis(),KeyEvent.ACTION_UP,originalPress.keyCode,0,0,originalPress.deviceId,originalPress.scanCode,0,android.view.InputDevice.SOURCE_KEYBOARD)
+                assertTrue(view.dispatchKeyEvent(repeat));assertTrue(view.dispatchKeyEvent(up))
+                assertEquals(2,writes.size);assertTrue(owner.retained());assertFalse(owner.paused)
+            }
+        }finally{instrumentation.runOnMainSync{releaseAck.complete(Unit);view.release();owner.retire(discard=true);scope.cancel()}}
+    }
+    private fun historyLifecycleLossStopsCleanup(loss:String) {
+        val instrumentation=InstrumentationRegistry.getInstrumentation();val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
+        val revalidated=kotlinx.coroutines.CompletableDeferred<Unit>();var fresh=true;val writes=mutableListOf<ShellInput>();var stopped:TerminalInputPause?=null
+        lateinit var view:DirectTerminalInputView;lateinit var owner:TerminalInputOwner;var replacement:TerminalInputOwner?=null;var dialog:android.app.Dialog?=null
+        ui.setContent {
+            AndroidView(modifier=Modifier.fillMaxWidth().height(64.dp).testTag("history-lifecycle"),factory={context->
+                owner=TerminalInputOwner(scope,{true},{fresh},{if(!fresh)revalidated.await()},{0},{input,_->writes.add(input);receipt()},{_,_->},{},{stopped=it})
+                DirectTerminalInputView(context).also{view=it;it.bind(owner)}
+            })
+        }
+        lateinit var window:Window;lateinit var root:View;lateinit var activity:android.app.Activity
+        ui.runOnIdle {
+            var context=view.context
+            while(context is android.content.ContextWrapper&&context !is android.app.Activity){val parent=context.baseContext;check(parent!==context);context=parent}
+            activity=context as android.app.Activity;window=activity.window;root=window.decorView.rootView
+        }
+        try {
+            ui.waitUntil(10000){var ready=false;instrumentation.runOnMainSync{ready=view.isAttachedToWindow&&view.rootView===root&&window.decorView.rootView===root&&view.hasWindowFocus()};ready}
+            ui.onNodeWithTag("history-lifecycle").performTouchInput{click()}
+            ui.runOnIdle {
+                val now=android.os.SystemClock.uptimeMillis()
+                val press=KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_DPAD_LEFT,0,0,1,21,0,android.view.InputDevice.SOURCE_KEYBOARD)
+                assertTrue(view.dispatchKeyEvent(press))
+            }
+            ui.waitUntil(10000){var complete=false;instrumentation.runOnMainSync{complete=writes.size==1&&owner.pendingEvents==0};complete}
+            ui.runOnIdle {
+                fresh=false;owner.blockForHistory(true);view.bind(owner)
+                assertTrue(view.isEnabled&&view.isFocused&&view.isAttachedToWindow&&view.hasWindowFocus())
+                when(loss) {
+                    "replacement"->{replacement=TerminalInputOwner(scope,{true},{true},{},{0},{input,_->writes.add(input);receipt()},{_,_->},{},{});view.bind(replacement)}
+                    "detach"->{(view.parent as android.view.ViewGroup).removeView(view);assertFalse(view.isAttachedToWindow)}
+                    "focus"->{view.clearFocus();assertFalse(view.isFocused)}
+                    "window"->{dialog=android.app.Dialog(activity).also{it.setContentView(android.widget.TextView(activity).apply{text="Owned history window loss"});it.show()}}
+                    else->error("unknown owned lifecycle loss")
+                }
+            }
+            ui.waitUntil(10000){var paused=false;instrumentation.runOnMainSync{paused=owner.paused};paused}
+            ui.runOnIdle {
+                assertFalse(owner.retained());assertFalse(owner.accepting());assertEquals(TerminalInputPause.SourceLost,stopped)
+                if(loss=="window")assertFalse(view.hasWindowFocus())
+                fresh=true;revalidated.complete(Unit)
+            }
+            ui.waitForIdle()
+            ui.runOnIdle {assertEquals(1,writes.size);assertEquals(0,owner.pendingEvents);assertFalse(owner.offer(ShellInput.Text("must not resume after real view loss")))}
+        }finally{instrumentation.runOnMainSync{dialog?.dismiss();revalidated.complete(Unit);view.release();owner.retire(discard=true);replacement?.retire(discard=true);scope.cancel()}}
+    }
+    @Test fun historyOwnerReplacementStopsConfirmedCleanup()=historyLifecycleLossStopsCleanup("replacement")
+    @Test fun historyNativeDetachStopsConfirmedCleanup()=historyLifecycleLossStopsCleanup("detach")
+    @Test fun historyNativeFocusLossStopsConfirmedCleanup()=historyLifecycleLossStopsCleanup("focus")
+    @Test fun historyNativeWindowLossStopsConfirmedCleanup()=historyLifecycleLossStopsCleanup("window")
 }

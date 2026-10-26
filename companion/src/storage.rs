@@ -919,6 +919,7 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
                 ),
                 RequestBody::ShellInput(p) => (ActionMethod::ShellInput,p.boot_id.clone(),None,None),
                 RequestBody::ShellResize(p)=>(ActionMethod::ShellResize,p.boot_id.clone(),None,None),
+                RequestBody::ShellScroll(p)=>(ActionMethod::ShellScroll,p.boot_id.clone(),None,None),
                 RequestBody::SessionCreate(p) => (
                     ActionMethod::SessionCreate,
                     p.boot_id.clone(),
@@ -957,7 +958,7 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
             }
             let receipt = Receipt {
                 action_id: request.id.clone(),
-                shell_target:match &request.body {RequestBody::ShellInput(params)=>Some(params.target.clone()),RequestBody::ShellResize(params)=>Some(params.target.clone()),_=>None},
+                shell_target:match &request.body {RequestBody::ShellInput(params)=>Some(params.target.clone()),RequestBody::ShellResize(params)=>Some(params.target.clone()),RequestBody::ShellScroll(params)=>Some(params.target.clone()),_=>None},
                 method,
                 boot_id,
                 target,
@@ -2080,6 +2081,7 @@ fn validate_mutation_boot(request: &Request, current: &Uuid) -> StoreResult<()> 
         RequestBody::SessionCreate(p) => &p.boot_id,
         RequestBody::ShellInput(p) => &p.boot_id,
         RequestBody::ShellResize(p)=>&p.boot_id,
+        RequestBody::ShellScroll(p)=>&p.boot_id,
         body if body.attachment_action().is_some()=>body.attachment_action().ok_or(StorageError::Corrupt)?.1,
         RequestBody::TerminalCreate(p)=>&p.boot_id,
         RequestBody::AgentRename(p) => &p.boot_id,

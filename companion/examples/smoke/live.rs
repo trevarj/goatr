@@ -10626,9 +10626,7 @@ impl Phone {
                 })
             }
             GridSubject::Shell(target) => {
-                RequestBody::ShellGridSubscribe(ShellGridSubscribeParams {
-                    target: target.clone(),
-                })
+                RequestBody::ShellGridSubscribe(ShellGridSubscribeParams { target: target.clone(), history: false })
             }
         };
         self.grid = Some(witness);
@@ -14440,8 +14438,8 @@ mod tests {
         let opening=Uuid::random();let subscription=Uuid::random();let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
         let mut witness=GridWitness::pending(opening.clone(),GridSubject::Shell(target.clone()));witness.fixture=Some(TerminalFixtureWitness::new());
         witness.response(&opening,&Ok(ResultBody::ShellGridSubscribe(ShellGridSubscribeResult{target,subscription:subscription.clone(),seq:ZeroValue(0),
-            frame:GridBegin{mode:GridMode::Replace,revision:Uint(0),columns:Uint(columns as u64),rows:Uint(1),cursor:None,
-                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2)}})),128).unwrap();
+            frame:GridBegin { scroll: None, mode:GridMode::Replace,revision:Uint(0),columns:Uint(columns as u64),rows:Uint(1),cursor:None,
+                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2) }})),128).unwrap();
         (witness,subscription)
     }
     #[test]
@@ -14460,8 +14458,8 @@ mod tests {
             assert!(witness.deadline.is_none());witness.arm("TransactionA").unwrap();assert!(witness.deadline.is_none());
             let mut cells=terminal_test_cells();let columns=cells.len();let first=cells[0].clone();
             let split=TERMINAL_MARKER.len()+1;let tail=cells.split_off(split);
-            let mut frame=GridBegin{mode:GridMode::Replace,revision:Uint(0),columns:Uint(columns as u64),rows:Uint(1),cursor:None,
-                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2)};
+            let mut frame=GridBegin { scroll: None, mode:GridMode::Replace,revision:Uint(0),columns:Uint(columns as u64),rows:Uint(1),cursor:None,
+                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2) };
             let envelope=Envelope::Response(Response{id:opening,outcome:Ok(ResultBody::ShellGridSubscribe(ShellGridSubscribeResult{
                 target,subscription:subscription.clone(),seq:ZeroValue(0),frame:frame.clone()}))});
             let bytes=goatr::protocol::encode_payload(&envelope).unwrap().len();
@@ -14558,9 +14556,8 @@ mod tests {
                 assert_eq!(witness.terminal_opening_commit().unwrap(),0);
                 assert!(!witness.terminal_fixture_ready(0).unwrap());
             }
-            witness.event(Event{subscription:subscription.clone(),seq:Uint(4),body:EventBody::GridBegin(GridBeginEvent{frame:GridBegin{
-                mode:GridMode::Replace,revision:Uint(1),columns:Uint(later_cells.len() as u64),rows:Uint(1),cursor:None,
-                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2)}})},128).unwrap();
+            witness.event(Event{subscription:subscription.clone(),seq:Uint(4),body:EventBody::GridBegin(GridBeginEvent{frame:GridBegin { scroll: None, mode:GridMode::Replace,revision:Uint(1),columns:Uint(later_cells.len() as u64),rows:Uint(1),cursor:None,
+            alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2) }})},128).unwrap();
             witness.event(part(5,1,0,0,later_cells[..split].to_vec()),256).unwrap();
             witness.event(part(6,1,1,split as u64,later_cells[split..].to_vec()),256).unwrap();
             if !opening_contains_marker{assert!(!witness.terminal_fixture_ready(0).unwrap());}
@@ -15733,17 +15730,15 @@ mod tests {
             target: expected.clone(),
             subscription: Uuid::random(),
             seq: ZeroValue(0),
-            frame: GridBegin {
-                mode: GridMode::Replace,
-                revision: Uint(0),
-                columns: Uint(1),
-                rows: Uint(1),
-                cursor: None,
-                alternate_screen: false,
-                graphics_omitted: true,
-                popup_blocked: false,
-                part_count: Uint(1),
-            },
+            frame: GridBegin { scroll: None, mode: GridMode::Replace,
+            revision: Uint(0),
+            columns: Uint(1),
+            rows: Uint(1),
+            cursor: None,
+            alternate_screen: false,
+            graphics_omitted: true,
+            popup_blocked: false,
+            part_count: Uint(1), },
         });
         let encoded = encode_payload(&Envelope::Response(Response {
             id: opening,
@@ -16259,17 +16254,15 @@ mod tests {
                         target,
                         subscription: subscription.clone(),
                         seq: ZeroValue(0),
-                        frame: GridBegin {
-                            mode: GridMode::Replace,
-                            revision: Uint(0),
-                            columns: Uint(1),
-                            rows: Uint(1),
-                            cursor: None,
-                            alternate_screen: false,
-                            graphics_omitted: true,
-                            popup_blocked: false,
-                            part_count: Uint(1),
-                        },
+                        frame: GridBegin { scroll: None, mode: GridMode::Replace,
+                        revision: Uint(0),
+                        columns: Uint(1),
+                        rows: Uint(1),
+                        cursor: None,
+                        alternate_screen: false,
+                        graphics_omitted: true,
+                        popup_blocked: false,
+                        part_count: Uint(1), },
                     },
                 )),
             });
@@ -16422,17 +16415,15 @@ mod tests {
         let original_history_seq = history.as_ref().unwrap().snapshot.seq.0;
         let opening = Uuid::random();
         let subscription = Uuid::random();
-        let frame = GridBegin {
-            mode: GridMode::Replace,
-            revision: Uint(0),
-            columns: Uint(TOKEN.len() as u64),
-            rows: Uint(1),
-            cursor: None,
-            alternate_screen: false,
-            graphics_omitted: true,
-            popup_blocked: false,
-            part_count: Uint(1),
-        };
+        let frame = GridBegin { scroll: None, mode: GridMode::Replace,
+        revision: Uint(0),
+        columns: Uint(TOKEN.len() as u64),
+        rows: Uint(1),
+        cursor: None,
+        alternate_screen: false,
+        graphics_omitted: true,
+        popup_blocked: false,
+        part_count: Uint(1), };
         let response = Envelope::Response(Response {
             id: opening.clone(),
             outcome: Ok(ResultBody::TerminalGridSubscribe(

@@ -60,7 +60,7 @@ internal class AgentAliasLease {
 class AgentAliasMutationContext internal constructor(internal val original:Any,internal val lease:AgentAliasLease)
 data class ShellInputObservation(val token:Uuid,val unknown:Boolean)
 private data class ShellInputStatusObservation(val order:Long,val observation:ShellInputObservation)
-internal enum class ShellMutationPurpose {Input,Resize}
+internal enum class ShellMutationPurpose {Input,Resize,Scroll}
 class ShellMutationContext internal constructor(internal val original:Any,internal val lease:ShellMutationLease,internal val purpose:ShellMutationPurpose,internal val inputObservation:Pair<Uuid,Uuid>?=null,internal val grid:Any?=null,internal val gridSubscription:Uuid?=null)
 enum class ConnectionFailurePhase { Dial, OpenStream, Hello, Snapshot, Reader, Recovery }
 enum class ConnectionFailureCategory { Timeout, Known, Protocol, Transport, Other }
@@ -163,6 +163,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     }
     private class ShellReadContext(val host:String,val live:Live,val hostReducer:HostReducer,val shell:ShellSummary) {
         val active=AtomicBoolean(true)
+        val hello=live.hello
         val incarnation=hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==shell.serverId}?.serverIncarnation ?: throw StorePolicy(ErrorCode.NotReady)
     }
     private class TerminalReadContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid) {
@@ -173,8 +174,8 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         /** Caller cancellation invalidates a correlated late reply without closing the transport. */
         val active=AtomicBoolean(true)
     }
-    private class GridReadContext(val live:Live,val terminal:TerminalReadContext?,val shell:ShellReadContext?,val lease:TerminalGridLease,val display:(TerminalGrid?,TerminalGridLease)->Unit) {
-        val reducer=TerminalGridReducer(ansiObserver=terminal!=null)
+    private class GridReadContext(val live:Live,val terminal:TerminalReadContext?,val shell:ShellReadContext?,val lease:TerminalGridLease,val history:Boolean,val display:(TerminalGrid?,TerminalGridLease)->Unit) {
+        val reducer=TerminalGridReducer(ansiObserver=terminal!=null,history=history)
         val server=terminal?.reducer?.state?.summary?.serverId ?: shell?.shell?.serverId
         val incarnation=server?.let {id->live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==id}?.serverIncarnation}
         var subscription:Uuid?=null
@@ -319,7 +320,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             if(requested is RequestBody.TerminalCreate)validateTerminalCreation(terminal ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
             if(requested.attachmentTarget()!=null)validateAttachment(attachment ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
             if(requested is RequestBody.AgentRename) validateAgentAlias(alias ?: throw StorePolicy(ErrorCode.NotReady),current,requested)
-            if(requested is RequestBody.ShellInput || requested is RequestBody.ShellResize) {
+            if(requested is RequestBody.ShellInput || requested is RequestBody.ShellResize || requested is RequestBody.ShellScroll) {
                 try {validateShellMutation(shell ?: throw StorePolicy(ErrorCode.NotReady),current,requested)}
                 catch(failure:StorePolicy){onFailure?.invoke(ActionAdmissionGuard.SourceNotCurrent,failure.code);throw failure}
             }
@@ -414,7 +415,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                 if(agentCreation!=null)agentCreation.lease.admit {validate(current,requested,id);admit()}
                 else if(terminal!=null)terminal.lease.admit {validate(current,requested,id);admit()}
                 else {validate(current,requested,id);admit()}
-            }}else if(agentCreation!=null){agentCreation.lease.admit {validate(current,requested,id);admit()}}else if(requested is RequestBody.TerminalCreate){val original=terminal ?: throw StorePolicy(ErrorCode.NotReady);original.lease.admit {validate(current,requested,id);admit()}}else if(requested is RequestBody.ShellInput || requested is RequestBody.ShellResize) {
+            }}else if(agentCreation!=null){agentCreation.lease.admit {validate(current,requested,id);admit()}}else if(requested is RequestBody.TerminalCreate){val original=terminal ?: throw StorePolicy(ErrorCode.NotReady);original.lease.admit {validate(current,requested,id);admit()}}else if(requested is RequestBody.ShellInput || requested is RequestBody.ShellResize || requested is RequestBody.ShellScroll) {
                 val original=shell ?: throw StorePolicy(ErrorCode.NotReady)
                 // No suspension or write under this gate. Revocation wins before
                 // admission; once admitted, the existing frame owner finishes.
@@ -1245,6 +1246,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             current=shellReadCurrent(context)
             if(context.live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==context.shell.serverId}?.serverIncarnation!=grid.incarnation)throw StorePolicy(ErrorCode.StaleSession)
             if(current&&context.live.hostReducer.inventory?.shells?.singleOrNull {it.target==context.shell.target}?.capabilities?.grid!=true)throw StorePolicy(ErrorCode.NotReady)
+            if(current&&grid.history&&(context.live.hello!==context.hello||context.hello?.features?.shellHistory!=true||context.live.hostReducer.inventory?.shells?.singleOrNull {it.target==context.shell.target}?.capabilities?.input!=true))throw StorePolicy(ErrorCode.NotReady)
         }
         return current
     }
@@ -1269,7 +1271,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     private suspend fun gridStream(live:Live,body:RequestBody,terminal:TerminalReadContext?,shell:ShellReadContext?,display:(TerminalGrid?,TerminalGridLease)->Unit) {
         if(live.grid!=null)throw StorePolicy(ErrorCode.Busy)
         val caller=currentCoroutineContext()[Job]!!
-        val grid=GridReadContext(live,terminal,shell,TerminalGridLease(caller),display);live.grid=grid
+        val grid=GridReadContext(live,terminal,shell,TerminalGridLease(caller),(body as? RequestBody.ShellGridSubscribe)?.params?.history==true,display);live.grid=grid
         try {
             request(live,body,terminal=terminal,shell=shell){response->
                 val (subscription,frame)=when(response){
@@ -1466,15 +1468,16 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             is RequestBody.SessionCreate->body.params.bootId to body.params.placement?.sourceTarget
             is RequestBody.ShellInput->body.params.bootId to null
             is RequestBody.ShellResize->body.params.bootId to null
+            is RequestBody.ShellScroll->body.params.bootId to null
             else->return
         }
         if(boot!=live.hello?.bootId) reject(ActionAdmissionGuard.BootChanged,ErrorCode.StaleHost)
         if(body !is RequestBody.AttachmentsDiscard && !live.hostReducer.ready) reject(ActionAdmissionGuard.HostNotReady,ErrorCode.NotReady)
         if(!live.receiptsRecovered) reject(ActionAdmissionGuard.ReceiptsUnreconciled,ErrorCode.NotReady)
-        if(body is RequestBody.ShellInput || body is RequestBody.ShellResize) {
-            val shellTarget=when(body){is RequestBody.ShellInput->body.params.target;is RequestBody.ShellResize->body.params.target;else->throw StorePolicy(ErrorCode.InvalidRequest)}
+        if(body is RequestBody.ShellInput || body is RequestBody.ShellResize || body is RequestBody.ShellScroll) {
+            val shellTarget=when(body){is RequestBody.ShellInput->body.params.target;is RequestBody.ShellResize->body.params.target;is RequestBody.ShellScroll->body.params.target;else->throw StorePolicy(ErrorCode.InvalidRequest)}
             val shell=live.hostReducer.inventory?.shells?.singleOrNull {it.target==shellTarget} ?: reject(ActionAdmissionGuard.TargetChanged,ErrorCode.StaleSession)
-            val allowed=when(body){is RequestBody.ShellInput->shell.capabilities.input;is RequestBody.ShellResize->shell.capabilities.grid;else->shell.capabilities.create}
+            val allowed=when(body){is RequestBody.ShellInput->shell.capabilities.input;is RequestBody.ShellResize->shell.capabilities.grid;is RequestBody.ShellScroll->shell.capabilities.grid&&shell.capabilities.input;else->false}
             if(shell.connectivity!=SessionConnectivity.Ready || !shell.capabilities.read || !allowed || !live.hostReducer.sourceCurrent(shell.serverId)) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)
         }
         if(target!=null) {val reducer=live.reducers[target.sessionId] ?: reject(ActionAdmissionGuard.ReducerAbsent,ErrorCode.NotReady);val summary=reducer.state?.summary ?: reject(ActionAdmissionGuard.SummaryAbsent,ErrorCode.NotReady);if(Target(summary.sessionId,summary.generation)!=target) reject(ActionAdmissionGuard.TargetChanged,ErrorCode.StaleSession);if(!reducer.mutationsEnabled) reject(ActionAdmissionGuard.MutationsDisabled,ErrorCode.NotReady);val route=reducer.source?.let {live.subscriptions[it]};if(route==null || route.target!=target || !route.owner.active.get())reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady);if(!live.hostReducer.sourceCurrent(summary.serverId)) reject(ActionAdmissionGuard.SourceNotCurrent,ErrorCode.NotReady)}
@@ -1780,7 +1783,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
      * explicitly pressed Send/Stop/Answer after authoritative snapshots+receipt reconciliation. */
     suspend fun mutate(host:String,request:Request,ordinaryComposer:Boolean=false,approval:RecoveryApproval=RecoveryApproval(),shell:ShellMutationContext?=null,alias:AgentAliasMutationContext?=null,attachment:AttachmentMutationContext?=null,terminal:TerminalCreationMutationContext?=null,agentCreation:AgentSessionMutationContext?=null,skill:SkillInvocationContext?=null,directories:CreationDirectoriesContext?=null,controls:ControlsMutationContext?=null,queue:QueueMutationContext?=null):Receipt = withContext(serial) {
         val live=originalLive(host,request.id);val body=request.body
-        if((body is RequestBody.TerminalCreate||body is RequestBody.ShellInput||body is RequestBody.ShellResize||body is RequestBody.SessionControlsApply||body.queueTarget()!=null)&&store.localAction(host,request.id)!=null) {
+        if((body is RequestBody.TerminalCreate||body is RequestBody.ShellInput||body is RequestBody.ShellResize||body is RequestBody.ShellScroll||body is RequestBody.SessionControlsApply||body.queueTarget()!=null)&&store.localAction(host,request.id)!=null) {
             val key=secrets.receipt(host,store)
             val matched=try {store.matchingAction(host,request,key)}finally {key.fill(0)}
             if(!matched)throw StorePolicy(ErrorCode.NotReady)
@@ -1789,12 +1792,12 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                 is ActionStatusResult.Unknown->throw StorePolicy(ErrorCode.NotReady)
             }
         }
-        if(body.attachmentTarget()==null&&body !is RequestBody.TerminalCreate&&body !is RequestBody.AgentRename&&body !is RequestBody.WorkspaceRename&&body !is RequestBody.PromptSubmit&&body !is RequestBody.TurnCancel&&body !is RequestBody.RequestRespond&&body !is RequestBody.SessionCreate&&body !is RequestBody.ShellInput&&body !is RequestBody.ShellResize&&body !is RequestBody.SessionControlsApply&&body.queueTarget()==null)throw StorePolicy(ErrorCode.InvalidRequest)
+        if(body.attachmentTarget()==null&&body !is RequestBody.TerminalCreate&&body !is RequestBody.AgentRename&&body !is RequestBody.WorkspaceRename&&body !is RequestBody.PromptSubmit&&body !is RequestBody.TurnCancel&&body !is RequestBody.RequestRespond&&body !is RequestBody.SessionCreate&&body !is RequestBody.ShellInput&&body !is RequestBody.ShellResize&&body !is RequestBody.ShellScroll&&body !is RequestBody.SessionControlsApply&&body.queueTarget()==null)throw StorePolicy(ErrorCode.InvalidRequest)
         if(agentCreation!=null)validateAgentSession(agentCreation,live,body as? RequestBody.SessionCreate ?: throw StorePolicy(ErrorCode.InvalidRequest))
         if((body is RequestBody.TerminalCreate)!=(terminal!=null))throw StorePolicy(ErrorCode.InvalidRequest)
         if(body is RequestBody.TerminalCreate)validateTerminalCreation(terminal!!,live,body)
-        if((body is RequestBody.ShellInput || body is RequestBody.ShellResize)!=(shell!=null)) throw StorePolicy(ErrorCode.InvalidRequest)
-        if(body is RequestBody.ShellInput || body is RequestBody.ShellResize) validateShellMutation(shell!!,live,body)
+        if((body is RequestBody.ShellInput || body is RequestBody.ShellResize || body is RequestBody.ShellScroll)!=(shell!=null)) throw StorePolicy(ErrorCode.InvalidRequest)
+        if(body is RequestBody.ShellInput || body is RequestBody.ShellResize || body is RequestBody.ShellScroll) validateShellMutation(shell!!,live,body)
         if((body is RequestBody.AgentRename)!=(alias!=null)) throw StorePolicy(ErrorCode.InvalidRequest)
         if(body is RequestBody.AgentRename) validateAgentAlias(alias!!,live,body)
         if((body.attachmentTarget()!=null)!=(attachment!=null))throw StorePolicy(ErrorCode.InvalidRequest)
@@ -1841,6 +1844,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
                     is ResultBody.SessionCreate->result.result.receipt
                     is ResultBody.ShellInput->result.result.receipt
                     is ResultBody.ShellResize->result.result.receipt
+                    is ResultBody.ShellScroll->result.result.receipt
                     else->invalidWire()
                 }
             }
@@ -1928,32 +1932,35 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     internal suspend fun captureShellMutation(host:String,target:ShellTarget,source:Uuid,lease:ShellMutationLease,purpose:ShellMutationPurpose,inputObservation:Pair<Uuid,Uuid>?=null):ShellMutationContext=withContext(serial) {
         if(!lease.active.get()) throw StorePolicy(ErrorCode.StaleSession)
         val original=shellContext(host,target,source)
-        val allowed=when(purpose){ShellMutationPurpose.Input->original.shell.capabilities.input;ShellMutationPurpose.Resize->original.shell.capabilities.grid}
+        val allowed=when(purpose){ShellMutationPurpose.Input->original.shell.capabilities.input;ShellMutationPurpose.Resize->original.shell.capabilities.grid;ShellMutationPurpose.Scroll->original.shell.capabilities.input&&original.shell.capabilities.grid}
         if(!allowed)throw StorePolicy(ErrorCode.NotReady)
         if(inputObservation!=null && (purpose!=ShellMutationPurpose.Input || original.live.shellInputStatuses[inputObservation.first]?.observation?.token!=inputObservation.second))throw StorePolicy(ErrorCode.NotReady)
         val grid=original.live.grid?.takeIf {it.shell?.shell?.target==target&&validateGrid(it)&&it.reducer.committed!=null} ?: throw StorePolicy(ErrorCode.NotReady)
         if(grid.reducer.committed?.begin?.popupBlocked==true)throw StorePolicy(ErrorCode.NotReady)
+        if(purpose==ShellMutationPurpose.Scroll&&(!grid.history||grid.reducer.committed?.begin?.scroll==null||grid.reducer.committed?.begin?.alternateScreen!=false))throw StorePolicy(ErrorCode.NotReady)
         ShellMutationContext(original,lease,purpose,inputObservation,grid,grid.subscription)
     }
     private fun validateShellMutation(context:ShellMutationContext,live:Live,body:RequestBody) {
-        val (target,purpose)=when(body){is RequestBody.ShellInput->body.params.target to ShellMutationPurpose.Input;is RequestBody.ShellResize->body.params.target to ShellMutationPurpose.Resize;else->throw StorePolicy(ErrorCode.InvalidRequest)}
+        val (target,purpose)=when(body){is RequestBody.ShellInput->body.params.target to ShellMutationPurpose.Input;is RequestBody.ShellResize->body.params.target to ShellMutationPurpose.Resize;is RequestBody.ShellScroll->body.params.target to ShellMutationPurpose.Scroll;else->throw StorePolicy(ErrorCode.InvalidRequest)}
         if(context.purpose!=purpose) throw StorePolicy(ErrorCode.InvalidRequest)
         context.inputObservation?.let {(action,token)->if(purpose!=ShellMutationPurpose.Input || live.shellInputStatuses[action]?.observation?.token!=token)throw StorePolicy(ErrorCode.NotReady)}
         if(!context.lease.active.get()) throw StorePolicy(ErrorCode.StaleSession)
         val original=context.original as? ShellReadContext ?: throw StorePolicy(ErrorCode.InvalidRequest)
         if(original.live!==live || original.host!=live.host.hostId || original.shell.target!=target) throw StorePolicy(ErrorCode.StaleSession)
         validateShellRead(original)
-        val allowed=when(purpose){ShellMutationPurpose.Input->original.shell.capabilities.input;ShellMutationPurpose.Resize->original.shell.capabilities.grid}
+        val allowed=when(purpose){ShellMutationPurpose.Input->original.shell.capabilities.input;ShellMutationPurpose.Resize->original.shell.capabilities.grid;ShellMutationPurpose.Scroll->original.shell.capabilities.input&&original.shell.capabilities.grid}
         if(!allowed)throw StorePolicy(ErrorCode.NotReady)
-        val subscription=when(body){is RequestBody.ShellInput->body.params.subscription;is RequestBody.ShellResize->body.params.subscription;else->throw StorePolicy(ErrorCode.InvalidRequest)}
+        val subscription=when(body){is RequestBody.ShellInput->body.params.subscription;is RequestBody.ShellResize->body.params.subscription;is RequestBody.ShellScroll->body.params.subscription;else->throw StorePolicy(ErrorCode.InvalidRequest)}
         val grid=context.grid as? GridReadContext ?: throw StorePolicy(ErrorCode.InvalidRequest)
         if(live.grid!==grid || grid.subscription!=subscription || context.gridSubscription!=grid.subscription || !validateGrid(grid) || grid.reducer.committed==null || grid.reducer.committed?.begin?.popupBlocked==true)throw StorePolicy(ErrorCode.StaleSession)
+        if(purpose==ShellMutationPurpose.Scroll&&(!grid.history||original.live.hello!==original.hello||original.hello?.features?.shellHistory!=true||grid.reducer.committed?.begin?.scroll==null||grid.reducer.committed?.begin?.alternateScreen!=false))throw StorePolicy(ErrorCode.NotReady)
     }
     /** Both input and resize bind this exact active original control lease. */
     internal suspend fun shell(host:String,target:ShellTarget,source:Uuid,display:(TerminalGrid?,TerminalGridLease)->Unit)=withContext(serial) {
         val context=shellContext(host,target,source)
         if(!context.shell.capabilities.grid)throw StorePolicy(ErrorCode.NotReady)
-        gridStream(context.live,RequestBody.ShellGridSubscribe(ShellGridSubscribeParams(target)),null,context,display)
+        val history=context.hello?.features?.shellHistory==true&&context.shell.capabilities.input
+        gridStream(context.live,RequestBody.ShellGridSubscribe(ShellGridSubscribeParams(target,history=history)),null,context,display)
     }
 
 }

@@ -386,6 +386,7 @@ impl Display {
             graphics_omitted: true,
             popup_blocked: false,
             part_count: Uint(self.cells.len().div_ceil(512) as u64),
+            scroll: None,
         };
         begin.validate().map_err(|_| ErrorCode::NotReady)?;
         Ok(endpoint::Projection {

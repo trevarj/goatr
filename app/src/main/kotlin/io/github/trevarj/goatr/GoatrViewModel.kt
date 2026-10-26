@@ -21,7 +21,7 @@ data class SkillsSnapshot(val key:ConversationKey,val source:Uuid,val generation
 data class SkillsDocumentState(val snapshot:SkillsSnapshot,val entry:SkillEntry,val ticket:Any,val loading:Boolean=true,val text:String?=null,val failed:Boolean=false)
 data class ChangesSnapshot(val key: ConversationKey,val source: Uuid,val ticket: Long,val changes: ChangesReadResult?,val loading: Boolean,val error: Boolean)
 data class ShellSelection(val host:String,val target:ShellTarget)
-data class ShellSnapshot(val selection:ShellSelection,val source:Uuid,val ticket:Long,val summary:ShellSummary,val grid:TerminalGrid?,val loading:Boolean,val error:Boolean,val controlBegun:Boolean=false,val incarnation:Uuid?=null,val originalHello:HelloResult?=null)
+data class ShellSnapshot(val selection:ShellSelection,val source:Uuid,val ticket:Long,val summary:ShellSummary,val grid:TerminalGrid?,val loading:Boolean,val error:Boolean,val controlBegun:Boolean=false,val incarnation:Uuid?=null,val originalHello:HelloResult?=null,val history:ShellHistoryState=ShellHistoryState())
 data class ShellInputDraft(val value:androidx.compose.ui.text.input.TextFieldValue=androidx.compose.ui.text.input.TextFieldValue(),val revision:Long=0,val direct:Boolean=false,val keyCharacter:String="",val modifiers:TerminalModifierState=TerminalModifierState(),val queuedRevision:Long?=null)
 data class ShellInputGate(val scope:ShellControlScope,val loaded:Boolean,val prior:LocalAction?,val pending:Boolean,val observation:ShellInputObservation?=null)
 data class ShellControlScope(val selection:ShellSelection,val source:Uuid,val ticket:Long)
@@ -1841,6 +1841,9 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         focusedId=action
         if(foreground && connection.state.value.hello.containsKey(host) && connection.status(host,action) is ActionStatusResult.Unknown) notice="Host outcome is unknown/expired. Retained historical metadata is inspection only; never replay or retarget this UUID."
         shell?.takeIf {it.selection.host==host && shellAdmitted(it)}?.let {loadShellInput(ShellControlScope(it.selection,it.source,it.ticket))}
+        shell?.takeIf {it.selection.host==host&&it.history.action==action&&shellAdmitted(it)&&it.controlBegun}?.let {shown->
+            store.localAction(host,action)?.takeIf {it.authoritative&&it.metadata.shellTarget==shown.selection.target}?.receipt?.let {shown.history.receipt(it);terminalOwner(ShellControlScope(shown.selection,shown.source,shown.ticket))?.blockForHistory(shown.history.mode!=ShellHistoryMode.Live)}
+        }
     }
     fun displayed(host: String,receipt: Receipt) { viewModelScope.launch {
         try {
@@ -2070,6 +2073,9 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             try {connection.shell(selected.host,selected.target,currentSource){grid,lease->
                 val admitted=shell?.let {shellAdmitted(it)&&it.controlBegun}==true
                 publishShellGrid(shellState,selected,source,ticket,admitted,lease,grid)
+                shell?.takeIf {it.selection==selected&&it.source==source&&it.ticket==ticket&&it.grid===grid&&lease.active()&&(grid==null||admitted)}?.let {
+                    terminalOwner(ShellControlScope(selected,source,ticket))?.blockForHistory(it.history.mode!=ShellHistoryMode.Live)
+                }
                 if(!lease.active())terminalInputOwner?.unavailable()
             }}catch(cancel:CancellationException){throw cancel}
             catch(_:Exception){shell?.takeIf {it.ticket==ticket&&shellRetained(it)}?.let {shell=it.copy(grid=null,loading=false,error=true)}}
@@ -2079,7 +2085,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val shown=shell?.takeIf {it.selection==scope.selection&&it.source==scope.source&&it.ticket==scope.ticket} ?: return
         stopTerminalInput()
         shellJob?.cancel();shellJob=null;shellMutationLease?.invalidate();shellMutationLease=ShellMutationLease();shellTicket++
-        shell=shown.copy(ticket=shellTicket,grid=null,controlBegun=false,loading=false,error=false)
+        shell=shown.copy(ticket=shellTicket,grid=null,controlBegun=false,loading=false,error=false,history=ShellHistoryState())
         shellInputDrafts[shown.selection]?.let {shellInputDrafts[shown.selection]=it.copy(modifiers=TerminalModifierState())}
     }
     fun resizeShell(scope:ShellControlScope,columns:Long,rows:Long)=perform {
@@ -2094,6 +2100,29 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val params=ShellResizeParams(boot,scope.selection.target,original.gridSubscription ?: throw StorePolicy(ErrorCode.NotReady),Uint(columns),Uint(rows));params.validate()
         connection.mutate(scope.selection.host,Request(Uuid.random(),RequestBody.ShellResize(params)),shell=original)
         refreshActions()
+    }
+    fun shellHistoryAllowed(scope:ShellControlScope):Boolean {
+        val shown=shell?.takeIf {it.selection==scope.selection&&it.source==scope.source&&it.ticket==scope.ticket} ?: return false
+        val frame=shown.grid?.begin ?: return false
+        return shellControlAllowed(scope)&&shown.controlBegun&&!shown.error&&shown.summary.capabilities.input&&shown.originalHello?.features?.shellHistory==true&&shown.history.active()&&shown.history.metrics!=null&&shown.history.mode!=ShellHistoryMode.Pending&&!frame.alternateScreen&&!frame.popupBlocked
+    }
+    fun scrollShell(scope:ShellControlScope,offset:Long)=perform {
+        if(!shellHistoryAllowed(scope)||connection.state.value.mutationReady[scope.selection.host]!=true)throw StorePolicy(ErrorCode.NotReady)
+        val shown=shell ?: throw StorePolicy(ErrorCode.NotReady);val history=shown.history
+        val lease=shellMutationLease ?: throw StorePolicy(ErrorCode.NotReady);val action=Uuid.random()
+        Uint(offset).validate();history.begin(action,offset)
+        try {
+            terminalOwner(scope)?.historyBarrier()
+            if(shell?.history!==history||!shellControlAllowed(scope)||shellMutationLease!==lease)throw StorePolicy(ErrorCode.StaleSession)
+            val source=connection.state.value.inventory[scope.selection.host]?.subscription ?: throw StorePolicy(ErrorCode.NotReady)
+            val original=connection.captureShellMutation(scope.selection.host,scope.selection.target,source,lease,ShellMutationPurpose.Scroll)
+            val boot=shown.originalHello?.bootId ?: throw StorePolicy(ErrorCode.NotReady)
+            val receipt=connection.mutate(scope.selection.host,Request(action,RequestBody.ShellScroll(ShellScrollParams(boot,scope.selection.target,original.gridSubscription ?: throw StorePolicy(ErrorCode.NotReady),Uint(offset)))),shell=original)
+            if(shell?.history===history&&shellControlAllowed(scope)){history.receipt(receipt);terminalOwner(scope)?.blockForHistory(history.mode!=ShellHistoryMode.Live)}
+        }catch(error:Exception){
+            if(shell?.history===history){if(withContext(NonCancellable){store.localAction(scope.selection.host,action)}==null)history.refused()else history.uncertain();terminalOwner(scope)?.blockForHistory(history.mode!=ShellHistoryMode.Live)}
+            throw error
+        }finally{refreshActions()}
     }
     fun closeShell() {
         stopTerminalInput()
@@ -2212,6 +2241,8 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     }
     internal fun prepareTerminalInput(scope:ShellControlScope) {
         if(terminalInputToken!=null||!inputConsentAllowed(scope))return
+        val history=shell?.history ?: return
+        if(history.mode!=ShellHistoryMode.Live)return
         if(scope.selection !in shellInputDrafts&&shellInputDrafts.size>=16){notice="Keep or explicitly clear an existing terminal draft first.";return}
         if(utf8Size(shellDraft(scope.selection).value.text)>49152){notice="Reduce the draft before direct input;16KiB recovery reserve stays inside64KiB.";return}
         if(scope.selection !in shellInputDrafts)shellInputDrafts[scope.selection]=ShellInputDraft()
@@ -2224,8 +2255,8 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             requireShellInputScope(scope)
             val currentSource=connection.state.value.inventory[scope.selection.host]?.subscription ?: throw StorePolicy(ErrorCode.NotReady)
             val original=connection.captureShellMutation(scope.selection.host,scope.selection.target,currentSource,lease,ShellMutationPurpose.Input,observation)
-            requireShellInputScope(scope)
-            if(terminalInputToken!==token||shellMutationLease!==lease||!inputConsentAllowed(scope))throw StorePolicy(ErrorCode.StaleSession)
+            val captured=requireShellInputScope(scope)
+            if(terminalInputToken!==token||shellMutationLease!==lease||captured.history!==history||!inputConsentAllowed(scope))throw StorePolicy(ErrorCode.StaleSession)
             var last:Receipt?=null
             fun retained()=terminalInputToken===token&&shellMutationLease===lease&&lease.active.get()&&runCatching {requireShellInputOwnerScope(scope)}.isSuccess
             fun ready()=retained()&&runCatching {requireShellInputScope(scope)}.isSuccess
@@ -2248,7 +2279,9 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
                         TerminalInputPause.Closed->notice}
                     if(reason!=TerminalInputPause.Closed&&shell?.let {it.selection==scope.selection&&it.source==scope.source&&it.ticket==scope.ticket}==true)releaseShellControl(scope)
                 }})
-            if(terminalInputToken!==token){owner.retire();return@launch}
+            val current=runCatching {requireShellInputScope(scope)}.getOrNull()
+            if(terminalInputToken!==token||shellMutationLease!==lease||current?.history!==history||!inputConsentAllowed(scope)){owner.retire();return@launch}
+            owner.blockForHistory(history.mode!=ShellHistoryMode.Live)
             terminalInputScope=scope;terminalInputOwner=owner
         }catch(cancel:CancellationException){throw cancel}catch(_:Exception){if(terminalInputToken===token){
             terminalInputToken=null;terminalInputOwner=null;terminalInputScope=null;terminalInputPause=TerminalInputPause.SourceLost;clearShellModifiers(scope)

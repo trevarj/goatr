@@ -42,6 +42,7 @@ pub(super) fn decode_request_body(method: Method, params: &Value) -> ValidationR
         Method::ShellGridSubscribe => Ok(RequestBody::ShellGridSubscribe(typed(params, true)?)),
         Method::ShellInput => Ok(RequestBody::ShellInput(typed(params, true)?)),
         Method::ShellResize=>Ok(RequestBody::ShellResize(typed(params,true)?)),
+        Method::ShellScroll=>Ok(RequestBody::ShellScroll(typed(params,true)?)),
         Method::SkillsList => Ok(RequestBody::SkillsList(typed(params, true)?)),
         Method::SkillsPreviewOpen=>Ok(RequestBody::SkillsPreviewOpen(typed(params,true)?)),
         Method::SkillsPreviewRead=>Ok(RequestBody::SkillsPreviewRead(typed(params,true)?)),
@@ -106,6 +107,7 @@ pub(super) fn decode_result_body(method: Method, result: &Value) -> ValidationRe
         Method::ShellGridSubscribe => Ok(ResultBody::ShellGridSubscribe(typed(result, false)?)),
         Method::ShellInput => Ok(ResultBody::ShellInput(typed(result, false)?)),
         Method::ShellResize=>Ok(ResultBody::ShellResize(typed(result,false)?)),
+        Method::ShellScroll=>Ok(ResultBody::ShellScroll(typed(result,false)?)),
         Method::SkillsList => Ok(ResultBody::SkillsList(typed(result, false)?)),
         Method::SkillsPreviewOpen=>Ok(ResultBody::SkillsPreviewOpen(typed(result,false)?)),
         Method::SkillsPreviewRead=>Ok(ResultBody::SkillsPreviewRead(typed(result,false)?)),
@@ -398,10 +400,10 @@ pub(super) fn validate_history_upsert_event(x: &HistoryUpsertEvent) -> Validatio
 }
 pub(super) fn validate_receipt(x: &Receipt) -> Validation {
     ensure(x.created_at <= x.updated_at)?;
-    ensure(matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput|ActionMethod::ShellResize)==x.shell_target.is_some())?;
-    if matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput|ActionMethod::ShellResize) {
+    ensure(matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput|ActionMethod::ShellResize|ActionMethod::ShellScroll)==x.shell_target.is_some())?;
+    if matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput|ActionMethod::ShellResize|ActionMethod::ShellScroll) {
         ensure(x.target.is_none() && x.creation.is_none())?;
-        if x.state==ReceiptState::Succeeded {ensure(match &x.result {Some(ActionResult::ShellCreation(result)) if x.method==ActionMethod::ShellCreate=>result.resources.complete(),Some(ActionResult::ShellInput(result)) if x.method==ActionMethod::ShellInput=>result.progress.accepted(),Some(ActionResult::ShellResize(_)) if x.method==ActionMethod::ShellResize=>true,_=>false})?;}
+        if x.state==ReceiptState::Succeeded {ensure(match &x.result {Some(ActionResult::ShellCreation(result)) if x.method==ActionMethod::ShellCreate=>result.resources.complete(),Some(ActionResult::ShellInput(result)) if x.method==ActionMethod::ShellInput=>result.progress.accepted(),Some(ActionResult::ShellResize(_)) if x.method==ActionMethod::ShellResize=>true,Some(ActionResult::ShellScroll(_)) if x.method==ActionMethod::ShellScroll=>true,_=>false})?;}
     }
     if matches!(x.method,ActionMethod::AttachmentsBegin|ActionMethod::AttachmentsChunk|ActionMethod::AttachmentsComplete|ActionMethod::AttachmentsDiscard) {ensure(x.target.is_some() && x.creation.is_none())?;if let Some(ActionResult::Attachment(result))=&x.result{ensure(x.target.as_ref()==Some(&result.target))?;}
     if x.state==ReceiptState::Succeeded {ensure(matches!(&x.result,Some(ActionResult::Attachment(_))))?;}}
@@ -432,6 +434,7 @@ pub(super) fn validate_receipt(x: &Receipt) -> Validation {
                 | (ActionMethod::ShellInput, ActionResult::ShellInput(_))
                 | (ActionMethod::ShellInput,ActionResult::ShellDispatch(_))
                 | (ActionMethod::ShellResize,ActionResult::ShellResize(_))
+                | (ActionMethod::ShellScroll,ActionResult::ShellScroll(_))
                 | (ActionMethod::WorktreesRemove,ActionResult::WorktreeRemoval(_))
                 | (ActionMethod::AttachmentsBegin,ActionResult::Attachment(_))
                 | (ActionMethod::AttachmentsChunk,ActionResult::Attachment(_))
@@ -448,6 +451,7 @@ pub(super) fn validate_receipt(x: &Receipt) -> Validation {
                 | (ActionMethod::TurnCancel, ActionResult::Cancel(_))
                 | (ActionMethod::RequestRespond, ActionResult::Response(_))
         ))?;
+        if matches!(result,ActionResult::ShellScroll(_)){ensure(x.state==ReceiptState::Succeeded)?;}
         if let ActionResult::ShellDispatch(result)=result {
             ensure(x.state!=ReceiptState::Succeeded)?;
             if x.state==ReceiptState::Dispatched {ensure(result.progress.complete())?;}

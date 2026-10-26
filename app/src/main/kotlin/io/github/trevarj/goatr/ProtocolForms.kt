@@ -41,6 +41,7 @@ internal fun decodeRequestBody(method: Method, params: JsonElement): RequestBody
     Method.ShellGridSubscribe -> RequestBody.ShellGridSubscribe(Protocol.typed(params, true))
     Method.ShellInput -> RequestBody.ShellInput(Protocol.typed(params, true))
     Method.ShellResize->RequestBody.ShellResize(Protocol.typed(params,true))
+    Method.ShellScroll->RequestBody.ShellScroll(Protocol.typed(params,true))
     Method.SkillsList -> RequestBody.SkillsList(Protocol.typed(params, true))
     Method.SkillsPreviewOpen->RequestBody.SkillsPreviewOpen(Protocol.typed(params,true))
     Method.SkillsPreviewRead->RequestBody.SkillsPreviewRead(Protocol.typed(params,true))
@@ -92,6 +93,7 @@ internal fun decodeResultBody(method: Method, result: JsonElement): ResultBody =
     Method.ShellGridSubscribe -> ResultBody.ShellGridSubscribe(Protocol.typed(result, false))
     Method.ShellInput -> ResultBody.ShellInput(Protocol.typed(result, false))
     Method.ShellResize->ResultBody.ShellResize(Protocol.typed(result,false))
+    Method.ShellScroll->ResultBody.ShellScroll(Protocol.typed(result,false))
     Method.SkillsList -> { requireWire(result.toString().toByteArray(Charsets.UTF_8).size<=256*1024); ResultBody.SkillsList(Protocol.typed(result, false)) }
     Method.SkillsPreviewOpen->ResultBody.SkillsPreviewOpen(Protocol.typed(result,false))
     Method.SkillsPreviewRead->ResultBody.SkillsPreviewRead(Protocol.typed(result,false))
@@ -184,9 +186,13 @@ internal fun requestJson(body: RequestBody): JsonObject {
             put("target",Protocol.strictJson.encodeToJsonElement(body.params.target))
             if(body.params.ansiObserver)put("ansiObserver",JsonPrimitive(true))
         }}
-        is RequestBody.ShellGridSubscribe -> {body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.ShellGridSubscribe -> {body.params.validate();buildJsonObject {
+            put("target",Protocol.strictJson.encodeToJsonElement(body.params.target))
+            if(body.params.history)put("history",JsonPrimitive(true))
+        }}
     is RequestBody.ShellInput -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
     is RequestBody.ShellResize->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+    is RequestBody.ShellScroll->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
     is RequestBody.SkillsList -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
     is RequestBody.SkillsPreviewOpen->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
     is RequestBody.SkillsPreviewRead->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
@@ -284,10 +290,11 @@ internal fun validateNotificationsSyncResult(x: NotificationsSyncResult) { requi
 internal fun validateHistoryUpsertEvent(x: HistoryUpsertEvent) { requireWire(x.records.isNotEmpty() && x.records.size <= 100) }
 internal fun validateReceipt(x: Receipt) {
     requireWire(x.createdAt.value <= x.updatedAt.value)
-    requireWire((x.method in listOf(ActionMethod.ShellCreate,ActionMethod.ShellInput,ActionMethod.ShellResize))==(x.shellTarget!=null))
+    requireWire((x.method in listOf(ActionMethod.ShellCreate,ActionMethod.ShellInput,ActionMethod.ShellResize,ActionMethod.ShellScroll))==(x.shellTarget!=null))
     if(x.method==ActionMethod.ShellCreate){requireWire(x.target==null && x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultShellCreation && x.result.resources.complete())}
     if(x.method==ActionMethod.ShellInput){requireWire(x.target==null && x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultShellInput && x.result.progress.accepted())}
     if(x.method==ActionMethod.ShellResize){requireWire(x.target==null && x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultShellResize)}
+    if(x.method==ActionMethod.ShellScroll){requireWire(x.target==null && x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultShellScroll)}
     if(x.method in setOf(ActionMethod.AttachmentsBegin,ActionMethod.AttachmentsChunk,ActionMethod.AttachmentsComplete,ActionMethod.AttachmentsDiscard)){requireWire(x.target!=null&&x.creation==null);if(x.result is ActionResultAttachment)requireWire(x.result.target==x.target);if(x.state==ReceiptState.Succeeded)requireWire(x.result is ActionResultAttachment)}
     // Provider-target historical terminal.create receipts remain readable.
     if(x.method==ActionMethod.TerminalCreate){requireWire(x.shellTarget==null&&x.creation==null);if(x.state==ReceiptState.Succeeded)requireWire((x.result as? ActionResultShellCreation)?.resources?.complete()==true)}
@@ -307,6 +314,7 @@ internal fun validateReceipt(x: Receipt) {
         ActionMethod.ShellCreate->result is ActionResultShellCreation
         ActionMethod.ShellInput->result is ActionResultShellInput||result is ActionResultShellDispatch
         ActionMethod.ShellResize->result is ActionResultShellResize
+        ActionMethod.ShellScroll->result is ActionResultShellScroll && x.state==ReceiptState.Succeeded
         ActionMethod.WorktreesRemove->result is ActionResultWorktreeRemoval
         ActionMethod.AgentRename->result is ActionResultAgentRenamed
         ActionMethod.WorkspaceRename->result is ActionResultWorkspaceRenamed
@@ -488,6 +496,7 @@ internal fun resultJson(body: ResultBody): JsonElement = when(body) {
     is ResultBody.ShellGridSubscribe -> {body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.ShellInput -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.ShellResize->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
+    is ResultBody.ShellScroll->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.SkillsList -> { body.result.validate(); Protocol.strictJson.encodeToJsonElement(body.result) }
     is ResultBody.SkillsPreviewOpen->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}
     is ResultBody.SkillsPreviewRead->{body.result.validate();Protocol.strictJson.encodeToJsonElement(body.result)}

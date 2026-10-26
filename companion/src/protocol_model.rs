@@ -494,6 +494,8 @@ pub enum ActionMethod {
     ShellInput,
     #[serde(rename="shell.resize")]
     ShellResize,
+    #[serde(rename="shell.scroll")]
+    ShellScroll,
     #[serde(rename="worktrees.remove")]
     WorktreesRemove,
     #[serde(rename = "agent.rename")]
@@ -675,6 +677,8 @@ pub enum Method {
     ShellInput,
     #[serde(rename="shell.resize")]
     ShellResize,
+    #[serde(rename="shell.scroll")]
+    ShellScroll,
     #[serde(rename = "agent.rename")]
     AgentRename,
     #[serde(rename = "workspace.rename")]
@@ -2233,6 +2237,8 @@ impl WireValidate for HelloParams {
 pub struct HelloFeatures {
     #[serde(default)]
     pub agent_ansi: bool,
+    #[serde(default)]
+    pub shell_history: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2868,6 +2874,8 @@ pub struct GridBegin {
     #[serde(default)]
     pub popup_blocked: bool,
     pub part_count: Uint,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
+    pub scroll:Option<GridScroll>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2886,9 +2894,17 @@ impl WireValidate for GridBegin {
         if let Some(c) = &self.cursor {
             ensure(c.column.0 < self.columns.0 && c.row.0 < self.rows.0 && c.shape.0 <= 6)?;
         }
+        if let Some(scroll)=&self.scroll {scroll.validate()?;}
         Ok(())
     }
 }
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct GridScroll {pub offset_from_bottom:Uint,pub max_offset_from_bottom:Uint,pub viewport_rows:Uint}
+impl WireValidate for GridScroll {fn validate(&self)->Validation {
+    self.offset_from_bottom.validate()?;self.max_offset_from_bottom.validate()?;self.viewport_rows.validate()?;
+    ensure(self.offset_from_bottom.0<=self.max_offset_from_bottom.0&&(1..=256).contains(&self.viewport_rows.0))
+}}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GridSpan {
@@ -3595,6 +3611,8 @@ pub enum ActionResult {
     ShellDispatch(ActionResultShellDispatch),
     #[serde(rename="shell_resize")]
     ShellResize(ActionResultShellResize),
+    #[serde(rename="shell_scroll")]
+    ShellScroll(GridScroll),
     #[serde(rename = "agent_renamed")]
     AgentRenamed(ActionResultAgentRenamed),
     #[serde(rename = "workspace_renamed")]
@@ -3617,6 +3635,7 @@ impl WireValidate for ActionResult {
             Self::ShellInput(x) => x.validate(),
             Self::ShellDispatch(x)=>x.validate(),
             Self::ShellResize(x)=>x.validate(),
+            Self::ShellScroll(x)=>x.validate(),
             Self::WorktreeRemoval(x)=>x.validate(),
             Self::AgentRenamed(x) => x.validate(),
             Self::WorkspaceRenamed(x) => x.validate(),
@@ -3689,6 +3708,8 @@ pub enum RequestBody {
     ShellInput(ShellInputParams),
     #[serde(rename="shell.resize")]
     ShellResize(ShellResizeParams),
+    #[serde(rename="shell.scroll")]
+    ShellScroll(ShellScrollParams),
     #[serde(rename = "agent.rename")]
     AgentRename(AgentRenameParams),
     #[serde(rename = "workspace.rename")]
@@ -3759,6 +3780,7 @@ impl RequestBody {
             Self::SessionCreate(_) => Method::SessionCreate,
             Self::ShellInput(_) => Method::ShellInput,
             Self::ShellResize(_)=>Method::ShellResize,
+            Self::ShellScroll(_)=>Method::ShellScroll,
             Self::ShellGridSubscribe(_) => Method::ShellGridSubscribe,
             Self::AgentRename(_) => Method::AgentRename,
             Self::WorkspaceRename(_) => Method::WorkspaceRename,
@@ -3813,6 +3835,7 @@ impl WireValidate for RequestBody {
             Self::SessionCreate(x) => x.validate(),
             Self::ShellInput(x) => x.validate(),
             Self::ShellResize(x)=>x.validate(),
+            Self::ShellScroll(x)=>x.validate(),
             Self::ShellGridSubscribe(x) => x.validate(),
             Self::AgentRename(x) => x.validate(),
             Self::WorkspaceRename(x) => x.validate(),
@@ -3865,6 +3888,7 @@ pub enum ResultBody {
     SessionCreate(SessionCreateResult),
     ShellInput(ShellInputResult),
     ShellResize(ShellResizeResult),
+    ShellScroll(ShellScrollResult),
     ShellGridSubscribe(ShellGridSubscribeResult),
     AgentRename(AgentRenameResult),
     WorkspaceRename(WorkspaceRenameResult),
@@ -4090,7 +4114,7 @@ impl WireValidate for ShellSummary {fn validate(&self)->Validation {
 }}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
-pub struct ShellGridSubscribeParams {pub target:ShellTarget}
+pub struct ShellGridSubscribeParams {pub target:ShellTarget,#[serde(default)]pub history:bool}
 impl WireValidate for ShellGridSubscribeParams {fn validate(&self)->Validation {self.target.validate()}}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -4118,6 +4142,16 @@ impl WireValidate for ShellResizeResult {fn validate(&self)->Validation{self.rec
 #[serde(rename_all="camelCase")]
 pub struct ActionResultShellResize {pub columns:Uint,pub rows:Uint}
 impl WireValidate for ActionResultShellResize {fn validate(&self)->Validation{shell_dimensions(&self.columns,&self.rows)}}
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct ShellScrollParams {pub boot_id:Uuid,pub target:ShellTarget,pub subscription:Uuid,pub offset_from_bottom:Uint}
+impl WireValidate for ShellScrollParams {fn validate(&self)->Validation {
+    self.boot_id.validate()?;self.target.validate()?;self.subscription.validate()?;self.offset_from_bottom.validate()
+}}
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct ShellScrollResult {pub receipt:Receipt}
+impl WireValidate for ShellScrollResult {fn validate(&self)->Validation {self.receipt.validate()?;ensure(self.receipt.method==ActionMethod::ShellScroll)}}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct ShellCreationResources {

@@ -28,7 +28,7 @@ import androidx.compose.ui.semantics.*
 class TerminalGrid(val begin:GridBegin,val cells:List<GridCell>,val hasBlinkingCells:Boolean) {
     override fun toString()="TerminalGrid(redacted)"
 }
-internal class TerminalGridReducer(private val ansiObserver:Boolean=false) {
+internal class TerminalGridReducer(private val ansiObserver:Boolean=false,private val history:Boolean=false) {
     var committed:TerminalGrid?=null
         private set
     private var stage:ArrayList<GridCell>?=null
@@ -46,6 +46,7 @@ internal class TerminalGridReducer(private val ansiObserver:Boolean=false) {
     fun open(frame:GridBegin,bytes:Int){requireWire(frame.revision.value==0L);sequence=0;revision=0;start(frame,bytes)}
     private fun start(frame:GridBegin,bytes:Int){
         frame.validate();requireWire(stage==null && frame.revision.value==revision)
+        requireWire(frame.scroll==null || history&&!ansiObserver&&!frame.alternateScreen&&!frame.popupBlocked)
         if(ansiObserver)requireWire(frame.columns.value*frame.rows.value<=8192 && frame.graphicsOmitted && !frame.alternateScreen && !frame.popupBlocked)
         blinking=false
         // ponytail: negotiated Agent has <=8192 cells/260 bytes; Shell retains <=32768/128.
@@ -126,6 +127,45 @@ internal fun publishShellGrid(state:MutableState<ShellSnapshot?>,selection:Shell
     if(frame!=null && (!lease.active() || !admitted || !shown.controlBegun || shown.error))return
     val failed=shown.error || frame==null && shown.controlBegun && !lease.active()
     state.value=shown.copy(grid=frame,loading=frame==null && shown.controlBegun && lease.active() && !failed,error=failed)
+    shown.history.committed(frame,lease)
+}
+enum class ShellHistoryMode {Live,Browsing,Pending,Uncertain}
+/** Current committed display plus one explicit absolute intent, scoped by its viewer owner. */
+class ShellHistoryState {
+    var mode by mutableStateOf(ShellHistoryMode.Live);private set
+    var metrics by mutableStateOf<GridScroll?>(null);private set
+    var action by mutableStateOf<Uuid?>(null);private set
+    private var requested=0L
+    private var prior=ShellHistoryMode.Live
+    private var bottomAck=false
+    private var settled=false
+    private var owner:TerminalGridLease?=null
+    internal fun active()=owner?.active()==true
+    internal fun committed(frame:TerminalGrid?,lease:TerminalGridLease) {
+        if(owner==null)owner=lease
+        if(owner!==lease)return
+        if(!lease.active()){metrics=null;return}
+        metrics=frame?.begin?.takeUnless {it.alternateScreen||it.popupBlocked}?.scroll
+        if(metrics?.offsetFromBottom?.value?.let {it>0}==true&&mode==ShellHistoryMode.Live){mode=ShellHistoryMode.Browsing;bottomAck=false}
+        resume()
+    }
+    fun begin(id:Uuid,offset:Long) {
+        requireWire(active()&&mode!=ShellHistoryMode.Pending&&metrics!=null)
+        prior=if(mode==ShellHistoryMode.Live&&metrics?.offsetFromBottom?.value==0L)ShellHistoryMode.Live else if(mode==ShellHistoryMode.Uncertain)ShellHistoryMode.Uncertain else ShellHistoryMode.Browsing
+        action=id;requested=offset;mode=ShellHistoryMode.Pending;bottomAck=false;settled=false
+    }
+    fun receipt(receipt:Receipt) {
+        if(receipt.actionId!=action||receipt.method!=ActionMethod.ShellScroll||settled)return
+        when(receipt.state) {
+            ReceiptState.Succeeded->{val actual=receipt.result as? ActionResultShellScroll ?: return;settled=true;mode=ShellHistoryMode.Browsing;bottomAck=requested==0L&&actual.offsetFromBottom.value==0L;resume()}
+            ReceiptState.Failed->{settled=true;refused()}
+            ReceiptState.Uncertain->{mode=ShellHistoryMode.Uncertain;bottomAck=false}
+            ReceiptState.Reserved,ReceiptState.Dispatching,ReceiptState.Dispatched->Unit
+        }
+    }
+    fun uncertain(){mode=ShellHistoryMode.Uncertain;bottomAck=false}
+    fun refused(){mode=if(prior==ShellHistoryMode.Live&&(!active()||metrics?.offsetFromBottom?.value!=0L))ShellHistoryMode.Browsing else prior;bottomAck=false}
+    private fun resume(){if(active()&&bottomAck&&metrics?.offsetFromBottom?.value==0L){mode=ShellHistoryMode.Live;bottomAck=false}}
 }
 /** Shared by the real renderer and its geometry regression; no per-draw range/list allocation. */
 internal class TerminalGridViewport(val columns:Int,val rows:Int,val panX:Float,val panY:Float,

@@ -964,7 +964,7 @@ async fn connection_loop(
             boot_id: security.boot.clone(),
             protocol: ProtocolVersion(2),
             backends,
-            features: HelloFeatures { agent_ansi: topology.is_some() },
+            features: HelloFeatures { agent_ansi: topology.is_some(), shell_history:topology.is_some() },
         });
         if let Some(capture) = &hello_capture {
             capture.report("response_write", "entered", None, "none");
@@ -1680,6 +1680,31 @@ async fn dispatch(
             };
             ResultBody::ShellResize(ShellResizeResult{receipt})
         }
+        RequestBody::ShellScroll(params)=>{
+            let request=Request{id:r.id.clone(),body:RequestBody::ShellScroll(params.clone())};
+            let validator=topology.clone();let state=security.state.clone();let connection=auth.connection_id.clone();
+            drop(guard);
+            let reservation=security.reserve(auth,request,move|request|{
+                let RequestBody::ShellScroll(params)=&request.body else{return Err(ErrorCode::InvalidRequest);};
+                validator.as_ref().ok_or(ErrorCode::NotReady)?.validate_shell_scroll(&state,&connection,params).map(|_|())
+            },|_|{}).await?;
+            let receipt=match reservation {
+                Reservation::Existing(receipt)=>receipt,
+                Reservation::Reserved(_)=>{
+                    let outcome=match topology {Some(topology)=>topology.shell_scroll_once(security,auth,&r.id,&params,deadline).await,None=>Err(ErrorCode::NotReady)};
+                    let proof=auth.proof.clone();let action=r.id.clone();
+                    let mut receipt=security.storage.call(move|store|store.status(&proof,&action,now_ms())).await.map_err(store_error)?.ok_or(ErrorCode::NotReady)?;
+                    if receipt.state==ReceiptState::Reserved {
+                        let proof=auth.proof.clone();let action=r.id.clone();let code=outcome.err().unwrap_or(ErrorCode::NotReady);
+                        receipt=security.storage.call(move|store|store.transition(&proof,&action,crate::storage::ReceiptTransition {
+                            state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("scroll boundary not entered".into())),result:None,error:Some(wire_error(code)),at:now_ms(),
+                        })).await.map_err(store_error)?;
+                    }
+                    receipt
+                }
+            };
+            ResultBody::ShellScroll(ShellScrollResult{receipt})
+        }
         RequestBody::WorktreesList(v) => {
             let topology=topology.ok_or(ErrorCode::NotReady)?;
             let provider=target_provider(&security.state,&v.target)?;
@@ -2001,7 +2026,7 @@ mod tests {
             let reading=async {let mut frames=Vec::new();for _ in 0..3{frames.push(decode_payload(&read_frame(recv,FRAME_MAX).await.unwrap(),Some(Method::ShellGridSubscribe)).unwrap());}done.store(true,Ordering::Release);frames};
             let ((),frames)=tokio::time::timeout(Duration::from_secs(15),async{tokio::join!(writing,reading)}).await.unwrap();frames
         }
-        for lose_second in [false,true] {
+        for (history,lose_second) in [(false,false),(false,true),(true,false),(true,true)] {
             let mut wire=WriterFixture::new().await;
             let fixture=crate::herdr::grid::queue_fixture(wire.security.state.clone(),Uuid::random()).await;
             let topology=fixture.topology();
@@ -2042,13 +2067,14 @@ mod tests {
                     socket.write_all(&native::response(id,result)).await.unwrap();
                     if surface_revision==0 {
                         surface_revision=1;socket.write_all(&native::native_control("shell.snapshot.v1",native::view(2))).await.unwrap();
-                        socket.write_all(&native::packet(&native::surface(1,1,2,&[("x",0,0,0,false)],Rect{x:0,y:0,width:1,height:1},false))).await.unwrap();
+                        socket.write_all(&native::packet(&native::surface_with_scroll(1,1,2,&[("x",0,0,0,false)],Rect{x:0,y:0,width:1,height:1},false,Some([0,20,1]),None,false))).await.unwrap();
                     }
                 }
             });
-            topology.grid_open(wire.security.clone(),wire.auth.clone(),Uuid::random(),RequestBody::ShellGridSubscribe(ShellGridSubscribeParams{target:description.target.clone()}),Instant::now()+Duration::from_secs(15)).await.unwrap();
+            topology.grid_open(wire.security.clone(),wire.auth.clone(),Uuid::random(),RequestBody::ShellGridSubscribe(ShellGridSubscribeParams { target: description.target.clone(), history }),Instant::now()+Duration::from_secs(15)).await.unwrap();
             let frames=drain(&mut wire).await;
             let Envelope::Response(Response{outcome:Ok(ResultBody::ShellGridSubscribe(opened)),..})=&frames[0] else{panic!("actual owned opening descriptor");};
+            assert_eq!(opened.frame.scroll.as_ref().map(|metrics|metrics.offset_from_bottom.0),history.then_some(0));
             let subscription=opened.subscription.clone();
             let request=Request{id:Uuid::random(),body:RequestBody::ShellResize(ShellResizeParams{boot_id:wire.security.boot.clone(),target:description.target.clone(),subscription:subscription.clone(),columns:Uint(2),rows:Uint(1)})};
             let mut views=Viewing::default();

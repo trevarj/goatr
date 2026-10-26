@@ -3173,6 +3173,12 @@ impl State {
         if epoch!=source {return Err(ErrorCode::StaleSession)}
         if shell.connectivity!=SessionConnectivity::Ready||!shell.capabilities.read||access==crate::herdr::shells::ShellAccess::Input&&!shell.capabilities.input {return Err(ErrorCode::NotReady)}Ok(())
     }
+    pub(crate) fn validate_shell_history(&self,target:&ShellTarget,source:&Uuid)->StateResult<()> {
+        let inner=self.inner.lock().expect("state mutex");
+        let (shell,epoch)=inner.shells.get(&target.shell_id).filter(|(shell,_)|shell.target==*target).ok_or(ErrorCode::StaleSession)?;
+        if epoch!=source{return Err(ErrorCode::StaleSession);}
+        if shell.connectivity!=SessionConnectivity::Ready||!shell.capabilities.read||!shell.capabilities.grid||!shell.capabilities.input{return Err(ErrorCode::NotReady);}Ok(())
+    }
 }
 
 

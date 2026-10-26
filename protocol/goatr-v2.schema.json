@@ -713,6 +713,7 @@
           "additionalProperties": false
         },
         {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"shell.resize"},"params":{"$ref":"#/$defs/ShellResizeParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
+        {"type":"object","properties":{"v":{"const":2},"type":{"const":"request"},"id":{"$ref":"#/$defs/Uuid"},"method":{"const":"shell.scroll"},"params":{"$ref":"#/$defs/ShellScrollParams"}},"required":["v","type","id","method","params"],"additionalProperties":false},
         {
           "type": "object",
           "properties": {
@@ -1231,6 +1232,7 @@
                   "$ref": "#/$defs/ResponseShellInputResult"
                 },
                 {"$ref":"#/$defs/ResponseShellResizeResult"},
+                {"$ref":"#/$defs/ResponseShellScrollResult"},
                 {
                   "$ref": "#/$defs/ResponseAttachmentsResult"
                 },
@@ -1644,13 +1646,13 @@
     "GridCursor":{"type":"object","properties":{"column":{"$ref":"#/$defs/Uint"},"row":{"$ref":"#/$defs/Uint"},"visible":{"type":"boolean"},"shape":{"type":"integer","minimum":0,"maximum":6}},"required":["column","row","visible","shape"],"additionalProperties":false},
     "GridAttributes":{"type":"object","properties":{"bold":{"type":"boolean"},"faint":{"type":"boolean"},"italic":{"type":"boolean"},"blink":{"type":"boolean"},"strike":{"type":"boolean"},"inverse":{"type":"boolean","default":false},"concealed":{"type":"boolean","default":false},"underline":{"enum":["none","single","double","curly","dotted","dashed"]},"underlineColor":{"$ref":"#/$defs/GridColor"}},"required":["bold","faint","italic","blink","strike","underline"],"additionalProperties":false},
     "GridCell":{"type":"object","properties":{"text":{"type":"string","x-maxUtf8Bytes":260,"x-noControlCharacters":true,"x-noUnicodeSeparators":true},"width":{"type":"integer","minimum":0,"maximum":2},"foreground":{"$ref":"#/$defs/GridColor"},"background":{"$ref":"#/$defs/GridColor"},"attributes":{"$ref":"#/$defs/GridAttributes"}},"required":["text","width","foreground","background","attributes"],"additionalProperties":false,"x-contextValidation":"260 UTF-8 bytes only on an explicitly negotiated Agent ANSI projection; ordinary Shell ingress and reduction retain 128","x-widthContract":"zero requires empty text and previous width-two cell in the same row; one/two require nonempty text; two requires following zero, including across parts"},
-    "GridBegin":{"type":"object","properties":{"mode":{"const":"replace"},"revision":{"$ref":"#/$defs/Uint"},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256},"cursor":{"$ref":"#/$defs/GridCursor"},"alternateScreen":{"type":"boolean"},"graphicsOmitted":{"type":"boolean"},"popupBlocked":{"type":"boolean","default":false},"partCount":{"type":"integer","minimum":1,"maximum":128}},"required":["mode","revision","columns","rows","alternateScreen","graphicsOmitted","partCount"],"additionalProperties":false,"x-contextValidation":"columns*rows<=32768; cursor inside frame"},
+    "GridBegin":{"type":"object","properties":{"mode":{"const":"replace"},"revision":{"$ref":"#/$defs/Uint"},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256},"cursor":{"$ref":"#/$defs/GridCursor"},"alternateScreen":{"type":"boolean"},"graphicsOmitted":{"type":"boolean"},"popupBlocked":{"type":"boolean","default":false},"partCount":{"type":"integer","minimum":1,"maximum":128},"scroll":{"$ref":"#/$defs/GridScroll"}},"required":["mode","revision","columns","rows","alternateScreen","graphicsOmitted","partCount"],"additionalProperties":false,"x-contextValidation":"columns*rows<=32768; cursor inside frame; scroll only on explicitly history-qualified current Input-authorized Shell lease, never Agent/old peer/alternate screen/popup; selected metrics and cells commit atomically"},
     "GridSpan":{"type":"object","properties":{"row":{"type":"integer","minimum":0,"maximum":255},"column":{"type":"integer","minimum":0,"maximum":511},"cells":{"type":"array","items":{"$ref":"#/$defs/GridCell"},"minItems":1,"maxItems":512}},"required":["row","column","cells"],"additionalProperties":false},
     "GridPart":{"type":"object","properties":{"revision":{"$ref":"#/$defs/Uint"},"index":{"type":"integer","minimum":0,"maximum":127},"spans":{"type":"array","items":{"$ref":"#/$defs/GridSpan"},"minItems":1,"maxItems":512}},"required":["revision","index","spans"],"additionalProperties":false,"x-contextValidation":"<=512 cells; exact row-major frame coverage across parts, no overlaps/gaps/row-crossing spans"},
     "GridCommit":{"type":"object","properties":{"revision":{"$ref":"#/$defs/Uint"}},"required":["revision"],"additionalProperties":false},
     "ResponseGridColor":{"oneOf":[{"type":"object","properties":{"kind":{"const":"default"}},"required":["kind"],"additionalProperties":true},{"type":"object","properties":{"kind":{"const":"indexed"},"index":{"type":"integer","minimum":0,"maximum":255}},"required":["kind","index"],"additionalProperties":true},{"type":"object","properties":{"kind":{"const":"rgb"},"value":{"type":"integer","minimum":0,"maximum":16777215}},"required":["kind","value"],"additionalProperties":true}]},
     "ResponseGridCursor":{"type":"object","properties":{"column":{"$ref":"#/$defs/ResponseUint"},"row":{"$ref":"#/$defs/ResponseUint"},"visible":{"type":"boolean"},"shape":{"type":"integer","minimum":0,"maximum":6}},"required":["column","row","visible","shape"],"additionalProperties":true},
-    "ResponseGridBegin":{"type":"object","properties":{"mode":{"const":"replace"},"revision":{"const":0},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256},"cursor":{"$ref":"#/$defs/ResponseGridCursor"},"alternateScreen":{"type":"boolean"},"graphicsOmitted":{"type":"boolean"},"partCount":{"type":"integer","minimum":1,"maximum":128}},"required":["mode","revision","columns","rows","alternateScreen","graphicsOmitted","partCount"],"additionalProperties":true,"x-contextValidation":"columns*rows<=32768; cursor inside frame"},
+    "ResponseGridBegin":{"type":"object","properties":{"mode":{"const":"replace"},"revision":{"const":0},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256},"cursor":{"$ref":"#/$defs/ResponseGridCursor"},"alternateScreen":{"type":"boolean"},"graphicsOmitted":{"type":"boolean"},"partCount":{"type":"integer","minimum":1,"maximum":128},"scroll":{"$ref":"#/$defs/ResponseGridScroll"}},"required":["mode","revision","columns","rows","alternateScreen","graphicsOmitted","partCount"],"additionalProperties":true,"x-contextValidation":"columns*rows<=32768; cursor inside frame; scroll only on explicitly history-qualified current Input-authorized Shell lease, never Agent/old peer/alternate screen/popup"},
     "Text": {
       "type": "string",
       "x-maxUtf8Bytes": 1048576
@@ -2004,6 +2006,7 @@
         "shell.create",
         "shell.input",
         "shell.resize",
+        "shell.scroll",
         "agent.rename",
         "worktrees.remove",
         "attachments.begin",
@@ -2112,6 +2115,7 @@
         "shell.grid.subscribe",
         "shell.input",
         "shell.resize",
+        "shell.scroll",
         "agent.rename",
         "attachments.begin",
         "attachments.chunk",
@@ -2997,7 +3001,7 @@
               "method": {
                 "enum": [
                   "shell.create",
-                  "shell.input","shell.resize"
+                  "shell.input","shell.resize","shell.scroll"
                 ]
               }
             },
@@ -3125,6 +3129,9 @@
         {"if":{"properties":{"method":{"const":"shell.input"},"state":{"const":"dispatched"},"result":{"properties":{"kind":{"const":"shell_dispatch"}},"required":["kind"]}},"required":["method","state","result"]},"then":{"properties":{"result":{"properties":{"progress":{"required":["frameBytes","socketBytesWritten","frameComplete"],"properties":{"frameComplete":{"const":true}}}}}}}},
         {"if":{"properties":{"method":{"const":"shell.resize"}},"required":["method"]},"then":{"properties":{"result":{"$ref":"#/$defs/ActionResultShellResize"}}}},
         {"if":{"properties":{"method":{"const":"shell.resize"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"required":["result"]}},
+        {"if":{"properties":{"method":{"const":"shell.scroll"}},"required":["method"]},"then":{"properties":{"result":{"$ref":"#/$defs/ActionResultShellScroll"}}}},
+        {"if":{"properties":{"method":{"const":"shell.scroll"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"required":["result"]}},
+        {"if":{"properties":{"result":{"properties":{"kind":{"const":"shell_scroll"}},"required":["kind"]}},"required":["result"]},"then":{"properties":{"method":{"const":"shell.scroll"},"state":{"const":"succeeded"}}}},
         {
           "if": {
             "properties": {
@@ -4099,8 +4106,8 @@
       ],
       "additionalProperties": false
     },
-    "HelloFeatures":{"type":"object","properties":{"agentAnsi":{"type":"boolean","default":false}},"additionalProperties":false},
-    "ResponseHelloFeatures":{"type":"object","properties":{"agentAnsi":{"type":"boolean","default":false}},"additionalProperties":true},
+    "HelloFeatures":{"type":"object","properties":{"agentAnsi":{"type":"boolean","default":false},"shellHistory":{"type":"boolean","default":false}},"additionalProperties":false},
+    "ResponseHelloFeatures":{"type":"object","properties":{"agentAnsi":{"type":"boolean","default":false},"shellHistory":{"type":"boolean","default":false}},"additionalProperties":true},
     "HelloResult": {
       "type": "object",
       "properties": {
@@ -5527,6 +5534,7 @@
         },
         {"$ref":"#/$defs/ActionResultShellDispatch"},
         {"$ref":"#/$defs/ActionResultShellResize"},
+        {"$ref":"#/$defs/ActionResultShellScroll"},
         {
           "$ref": "#/$defs/ActionResultAgentRenamed"
         },
@@ -7046,6 +7054,7 @@
         "shell.create",
         "shell.input",
         "shell.resize",
+        "shell.scroll",
         "agent.rename",
         "worktrees.remove",
         "attachments.begin",
@@ -7244,6 +7253,7 @@
         },
         {"$ref":"#/$defs/ResponseActionResultShellDispatch"},
         {"$ref":"#/$defs/ResponseActionResultShellResize"},
+        {"$ref":"#/$defs/ResponseActionResultShellScroll"},
         {
           "$ref": "#/$defs/ResponseActionResultAgentRenamed"
         },
@@ -7413,7 +7423,7 @@
               "method": {
                 "enum": [
                   "shell.create",
-                  "shell.input","shell.resize"
+                  "shell.input","shell.resize","shell.scroll"
                 ]
               }
             },
@@ -7450,6 +7460,9 @@
         },
         {"if":{"properties":{"method":{"const":"shell.resize"}},"required":["method"]},"then":{"properties":{"result":{"$ref":"#/$defs/ResponseActionResultShellResize"}}}},
         {"if":{"properties":{"method":{"const":"shell.resize"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"required":["result"]}},
+        {"if":{"properties":{"method":{"const":"shell.scroll"}},"required":["method"]},"then":{"properties":{"result":{"$ref":"#/$defs/ResponseActionResultShellScroll"}}}},
+        {"if":{"properties":{"method":{"const":"shell.scroll"},"state":{"const":"succeeded"}},"required":["method","state"]},"then":{"required":["result"]}},
+        {"if":{"properties":{"result":{"properties":{"kind":{"const":"shell_scroll"}},"required":["kind"]}},"required":["result"]},"then":{"properties":{"method":{"const":"shell.scroll"},"state":{"const":"succeeded"}}}},
         {
           "if": {
             "properties": {
@@ -9908,6 +9921,7 @@
     "ShellGridSubscribeParams": {
       "type": "object",
       "properties": {
+        "history":{"type":"boolean","default":false},
         "target": {
           "$ref": "#/$defs/ShellTarget"
         }
@@ -10416,6 +10430,13 @@
     "ResponseShellResizeResult":{"type":"object","properties":{"receipt":{"$ref":"#/$defs/ResponseReceipt"}},"required":["receipt"],"additionalProperties":true},
     "ActionResultShellResize":{"type":"object","properties":{"kind":{"const":"shell_resize"},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256}},"required":["kind","columns","rows"],"additionalProperties":false,"x-contextValidation":"columns*rows<=32768; only coherent native dimensions confirm success"},
     "ResponseActionResultShellResize":{"type":"object","properties":{"kind":{"const":"shell_resize"},"columns":{"type":"integer","minimum":1,"maximum":512},"rows":{"type":"integer","minimum":1,"maximum":256}},"required":["kind","columns","rows"],"additionalProperties":true,"x-contextValidation":"columns*rows<=32768"},
+    "GridScroll":{"type":"object","properties":{"offsetFromBottom":{"$ref":"#/$defs/Uint"},"maxOffsetFromBottom":{"$ref":"#/$defs/Uint"},"viewportRows":{"type":"integer","minimum":1,"maximum":256}},"required":["offsetFromBottom","maxOffsetFromBottom","viewportRows"],"additionalProperties":false,"x-contextValidation":"offsetFromBottom<=maxOffsetFromBottom; current selected Shell pane only"},
+    "ResponseGridScroll":{"type":"object","properties":{"offsetFromBottom":{"$ref":"#/$defs/ResponseUint"},"maxOffsetFromBottom":{"$ref":"#/$defs/ResponseUint"},"viewportRows":{"type":"integer","minimum":1,"maximum":256}},"required":["offsetFromBottom","maxOffsetFromBottom","viewportRows"],"additionalProperties":true,"x-contextValidation":"offsetFromBottom<=maxOffsetFromBottom"},
+    "ShellScrollParams":{"type":"object","properties":{"bootId":{"$ref":"#/$defs/Uuid"},"target":{"$ref":"#/$defs/ShellTarget"},"subscription":{"$ref":"#/$defs/Uuid"},"offsetFromBottom":{"$ref":"#/$defs/Uint"}},"required":["bootId","target","subscription","offsetFromBottom"],"additionalProperties":false,"x-contextValidation":"current exact original history-qualified Input-authorized Shell lease/source/route; absolute shared native viewport intent, no replay or atomic native identity fence"},
+    "ShellScrollResult":{"type":"object","properties":{"receipt":{"allOf":[{"$ref":"#/$defs/Receipt"},{"properties":{"method":{"const":"shell.scroll"}}}]}},"required":["receipt"],"additionalProperties":false},
+    "ResponseShellScrollResult":{"type":"object","properties":{"receipt":{"allOf":[{"$ref":"#/$defs/ResponseReceipt"},{"properties":{"method":{"const":"shell.scroll"}}}]}},"required":["receipt"],"additionalProperties":true},
+    "ActionResultShellScroll":{"type":"object","properties":{"kind":{"const":"shell_scroll"},"offsetFromBottom":{"$ref":"#/$defs/Uint"},"maxOffsetFromBottom":{"$ref":"#/$defs/Uint"},"viewportRows":{"type":"integer","minimum":1,"maximum":256}},"required":["kind","offsetFromBottom","maxOffsetFromBottom","viewportRows"],"additionalProperties":false,"x-contextValidation":"offsetFromBottom<=maxOffsetFromBottom; actual correlated clamped metrics, Succeeded only"},
+    "ResponseActionResultShellScroll":{"type":"object","properties":{"kind":{"const":"shell_scroll"},"offsetFromBottom":{"$ref":"#/$defs/ResponseUint"},"maxOffsetFromBottom":{"$ref":"#/$defs/ResponseUint"},"viewportRows":{"type":"integer","minimum":1,"maximum":256}},"required":["kind","offsetFromBottom","maxOffsetFromBottom","viewportRows"],"additionalProperties":true,"x-contextValidation":"offsetFromBottom<=maxOffsetFromBottom; Succeeded only"},
     "ShellInputResult": {
       "type": "object",
       "properties": {
@@ -12445,7 +12466,8 @@
       "action": false,
       "contextValidation": "explicit ansiObserver true after Hello agentAnsi; original Ready provider binding/source/executable/process/incarnation/workspace/tab/pane/exact-terminal pin; display-only <=8192 cells; no command lane"
     },
-    "shell.grid.subscribe":{"params":"ShellGridSubscribeParams","result":"ShellGridSubscribeResult","bootRequired":false,"action":false,"contextValidation":"original ShellTarget/read grant and native grid availability; one viewer per connection"},
+    "shell.grid.subscribe":{"params":"ShellGridSubscribeParams","result":"ShellGridSubscribeResult","bootRequired":false,"action":false,"contextValidation":"original ShellTarget/read grant and native grid availability; one viewer per connection; history true only after current pinned Hello.shellHistory and Input permission; false is byte-omitted and preserves legacy input/resize with no scroll fields or history mode gate"},
+    "shell.scroll":{"params":"ShellScrollParams","result":"ShellScrollResult","bootRequired":true,"action":true,"contextValidation":"original Input-authorized history-qualified ShellTarget/source/generation/subscription; one source-pinned public pane.scroll request, correlated clamped metrics; shared non-atomic viewport; receipt/status-only duplicate recovery"},
     "worktrees.list": {
       "params": "WorktreesListParams",
       "result": "WorktreesListResult",

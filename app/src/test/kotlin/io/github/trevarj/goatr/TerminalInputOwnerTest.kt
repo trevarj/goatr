@@ -302,4 +302,77 @@ class TerminalInputOwnerTest {
         assertTrue(ShellDispatchProgress(19,19,true).retains(ShellDispatchProgress(19,7,false)))
         assertFalse(ShellDispatchProgress(19,6,false).retains(ShellDispatchProgress(19,7,false)))
     }
+    @Test fun historyBarrierIsReversibleRecoversOnlyUnsentTextAndDropsOfferedKeys()=runBlocking {
+        val writes=mutableListOf<ShellInput>();val recovered=mutableListOf<TerminalPendingText>();var completed=0;var stops=0
+        val owner=TerminalInputOwner(this,{true},{true},{},{0},{input,_->writes.add(input);receipt()},{_,_->completed++},{recovered.addAll(it)},{stops++})
+        try {
+            assertTrue(owner.offer(ShellInput.Text("known unsent"),19))
+            assertTrue(owner.offer(ShellInput.Keys(listOf(key(ShellKeyName.Character,id=71,value="x")))))
+            owner.blockForHistory(true);owner.historyBarrier()
+            assertEquals(listOf(TerminalPendingText("known unsent",19)),recovered);assertTrue(writes.isEmpty())
+            assertTrue(owner.retained());assertFalse(owner.accepting());assertFalse(owner.paused);assertEquals(0,stops)
+            assertFalse(owner.offer(ShellInput.Text("new text")));assertFalse(owner.offer(ShellInput.Keys(listOf(key(ShellKeyName.Left,ShellKeyPhase.Release,71)))))
+            owner.blockForHistory(false);assertTrue(owner.offer(ShellInput.Text("fresh gesture")))
+            withTimeout(1000){while(completed!=1)yield()}
+            assertEquals(listOf(ShellInput.Text("fresh gesture")),writes);assertEquals(0,stops)
+        }finally{owner.retire()}
+    }
+    @Test fun historyWaitsForInflightReceiptThenReleasesOnlyConfirmedPhysicalHoldsOnce()=runBlocking {
+        val pressEntered=CompletableDeferred<Unit>();val pressResult=CompletableDeferred<Receipt>();val releaseEntered=CompletableDeferred<Unit>();val releaseResult=CompletableDeferred<Receipt>()
+        val writes=mutableListOf<ShellInput>();val recovered=mutableListOf<TerminalPendingText>();var stops=0
+        val owner=TerminalInputOwner(this,{true},{true},{},{0},{input,_->
+            writes.add(input);val phase=(input as ShellInput.Keys).events.single().phase
+            if(phase==ShellKeyPhase.Press){pressEntered.complete(Unit);pressResult.await()}else{releaseEntered.complete(Unit);releaseResult.await()}
+        },{_,_->},{recovered.addAll(it)},{stops++})
+        try {
+            assertTrue(owner.offer(ShellInput.Keys(listOf(key(ShellKeyName.Left,id=42)))))
+            withTimeout(1000){pressEntered.await()}
+            assertTrue(owner.offer(ShellInput.Keys(listOf(key(ShellKeyName.Right,id=77)))))
+            assertTrue(owner.offer(ShellInput.Text("newer draft snapshot"),23))
+            owner.blockForHistory(true)
+            assertFalse(owner.accepting());assertTrue(owner.retained());assertEquals(1,writes.size);assertTrue(recovered.isEmpty())
+            pressResult.complete(receipt())
+            withTimeout(1000){releaseEntered.await()}
+            val release=(writes.last() as ShellInput.Keys).events.single()
+            assertEquals(ShellKeyPhase.Release,release.phase);assertEquals(42L,release.physicalKeyId!!.value);assertEquals(ShellKeyName.Left,release.key.key)
+            assertFalse(owner.offer(ShellInput.Keys(listOf(key(ShellKeyName.Left,ShellKeyPhase.Release,42)))))
+            assertFalse(owner.offer(ShellInput.Keys(listOf(key(ShellKeyName.Right,ShellKeyPhase.Release,77)))))
+            assertFalse(owner.offer(ShellInput.Keys(listOf(key(ShellKeyName.Left,ShellKeyPhase.Repeat,42)))))
+            assertEquals(listOf(TerminalPendingText("newer draft snapshot",23)),recovered)
+            releaseResult.complete(receipt());withTimeout(1000){owner.historyBarrier()}
+            assertEquals(2,writes.size);assertFalse(owner.hardwareOutstanding());assertFalse(owner.paused);assertEquals(0,stops)
+            assertFalse(owner.offer(ShellInput.Keys(listOf(key(ShellKeyName.Left,ShellKeyPhase.Release,42)))))
+            owner.blockForHistory(false);assertTrue(owner.accepting())
+        }finally{pressResult.complete(receipt(ReceiptState.Uncertain));releaseResult.complete(receipt(ReceiptState.Uncertain));owner.retire()}
+    }
+    @Test fun historyBarrierNeverReplaysInflightUncertaintyAndKeepsFailedTextBeforeLaterUnsentText()=runBlocking {
+        for(state in listOf(ReceiptState.Failed,ReceiptState.Uncertain)) {
+            val entered=CompletableDeferred<Unit>();val result=CompletableDeferred<Receipt>();val recovered=mutableListOf<TerminalPendingText>();var writes=0
+            val owner=TerminalInputOwner(this,{true},{true},{},{0},{_,_->writes++;entered.complete(Unit);result.await()},{_,_->},{recovered.addAll(it)},{})
+            try {
+                assertTrue(owner.offer(ShellInput.Text("possibly entered"),30));withTimeout(1000){entered.await()}
+                assertTrue(owner.offer(ShellInput.Text("definitely unsent"),31));owner.blockForHistory(true)
+                result.complete(receipt(state,if(state==ReceiptState.Failed)ShellDispatchProgress()else ShellDispatchProgress(19,7,false)))
+                withTimeout(1000){while(owner.pendingEvents!=0)yield()}
+                assertEquals(if(state==ReceiptState.Failed)listOf(TerminalPendingText("possibly entered",30),TerminalPendingText("definitely unsent",31))else listOf(TerminalPendingText("definitely unsent",31)),recovered)
+                owner.blockForHistory(false);assertFalse(owner.offer(ShellInput.Text("not an automatic retry")));assertEquals(1,writes)
+            }finally{result.complete(receipt(ReceiptState.Uncertain));owner.retire()}
+        }
+    }
+    @Test fun freshOwnerBlockedBeforeFirstExposureCannotOfferUntilExplicitUnblock()=runBlocking {
+        val written=mutableListOf<ShellInput>();var completed=0;var stops=0
+        val prepared=TerminalInputOwner(this,{true},{true},{},{0},{input,_->written.add(input);receipt()},{_,_->completed++},{fail("A fresh blocked owner has no unsent text")},{stops++})
+        prepared.blockForHistory(true)
+        val exposed=prepared
+        try {
+            assertTrue(exposed.retained());assertFalse(exposed.accepting())
+            assertFalse(exposed.offer(ShellInput.Text("must stay local")))
+            assertFalse(exposed.offer(ShellInput.Keys(listOf(key(ShellKeyName.Left,id=42)))))
+            yield();assertTrue(written.isEmpty());assertEquals(0,exposed.pendingEvents);assertEquals(0,stops)
+            exposed.blockForHistory(false);assertTrue(exposed.accepting())
+            assertTrue(exposed.offer(ShellInput.Text("fresh explicit gesture")))
+            withTimeout(1000){while(completed!=1)yield()}
+            assertEquals(listOf(ShellInput.Text("fresh explicit gesture")),written);assertEquals(0,stops)
+        }finally{exposed.retire()}
+    }
 }
