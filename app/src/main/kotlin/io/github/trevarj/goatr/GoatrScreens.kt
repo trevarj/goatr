@@ -5,7 +5,6 @@ import computer.iroh.OwnedReadPhase
 import android.Manifest
 import android.content.Intent
 import android.os.Build
-import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -74,7 +73,7 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
     LaunchedEffect(model.notificationPermissionRequest,model.notificationPermissionLaunch) {
         if(model.notificationPermissionRequest>0&&model.beginNotificationPermissionRequest(model.notificationPermissionRequest)) {
             if(Build.VERSION.SDK_INT>=33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-            else model.notificationPermissionResult()
+            // API<33 never enters a runtime notification-permission request.
         }
     }
     // This is a one-frame presentation route only. It never survives recreation or owns creation state.
@@ -162,9 +161,7 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
                         Box(Modifier.weight(1f)) {ConversationScreen(key,store,connection,model)}
                     }
                 }
-                Screen.Settings -> SettingsScreen(model.host,store,connection,model) {
-                    context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE,context.packageName))
-                }
+                Screen.Settings -> SettingsScreen(model.host,store,connection,model) {intent->context.startActivity(intent)}
             }
             }
             }
@@ -1889,7 +1886,15 @@ private fun ActionPaging(model: GoatrViewModel,collapsed: Boolean=false) {
 }
 
 @Composable
-private fun SettingsScreen(host: String?,store: StoreView,connection: ConnectionView,model: GoatrViewModel,onRepairNotifications: () -> Unit) {
+private fun SettingsScreen(host: String?,store: StoreView,connection: ConnectionView,model: GoatrViewModel,onRepairNotifications: (Intent) -> Unit) {
+    val lifecycle=androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle,model) {
+        val observer=androidx.lifecycle.LifecycleEventObserver {_,event->
+            if(event==androidx.lifecycle.Lifecycle.Event.ON_RESUME)model.notificationSettingsResumed()
+        }
+        lifecycle.addObserver(observer)
+        onDispose {lifecycle.removeObserver(observer)}
+    }
     if(host!=null) {
         key(host) {HostSettingsScreen(host,store,connection,model,showAppearance=false,onRepairNotifications=onRepairNotifications,modifier=Modifier.fillMaxSize())}
         return
@@ -1953,7 +1958,7 @@ private fun SettingsScreen(host: String?,store: StoreView,connection: Connection
 }
 
 @Composable
-private fun HostSettingsScreen(host: String,store: StoreView,connection: ConnectionView,model: GoatrViewModel,showAppearance: Boolean,onRepairNotifications: () -> Unit,modifier: Modifier = Modifier) {
+private fun HostSettingsScreen(host: String,store: StoreView,connection: ConnectionView,model: GoatrViewModel,showAppearance: Boolean,onRepairNotifications: (Intent) -> Unit,modifier: Modifier = Modifier) {
     var confirmForget by remember(host) {mutableStateOf(false)}
     var confirmUnpair by remember(host) {mutableStateOf(false)}
     var discard by remember(host) {mutableStateOf<RecoveryDraft?>(null)}
@@ -2015,16 +2020,29 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
                     tag="delivery_completed_$host",
                     onCheckedChange={model.setCompletionDelivery(host,it)},
                 )
-                val keeper=model.deliveryLabel(host)
-                StatusPill(keeper,when(keeper) {
-                    "Socket keeper connected" -> StatusEmphasis.Positive
-                    "Socket keeper reconnecting","Permission required" -> StatusEmphasis.Attention
+                val keeper=model.deliveryState(host)
+                StatusPill(keeper.label,when(keeper) {
+                    NotificationDeliveryState.Connected -> StatusEmphasis.Positive
+                    NotificationDeliveryState.Reconnecting,NotificationDeliveryState.GlobalBlocked,
+                    NotificationDeliveryState.AttentionBlocked,NotificationDeliveryState.DeliveryBlocked,
+                    NotificationDeliveryState.BothChannelsBlocked -> StatusEmphasis.Attention
                     else -> StatusEmphasis.Muted
                 })
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                     IconAction(MaterialGlyph.Play,"Start","delivery_start_$host",enabled=!model.busy && model.deliveryEnabled(host),onClick=model::startPersistentDelivery)
                     IconAction(MaterialGlyph.Stop,"Stop","delivery_stop_$host",enabled=!model.busy && model.deliveryRequested(),onClick=model::stopPersistentDelivery)
-                    IconAction(MaterialGlyph.Notification,"Repair notifications","delivery_repair_$host",enabled=!model.busy,onClick=onRepairNotifications)
+                }
+                val blocked=model.notificationHealth.repairs()
+                val repairTargets=blocked.ifEmpty {listOf(NotificationRepair.App)}
+                repairTargets.forEach {repair->
+                    if(repair in blocked)UiText(
+                        if(repair==NotificationRepair.App&&model.notificationHealth.runtimePermissionRequired)"App notifications unavailable · notification permission is not granted"
+                        else "${repair.label} blocked",
+                        color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall)
+                    val action=model.notificationRepairAction(repair,onRepairNotifications)
+                    IconAction(MaterialGlyph.Notification,"Repair ${repair.label}",
+                        if(repair==NotificationRepair.App)"delivery_repair_$host"else"delivery_repair_${repair.name.lowercase()}_$host",
+                        enabled=!model.busy&&action!=null,onClick={action?.invoke()})
                 }
                 UiText("ntfy hints contain no conversation text. Open a notification to authenticate and synchronize. Doze, notification permission, force-stop, desktop sleep and relay outages can delay delivery.",style=MaterialTheme.typography.bodySmall)
                 UiText("Registration verification is scoped to an authenticated connection. Offline is last verified, not current delivery health. Sleeping Goatr cannot instantly observe later host or distributor failure.",style=MaterialTheme.typography.bodySmall)

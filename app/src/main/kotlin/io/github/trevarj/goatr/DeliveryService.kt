@@ -38,7 +38,8 @@ class DeliveryService : Service() {
     private val retryIndex=mutableMapOf<String,Int>()
     private var retryGeneration=0L
     private var initialized=false
-    private var destroyed=false
+    @Volatile private var destroyed=false
+    @Volatile private var foregroundReady=false
     private var networkCallback:ConnectivityManager.NetworkCallback?=null
 
     override fun onCreate() {
@@ -52,33 +53,49 @@ class DeliveryService : Service() {
     }.also { synchronized(owned) {owned+=it} }
 
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
-        if(intent?.action==ACTION_STOP) {runtime.deliveryPreferences.setServiceRequested(false);stopSelf();return START_NOT_STICKY}
-        if(!runtime.deliveryPreferences.serviceRequested() || !runtime.deliveryPreferences.canPostNotifications()) {updateStatus(DeliverySnapshot());stopSelf();return START_NOT_STICKY}
-        startForeground(FOREGROUND_ID,runtime.notifications.foreground())
+        if(intent?.action==ACTION_STOP) {runtime.deliveryPreferences.setServiceRequested(false);stopForHealth();return START_NOT_STICKY}
+        if(!runtime.deliveryPreferences.serviceRequested()) {stopForHealth();return START_NOT_STICKY}
+        val foreground=notificationAttempt({runtime.notifications.health().keeperAvailable}) {
+            startForeground(FOREGROUND_ID,runtime.notifications.foreground())
+        }
+        if(foreground!=PresentationOutcome.AttemptedHealthy) {stopForHealth();return START_NOT_STICKY}
+        synchronized(statusMutable) {foregroundReady=true}
         launchOwned { initialize() }
         return START_NOT_STICKY
     }
     private fun enabledHosts():List<String> = runtime.store.state.value.hosts.map {it.hostId}.filter{runtime.deliveryPreferences.requiresKeeper(it,runtime.push.verified(it))}
+    private fun stopForHealth() {
+        // A failed foreground attempt and a suspended initializer cannot republish healthy running.
+        synchronized(statusMutable) {foregroundReady=false;updateStatus(DeliverySnapshot())}
+        try {stopForeground(STOP_FOREGROUND_REMOVE)}catch(_:Exception){}
+        stopSelf()
+    }
 
     private suspend fun initialize() {
         lifecycle.withLock {
-            if(destroyed || initialized) return
+            if(destroyed||initialized||!foregroundReady)return
             try { runtime.acquire(claim) }
             catch(cancel:CancellationException) { try {runtime.release(claim)} catch(_:Exception) {};throw cancel }
             catch(_:Exception) {
                 // The selected policy remains durable; do not reset keys or create a replacement.
-                updateStatus(DeliverySnapshot(running=false,reconnecting=enabledHosts().toSet()))
+                synchronized(statusMutable) {foregroundReady=false;updateStatus(DeliverySnapshot(running=false,reconnecting=enabledHosts().toSet()))}
                 try {runtime.release(claim)} catch(_:Exception) {}
                 stopSelf()
                 return
             }
             if(destroyed) {runtime.release(claim);return}
-            if(!runtime.deliveryPreferences.canPostNotifications()) {enabledHosts().forEach {host->runtime.notifications.reconcile(host)};updateStatus(DeliverySnapshot());stopSelf();return}
-            initialized=true
-            updateStatus(DeliverySnapshot(running=true))
+            val healthy=runtime.notifications.health().keeperAvailable
+            val ready=synchronized(statusMutable) {
+                if(destroyed||!foregroundReady||!runtime.deliveryPreferences.serviceRequested()||!healthy)false
+                else {initialized=true;updateStatus(DeliverySnapshot(running=true));true}
+            }
+            if(!ready) {stopForHealth();enabledHosts().forEach {host->runtime.notifications.reconcile(host)};return}
             observeNetwork()
             launchOwned { runtime.connection.notificationWakeups.collect { requestReconcile(it.host) } }
-            launchOwned { runtime.deliveryPreferences.changes.collect {if(enabledHosts().isEmpty()){updateStatus(DeliverySnapshot());stopSelf()}else enabledHosts().forEach {host->requestReconcile(host)} } }
+            launchOwned { runtime.deliveryPreferences.changes.collect {
+                if(enabledHosts().isEmpty()||!runtime.notifications.health().keeperAvailable)stopForHealth()
+                else enabledHosts().forEach {host->requestReconcile(host)}
+            } }
             // Authoritative connection loss is a wakeup for bounded recovery, healthy hosts are not redialed.
             launchOwned { runtime.connection.state.collect { view -> enabledHosts().filter { !view.hello.containsKey(it) }.forEach {host->requestReconcile(host)} } }
             enabledHosts().forEach {host->requestReconcile(host)}
@@ -104,8 +121,9 @@ class DeliveryService : Service() {
         }
     }
     private suspend fun reconcileHostOnce(host:String) {
-        if(destroyed || !runtime.deliveryPreferences.serviceRequested() || !runtime.deliveryPreferences.canPostNotifications()) {
-            if(!runtime.deliveryPreferences.canPostNotifications()) {runtime.notifications.reconcile(host);updateStatus(DeliverySnapshot());stopSelf()};return
+        if(destroyed)return
+        if(!foregroundReady||!runtime.deliveryPreferences.serviceRequested()||!runtime.notifications.health().keeperAvailable) {
+            stopForHealth();runtime.notifications.reconcile(host);return
         }
         if(!runtime.deliveryPreferences.requiresKeeper(host,runtime.push.verified(host))) {runtime.notifications.reconcile(host);return}
         markReconnecting(host,true)
@@ -115,6 +133,10 @@ class DeliveryService : Service() {
             val expected=runtime.connection.state.value.hello[host] ?: throw StorePolicy(ErrorCode.NotReady)
             var after:Uint?=null
             do { after=runtime.connection.notificationsSync(host,expected,after).nextSequence } while(after!=null)
+            if(destroyed)return
+            if(!foregroundReady||!runtime.deliveryPreferences.serviceRequested()||!runtime.notifications.health().keeperAvailable) {
+                stopForHealth();runtime.notifications.reconcile(host);return
+            }
             retryMutex.withLock {retryIndex.remove(host);hostGates[host]?.retryScheduled=false}
             markReconnecting(host,false)
             runtime.notifications.reconcile(host)
@@ -147,14 +169,15 @@ class DeliveryService : Service() {
         }.also(connectivity::registerDefaultNetworkCallback)
     }
     private fun markReconnecting(host:String,reconnecting:Boolean) {
-        val now=statusMutable.value;val next=now.reconnecting.toMutableSet()
-        if(reconnecting) next+=host else next-=host
-        updateStatus(now.copy(reconnecting=next))
+        synchronized(statusMutable) {
+            val now=statusMutable.value;val next=now.reconnecting.toMutableSet()
+            if(reconnecting)next+=host else next-=host
+            updateStatus(now.copy(reconnecting=next))
+        }
     }
     override fun onDestroy() {
-        destroyed=true
+        synchronized(statusMutable) {destroyed=true;foregroundReady=false;updateStatus(DeliverySnapshot())}
         networkCallback?.let { try {connectivity.unregisterNetworkCallback(it)} catch(_:Exception) {} };networkCallback=null
-        updateStatus(DeliverySnapshot())
         runtime.cleanupScope.launch {
             val jobs=synchronized(owned) {owned.toList()};jobs.forEach {it.cancel()};jobs.forEach {try {it.join()} catch(_:CancellationException) {}}
             retryMutex.withLock {retryGeneration++;hostGates.clear();retryIndex.clear()}
@@ -175,10 +198,12 @@ class DeliveryService : Service() {
         fun startFromUser(context:Context,admitted:()->Boolean):Boolean {
             if(!admitted())return false
             val app=context.applicationContext as GoatrApplication
-            if(!app.runtime.deliveryPreferences.canPostNotifications()||!admitted())return false
+            if(!app.runtime.notifications.health().keeperAvailable||!admitted())return false
             app.runtime.deliveryPreferences.setServiceRequested(true)
             if(!admitted())return false
-            app.startForegroundService(Intent(app,DeliveryService::class.java).setAction(ACTION_START));return true
+            return notificationAttempt({admitted()&&app.runtime.notifications.health().keeperAvailable}) {
+                app.startForegroundService(Intent(app,DeliveryService::class.java).setAction(ACTION_START))
+            }==PresentationOutcome.AttemptedHealthy
         }
         fun stopFromUser(context:Context) {val app=context.applicationContext as GoatrApplication;app.runtime.deliveryPreferences.setServiceRequested(false);app.stopService(Intent(app,DeliveryService::class.java))}
         fun stopWhenUnused(context:Context) {context.applicationContext.stopService(Intent(context.applicationContext,DeliveryService::class.java))}

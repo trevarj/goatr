@@ -1874,7 +1874,7 @@ class GoatrConnectionTest {
         assertEquals(setOf(Provider.Omp,Provider.Codex),rows.map(::stockProvider).toSet())
         val runtime=(context as GoatrApplication).runtime
         val manager=checkNotNull(context.getSystemService(android.app.NotificationManager::class.java))
-        check(runtime.deliveryPreferences.canPostNotifications()){"Owned delivery requires already granted notification permission; never skip or bypass a user dialog"}
+        check(runtime.notifications.health().globalAvailable){"Owned delivery requires already granted notification permission; never skip or bypass a user dialog"}
         if(mode=="ntfy") {
             val packageInfo=context.packageManager.getPackageInfo("io.heckel.ntfy",android.content.pm.PackageManager.PackageInfoFlags.of(android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES.toLong()))
             assertTrue(checkNotNull(packageInfo.applicationInfo).flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE==0)

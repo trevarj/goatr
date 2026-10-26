@@ -136,6 +136,8 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     internal var notificationPermissionLaunch by mutableStateOf<Long?>(null)
         private set
     private var deliveryPreferenceRevision by mutableStateOf(0L)
+    internal var notificationHealth by mutableStateOf(runtime.notifications.health())
+        private set
     private var permissionRequest:Pair<Long,()->Boolean>?=null
     @Volatile private var navigationTicket=Any()
     private var attentionRouteJob:Job?=null
@@ -433,8 +435,8 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {store.state.collect {
             attentionInbox?.takeIf {shown->!attentionInboxAdmitted(shown)}?.let {closeAttentionInbox()}
         }}
-        viewModelScope.launch {DeliveryService.status.collect {delivery=it}}
-        viewModelScope.launch {deliveryPreferences.changes.collect {deliveryPreferenceRevision=it}}
+        viewModelScope.launch {DeliveryService.status.collect {delivery=it;refreshNotificationHealth()}}
+        viewModelScope.launch {deliveryPreferences.changes.collect {deliveryPreferenceRevision=it;notificationHealth=runtime.notifications.health()}}
         viewModelScope.launch {connection.notificationWakeups.collect {wakeup->
             val attentionForeground=foregroundGeneration
             if(foreground&&wakeup.syncRequired)try{
@@ -454,6 +456,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val conversation=if(!active)selection?.let {connection.retireConversationSubscription(it.host,it.target)}else null
         if(active && foregroundGeneration==null) foregroundGeneration=ForegroundGeneration(runtime.newClaim(RuntimeClaimKind.Ui),CompletableDeferred())
         foreground = active
+        if(active)refreshNotificationHealth()
         if (!active) {
             closeAttentionInbox()
             // Admission guards change immediately, before queued native cleanup finishes.
@@ -1957,13 +1960,33 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val navigation=navigationTicket;val selectedHost=host
         return {foreground&&foregroundGeneration===generation&&navigationTicket===navigation&&screen==Screen.Settings&&host==selectedHost}
     }
+    private fun refreshNotificationHealth():NotificationHealth {
+        val current=runtime.notifications.health()
+        if(current!=notificationHealth) {
+            notificationHealth=current
+            deliveryPreferences.notificationHealthChanged()
+        }
+        return current
+    }
+    internal fun notificationSettingsResumed() {
+        if(foreground&&screen==Screen.Settings)refreshNotificationHealth()
+    }
+    internal fun notificationRepairAction(repair:NotificationRepair,open:(android.content.Intent)->Unit):(() -> Unit)? {
+        val admitted=deliveryVisibleGuard() ?: return null
+        return {if(admitted())open(repair.intent(getApplication()))}
+    }
     private fun requestDeliveryStart(admitted:()->Boolean) {
         if(!admitted())return
-        if(!deliveryPreferences.canPostNotifications()) {
+        val health=refreshNotificationHealth()
+        if(health.runtimePermissionRequired) {
             deliveryPreferences.setServiceRequested(true)
             if(permissionRequest?.second?.invoke()==true)return
             notificationPermissionRequest++
             permissionRequest=notificationPermissionRequest to admitted
+            return
+        }
+        if(!health.keeperAvailable) {
+            notice=if(!health.globalAvailable)"Enable app notifications in Android notification settings."else"Enable the Goatr delivery channel in Android notification settings."
             return
         }
         DeliveryService.startFromUser(getApplication(),admitted)
@@ -1987,21 +2010,16 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         val original=permissionRequest ?: return
         if(original.first!=launched)return
         permissionRequest=null
-        if(original.second()&&deliveryPreferences.canPostNotifications()&&deliveryPreferences.serviceRequested())DeliveryService.startFromUser(getApplication(),original.second)
+        if(original.second()&&refreshNotificationHealth().keeperAvailable&&deliveryPreferences.serviceRequested())DeliveryService.startFromUser(getApplication(),original.second)
     }
     fun deliveryEnabled(host:String):Boolean {deliveryPreferenceRevision;return deliveryPreferences.hostEnabled(host)}
     fun deliveryCompleted(host:String):Boolean {deliveryPreferenceRevision;return deliveryPreferences.notifyCompleted(host)}
     fun deliveryRequested():Boolean {deliveryPreferenceRevision;return deliveryPreferences.serviceRequested()}
-    fun deliveryLabel(host:String):String {
+    internal fun deliveryState(host:String):NotificationDeliveryState {
         deliveryPreferenceRevision
-        return when {
-            !deliveryPreferences.hostEnabled(host) -> "Off"
-            !deliveryPreferences.canPostNotifications() -> "Permission required"
-            !deliveryPreferences.requiresKeeper(host,runtime.push.verified(host)) -> "No socket keeper required · ntfy registration"
-            !deliveryPreferences.serviceRequested()||!delivery.running -> "Socket keeper stopped"
-            DeliveryService.isReconnecting(host)||connection.state.value.hello[host]==null||connection.state.value.inventoryReady[host]!=true -> "Socket keeper reconnecting"
-            else -> "Socket keeper connected"
-        }
+        return notificationHealth.deliveryState(deliveryPreferences.hostEnabled(host),
+            deliveryPreferences.requiresKeeper(host,runtime.push.verified(host)),deliveryPreferences.serviceRequested(),delivery.running,
+            DeliveryService.isReconnecting(host)||connection.state.value.hello[host]==null||connection.state.value.inventoryReady[host]!=true)
     }
     private fun invalidateSeparateCreation() { separateCreationAction=null;separateCreationGeneration++ }
     suspend fun loadContent(key: ConversationKey,source: Uuid?,reference: ContentRef,completed: Boolean): String {

@@ -298,7 +298,7 @@ class NavigationTest {
             ui.waitUntil(20000){owner.foreground&&owner.connection.ownsNetworkCallback()}
             ui.waitForIdle()
             assertTrue(runtime.store.state.value.hosts.isEmpty())
-            check(runtime.deliveryPreferences.canPostNotifications()){"Existing owned fixture must grant notifications before this negative FGS boundary check"}
+            check(runtime.notifications.health().globalAvailable){"Existing owned fixture must grant notifications before this negative FGS boundary check"}
             check(runtime.push.ntfyInstalled()){"Qualified official ntfy is a fixture prerequisite; absence must not make the stale-route regression pass"}
             runtime.store.host(HostMetadata(host,"Owned no-channel delivery boundary",Uuid.random(),listOf(SecretStore.ENDPOINT_ALIAS)))
             runtime.deliveryPreferences.setMode(host,DeliveryMode.Ntfy)
@@ -338,6 +338,59 @@ class NavigationTest {
             for(deletion in runtime.store.state.value.keyDeletion)runtime.secrets.delete(deletion,runtime.store)
             runtime.deliveryPreferences.clearHost(host)
             if(keys.containsAlias(SecretStore.ENDPOINT_ALIAS))runtime.secrets.delete(KeyDeletion("synthetic-delivery-boundary-owner",listOf(SecretStore.ENDPOINT_ALIAS)),runtime.store)
+            scenario.close()
+        }
+    }
+    @Test fun notificationRepairUsesExactAppChannelsAndRejectsOldSettingsAndForegroundCallbacks()=runBlocking {
+        val context=InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as GoatrApplication
+        val keys=KeyStore.getInstance("AndroidKeyStore").apply {load(null)}
+        assertFalse("Isolated fixture only; never adopt retained endpoint keys",keys.containsAlias(SecretStore.ENDPOINT_ALIAS))
+        assertFalse(File(context.noBackupFilesDir,"goatr-keys/${SecretStore.ENDPOINT_ALIAS}.gcm.initialized").exists())
+        IrohAndroid.installAndroidContext(context)
+        val scenario=ActivityScenario.launch(MainActivity::class.java)
+        lateinit var owner:GoatrViewModel
+        val intents=mutableListOf<android.content.Intent>()
+        try {
+            scenario.onActivity {owner=ViewModelProvider(it)[GoatrViewModel::class.java]}
+            ui.waitUntil(20000){owner.foreground&&owner.connection.ownsNetworkCallback()}
+            assertTrue(owner.store.state.value.hosts.isEmpty())
+            lateinit var oldRoute:()->Unit;lateinit var oldForeground:()->Unit
+            ui.runOnIdle {
+                owner.settings()
+                val permissionRequests=owner.notificationPermissionRequest
+                oldRoute=checkNotNull(owner.notificationRepairAction(NotificationRepair.Attention){intents+=it})
+                owner.sessions();owner.settings()
+                oldRoute();assertTrue(intents.isEmpty())
+                owner.settings("owned-repair-route-A")
+                val oldHost=checkNotNull(owner.notificationRepairAction(NotificationRepair.Delivery){intents+=it})
+                owner.settings("owned-repair-route-B");oldHost();assertTrue(intents.isEmpty())
+                owner.settings()
+                for(repair in NotificationRepair.entries) {
+                    checkNotNull(owner.notificationRepairAction(repair){intents+=it}).invoke()
+                }
+                assertEquals(3,intents.size)
+                val app=intents[0];val attention=intents[1];val delivery=intents[2]
+                assertEquals(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS,app.action)
+                assertNull(app.getStringExtra(android.provider.Settings.EXTRA_CHANNEL_ID))
+                for(intent in intents)assertEquals(context.packageName,intent.getStringExtra(android.provider.Settings.EXTRA_APP_PACKAGE))
+                assertEquals(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS,attention.action)
+                assertEquals(NotificationCoordinator.ALERT_CHANNEL,attention.getStringExtra(android.provider.Settings.EXTRA_CHANNEL_ID))
+                assertEquals(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS,delivery.action)
+                assertEquals(NotificationCoordinator.FOREGROUND_CHANNEL,delivery.getStringExtra(android.provider.Settings.EXTRA_CHANNEL_ID))
+                assertEquals(permissionRequests,owner.notificationPermissionRequest)
+                oldForeground=checkNotNull(owner.notificationRepairAction(NotificationRepair.Delivery){intents+=it})
+            }
+            scenario.moveToState(Lifecycle.State.CREATED)
+            ui.waitUntil(20000){!owner.foreground}
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {oldForeground()}
+            assertEquals(3,intents.size)
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            ui.waitUntil(20000){owner.foreground}
+            ui.runOnIdle {oldForeground();assertEquals(3,intents.size)}
+        }finally {
+            scenario.moveToState(Lifecycle.State.CREATED);owner.connection.shutdown()
+            assertTrue(owner.store.state.value.hosts.isEmpty())
+            if(keys.containsAlias(SecretStore.ENDPOINT_ALIAS))context.runtime.secrets.delete(KeyDeletion("owned-notification-repair-fixture",listOf(SecretStore.ENDPOINT_ALIAS)),owner.store)
             scenario.close()
         }
     }

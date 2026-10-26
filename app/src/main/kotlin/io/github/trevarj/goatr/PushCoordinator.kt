@@ -148,7 +148,7 @@ internal class PushCoordinator(private val app:Application,private val runtime:G
   val hint=try{PushHints.verify(message.content,record)}catch(_:Exception){return@callback}
   when(val verified=hint){
    is VerifiedPushHint.Probe->{save(record.copy(probeReceived=true));if(!verifiedGenerations.containsKey(host))mark(host,if(record.acknowledged)"Previously acknowledged · verifying current host"else"Confirming probe")}
-   is VerifiedPushHint.Event->{runtime.store.pushHint(host,verified.hint,{runtime.deliveryPreferences.hostEnabled(host)&&runtime.deliveryPreferences.canPostNotifications()},{runtime.deliveryPreferences.notifyCompleted(host)},{event->runtime.suppressesAlert(host,event)})}
+   is VerifiedPushHint.Event->{runtime.store.pushHint(host,verified.hint,{runtime.notifications.health().allowsAttention(runtime.deliveryPreferences.hostEnabled(host))},{runtime.deliveryPreferences.notifyCompleted(host)},{event->runtime.suppressesAlert(host,event)})}
   }
  }
  fun callbackFailure(instance:String)=callback(instance){host,record->unconfirm(record);save(record.copy(repair=true));mark(host,"Repair required")}

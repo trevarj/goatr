@@ -117,7 +117,7 @@ class SessionStoreTest {
                 val second=first.copy(eventId=Uuid.random(),sequence=Uint(2))
                 store.liveNotification(HOST,first);store.liveNotification(HOST,second)
                 store.installPresentationSink(object:PresentationSink {
-                    override fun post(host:String,event:AttentionEvent):Boolean {
+                    override fun post(host:String,event:AttentionEvent):PresentationOutcome {
                         android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
                             db.rawQuery("SELECT disposition FROM notification_presentations WHERE host=? AND event=?",arrayOf(host,event.eventId.value)).use {row->
                                 assertTrue("Presentation decision must be committed before the OS effect",row.moveToFirst());assertEquals("posted",row.getString(0))
@@ -126,8 +126,9 @@ class SessionStoreTest {
                         }
                         manager.notify(tag,event.sequence.value.toInt(),android.app.Notification.Builder(context,channel).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Owned transaction regression").build())
                         posts+=event.eventId
-                        return true
+                        return PresentationOutcome.AttemptedHealthy
                     }
+                    override fun postHint(host:String,hint:PushEventHint):PresentationOutcome = error("This event-only transaction fixture must never receive a push hint")
                     override fun cancel(host:String,eventId:String):Boolean {manager.cancel(tag,if(eventId==first.eventId.value)1 else 2);return true}
                     override fun noLongerPresent(host:String,eventId:String):Boolean = manager.activeNotifications.none {it.tag==tag&&it.id==(if(eventId==first.eventId.value)1 else 2)}
                 })
@@ -869,11 +870,11 @@ class SessionStoreTest {
             val channel="push-store-${Uuid.random().value}";val tags=mutableSetOf<String>()
             manager.createNotificationChannel(android.app.NotificationChannel(channel,"Owned push ledger regression",android.app.NotificationManager.IMPORTANCE_LOW))
             val hints=mutableListOf<Uuid>();val authenticated=mutableListOf<Uuid>()
-            fun present(event:Uuid,hint:Boolean):Boolean {
+            fun present(event:Uuid,hint:Boolean):PresentationOutcome {
                 val tag="$channel.${event.value}";tags+=tag
                 manager.notify(tag,1,android.app.Notification.Builder(context,channel).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Owned generic notification").setOnlyAlertOnce(true).build())
                 if(hint)hints+=event else authenticated+=event
-                return true
+                return PresentationOutcome.AttemptedHealthy
             }
             store.installPresentationSink(object:PresentationSink {
                 override fun post(host:String,event:AttentionEvent)=present(event.eventId,false)
@@ -909,8 +910,8 @@ class SessionStoreTest {
                 android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use{db->db.execSQL("UPDATE notification_presentations SET disposition='suppressed_visible',active=0 WHERE host=? AND event=?",arrayOf(HOST,legacy.eventId.value))}
                 store.liveNotification(HOST,legacy)
                 store.reconcilePresentations(HOST){PresentationPolicy(true,true){Target(it.sessionId,it.generation)==old}}
-                assertEquals(listOf(event.eventId,legacy.eventId),authenticated)
-                withTimeout(5000){while(manager.activeNotifications.none{it.tag=="$channel.${legacy.eventId.value}"})delay(10)}
+                assertEquals(listOf(event.eventId),authenticated)
+                withTimeout(5000){while(manager.activeNotifications.any{it.tag=="$channel.${legacy.eventId.value}"})delay(10)}
                 val disabledCompletion=legacy.copy(eventId=Uuid.random(),sequence=Uint(4),category=AttentionCategory.Completed)
                 store.pushHint(HOST,hint(disabledCompletion),{true},{true}){false}
                 manager.cancel("$channel.${disabledCompletion.eventId.value}",1)
@@ -928,7 +929,7 @@ class SessionStoreTest {
                 assertFalse("Later preference changes cannot replay an already consumed hint",disabledCompletion.eventId in authenticated)
                 store.readConfirmed(HOST,ReadWatermark(session,Uint(1)))
                 withTimeout(5000){while(manager.activeNotifications.any{it.tag=="$channel.${event.eventId.value}"})delay(10)}
-                assertTrue(manager.activeNotifications.any{it.tag=="$channel.${legacy.eventId.value}"})
+                assertTrue(manager.activeNotifications.none{it.tag=="$channel.${legacy.eventId.value}"})
             }finally{tags.forEach{manager.cancel(it,1)};manager.deleteNotificationChannel(channel)}
         }
     }
@@ -960,5 +961,256 @@ class SessionStoreTest {
             refused(signed(JsonObject(raw+("generation" to JsonPrimitive(Uuid.random().value))).toString()))
             refused(ByteArray(2049){'A'.code.toByte()})
         }finally{key.fill(0)}
+    }
+    private fun presentationState(name:String,event:Uuid):Pair<String,Int>? =
+        android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+            db.rawQuery("SELECT disposition,active FROM notification_presentations WHERE host=? AND event=?",arrayOf(HOST,event.value)).use {row->
+                if(row.moveToFirst())row.getString(0) to row.getInt(1)else null
+            }
+        }
+    private fun hintCount(name:String,event:Uuid):Int =
+        android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+            db.rawQuery("SELECT count(*) FROM push_hints WHERE host=? AND event=?",arrayOf(HOST,event.value)).use {row->check(row.moveToFirst());row.getInt(0)}
+        }
+    private fun notificationHealth(attention:Int=3,delivery:Int=2,global:Boolean=true)=NotificationHealth.measured(34,global,true,attention,delivery)
+    /** Controlled synchronous effect boundary plus real committed SQLite, not OS delivery evidence. */
+    private inner class LedgerSink(private val name:String):PresentationSink {
+        var health=notificationHealth()
+        var beforeAttempt:(()->Unit)?=null
+        var duringAttempt:(()->Unit)?=null
+        var throwAtEntry=false
+        var failCancel=false
+        val calls=mutableListOf<Pair<String,String>>()
+        val effects=mutableListOf<Pair<String,String>>()
+        val cancellations=mutableListOf<Pair<String,String>>()
+        private fun present(host:String,event:Uuid,hint:Boolean):PresentationOutcome {
+            assertEquals(HOST,host)
+            assertEquals((if(hint)"hint_posted"else"posted") to 1,presentationState(name,event))
+            calls+=host to event.value
+            if(throwAtEntry)throw IllegalStateException("Owned sink entry boundary")
+            beforeAttempt?.invoke()
+            return notificationAttempt({health.allowsAttention(true)}) {
+                effects+=host to event.value
+                duringAttempt?.invoke()
+            }
+        }
+        override fun post(host:String,event:AttentionEvent)=present(host,event.eventId,false)
+        override fun postHint(host:String,hint:PushEventHint)=present(host,hint.eventId,true)
+        override fun cancel(host:String,eventId:String):Boolean {
+            cancellations+=host to eventId
+            if(failCancel)throw IllegalStateException("Owned cancellation boundary")
+            return true
+        }
+        override fun noLongerPresent(host:String,eventId:String)=false
+        fun restore() {health=notificationHealth();beforeAttempt=null;duringAttempt=null;throwAtEntry=false}
+    }
+    private fun presentationEvent(sequence:Long=1)=AttentionEvent(Uuid.random(),Uint(sequence),Uuid.random(),Uuid.random(),AttentionCategory.Attention,Uint(0))
+
+    @Test fun typedEventAttemptsConsumeBeforeEffectRetainUnknownCancellationAndNeverReplayAfterReopen()=runBlocking {
+        for(kind in listOf("blocked","global_blocked","changed","thrown","sink_thrown","healthy"))withStore {store,name,clock,_->
+            val event=presentationEvent();val sink=LedgerSink(name)
+            when(kind) {
+                "blocked"->sink.beforeAttempt={sink.health=notificationHealth(attention=0)}
+                "global_blocked"->sink.beforeAttempt={sink.health=notificationHealth(global=false)}
+                "changed"->sink.duringAttempt={sink.health=notificationHealth(attention=0)}
+                "thrown"->sink.duringAttempt={throw IllegalStateException("Owned attempted effect")}
+                "sink_thrown"->sink.throwAtEntry=true
+            }
+            store.installPresentationSink(sink);store.liveNotification(HOST,event)
+            store.reconcilePresentations(HOST){PresentationPolicy(sink.health.allowsAttention(true),true){false}}
+            val expected=when(kind){"blocked","global_blocked"->"blocked_before_attempt" to 0;"healthy"->"posted" to 1;else->"attempted_unknown" to 1}
+            assertEquals(expected,presentationState(name,event.eventId))
+            assertEquals(1,sink.calls.size);assertEquals(if(kind=="blocked"||kind=="global_blocked"||kind=="sink_thrown")0 else 1,sink.effects.size)
+            assertEquals(listOf(event),store.cachedNotifications(HOST).events)
+            sink.restore();store.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+            assertEquals(1,sink.calls.size)
+            store.close();val reopened=SessionStore(context,name,clock)
+            try {
+                reopened.installPresentationSink(sink);reopened.open()
+                reopened.liveNotification(HOST,event);reopened.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+                assertEquals(1,sink.calls.size);assertEquals(expected,presentationState(name,event.eventId))
+                reopened.readConfirmed(HOST,ReadWatermark(event.sessionId,event.sequence))
+                assertEquals(0,presentationState(name,event.eventId)!!.second)
+                assertEquals(if(expected.second==1)listOf(HOST to event.eventId.value)else emptyList<Pair<String,String>>(),sink.cancellations)
+                val future=event.copy(eventId=Uuid.random(),sequence=Uint(2))
+                reopened.liveNotification(HOST,future);reopened.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+                assertEquals(2,sink.calls.size)
+                reopened.reconcilePresentations(HOST){PresentationPolicy(false,true){false}}
+                assertTrue(HOST to future.eventId.value in sink.cancellations)
+                reopened.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+                assertEquals(2,sink.calls.size)
+                val retained=reopened.cachedNotifications(HOST)
+                assertEquals(listOf(event,future),retained.events)
+                assertEquals(listOf(ReadWatermark(event.sessionId,event.sequence)),retained.read)
+            }finally{reopened.close()}
+        }
+    }
+
+    @Test fun everyConsumedHintDispositionDeletesExactMetadataWithoutADeferredReplacementPost()=runBlocking {
+        for(kind in listOf("blocked","global_blocked","changed","unknown","sink_thrown","policy","legacy_visible","healthy"))withStore {store,name,_,_->
+            val event=presentationEvent();val sink=LedgerSink(name);store.installPresentationSink(sink)
+            val device=store.state.value.hosts.single().deviceId!!;val generation=Uuid.random()
+            store.encryptedRegistration(HOST,generation,device,null,byteArrayOf(7,8,9))
+            val hint=PushEventHint(1,EndpointId(HOST),device,generation,event.sessionId,event.eventId,event.sequence,event.category)
+            if(kind=="blocked")sink.beforeAttempt={sink.health=notificationHealth(attention=0)}
+            if(kind=="global_blocked")sink.beforeAttempt={sink.health=notificationHealth(global=false)}
+            if(kind=="changed")sink.duringAttempt={sink.health=notificationHealth(attention=0)}
+            if(kind=="sink_thrown")sink.throwAtEntry=true
+            if(kind=="unknown")sink.duringAttempt={throw IllegalStateException("Owned hint attempt")}
+            store.pushHint(HOST,hint,{kind!="policy"},{true}){false}
+            assertEquals(1,hintCount(name,event.eventId));assertTrue(store.cachedNotifications(HOST).events.isEmpty())
+            if(kind=="legacy_visible")android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use {db->
+                db.execSQL("UPDATE notification_presentations SET disposition='suppressed_visible',active=0 WHERE host=? AND event=?",arrayOf(HOST,event.eventId.value))
+            }
+            val before=sink.calls.size;sink.restore()
+            store.liveNotification(HOST,event)
+            // Disabled policy must still consume and validate an authenticated hint's identity.
+            store.reconcilePresentations(HOST){PresentationPolicy(kind!="policy",true){false}}
+            assertEquals(0,hintCount(name,event.eventId))
+            assertEquals(before+if(kind=="healthy")1 else 0,sink.calls.size)
+            store.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+            store.pushHint(HOST,hint,{true},{true}){false}
+            assertEquals(before+if(kind=="healthy")1 else 0,sink.calls.size)
+            assertEquals(listOf(event),store.cachedNotifications(HOST).events)
+            assertEquals(generation,store.encryptedRegistration(HOST)!!.first)
+            assertArrayEquals(byteArrayOf(7,8,9),store.encryptedRegistration(HOST)!!.second)
+            store.readConfirmed(HOST,ReadWatermark(event.sessionId,event.sequence))
+            if(kind=="unknown"||kind=="changed"||kind=="sink_thrown"||kind=="healthy")assertTrue(HOST to event.eventId.value in sink.cancellations)
+        }
+    }
+
+    @Test fun blockedAuthenticatedReplacementRestoresPriorActiveHintForReadAndDisableCancellation()=runBlocking {
+        for(cancelByRead in listOf(false,true))withStore {store,name,_,_->
+            val event=presentationEvent();val sink=LedgerSink(name);store.installPresentationSink(sink)
+            val device=store.state.value.hosts.single().deviceId!!;val generation=Uuid.random()
+            store.encryptedRegistration(HOST,generation,device,null,byteArrayOf(1))
+            val hint=PushEventHint(1,EndpointId(HOST),device,generation,event.sessionId,event.eventId,event.sequence,event.category)
+            store.pushHint(HOST,hint,{true},{true}){false}
+            assertEquals("hint_posted" to 1,presentationState(name,event.eventId))
+            sink.beforeAttempt={sink.health=notificationHealth(attention=0)}
+            store.liveNotification(HOST,event);store.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+            assertEquals("blocked_before_attempt" to 1,presentationState(name,event.eventId))
+            assertEquals(2,sink.calls.size);assertEquals(1,sink.effects.size);assertEquals(0,hintCount(name,event.eventId))
+            sink.restore();store.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+            assertEquals(2,sink.calls.size)
+            if(cancelByRead)store.readConfirmed(HOST,ReadWatermark(event.sessionId,event.sequence))
+            else store.reconcilePresentations(HOST){PresentationPolicy(false,true){false}}
+            assertEquals(listOf(HOST to event.eventId.value),sink.cancellations)
+            assertEquals("blocked_before_attempt" to 0,presentationState(name,event.eventId))
+        }
+    }
+
+    @Test fun hintIdentityMismatchRefusesCleanupForEveryConsumedDisposition()=runBlocking {
+        for(disposition in listOf("hint_posted","blocked_before_attempt","attempted_unknown","suppressed_policy","suppressed_visible"))
+            for(mismatch in listOf("sequence","session","category"))withStore {store,name,_,_->
+                val event=presentationEvent();val sink=LedgerSink(name);store.installPresentationSink(sink)
+                val device=store.state.value.hosts.single().deviceId!!;val generation=Uuid.random()
+                store.encryptedRegistration(HOST,generation,device,null,byteArrayOf(1))
+                val hint=PushEventHint(1,EndpointId(HOST),device,generation,event.sessionId,event.eventId,event.sequence,event.category)
+                if(disposition=="blocked_before_attempt")sink.beforeAttempt={sink.health=notificationHealth(attention=0)}
+                if(disposition=="attempted_unknown")sink.throwAtEntry=true
+                store.pushHint(HOST,hint,{disposition!="suppressed_policy"},{true}){false}
+                if(disposition=="suppressed_visible")android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use {db->
+                    db.execSQL("UPDATE notification_presentations SET disposition='suppressed_visible',active=0 WHERE host=? AND event=?",arrayOf(HOST,event.eventId.value))
+                }
+                val consumed=presentationState(name,event.eventId);val calls=sink.calls.size;sink.restore()
+                val changed=when(mismatch) {
+                    "sequence"->event.copy(sequence=Uint(2))
+                    "session"->event.copy(sessionId=Uuid.random())
+                    else->event.copy(category=AttentionCategory.Completed)
+                }
+                store.liveNotification(HOST,changed)
+                expectPolicy(ErrorCode.InvalidRequest){store.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}}
+                assertEquals(1,hintCount(name,event.eventId));assertEquals(consumed,presentationState(name,event.eventId))
+                assertEquals(calls,sink.calls.size)
+            }
+    }
+
+    @Test fun unknownAttemptRetainsExactForgetCancellationAcrossHostDeletionAndReopen()=runBlocking {
+        withStore {store,name,clock,_->
+            val event=presentationEvent();val sink=LedgerSink(name);sink.throwAtEntry=true;store.installPresentationSink(sink)
+            store.liveNotification(HOST,event);store.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+            assertEquals("attempted_unknown" to 1,presentationState(name,event.eventId))
+            sink.failCancel=true;store.forget(HOST)
+            assertEquals(listOf(HOST to event.eventId.value),sink.cancellations)
+            store.close();val reopened=SessionStore(context,name,clock)
+            try {
+                sink.failCancel=false;reopened.installPresentationSink(sink);reopened.open()
+                reopened.reconcilePresentations(HOST){PresentationPolicy(false,false){false}}
+                assertEquals(listOf(HOST to event.eventId.value,HOST to event.eventId.value),sink.cancellations)
+                android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+                    db.rawQuery("SELECT count(*) FROM notification_cancel_pending WHERE host=? AND event=?",arrayOf(HOST,event.eventId.value)).use {row->assertTrue(row.moveToFirst());assertEquals(0,row.getInt(0))}
+                }
+                assertTrue(reopened.state.value.hosts.isEmpty())
+            }finally{reopened.close()}
+        }
+    }
+    @Test fun osHealthPublicationPreservesRealPreferencesRegistrationAndConsumedFloorAcrossExpiry()=runBlocking {
+        withStore {store,name,clock,advance->
+            val prefix="owned-notification-health-${Uuid.random().value}."
+            val ownedPreferences=mutableSetOf<String>()
+            val base=context
+            val isolated=object:android.content.ContextWrapper(base) {
+                override fun getApplicationContext():android.content.Context=this
+                override fun getSharedPreferences(name:String,mode:Int):android.content.SharedPreferences {
+                    val owned=prefix+name;ownedPreferences+=owned
+                    return base.getSharedPreferences(owned,mode)
+                }
+            }
+            val preferences=DeliveryPreferences(isolated)
+            fun preferencesSnapshot()=ownedPreferences.associateWith {base.getSharedPreferences(it,android.content.Context.MODE_PRIVATE).all.toMap()}
+            try {
+                preferences.setMode(HOST,DeliveryMode.Ntfy);preferences.setHostEnabled(HOST,true)
+                preferences.setNotifyCompleted(HOST,true);preferences.setServiceRequested(true)
+                val before=preferencesSnapshot();val metadata=store.state.value.hosts.single()
+                val generation=Uuid.random();val ciphertext=byteArrayOf(41,42,43,44)
+                // Opaque encrypted-record fixture; no claim of authenticated probe verification.
+                store.encryptedRegistration(HOST,generation,metadata.deviceId!!,null,ciphertext)
+                val event=presentationEvent();val sink=LedgerSink(name);store.installPresentationSink(sink)
+                sink.beforeAttempt={sink.health=notificationHealth(attention=0)}
+                store.liveNotification(HOST,event)
+                store.reconcilePresentations(HOST){PresentationPolicy(sink.health.allowsAttention(preferences.hostEnabled(HOST)),preferences.notifyCompleted(HOST)){false}}
+                assertEquals("blocked_before_attempt" to 0,presentationState(name,event.eventId))
+                sink.restore()
+                for(health in listOf(notificationHealth(attention=0),notificationHealth(delivery=0),notificationHealth(attention=0,delivery=0),notificationHealth(global=false),notificationHealth())) {
+                    sink.health=health;preferences.notificationHealthChanged()
+                    store.reconcilePresentations(HOST){PresentationPolicy(health.allowsAttention(preferences.hostEnabled(HOST)),preferences.notifyCompleted(HOST)){false}}
+                    assertEquals(before,preferencesSnapshot());assertEquals(metadata,store.state.value.hosts.single())
+                    assertEquals(generation,store.encryptedRegistration(HOST)!!.first)
+                    assertArrayEquals(ciphertext,store.encryptedRegistration(HOST)!!.second)
+                    assertFalse(preferences.requiresKeeper(HOST,true))
+                    assertTrue(preferences.requiresKeeper(HOST,false))
+                    assertEquals(1,sink.calls.size)
+                }
+                store.readConfirmed(HOST,ReadWatermark(event.sessionId,event.sequence))
+                advance(SessionStore.CACHE_AGE+1)
+                val future=event.copy(eventId=Uuid.random(),sequence=Uint(2),createdAt=Uint(clock()))
+                store.liveNotification(HOST,future)
+                android.database.sqlite.SQLiteDatabase.openDatabase(base.getDatabasePath(name).path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+                    db.rawQuery("SELECT presentation_floor FROM notification_state WHERE host=?",arrayOf(HOST)).use {row->assertTrue(row.moveToFirst());assertTrue(row.getLong(0)>=event.sequence.value)}
+                }
+                assertNull(presentationState(name,event.eventId))
+                store.close();val reopened=SessionStore(base,name,clock)
+                try {
+                    sink.restore();reopened.installPresentationSink(sink);reopened.open()
+                    reopened.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+                    assertEquals(2,sink.calls.size)
+                    val late=PushEventHint(1,EndpointId(HOST),metadata.deviceId!!,generation,event.sessionId,event.eventId,event.sequence,event.category)
+                    reopened.pushHint(HOST,late,{true},{true}){false}
+                    reopened.liveNotification(HOST,event.copy(createdAt=Uint(clock())))
+                    reopened.reconcilePresentations(HOST){PresentationPolicy(true,true){false}}
+                    assertEquals(2,sink.calls.size);assertEquals(0,hintCount(name,event.eventId))
+                    assertEquals(listOf(ReadWatermark(event.sessionId,event.sequence)),reopened.cachedNotifications(HOST).read)
+                    assertEquals(before,preferencesSnapshot());assertEquals(metadata,reopened.state.value.hosts.single())
+                    assertEquals(generation,reopened.encryptedRegistration(HOST)!!.first)
+                    assertArrayEquals(ciphertext,reopened.encryptedRegistration(HOST)!!.second)
+                }finally{reopened.close()}
+            }finally {
+                ownedPreferences.forEach {owned->
+                    base.getSharedPreferences(owned,android.content.Context.MODE_PRIVATE).edit().clear().commit()
+                    base.deleteSharedPreferences(owned)
+                }
+            }
+        }
     }
 }

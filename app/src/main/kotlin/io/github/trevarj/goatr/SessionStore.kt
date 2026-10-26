@@ -55,10 +55,12 @@ data class KeyDeletion(val hostId: String, val aliases: List<String>)
 data class ComposerSnippet(val id: Uuid, val hostId: String, val title: String, val body: String)
 /** A durable notification projection. It intentionally has no provider text or route authority. */
 data class StoredAttentionEvent(val event: AttentionEvent, val read: Boolean)
+/** Attempt accounting only; active ownership never proves OS delivery. */
+enum class PresentationOutcome { BlockedBeforeAttempt,AttemptedHealthy,AttemptedUnknown }
 /** Synchronous Android-only side effect invoked while the store admission lock is held. */
 interface PresentationSink {
-    fun post(host: String, event: AttentionEvent): Boolean
-    fun postHint(host:String,hint:PushEventHint):Boolean = false
+    fun post(host: String, event: AttentionEvent): PresentationOutcome
+    fun postHint(host:String,hint:PushEventHint):PresentationOutcome
     fun cancel(host: String, eventId: String): Boolean
     fun noLongerPresent(host: String, eventId: String): Boolean
 }
@@ -673,26 +675,38 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
                 val completed=payload?.let {Protocol.strictJson.decodeFromString<AttentionEvent>(it).category==AttentionCategory.Completed} ?: (string(db,"SELECT category FROM push_hints WHERE host=? AND event=?",host,event)==AttentionCategory.Completed.name)
                 if (!current.enabled || !current.includeCompleted && completed || !unread) cancelPresentation(db,host,event,time,sink)
             }
-            if (!current.enabled) return@withLock
             val floor=scalar(db,"SELECT presentation_floor FROM notification_state WHERE host=?",host)
+            // Consume the exact generationless hint for EVERY disposition, even while disabled/read.
+            val hints=db.rawQuery("SELECT n.event FROM push_hints h JOIN notifications n ON n.host=h.host AND n.id=h.event WHERE h.host=? ORDER BY h.sequence DESC LIMIT 100",arrayOf(host)).use {rows->buildList {
+                while(rows.moveToNext())add(Protocol.strictJson.decodeFromString<AttentionEvent>(rows.getString(0)).also {it.validate()})
+            }}
+            hints.forEach {event->
+                val exact=scalar(db,"SELECT count(*) FROM push_hints WHERE host=? AND event=? AND sequence=? AND session=? AND category=?",host,event.eventId.value,event.sequence.value.toString(),event.sessionId.value,event.category.name)==1L
+                if(!exact)throw StorePolicy(ErrorCode.InvalidRequest)
+                val hinted=string(db,"SELECT disposition FROM notification_presentations WHERE host=? AND event=?",host,event.eventId.value) ?: throw StorePolicy(ErrorCode.InvalidRequest)
+                val priorActive=scalar(db,"SELECT active FROM notification_presentations WHERE host=? AND event=?",host,event.eventId.value)==1L
+                val disposition=if(hinted!="hint_posted")hinted else when {
+                    !current.enabled||event.category==AttentionCategory.Completed&&!current.includeCompleted -> "suppressed_policy"
+                    event.sequence.value<=floor||event.sequence.value<=scalar(db,"SELECT coalesce(max(through),0) FROM readwater WHERE host=? AND session=?",host,event.sessionId.value) -> "suppressed_read"
+                    current.suppress(event) -> "suppressed_visible"
+                    else -> "posted"
+                }
+                transaction {
+                    if(hinted=="hint_posted")db.execSQL("UPDATE notification_presentations SET disposition=?,active=? WHERE host=? AND event=?",arrayOf<Any?>(disposition,if(disposition=="posted"||priorActive)1 else 0,host,event.eventId.value))
+                    db.execSQL("DELETE FROM push_hints WHERE host=? AND event=? AND sequence=? AND session=? AND category=?",arrayOf<Any?>(host,event.eventId.value,event.sequence.value,event.sessionId.value,event.category.name))
+                }
+                if(hinted=="hint_posted") {
+                    if(disposition=="posted") {
+                        val outcome=try {sink.post(host,event)}catch(_:Exception){PresentationOutcome.AttemptedUnknown}
+                        settlePresentation(db,host,event.eventId.value,disposition,priorActive,outcome)
+                    }else if(priorActive)cancelPresentation(db,host,event.eventId.value,time,sink)
+                }
+            }
+            if (!current.enabled) return@withLock
             val unread=db.rawQuery("SELECT n.event FROM notifications n LEFT JOIN readwater w ON w.host=n.host AND w.session=n.session WHERE n.host=? AND n.sequence>coalesce(w.through,0) AND n.sequence>? ORDER BY n.sequence DESC LIMIT 100",arrayOf(host,floor.toString())).use { rows->buildList {while(rows.moveToNext()) add(Protocol.strictJson.decodeFromString<AttentionEvent>(rows.getString(0)))} }
             unread.reversed().forEach { event ->
                 event.validate()
-                val hinted=string(db,"SELECT disposition FROM notification_presentations WHERE host=? AND event=?",host,event.eventId.value)
-                if(hinted!=null){
-                    if(hinted=="hint_posted"||hinted=="suppressed_visible"&&scalar(db,"SELECT count(*) FROM push_hints WHERE host=? AND event=?",host,event.eventId.value)>0){
-                        val exact=scalar(db,"SELECT count(*) FROM push_hints WHERE host=? AND event=? AND sequence=? AND session=? AND category=?",host,event.eventId.value,event.sequence.value.toString(),event.sessionId.value,event.category.name)==1L
-                        if(!exact)throw StorePolicy(ErrorCode.InvalidRequest)
-                        val disposition=when {
-                            event.category==AttentionCategory.Completed&&!current.includeCompleted -> "suppressed_policy"
-                            current.suppress(event) -> "suppressed_visible"
-                            else -> "posted"
-                        }
-                        transaction{db.execSQL("UPDATE notification_presentations SET disposition=?,active=CASE WHEN ? THEN active ELSE 1 END WHERE host=? AND event=?",arrayOf<Any?>(disposition,if(disposition!="posted")1 else 0,host,event.eventId.value));db.execSQL("DELETE FROM push_hints WHERE host=? AND event=?",arrayOf(host,event.eventId.value))}
-                        if(disposition!="posted"){if(hinted=="hint_posted")cancelPresentation(db,host,event.eventId.value,time,sink)}else try{sink.post(host,event)}catch(_:Exception){}
-                    }
-                    return@forEach
-                }
+                if(string(db,"SELECT disposition FROM notification_presentations WHERE host=? AND event=?",host,event.eventId.value)!=null)return@forEach
                 val disposition=when {
                     event.category==AttentionCategory.Completed && !current.includeCompleted -> "suppressed_policy"
                     current.suppress(event) -> "suppressed_visible"
@@ -702,8 +716,9 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
                     db.execSQL("INSERT INTO notification_presentations(host,event,sequence,session,disposition,active,attempted_at) VALUES(?,?,?,?,?,?,?)",arrayOf<Any?>(host,event.eventId.value,event.sequence.value,event.sessionId.value,disposition,if(disposition=="posted")1 else 0,time))
                 }
                 if (disposition=="posted") {
-                    // Do not retry an unknown manager result: the committed row is the decision.
-                    try { sink.post(host,event) } catch (_: Exception) {}
+                    // A blocked/unknown result consumes this decision; restoring health never replays it.
+                    val outcome=try {sink.post(host,event)}catch(_:Exception){PresentationOutcome.AttemptedUnknown}
+                    settlePresentation(db,host,event.eventId.value,disposition,false,outcome)
                 }
             }
             } finally {
@@ -717,6 +732,20 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
                 } finally {committed.clear();attempted.clear()}
             }
         }
+    }
+    /** Second bounded transaction under the same writer/mutex; active means possible owned presence. */
+    private fun settlePresentation(db:SQLiteDatabase,host:String,event:String,posted:String,priorActive:Boolean,outcome:PresentationOutcome) {
+        val disposition=when(outcome) {
+            PresentationOutcome.AttemptedHealthy->posted
+            PresentationOutcome.AttemptedUnknown->"attempted_unknown"
+            PresentationOutcome.BlockedBeforeAttempt->"blocked_before_attempt"
+        }
+        val active=outcome!=PresentationOutcome.BlockedBeforeAttempt||priorActive
+        db.beginTransaction()
+        try {
+            db.execSQL("UPDATE notification_presentations SET disposition=?,active=? WHERE host=? AND event=?",arrayOf<Any?>(disposition,if(active)1 else 0,host,event))
+            db.setTransactionSuccessful()
+        }finally{db.endTransaction()}
     }
     private fun cancelPresentation(db: SQLiteDatabase, host:String, event:String, time:Long, sink:PresentationSink) {
         try {
@@ -816,7 +845,13 @@ class SessionStore(context: Context, name: String = "goatr-private.db", private 
             if(authenticated==null)db.execSQL("INSERT INTO push_hints VALUES(?,?,?,?,?,?)",arrayOf<Any?>(host,hint.eventId.value,hint.sequence.value,hint.sessionId.value,hint.category.name,time))
             db.execSQL("INSERT INTO notification_presentations VALUES(?,?,?,?,?,?,?)",arrayOf<Any?>(host,hint.eventId.value,hint.sequence.value,hint.sessionId.value,disposition,if(disposition=="hint_posted"||disposition=="posted")1 else 0,time));db.setTransactionSuccessful()
         }finally{db.endTransaction()}
-        if(disposition=="hint_posted")try{presentationSink?.postHint(host,hint)}catch(_:Exception){}else if(disposition=="posted"&&authenticated!=null)try{presentationSink?.post(host,authenticated)}catch(_:Exception){}
+        if(disposition=="hint_posted"||disposition=="posted") {
+            val sink=presentationSink
+            val outcome=if(sink==null)PresentationOutcome.BlockedBeforeAttempt else try {
+                if(disposition=="hint_posted")sink.postHint(host,hint)else sink.post(host,checkNotNull(authenticated))
+            }catch(_:Exception){PresentationOutcome.AttemptedUnknown}
+            settlePresentation(db,host,hint.eventId.value,disposition,false,outcome)
+        }
     }}
     internal suspend fun retirePush(host:String,generation:Uuid,device:Uuid,admitted:()->Boolean) = write { db,time ->
         if(!admitted())throw StorePolicy(ErrorCode.NotReady)
