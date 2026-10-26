@@ -761,7 +761,7 @@ impl State {
         }
         let sessions = inventory_sessions(&i);
         cancel_grids(&mut i, |lease| {
-            let (target,epoch)=lease.shell();
+            let Some((target,epoch))=lease.shell() else{return !lease.retains_agent_inventory(&sessions,&hierarchy);};
             let Some((summary,source))=shell_map.get(&target.shell_id) else{return true;};
             if summary.target!=*target||source!=epoch{return true;}
             let Some(graph)=hierarchy.iter().find(|graph|&graph.server_id==lease.server()) else{return true;};
@@ -801,7 +801,8 @@ impl State {
         Ok(())
     }
     /// Return the source epoch captured for this installation, including its completion/abort.
-    pub fn begin_install(&self, state: SessionState) -> StateResult<Uuid> {
+    pub fn begin_install(&self, mut state: SessionState) -> StateResult<Uuid> {
+        state.summary.capabilities.terminal_read=false;
         valid(&state)?;
         let mut i = self.inner.lock().expect("state mutex");
         let id = state.summary.session_id.clone();
@@ -837,6 +838,7 @@ impl State {
                 }),
             );
         }
+        cancel_grids(&mut i,|lease|lease.agent_target().is_some_and(|target|target.session_id==id));
         invalidate_publications(&mut i,&id);
         i.unbound.retain(|row| !replacing_unbound(row));
         for h in &mut i.hierarchy {
@@ -879,6 +881,7 @@ impl State {
     /// or deletes its durable identity/resources; all old handles and subscribers invalidate.
     pub fn retire_session(&self, session: &Uuid) {
         let mut i = self.inner.lock().expect("state mutex");
+        cancel_grids(&mut i,|lease|lease.agent_target().is_some_and(|target|&target.session_id==session));
         publish(
             &mut i,
             Some(session),
@@ -931,6 +934,7 @@ impl State {
         s.native_queue.clear();
         s.native_bytes = 0;
         let source = s.source.clone();
+        cancel_grids(&mut i,|lease|lease.agent_target()==Some(target));
         invalidate_publications(&mut i,&target.session_id);
         i.content.retain(|_, p| p.target != *target);
         i.cursors.retain(|_, c| c.target != *target);
@@ -972,7 +976,8 @@ impl State {
         );
         Ok(())
     }
-    pub fn finish_install(&self, source: &Uuid, snapshot: ProviderSnapshot) -> StateResult<()> {
+    pub fn finish_install(&self, source: &Uuid, mut snapshot: ProviderSnapshot) -> StateResult<()> {
+        snapshot.state.summary.capabilities.terminal_read=false;
         valid(&snapshot.state)?;
         valid(&snapshot.pending)?;
         valid(&snapshot.native_older)?;
@@ -1306,6 +1311,16 @@ impl State {
             return Err(ErrorCode::StaleSession);
         }
         if session.observation_pending {
+            return Err(ErrorCode::NotReady);
+        }
+        Ok(())
+    }
+    pub(crate) fn validate_agent_observer(&self,target:&Target,epoch:&Uuid,provider:Provider,server:&Uuid,route:&crate::herdr::shells::ShellIdentity)->StateResult<()> {
+        let i=self.inner.lock().expect("state mutex");let session=current(&i,target)?;let summary=&session.state.summary;
+        if &session.source!=epoch||summary.provider!=provider||&summary.server_id!=server
+            ||summary.workspace_id!=route.workspace_id||summary.pane_id!=route.pane_id||summary.terminal_id!=route.terminal_id
+        {return Err(ErrorCode::StaleSession);}
+        if session.installing||session.install_failed||session.topology_dirty||session.observation_pending||summary.connectivity!=SessionConnectivity::Ready {
             return Err(ErrorCode::NotReady);
         }
         Ok(())
@@ -2809,7 +2824,8 @@ fn update_size(update: &SessionUpdate) -> StateResult<usize> {
         .map_err(|_| ErrorCode::ResourceLimit)?
         .len())
 }
-fn apply(i: &mut Inner, id: &Uuid, update: SessionUpdate) -> StateResult<()> {
+fn apply(i: &mut Inner, id: &Uuid, mut update: SessionUpdate) -> StateResult<()> {
+    if let SessionUpdate::State(state)=&mut update {state.summary.capabilities.terminal_read=false;}
     update_size(&update)?;
     let old=i.sessions.get(id).ok_or(ErrorCode::NotFound)?;
     let invalidate=match &update {
@@ -2825,6 +2841,14 @@ fn apply(i: &mut Inner, id: &Uuid, update: SessionUpdate) -> StateResult<()> {
         SessionUpdate::State(value)=>value.summary.connectivity!=SessionConnectivity::Ready,
         SessionUpdate::SourceGap=>true,_=>false,
     };
+    let retire_agent=match &update {
+        SessionUpdate::State(value)=>value.summary.connectivity!=SessionConnectivity::Ready
+            ||value.summary.provider!=old.state.summary.provider||value.summary.server_id!=old.state.summary.server_id
+            ||value.summary.workspace_id!=old.state.summary.workspace_id||value.summary.pane_id!=old.state.summary.pane_id
+            ||value.summary.terminal_id!=old.state.summary.terminal_id,
+        SessionUpdate::SourceGap=>true,_=>false,
+    };
+    if retire_agent {cancel_grids(i,|lease|lease.agent_target().is_some_and(|target|&target.session_id==id));}
     if controls_invalidate {invalidate_controls(i,id);}
     if queue_invalidate {invalidate_queue(i,id);}
     if invalidate {invalidate_skills(i,id);}

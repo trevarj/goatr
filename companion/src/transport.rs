@@ -964,6 +964,7 @@ async fn connection_loop(
             boot_id: security.boot.clone(),
             protocol: ProtocolVersion(2),
             backends,
+            features: HelloFeatures { agent_ansi: topology.is_some() },
         });
         if let Some(capture) = &hello_capture {
             capture.report("response_write", "entered", None, "none");

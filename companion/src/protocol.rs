@@ -722,10 +722,20 @@ pub fn canonical_json_size(value: &Value) -> ValidationResult<usize> {
         }
     })
 }
+fn request_body_value(body:&RequestBody)->ValidationResult<Value> {
+    let mut value=serde_json::to_value(body).map_err(|_|invalid())?;
+    if let RequestBody::TerminalGridSubscribe(params)=body {
+        let mut fields=serde_json::Map::new();
+        fields.insert("target".into(),serde_json::to_value(&params.target).map_err(|_|invalid())?);
+        if params.ansi_observer{fields.insert("ansiObserver".into(),Value::Bool(true));}
+        value["params"]=Value::Object(fields);
+    }
+    Ok(value)
+}
 pub fn canonical_request(request: &Request) -> ValidationResult<Vec<u8>> {
     request.id.validate()?;
     request.body.validate()?;
-    let mut value = serde_json::to_value(&request.body).map_err(|_| invalid())?;
+    let mut value = request_body_value(&request.body)?;
     if matches!(
         request.body.method(),
         Method::SessionHistory | Method::NotificationsSync | Method::SessionQueueList
@@ -843,7 +853,8 @@ pub fn encode_payload(envelope: &Envelope) -> ValidationResult<Vec<u8>> {
         Envelope::Request(x) => {
             object.insert("type".into(), Value::from("request"));
             object.insert("id".into(), value(&x.id)?);
-            let Value::Object(body) = value(&x.body)? else {
+            x.body.validate()?;
+            let Value::Object(body) = request_body_value(&x.body)? else {
                 return Err(invalid());
             };
             object.extend(body);

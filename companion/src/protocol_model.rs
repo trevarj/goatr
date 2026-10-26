@@ -2228,6 +2228,12 @@ impl WireValidate for HelloParams {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelloFeatures {
+    #[serde(default)]
+    pub agent_ansi: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HelloResult {
@@ -2236,6 +2242,8 @@ pub struct HelloResult {
     pub boot_id: Uuid,
     pub protocol: ProtocolVersion,
     pub backends: Vec<Backend>,
+    #[serde(default)]
+    pub features: HelloFeatures,
 }
 impl WireValidate for HelloResult {
     fn validate(&self) -> Validation {
@@ -2733,6 +2741,8 @@ pub struct ContentReadResult {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalGridSubscribeParams {
     pub target: Target,
+    #[serde(default)]
+    pub ansi_observer: bool,
 }
 impl WireValidate for TerminalGridSubscribeParams {
     fn validate(&self) -> Validation {
@@ -2824,7 +2834,7 @@ impl WireValidate for GridCell {
     fn validate(&self) -> Validation {
         ensure(
             self.width.0 <= 2
-                && self.text.len() <= 128
+                && self.text.len() <= 260
                 && (self.width.0 == 0) == self.text.is_empty()
                 && !self
                     .text

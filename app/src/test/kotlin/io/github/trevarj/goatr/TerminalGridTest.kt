@@ -85,4 +85,48 @@ class TerminalGridTest {
         publishShellGrid(state,shown.selection,shown.source,shown.ticket,false,lease,null)
         assertEquals(replacement,state.value)
     }
+    @Test fun negotiatedAgentLongGraphemeAndCursorStylesCommitAtomicallyWhileShellRetains128() {
+        val glyph="\uD834\uDD1E"+"\uD834\uDD65".repeat(64)
+        assertEquals(260,utf8Size(glyph))
+        val subscription=Uuid.random()
+        val first=frame(0,false).copy(graphicsOmitted=true,cursor=GridCursor(Uint(0),Uint(0),true,Uint(2)))
+        val part=Event(subscription,Uint(1),EventBody.GridPart(GridPart(Uint(0),Uint(0),listOf(GridSpan(Uint(0),Uint(0),listOf(cell(glyph),cell(" ")))))))
+        val shell=TerminalGridReducer();shell.open(first,1)
+        assertTrue(runCatching {shell.event(part,1)}.isFailure)
+        val observer=TerminalGridReducer(ansiObserver=true);observer.open(first,1)
+        assertFalse(observer.event(part,1));assertNull(observer.committed)
+        observer.event(Event(subscription,Uint(2),EventBody.GridCommit(GridCommit(Uint(0)))),1)
+        assertEquals(glyph,observer.committed!!.cells[0].text);assertEquals(Uint(2),observer.committed!!.begin.cursor!!.shape)
+        val next=first.copy(revision=Uint(1),cursor=GridCursor(Uint(1),Uint(0),false,Uint(6)))
+        observer.event(Event(subscription,Uint(3),EventBody.GridBegin(GridBeginEvent(next))),1)
+        val attrs=GridAttributes(true,false,true,false,true,GridUnderline.Curly)
+        observer.event(Event(subscription,Uint(4),EventBody.GridPart(GridPart(Uint(1),Uint(0),listOf(GridSpan(Uint(0),Uint(0),listOf(cell("界",2,attrs),cell("",0,attrs))))))),1)
+        assertEquals(glyph,observer.committed!!.cells[0].text);assertEquals(Uint(2),observer.committed!!.begin.cursor!!.shape)
+        observer.event(Event(subscription,Uint(5),EventBody.GridCommit(GridCommit(Uint(1)))),1)
+        assertEquals("界",observer.committed!!.cells[0].text);assertEquals(attrs,observer.committed!!.cells[0].attributes)
+        assertEquals(Uint(6),observer.committed!!.begin.cursor!!.shape);assertFalse(observer.committed!!.begin.cursor!!.visible)
+        observer.clear();assertNull(observer.committed)
+        assertTrue(runCatching {TerminalGridReducer(true).open(first.copy(columns=Uint(512),rows=Uint(17)),1)}.isFailure)
+        assertTrue(runCatching {TerminalGridReducer(true).open(first.copy(alternateScreen=true),1)}.isFailure)
+        assertTrue(runCatching {TerminalGridReducer(true).open(first,8*1024*1024+1)}.isFailure)
+        assertTrue(runCatching {cell(glyph+"x")}.isFailure)
+    }
+    @Test fun agentButtonRequiresCurrentHelloFeatureRouteAndReadySourceNotLegacyCapability() {
+        val id=Uuid.random();val target=Target(id,id)
+        val summary=SessionSummary(id,id,id,Id("w"),Id("n"),Id("p"),Provider.Omp,Id("native"),"Agent",SessionStatus.Idle,SessionConnectivity.Ready,
+            Capabilities(true,true,true,true,PromptMode.SubmitOrSteer,CancelMode.CurrentWork),
+            HistoryCoverage(HistoryScope.AllBranches,HistorySource.PersistedAndLive,false,false,false))
+        val pane=NativePane(Id("p"),Id("n"),Id("w"),Id("t"),focused=false,agentStatus=NativeAgentStatus.Idle,target=target)
+        val old=HelloFeatures(agentAnsi=false)
+        val current=HelloFeatures(agentAnsi=true)
+        assertFalse(summary.capabilities.terminalRead)
+        assertFalse(readOnlyAgentTerminal(old,summary,pane,true))
+        assertFalse(readOnlyAgentTerminal(old,summary.copy(capabilities=summary.capabilities.copy(terminalRead=true)),pane,true))
+        assertTrue(readOnlyAgentTerminal(current,summary,pane,true))
+        assertFalse(readOnlyAgentTerminal(current,summary,pane,false))
+        assertFalse(readOnlyAgentTerminal(current,summary.copy(connectivity=SessionConnectivity.Synchronizing),pane,true))
+        assertFalse(readOnlyAgentTerminal(current,summary,pane.copy(terminalId=Id("replacement")),true))
+        assertFalse(readOnlyAgentTerminal(current,summary,pane.copy(target=Target(id,Uuid.random())),true))
+        assertFalse(readOnlyAgentTerminal(null,summary,pane,true))
+    }
 }

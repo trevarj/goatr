@@ -28,7 +28,7 @@ import androidx.compose.ui.semantics.*
 class TerminalGrid(val begin:GridBegin,val cells:List<GridCell>,val hasBlinkingCells:Boolean) {
     override fun toString()="TerminalGrid(redacted)"
 }
-internal class TerminalGridReducer {
+internal class TerminalGridReducer(private val ansiObserver:Boolean=false) {
     var committed:TerminalGrid?=null
         private set
     private var stage:ArrayList<GridCell>?=null
@@ -46,8 +46,9 @@ internal class TerminalGridReducer {
     fun open(frame:GridBegin,bytes:Int){requireWire(frame.revision.value==0L);sequence=0;revision=0;start(frame,bytes)}
     private fun start(frame:GridBegin,bytes:Int){
         frame.validate();requireWire(stage==null && frame.revision.value==revision)
+        if(ansiObserver)requireWire(frame.columns.value*frame.rows.value<=8192 && frame.graphicsOmitted && !frame.alternateScreen && !frame.popupBlocked)
         blinking=false
-        // ponytail: two frames *32768 validated cells *128 UTF-8 bytes/glyph <=8MiB; incoming part is separately bounded.
+        // ponytail: negotiated Agent has <=8192 cells/260 bytes; Shell retains <=32768/128.
         begin=frame;stage=ArrayList((frame.columns.value*frame.rows.value).toInt());index=0;wireBytes=bytes;wide=false
         deadline=System.nanoTime()+15_000_000_000L;requireWire(wireBytes<=8*1024*1024)
     }
@@ -65,6 +66,7 @@ internal class TerminalGridReducer {
                 for(span in part.spans){
                     requireWire(span.row.value==cells.size.toLong()/columns && span.column.value==cells.size.toLong()%columns && span.column.value+span.cells.size<=columns)
                     for(cell in span.cells){
+                        requireWire(utf8Size(cell.text)<=if(ansiObserver)260 else 128)
                         requireWire(cells.size<total && (cell.width.value==0L)==wide)
                         cells.add(cell);wide=cell.width.value==2L
                         blinking=blinking || cell.width.value!=0L && cell.attributes.blink && !cell.attributes.concealed

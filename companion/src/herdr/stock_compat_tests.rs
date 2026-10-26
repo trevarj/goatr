@@ -1652,7 +1652,7 @@ async fn sibling_socket_requires_same_process_and_retains_own_socket_identity() 
     let fixture = grid::queue_fixture(security.state.clone(), Uuid::random()).await;
     let context = fixture
         .topology()
-        .logical_shell_context(fixture.lease.shell().0)
+        .logical_shell_context(fixture.lease.shell().unwrap().0)
         .unwrap();
     let path = fixture
         .source

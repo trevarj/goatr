@@ -679,10 +679,16 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             originalSelection?.takeIf {it.host==originalHost}?.let {connection.open(originalHost,it.target)}
         }
     }
+    fun readOnlyAgentTerminal(key:ConversationKey):Boolean {
+        val view=connection.state.value
+        val summary=view.sessions[key.host]?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==key.target}==true}?.state?.summary ?: return false
+        val graph=view.inventory[key.host]?.hierarchy?.singleOrNull {it.serverId==summary.serverId}
+        val pane=graph?.panes?.singleOrNull {it.target==key.target}
+        return readOnlyAgentTerminal(view.hello[key.host]?.features,summary,pane,view.inventoryReady[key.host]==true && view.sources[key.host]?.containsKey(key.target)==true && graph?.freshness==NativeFreshness.Current)
+    }
     fun openTerminal(key: ConversationKey) {
         val source=connection.state.value.sources[key.host]?.get(key.target) ?: return
-        val summary=connection.state.value.sessions[key.host]?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==key.target}==true}?.state?.summary ?: return
-        if(!foreground || selection!=key || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.terminalRead) return
+        if(!foreground || selection!=key || !readOnlyAgentTerminal(key)) return
         closeShell();closeTerminal()
         val ticket=terminalTicket
         terminal=TerminalSnapshot(key,source,ticket,null,true,false)

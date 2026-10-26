@@ -379,3 +379,27 @@ fn canonical_expansion_does_not_shrink_valid_decoded_editor_or_prompt_limit() {
         assert!(canonical_request(&request).unwrap().len() > FRAME_MAX);
     }
 }
+
+#[test]
+fn observer_hello_defaults_and_subscription_builders_preserve_old_bytes() {
+    let corpus=corpus();
+    let old=corpus["frames"].as_array().unwrap().iter().find(|case|case["name"]=="result hello").unwrap();
+    let Envelope::Response(response)=decode_payload(&input(old),Some(Method::Hello)).unwrap() else{panic!()};
+    let Ok(ResultBody::Hello(hello))=response.outcome else{panic!()};
+    assert!(!hello.features.agent_ansi);
+    let id=Uuid::random();let target=Target{session_id:id.clone(),generation:id.clone()};
+    let request=Request{id:id.clone(),body:RequestBody::TerminalGridSubscribe(TerminalGridSubscribeParams{target:target.clone(),ansi_observer:false})};
+    let wire=encode_payload(&Envelope::Request(request.clone())).unwrap();
+    let raw=parse_raw_json(&wire).unwrap();
+    assert_eq!(raw["params"],json!({"target":target}));
+    assert_eq!(canonical_request(&request).unwrap(),canonical_json(&json!({"method":"terminal.grid.subscribe","params":{"target":target}})).unwrap());
+    let old_wire=json!({"v":2,"type":"request","id":id,"method":"terminal.grid.subscribe","params":{"target":target}});
+    assert_eq!(decode_payload(&serde_json::to_vec(&old_wire).unwrap(),None).unwrap(),Envelope::Request(request.clone()));
+    let mut explicit=old_wire;explicit["params"]["ansiObserver"]=Value::Bool(false);
+    assert_eq!(decode_payload(&serde_json::to_vec(&explicit).unwrap(),None).unwrap(),Envelope::Request(request));
+    explicit["params"]["ansiObserver"]=Value::Bool(true);
+    let Envelope::Request(negotiated)=decode_payload(&serde_json::to_vec(&explicit).unwrap(),None).unwrap() else{panic!()};
+    let RequestBody::TerminalGridSubscribe(params)=&negotiated.body else{panic!()};
+    assert!(params.ansi_observer);
+    assert_eq!(parse_raw_json(&encode_payload(&Envelope::Request(negotiated)).unwrap()).unwrap()["params"]["ansiObserver"],true);
+}

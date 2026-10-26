@@ -358,7 +358,10 @@ fn legacy_snapshot(d:&mut Decoder<'_>)->Result<()> {
     for _ in 0..d.count(1)?{d.string()?;d.string()?;d.strings()?;d.variant(5)?;d.option(Decoder::string)?;}Ok(())
 }
 pub(super) fn decode<'a>(bytes:&'a [u8],selected:&str,baseline:&mut Option<Surface>)->Result<Message<'a>> {
-    require(!bytes.is_empty()&&bytes.len()<=MAX_FRAME)?;let mut d=Decoder::new(bytes);
+    decode_bounded(bytes,selected,baseline,MAX_FRAME)
+}
+fn decode_bounded<'a>(bytes:&'a [u8],selected:&str,baseline:&mut Option<Surface>,maximum:usize)->Result<Message<'a>> {
+    require(!bytes.is_empty()&&bytes.len()<=maximum)?;let mut d=Decoder::new(bytes);
     let message=match d.variant(21)? {
         0=>{d.u32()?;d.variant(2)?;d.option(Decoder::string)?;Message::Auxiliary},
         1=>{d.u64()?;d.u16()?;d.u16()?;d.boolean()?;d.blob()?;Message::Auxiliary},
@@ -378,10 +381,53 @@ pub(super) fn decode<'a>(bytes:&'a [u8],selected:&str,baseline:&mut Option<Surfa
     };d.done()?;Ok(message)
 }
 
+/// The direct observer borrows its ANSI blob; all other stock messages are validated
+/// and discarded without materializing a second screen or invoking endpoint control.
+pub(super) enum ObserverMessage<'a> {
+    Welcome {version:u32,encoding:u32,error:bool},
+    Frame {seq:u64,width:u16,height:u16,full:bool,bytes:&'a [u8]},
+    Auxiliary,
+    Shutdown,
+}
+pub(super) fn observer_decode(bytes:&[u8])->Result<ObserverMessage<'_>> {
+    require(!bytes.is_empty()&&bytes.len()<=32*1024*1024)?;
+    let mut d=Decoder::new(bytes);
+    let message=match d.variant(21)? {
+        0=>ObserverMessage::Welcome{version:d.u32()?,encoding:d.variant(2)?,error:d.option(Decoder::string)?.is_some()},
+        1=>ObserverMessage::Frame{seq:d.u64()?,width:d.u16()?,height:d.u16()?,full:d.boolean()?,bytes:d.blob()?},
+        3=>{d.option(Decoder::string)?;ObserverMessage::Shutdown},
+        13=>{
+            d.string()?;d.u64()?;d.u64()?;let f=frame(&mut d)?;panes(&mut d)?;
+            for _ in 0..d.count(1)? {d.variant(2)?;d.u16()?;Rect::read(&mut d)?;Rect::read(&mut d)?;for _ in 0..d.count(1)?{d.boolean()?;}}
+            d.option(popup)?;graphics(&mut d,"",None,f.width,f.height)?;
+            ObserverMessage::Auxiliary
+        },
+        19=>{
+            d.string()?;d.u64()?;d.u64()?;d.u64()?;
+            for _ in 0..d.count(1)?{d.u16()?;d.u16()?;for _ in 0..d.count(6)?{cell(&mut d)?;}}
+            panes(&mut d)?;d.option(cursor)?;ObserverMessage::Auxiliary
+        },
+        15=>{d.string()?;ObserverMessage::Auxiliary},
+        _=>{
+            // The ordinary decoder already freezes every auxiliary field position.
+            // Its size check is separate from this direct client's 32MiB framing cap.
+            let mut baseline=None;
+            decode_auxiliary(bytes,&mut baseline)?;
+            return Ok(ObserverMessage::Auxiliary);
+        },
+    };
+    d.done()?;Ok(message)
+}
+fn decode_auxiliary(bytes:&[u8],baseline:&mut Option<Surface>)->Result<()> {
+    decode_bounded(bytes,"",baseline,32*1024*1024).map(|_|())
+}
+
 /// Partial reads live on the actual owner; selecting a resize/release cannot lose a frame suffix.
-pub(super) struct Reader { header:[u8;4], header_read:usize, payload:Vec<u8>, payload_read:usize, deadline:Option<Instant> }
+pub(super) struct Reader { header:[u8;4], header_read:usize, payload:Vec<u8>, payload_read:usize, pub(super) deadline:Option<Instant>, maximum:usize }
 impl Reader {
-    pub(super) fn new()->Self{Self{header:[0;4],header_read:0,payload:Vec::new(),payload_read:0,deadline:None}}
+    pub(super) fn new()->Self{Self::bounded(MAX_FRAME)}
+    pub(super) fn observer()->Self{Self::bounded(32*1024*1024)}
+    fn bounded(maximum:usize)->Self{Self{header:[0;4],header_read:0,payload:Vec::new(),payload_read:0,deadline:None,maximum}}
     pub(super) async fn read(&mut self,reader:&mut BufReader<UnixStream>)->Result<Vec<u8>> {
         if self.header_read==0 {
             let n=reader.read(&mut self.header).await.map_err(policy)?;require(n>0)?;
@@ -389,7 +435,7 @@ impl Reader {
         }
         let deadline=self.deadline.ok_or(ErrorCode::NotReady)?;
         while self.header_read<4 {let n=timeout_at(deadline,reader.read(&mut self.header[self.header_read..])).await.map_err(|_|ErrorCode::Timeout)?.map_err(policy)?;require(n>0)?;self.header_read+=n;}
-        if self.payload.is_empty(){let n=u32::from_le_bytes(self.header) as usize;require(n>0&&n<=MAX_FRAME)?;self.payload.resize(n,0);}
+        if self.payload.is_empty(){let n=u32::from_le_bytes(self.header) as usize;require(n>0&&n<=self.maximum)?;self.payload.resize(n,0);}
         while self.payload_read<self.payload.len(){let n=timeout_at(deadline,reader.read(&mut self.payload[self.payload_read..])).await.map_err(|_|ErrorCode::Timeout)?.map_err(policy)?;require(n>0)?;self.payload_read+=n;}
         self.header_read=0;self.payload_read=0;Ok(std::mem::take(&mut self.payload))
     }

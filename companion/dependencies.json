@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "lockSha256": "6bde0b22012cbd06cee5c0c2dd773e4adc26c738d9d0c72f1a0a128753c37fe4",
+  "lockSha256": "4bf71518838b4a9745c618951316fae5a7a9110a0288d8956ef90202b46ec9ed",
   "readOnlyGit": {
     "owner": "flake.nix goatrManifest.readGit; the same locked pkgs.git derivation supplies product and all development shells",
     "nixpkgsRevision": "767b0d3ec98a143ad9ed7dfc0d5553510ac27133",
@@ -4907,7 +4907,7 @@
       "features": []
     }
   ],
-  "featureScope": "Actual offline Cargo metadata all-target graph. reqwest0.13.5 with rustls-no-provider/http2 and httpdate1.0.3 are product UnifiedPush publisher dependencies; http-body-util remains acceptance-only. No product build/test/audit/runtime evidence is implied by resolution.",
+  "featureScope": "Actual locked/offline Cargo metadata all-target graph with default root features; no --all-features or target filter. All 26 normal root direct dependencies are inventoried separately from the three dev dependencies. unicode-segmentation1.13.3 is now direct with unchanged resolved package identity/features. reqwest0.13.5 with rustls-no-provider/http2 and httpdate1.0.3 are product UnifiedPush publisher dependencies; http-body-util remains acceptance-only. No product build/test/audit/native/provider/device/runtime evidence is implied by resolution.",
   "advisories": {
     "status": "unexecuted",
     "requiredExclusions": [
@@ -5126,6 +5126,12 @@
       ]
     },
     {
+      "name": "unicode-segmentation",
+      "requirement": "=1.13.3",
+      "defaultFeatures": true,
+      "features": []
+    },
+    {
       "name": "unicode-width",
       "requirement": "=0.2.2",
       "defaultFeatures": true,
@@ -5147,10 +5153,10 @@
     }
   ],
   "resolution": {
-    "command": "nix develop path:/home/trev/Workspace/.goatr-continuity-a1329ccc823f/step2-lifecycle-source-s -c cargo metadata --offline --format-version 1 --manifest-path /home/trev/Workspace/goatr-continuity-a1329ccc823f-writer/companion/Cargo.toml",
-    "date": "2026-10-24",
-    "verification": "Actual offline Cargo metadata exit0. Added only unicode-width0.2.2 and its root direct edge. All398 prior registry versions/checksums/licenses/features match the retained graph. The cached unicode-width archive SHA256 equals the lock checksum; source declares MIT OR Apache-2.0. Codex publisher and advisory records unchanged. No compilation/tests/build/audit/provider/device checks performed.",
-    "metadataSha256": "40b9bb117afb476a886afa48ef99aa8b3778b897a61cad24e9247d805b01f745"
+    "command": "/run/current-system/sw/bin/taskset --cpu-list 0,1 nix develop path:/home/trev/Workspace/.goatr-mvp-a99d451e-2954-4f9a-a6e2-9f009ecb21d4/goatr-source-ansi-fixed-b6caac72-7222-4475-96c9-2955cd99a15f --cores 2 --max-jobs 1 -c cargo metadata --locked --offline --format-version 1 --manifest-path companion/Cargo.toml",
+    "date": "2026-10-26",
+    "verification": "Actual coordinator-run locked/offline Cargo metadata exit0 from /home/trev/Workspace/goatr, captured without --all-features or additional feature flags. The coordinator compared all 399 registry package identities/licenses/resolved feature sets with the retained inventory: no differences. Metadata contains 400 packages including the root, with 26 normal root direct dependencies and three dev dependencies; the sole normal root direct-edge addition is unicode-segmentation =1.13.3, defaultFeatures=true, features=[]. Existing package/checksum/license/feature, Codex publisher, SQLite, advisory and dev-dependency records are unchanged. Resolution is not compilation/test/build/audit/native/provider/device/runtime acceptance evidence.",
+    "metadataSha256": "bc0fa72511b063184381d9817fcac1a3e8ed94a5940fea62e1a1177f95c146f3"
   },
   "devDependencies": [
     {

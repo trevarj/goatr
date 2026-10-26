@@ -180,7 +180,10 @@ internal fun requestJson(body: RequestBody): JsonObject {
         is RequestBody.RequestRespond -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.ActionStatus -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
         is RequestBody.ContentRead -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
-        is RequestBody.TerminalGridSubscribe -> {body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
+        is RequestBody.TerminalGridSubscribe -> {body.params.validate();buildJsonObject {
+            put("target",Protocol.strictJson.encodeToJsonElement(body.params.target))
+            if(body.params.ansiObserver)put("ansiObserver",JsonPrimitive(true))
+        }}
         is RequestBody.ShellGridSubscribe -> {body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}
     is RequestBody.ShellInput -> { body.params.validate(); Protocol.strictJson.encodeToJsonElement(body.params) }
     is RequestBody.ShellResize->{body.params.validate();Protocol.strictJson.encodeToJsonElement(body.params)}

@@ -1349,7 +1349,7 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                 val filesAvailable=ready&&source!=null&&!model.busy&&summary?.capabilities?.artifacts==true
                 ComposerControlAction(MaterialGlyph.Folder,"Files","conversation_files",filesAvailable,PROJECT_FILE_READ_REQUIREMENT) {moreTools=false;model.beginArtifacts(key.host,ArtifactSource.Session(key.target))}
                 if(!filesAvailable) UiText(PROJECT_FILE_READ_REQUIREMENT,style=MaterialTheme.typography.bodySmall)
-                val terminalAvailable=ready&&source!=null&&summary?.capabilities?.terminalRead==true
+                val terminalAvailable=ready&&source!=null&&model.readOnlyAgentTerminal(key)
                 ComposerControlAction(MaterialGlyph.Terminal,"Terminal","terminal_open",terminalAvailable,"Terminal text is unavailable for this current native session.") {moreTools=false;model.openTerminal(key)}
                 if(!terminalAvailable) UiText("Terminal text is unavailable for this current native session.",style=MaterialTheme.typography.bodySmall)
                 val worktreesAvailable=ready&&source!=null&&summary?.capabilities?.worktreesRead==true

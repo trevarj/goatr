@@ -2297,6 +2297,9 @@ impl GridWitness {
     }
     fn begin(&mut self, frame: &GridBegin, bytes: usize, initial: bool) -> io::Result<()> {
         frame.validate().map_err(|_| grid_failure("descriptor"))?;
+        if matches!(self.subject,GridSubject::Pane(_)) && (frame.columns.0*frame.rows.0>8192 || !frame.graphics_omitted || frame.alternate_screen || frame.popup_blocked) {
+            return Err(grid_failure("ansi_observer_descriptor"));
+        }
         let expected = if initial {
             0
         } else {
@@ -2438,6 +2441,7 @@ impl GridWitness {
                 for span in part.spans {
                     for (offset, cell) in span.cells.into_iter().enumerate() {
                         cell.validate().map_err(|_|grid_failure("selected_cell"))?;
+                        if matches!(self.subject,GridSubject::Shell(_)) && cell.text.len()>128 {return Err(grid_failure("selected_cell"));}
                         let column=span.column.0+offset as u64;
                         if span.row.0!=self.cells as u64/self.columns||column!=self.cells as u64%self.columns
                             || (cell.width.0==0)!=self.wide_pending
@@ -2994,6 +2998,7 @@ async fn connect(
             boot_id: Uuid::random(),
             protocol: ProtocolVersion(2),
             backends: vec![],
+            features: HelloFeatures::default(),
         },
         events: 0,
         generation: None,
@@ -10614,8 +10619,10 @@ impl Phone {
         let id=witness.opening.clone();
         let body = match &witness.subject {
             GridSubject::Pane(target) => {
+                if !self.hello.features.agent_ansi{return Err(grid_failure("ansi_observer_unavailable"));}
                 RequestBody::TerminalGridSubscribe(TerminalGridSubscribeParams {
                     target: target.clone(),
+                    ansi_observer: true,
                 })
             }
             GridSubject::Shell(target) => {
@@ -15733,7 +15740,7 @@ mod tests {
                 rows: Uint(1),
                 cursor: None,
                 alternate_screen: false,
-                graphics_omitted: false,
+                graphics_omitted: true,
                 popup_blocked: false,
                 part_count: Uint(1),
             },
@@ -15761,6 +15768,7 @@ mod tests {
                 boot_id: Uuid::random(),
                 protocol: ProtocolVersion(2),
                 backends: vec![],
+                features: HelloFeatures::default(),
             },
             events: 0,
             generation: None,
@@ -16258,7 +16266,7 @@ mod tests {
                             rows: Uint(1),
                             cursor: None,
                             alternate_screen: false,
-                            graphics_omitted: false,
+                            graphics_omitted: true,
                             popup_blocked: false,
                             part_count: Uint(1),
                         },
@@ -16421,7 +16429,7 @@ mod tests {
             rows: Uint(1),
             cursor: None,
             alternate_screen: false,
-            graphics_omitted: false,
+            graphics_omitted: true,
             popup_blocked: false,
             part_count: Uint(1),
         };

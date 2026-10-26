@@ -1253,12 +1253,15 @@ data class HelloParams(
 }
 
 @Serializable
+data class HelloFeatures(val agentAnsi:Boolean=false)
+@Serializable
 data class HelloResult(
     val hostId: EndpointId,
     val deviceId: Uuid,
     val bootId: Uuid,
     val protocol: ProtocolVersion,
     val backends: List<Backend>,
+    val features:HelloFeatures=HelloFeatures(),
 ) : WireValue {
     override fun validate() {
         hostId.validateWire()
@@ -1588,7 +1591,7 @@ data class ContentReadResult(
 }
 
 @Serializable
-data class TerminalGridSubscribeParams(val target:Target):WireValue {override fun validate(){target.validateWire()}}
+data class TerminalGridSubscribeParams(val target:Target,val ansiObserver:Boolean=false):WireValue {override fun validate(){target.validateWire()}}
 @Serializable
 data class TerminalGridSubscribeResult(val target:Target,val subscription:Uuid,val seq:ZeroValue,val frame:GridBegin):WireValue {
     override fun validate(){target.validateWire();subscription.validateWire();seq.validateWire();frame.validate();requireWire(frame.revision.value==0L)}
@@ -1611,7 +1614,7 @@ data class GridAttributes(val bold:Boolean,val faint:Boolean,val italic:Boolean,
 @Serializable
 class GridCell(val text:String,val width:Uint,val foreground:GridColor,val background:GridColor,val attributes:GridAttributes):WireValue {
     override fun validate(){
-        requireWire(validUnicode(text) && utf8Size(text)<=128 && width.value<=2 && (width.value==0L)==text.isEmpty() && text.none {it.isISOControl() || it=='\u2028' || it=='\u2029'})
+        requireWire(validUnicode(text) && utf8Size(text)<=260 && width.value<=2 && (width.value==0L)==text.isEmpty() && text.none {it.isISOControl() || it=='\u2028' || it=='\u2029'})
         foreground.validate();background.validate();attributes.validate()
     }
     override fun equals(other:Any?)=other is GridCell && text==other.text && width==other.width && foreground==other.foreground && background==other.background && attributes==other.attributes

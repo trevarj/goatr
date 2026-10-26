@@ -87,6 +87,13 @@ class ConnectionView(
     val selectedRoutes: Map<String,SelectedIrohPath> = emptyMap(),
 )
 
+/** New-phone admission is derived from this Hello's features, never the legacy terminalRead bit. */
+internal fun readOnlyAgentTerminal(features:HelloFeatures?,summary:SessionSummary?,pane:NativePane?,current:Boolean):Boolean =
+    current && features?.agentAnsi==true && summary!=null && summary.connectivity==SessionConnectivity.Ready &&
+        (summary.provider==Provider.Codex || summary.provider==Provider.Omp) && pane!=null &&
+        pane.target?.sessionId==summary.sessionId && pane.target?.generation==summary.generation && pane.paneId==summary.paneId &&
+        pane.terminalId==summary.terminalId && pane.workspaceId==summary.workspaceId
+
 internal enum class ActionAdmissionPhase(val closed:String) { OriginalScope("original_scope"), PrePreSend("pre_presend"), PostPreSend("post_presend"), Request("request"), Writer("writer"), Pending("pending"), ResponseApply("response_apply"), ExistingStatus("existing_status") }
 internal enum class ActionAdmissionGuard(val closed:String) {
     OriginalAbsent("original_absent"), OriginalNotAlive("original_not_alive"), OriginalUnauthenticated("original_unauthenticated"), OriginalReplaced("original_replaced"), BootChanged("boot_changed"), HostNotReady("host_not_ready"), ReceiptsUnreconciled("receipts_unreconciled"), ReducerAbsent("reducer_absent"), SummaryAbsent("summary_absent"), TargetChanged("target_changed"), MutationsDisabled("mutations_disabled"), SourceNotCurrent("source_not_current"), NotAlive("not_alive"), Unauthenticated("unauthenticated"), InflightBusy("inflight_busy"), PendingConflict("pending_conflict"), IoBeforeFrame("io_before_frame"), IoAfterFrameStart("io_after_frame_start"), ConnectionClosed("connection_closed"), StorePolicy("store_policy"), Other("other"), Unknown("unknown"),
@@ -159,11 +166,15 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         val incarnation=hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==shell.serverId}?.serverIncarnation ?: throw StorePolicy(ErrorCode.NotReady)
     }
     private class TerminalReadContext(val host:String,val live:Live,val reducer:SessionReducer,val target:Target,val source:Uuid) {
+        val hello=live.hello
+        val original=reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
+        val route=live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==original.serverId && it.freshness==NativeFreshness.Current}
+            ?.panes?.singleOrNull {it.target==target} ?: throw StorePolicy(ErrorCode.NotReady)
         /** Caller cancellation invalidates a correlated late reply without closing the transport. */
         val active=AtomicBoolean(true)
     }
     private class GridReadContext(val live:Live,val terminal:TerminalReadContext?,val shell:ShellReadContext?,val lease:TerminalGridLease,val display:(TerminalGrid?,TerminalGridLease)->Unit) {
-        val reducer=TerminalGridReducer()
+        val reducer=TerminalGridReducer(ansiObserver=terminal!=null)
         val server=terminal?.reducer?.state?.summary?.serverId ?: shell?.shell?.serverId
         val incarnation=server?.let {id->live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==id}?.serverIncarnation}
         var subscription:Uuid?=null
@@ -1008,13 +1019,22 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     /** The selected terminal retains its original live/reducer/source triple. */
     private fun terminalContext(host:String,target:Target,source:Uuid):TerminalReadContext {
         val (live,reducer)=contentSource(host,target,source)
-        if(reducer.state?.summary?.capabilities?.terminalRead!=true) throw StorePolicy(ErrorCode.NotReady)
+        val summary=reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
+        val graph=live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==summary.serverId}
+        val pane=graph?.panes?.singleOrNull {it.target==target}
+        if(!readOnlyAgentTerminal(live.hello?.features,summary,pane,live.hostReducer.ready && live.hostReducer.sourceCurrent(summary.serverId) && graph?.freshness==NativeFreshness.Current))throw StorePolicy(ErrorCode.NotReady)
         return TerminalReadContext(host,live,reducer,target,source)
     }
     private fun validateTerminalRead(context:TerminalReadContext) {
         if(!context.active.get() || sessions[context.host]!==context.live || !context.live.alive.get() || context.live.reducers[context.target.sessionId]!==context.reducer) throw StorePolicy(ErrorCode.StaleSession)
         val summary=context.reducer.state?.summary ?: throw StorePolicy(ErrorCode.NotReady)
-        if(!context.live.hostReducer.ready || !context.live.hostReducer.sourceCurrent(summary.serverId) || summary.connectivity!=SessionConnectivity.Ready || !summary.capabilities.terminalRead || context.reducer.source!=context.source || Target(summary.sessionId,summary.generation)!=context.target) throw StorePolicy(ErrorCode.StaleSession)
+        val graph=context.live.hostReducer.inventory?.hierarchy?.singleOrNull {it.serverId==summary.serverId} ?: throw StorePolicy(ErrorCode.StaleSession)
+        val pane=graph.panes.singleOrNull {it.target==context.target} ?: throw StorePolicy(ErrorCode.StaleSession)
+        val original=context.original;val route=context.route
+        if(context.live.hello!==context.hello || context.reducer.source!=context.source || Target(summary.sessionId,summary.generation)!=context.target
+            ||summary.provider!=original.provider || summary.serverId!=original.serverId || pane.tabId!=route.tabId
+            ||pane.paneId!=route.paneId ||pane.terminalId!=route.terminalId ||pane.workspaceId!=route.workspaceId
+            ||!readOnlyAgentTerminal(context.hello?.features,summary,pane,context.live.hostReducer.ready && context.live.hostReducer.sourceCurrent(summary.serverId) && graph.freshness==NativeFreshness.Current))throw StorePolicy(ErrorCode.StaleSession)
     }
     private fun validateControlsRead(context:ControlsReadContext) {
         val live=context.live;val reducer=context.reducer
@@ -1205,7 +1225,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     }
     internal suspend fun terminal(host:String,target:Target,source:Uuid,display:(TerminalGrid?,TerminalGridLease)->Unit)=withContext(serial) {
         val context=terminalContext(host,target,source)
-        gridStream(context.live,RequestBody.TerminalGridSubscribe(TerminalGridSubscribeParams(target)),context,null,display)
+        gridStream(context.live,RequestBody.TerminalGridSubscribe(TerminalGridSubscribeParams(target,ansiObserver=true)),context,null,display)
     }
     private fun invalidateGrid(live:Live) {
         live.grid?.let {grid->try {

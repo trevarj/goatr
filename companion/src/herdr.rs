@@ -38,6 +38,7 @@ mod worktree_creation;
 pub(crate) mod shells;
 pub(crate) mod grid;
 pub(crate) mod endpoint;
+mod ansi;
 pub mod artifacts;
 pub(crate) mod creation_directories;
 pub(crate) use creation_directories::CreationSelection;
