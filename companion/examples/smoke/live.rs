@@ -44,6 +44,8 @@ mod ui;
 #[path = "physical.rs"]
 mod physical;
 const APP: &str = "io.github.trevarj.goatr.debug";
+const NTFY_APK_SHA256:&str="b4baa6f668bd57ad5df3b4e0e769165dcf25c5ee19fdb04f78077ee819616f2a";
+const NTFY_SIGNER_SHA256:&str="76e94d8e04706c5b99064c23210d8ca9910608abae8f3e972b41e388391646e0";
 #[derive(Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct Lease {
@@ -7415,12 +7417,11 @@ fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
         "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
         "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"]
         .iter().any(|key|std::env::var_os(key).is_some()){return Err(failure("background conflicts with inherited private/provider diagnostics"));}
-    let pins=["expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"];
-    for pin in pins {
+    for (pin,expected) in [("expected-ntfy-apk-sha256",NTFY_APK_SHA256),("expected-ntfy-signer-sha256",NTFY_SIGNER_SHA256)] {
         match args.get_one::<String>(pin) {
-            Some(value) if mode=="ntfy"&&value.len()==64&&value.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))=>{},
+            Some(value) if mode=="ntfy"&&value==expected=>{},
             None if mode=="persistent"=>{},
-            _=>return Err(failure("ntfy requires both explicit independently qualified lowercase SHA256 pins; persistent accepts neither")),
+            _=>return Err(failure("background ntfy requires the exact qualified official F-Droid1.25.2 APK/signer pair; persistent accepts neither")),
         }
     }
     Ok(())
@@ -7445,11 +7446,11 @@ fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
         return Err(failure("physical-mvp refuses inherited private/provider/Hello/grid capture"));
     }
     for (name,expected) in [
-        ("expected-ntfy-apk-sha256","8a1075c0963caa1e0dc404996531bc641cb2b982f92a4bc692d4999f9eb53f39"),
-        ("expected-ntfy-signer-sha256","6e145d7ae685eff75468e5067e03a6c3645453343e4e181dac8b6b17ff67489d"),
+        ("expected-ntfy-apk-sha256",NTFY_APK_SHA256),
+        ("expected-ntfy-signer-sha256",NTFY_SIGNER_SHA256),
     ] {
         if args.get_one::<String>(name).map(String::as_str)!=Some(expected) {
-            return Err(failure("physical-mvp requires the independently qualified official ntfy1.25.2 APK and signer pins"));
+            return Err(failure("physical-mvp requires the exact qualified official F-Droid ntfy1.25.2 APK and signer pins"));
         }
     }
     Ok(())
@@ -7509,9 +7510,11 @@ fn arguments_base() -> Command {
                 "admin-socket",
                 "disposable-uid",
             ])
-            .help("Finite owned-emulator persistent or official ntfy registration/probe/ACK/native attention/dedup/tap gate for BOTH original providers; retains native resources, no fault stop or replay"))
-        .arg(Arg::new("expected-ntfy-apk-sha256").long("expected-ntfy-apk-sha256").requires("notification-artifact-mode"))
-        .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("notification-artifact-mode"))
+            .help("Finite owned-emulator persistent or official F-Droid ntfy1.25.2 registration/probe/ACK/native attention/dedup/tap gate for BOTH original providers; retains native resources, no fault stop or replay"))
+        .arg(Arg::new("expected-ntfy-apk-sha256").long("expected-ntfy-apk-sha256").requires("notification-artifact-mode")
+            .help("Independent exact APK pin for official F-Droid https://f-droid.org/repo/io.heckel.ntfy_63.apk (1.25.2/code63); not the upstream GitHub fdroid-release build"))
+        .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("notification-artifact-mode")
+            .help("Independent exact official F-Droid APK-signer pin; physical-mvp/background ntfy only, never persistent"))
         .arg(Arg::new("expected-config-sha256").long("expected-config-sha256").requires_all(["physical-mvp","config"]).help("Independent exact retained0600 template SHA-256; never measured from the candidate as authority"))
         .arg(Arg::new("old-product-audit").long("old-product-audit").value_parser(value_parser!(PathBuf)).requires_all(["physical-mvp","expected-old-product-audit-sha256"]).help("Independent immutable OLD APK Startup provider/AAR audit, required when OLD differs from the frozen NEW artifact"))
         .arg(Arg::new("expected-old-product-audit-sha256").long("expected-old-product-audit-sha256").requires_all(["physical-mvp","old-product-audit"]))
@@ -14336,7 +14339,10 @@ mod tests {
             "--evidence-dir=/private/fresh".into(),"--consent-owned-providers".into(),"--automate-native-inputs".into(),
             "--serial=emulator-5594".into(),"--emulator-owner=/private/run.json".into(),"--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
         for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
-        if mode=="ntfy"{for field in ["expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"]{args.push(format!("--{field}={}","2".repeat(64)));}}
+        if mode=="ntfy" {
+            args.push(format!("--expected-ntfy-apk-sha256={NTFY_APK_SHA256}"));
+            args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
+        }
         args
     }
     fn physical_mvp_args()->Vec<String> {
@@ -14346,8 +14352,8 @@ mod tests {
             "--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
         for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
         args.push(format!("--expected-config-sha256={}",physical::EXPECTED_CONFIG_SHA256));
-        args.push("--expected-ntfy-apk-sha256=8a1075c0963caa1e0dc404996531bc641cb2b982f92a4bc692d4999f9eb53f39".into());
-        args.push("--expected-ntfy-signer-sha256=6e145d7ae685eff75468e5067e03a6c3645453343e4e181dac8b6b17ff67489d".into());
+        args.push(format!("--expected-ntfy-apk-sha256={NTFY_APK_SHA256}"));
+        args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
         args
     }
     #[test]
@@ -14413,17 +14419,46 @@ mod tests {
     }
     #[test]
     fn physical_mvp_requires_exact_official_ntfy_pins_without_leaking_them_to_other_modes() {
-        for field in ["expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"] {
-            let mut args=physical_mvp_args();args.retain(|arg|!arg.starts_with(&format!("--{field}=")));args.push(format!("--{field}={}","0".repeat(64)));
-            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();
-            assert!(physical_mode_environment(&parsed).unwrap_err().to_string().contains("independently qualified official ntfy"));
+        let apk="b4baa6f668bd57ad5df3b4e0e769165dcf25c5ee19fdb04f78077ee819616f2a";
+        let signer="76e94d8e04706c5b99064c23210d8ca9910608abae8f3e972b41e388391646e0";
+        // Former upstream release and actual older installed F-Droid artifact are reject inputs only.
+        let upstream_apk="8a1075c0963caa1e0dc404996531bc641cb2b982f92a4bc692d4999f9eb53f39";
+        let upstream_signer="6e145d7ae685eff75468e5067e03a6c3645453343e4e181dac8b6b17ff67489d";
+        let older_fdroid_apk="be6ea2f315fa86bc9c7d977dece15882e9db4a8fc12d6dd2fe7f655540a3ec43";
+        let arbitrary="0".repeat(64);
+        for physical in [true,false] {
+            let mut args=if physical{physical_mvp_args()}else{background_args("ntfy")};
+            args.retain(|arg|!arg.starts_with("--expected-ntfy-"));
+            args.extend([format!("--expected-ntfy-apk-sha256={apk}"),format!("--expected-ntfy-signer-sha256={signer}")]);
+            let check:fn(&clap::ArgMatches)->io::Result<()>=if physical{physical_mode_environment}else{background_mode_environment};
+            check(&feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap()).unwrap();
+            for (candidate_apk,candidate_signer) in [
+                (upstream_apk,upstream_signer),(apk,upstream_signer),(upstream_apk,signer),(older_fdroid_apk,signer),
+                (arbitrary.as_str(),signer),(apk,arbitrary.as_str()),("not-a-sha",signer),(apk,"not-a-sha"),(signer,apk),
+            ] {
+                let mut rejected=args.clone();rejected.retain(|arg|!arg.starts_with("--expected-ntfy-"));
+                rejected.extend([format!("--expected-ntfy-apk-sha256={candidate_apk}"),format!("--expected-ntfy-signer-sha256={candidate_signer}")]);
+                let parsed=feedback_arguments(arguments_base()).try_get_matches_from(rejected).unwrap();
+                assert!(check(&parsed).is_err(),"physical={physical} must reject a nonfixture or mixed identity");
+            }
+            for missing in ["--expected-ntfy-apk-sha256=","--expected-ntfy-signer-sha256="] {
+                let mut rejected=args.clone();rejected.retain(|arg|!arg.starts_with(missing));
+                match feedback_arguments(arguments_base()).try_get_matches_from(rejected) {
+                    Ok(parsed)=>assert!(check(&parsed).is_err()),
+                    Err(error)=>assert_eq!(error.kind(),clap::error::ErrorKind::MissingRequiredArgument),
+                }
+            }
         }
-        let pins=physical_mvp_args().into_iter().filter(|arg|arg.starts_with("--expected-ntfy-")).collect::<Vec<_>>();
-        let mut unrelated=vec!["smoke".to_owned()];unrelated.extend(pins.clone());
-        assert!(feedback_arguments(arguments_base()).try_get_matches_from(unrelated).is_err());
-        let mut persistent=background_args("persistent");persistent.extend(pins);
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(persistent).unwrap();
-        assert!(background_mode_environment(&parsed).is_err());
+        for (candidate_apk,candidate_signer) in [(apk,signer),(upstream_apk,upstream_signer),(apk,upstream_signer)] {
+            let pins=[format!("--expected-ntfy-apk-sha256={candidate_apk}"),format!("--expected-ntfy-signer-sha256={candidate_signer}")];
+            for supplied in [vec![pins[0].clone()],vec![pins[1].clone()],pins.to_vec()] {
+                let mut unrelated=vec!["smoke".to_owned()];unrelated.extend(supplied.clone());
+                assert!(feedback_arguments(arguments_base()).try_get_matches_from(unrelated).is_err());
+                let mut persistent=background_args("persistent");persistent.extend(supplied);
+                let parsed=feedback_arguments(arguments_base()).try_get_matches_from(persistent).unwrap();
+                assert!(background_mode_environment(&parsed).is_err());
+            }
+        }
     }
     #[test]
     fn finite_background_parser_accepts_both_explicit_modes_and_refuses_effectful_mixed_routes() {
