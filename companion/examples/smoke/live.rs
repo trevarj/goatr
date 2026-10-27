@@ -7455,16 +7455,32 @@ fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     }
     Ok(())
 }
-fn physical_host_preflight_selection(args:&clap::ArgMatches)->io::Result<bool> {
-    if !args.get_flag("physical-host-preflight"){return Ok(false);}
+fn physical_host_preflight_selection(args:&clap::ArgMatches)->io::Result<Option<physical::ControllerPolicy<'_>>> {
+    let policy=match (args.get_flag("physical-host-preflight"),args.get_flag("physical-host-wake-preflight")) {
+        (false,false)=>return Ok(None),
+        (true,false)=>physical::ControllerPolicy::Zero,
+        (false,true)=>{
+            let unit=args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("Wake diagnostic requires the exact controller unit"))?;
+            physical::validate_controller_unit(unit)?;physical::ControllerPolicy::WakeDiagnostic {unit}
+        }
+        (true,true)=>return Err(failure("host preflight policies are mutually exclusive")),
+    };
     if args.ids().any(|id|args.value_source(id.as_str())==Some(clap::parser::ValueSource::CommandLine)
-        &&!matches!(id.as_str(),"physical-host-preflight"|"evidence-dir")) {
-        return Err(failure("physical-host-preflight accepts only its selector and fresh evidence directory; no runtime/device/artifact/effect arguments"));
+        &&!match policy {
+            physical::ControllerPolicy::Zero=>matches!(id.as_str(),"physical-host-preflight"|"evidence-dir"),
+            physical::ControllerPolicy::WakeDiagnostic {..}=>matches!(id.as_str(),"physical-host-wake-preflight"|"expected-controller-unit"|"evidence-dir"),
+        }) {
+        return Err(failure("host preflight accepts only its closed selector/unit/evidence inputs; no runtime/device/artifact/effect arguments"));
     }
-    Ok(true)
+    Ok(Some(policy))
 }
 fn arguments_base() -> Command {
     Command::new("smoke")
+        .arg(Arg::new("physical-host-wake-preflight").long("physical-host-wake-preflight").action(ArgAction::SetTrue)
+            .requires_all(["expected-controller-unit","evidence-dir"]).conflicts_with("physical-host-preflight")
+            .help("Explicit real-host TTY diagnostic ONLY: exact four-set Wake capability shape plus expected actual controller unit, never full-matrix/runtime authority"))
+        .arg(Arg::new("expected-controller-unit").long("expected-controller-unit").requires("physical-host-wake-preflight")
+            .help("Exact goatr-host-wake-<canonical-lower-UUID>.service observed in the controller's sole unified cgroup leaf"))
         .arg(Arg::new("physical-host-preflight").long("physical-host-preflight").action(ArgAction::SetTrue)
             .requires("evidence-dir")
             .help("Human real-host TTY only: qualify the unchanged original-host guard and record closed permission diagnostics; evidence only, no native/provider/ADB/product effect or full-MVP claim"))
@@ -14182,10 +14198,10 @@ async fn checkpoint_held(
 }
 pub async fn run() -> io::Result<bool> {
     let args = arguments();
-    if physical_host_preflight_selection(&args)? {
+    if let Some(policy)=physical_host_preflight_selection(&args)? {
         let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required host preflight evidence"))?;
         fresh_shared_evidence(&evidence)?;
-        return physical::host_preflight(&evidence);
+        return physical::host_preflight(&evidence,policy);
     }
     physical_mode_environment(&args)?;
     if args.get_flag("physical-mvp") {
@@ -14370,17 +14386,43 @@ mod tests {
         args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
         args
     }
+    fn host_preflight_args(wake:bool)->Vec<String> {
+        let mut args=vec!["smoke".to_owned(),"--evidence-dir=/private/fresh".to_owned()];
+        if wake {
+            args.push("--physical-host-wake-preflight".to_owned());args.push(format!("--expected-controller-unit=goatr-host-wake-{}.service",Uuid::random().0));
+        }else{args.push("--physical-host-preflight".to_owned());}
+        args
+    }
+    #[test]
+    fn physical_host_wake_preflight_requires_canonical_unit_and_never_selects_zero_or_runtime() {
+        let args=host_preflight_args(true);let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+        let unit=parsed.get_one::<String>("expected-controller-unit").unwrap();
+        assert_eq!(physical_host_preflight_selection(&parsed).unwrap(),Some(physical::ControllerPolicy::WakeDiagnostic {unit}));
+        for prefix in ["--expected-controller-unit=","--evidence-dir="] {
+            let missing=args.iter().filter(|argument|!argument.starts_with(prefix)).cloned().collect::<Vec<_>>();
+            assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(missing).unwrap_err().kind(),clap::error::ErrorKind::MissingRequiredArgument);
+        }
+        for invalid in [unit.to_uppercase(),format!("/private/{unit}"),unit.replace(".service",".scope"),"goatr-host-wake-invalid.service".to_owned()] {
+            let mut bad=args.iter().filter(|argument|!argument.starts_with("--expected-controller-unit=")).cloned().collect::<Vec<_>>();
+            bad.push(format!("--expected-controller-unit={invalid}"));let parsed=feedback_arguments(arguments_base()).try_get_matches_from(bad).unwrap();
+            assert!(physical_host_preflight_selection(&parsed).is_err());
+        }
+        let mut old=host_preflight_args(false);old.push(format!("--expected-controller-unit={unit}"));
+        assert!(feedback_arguments(arguments_base()).try_get_matches_from(old).map_or(true,|parsed|physical_host_preflight_selection(&parsed).is_err()));
+        let no_selector=args.iter().filter(|argument|argument.as_str()!="--physical-host-wake-preflight").cloned().collect::<Vec<_>>();
+        assert!(feedback_arguments(arguments_base()).try_get_matches_from(no_selector).map_or(true,|parsed|physical_host_preflight_selection(&parsed).is_err()));
+    }
     #[test]
     fn physical_host_preflight_policy_accepts_only_selector_and_fresh_evidence() {
         let parsed=feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--physical-host-preflight","--evidence-dir=/private/fresh"]).unwrap();
-        assert!(physical_host_preflight_selection(&parsed).unwrap());
+        assert_eq!(physical_host_preflight_selection(&parsed).unwrap(),Some(physical::ControllerPolicy::Zero));
         assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::DefaultValue));
         assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--physical-host-preflight"]).unwrap_err().kind(),clap::error::ErrorKind::MissingRequiredArgument);
         let ordinary=feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--evidence-dir=/private/fresh"]).unwrap();
-        assert!(!physical_host_preflight_selection(&ordinary).unwrap());
+        assert!(physical_host_preflight_selection(&ordinary).unwrap().is_none());
         for ordinary in [physical_mvp_args(),background_args("persistent"),background_args("ntfy")] {
             let parsed=feedback_arguments(arguments_base()).try_get_matches_from(ordinary).unwrap();
-            assert!(!physical_host_preflight_selection(&parsed).unwrap());
+            assert!(physical_host_preflight_selection(&parsed).unwrap().is_none());
         }
     }
     #[test]
@@ -14396,26 +14438,34 @@ mod tests {
             "--physical-relay-ephemeral","--development-continuity","--development-owner-feedback","--development-android-only",
             "--keep-foreground-for-feedback","--defer-retention-crossing","--admin-socket=/private/socket","--disposable-uid=1901",
             "--project-read-seed-pack=/private/pack","--review-fixture","--owned-mcp-stdio=/private/lease",
-            "--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=1"] {
-            let args=["smoke","--physical-host-preflight","--evidence-dir=/private/fresh",selector];
-            let admitted=feedback_arguments(arguments_base()).try_get_matches_from(args).is_ok_and(|parsed|physical_host_preflight_selection(&parsed).is_ok_and(|selected|selected));
-            assert!(!admitted,"{selector}");
+            "--physical-host-preflight","--physical-host-wake-preflight",
+            "--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=1",
+            "--physical-host-wake-preflight=true","--physical-host-wake-preflight=false","--physical-host-wake-preflight=1"] {
+            for wake in [false,true] {
+                let mut args=host_preflight_args(wake);args.push(selector.to_owned());
+                let admitted=feedback_arguments(arguments_base()).try_get_matches_from(args).is_ok_and(|parsed|physical_host_preflight_selection(&parsed).is_ok_and(|selected|selected.is_some()));
+                assert!(!admitted,"{selector}/{wake}");
+            }
         }
-        for mut complete in [physical_mvp_args(),background_args("persistent"),background_args("ntfy")] {
-            complete.push("--physical-host-preflight".to_owned());
-            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(complete).unwrap();
-            assert!(physical_host_preflight_selection(&parsed).is_err());
+        for complete in [physical_mvp_args(),background_args("persistent"),background_args("ntfy")] {
+            for wake in [false,true] {
+                let mut args=complete.clone();args.extend(host_preflight_args(wake).into_iter().skip(2));
+                let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();
+                assert!(physical_host_preflight_selection(&parsed).is_err());
+            }
         }
     }
     #[test]
     fn physical_host_preflight_early_frontend_routes_malformed_and_mixed_selectors_to_rejection() {
-        for selector in ["--physical-host-preflight","--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=garbage"] {
+        for selector in ["--physical-host-preflight","--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=garbage",
+            "--physical-host-wake-preflight","--physical-host-wake-preflight=true","--physical-host-wake-preflight=false","--physical-host-wake-preflight=garbage"] {
             for shortcut in [vec!["--owned-mcp-stdio","/private/lease"],vec!["--review-fixture"],vec!["--terminal-only"],vec!["--project-read-only"]] {
                 for first in [true,false] {
                     let mut args=vec!["smoke","--evidence-dir=/private/fresh"];
+                    if selector.starts_with("--physical-host-wake-preflight"){args.push("--expected-controller-unit=goatr-host-wake-00000000-0000-4000-8000-000000000000.service");}
                     if first{args.push(selector);}args.extend(shortcut.iter().copied());if !first{args.push(selector);}
                     assert!(args.iter().skip(1).any(|argument|super::super::early_live_argument(std::ffi::OsStr::new(argument))));
-                    let admitted=feedback_arguments(arguments_base()).try_get_matches_from(args).is_ok_and(|parsed|physical_host_preflight_selection(&parsed).is_ok_and(|selected|selected));
+                    let admitted=feedback_arguments(arguments_base()).try_get_matches_from(args).is_ok_and(|parsed|physical_host_preflight_selection(&parsed).is_ok_and(|selected|selected.is_some()));
                     assert!(!admitted);
                 }
             }

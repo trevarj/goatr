@@ -177,6 +177,16 @@ async fn output(mut command: AsyncCommand, limit: usize, deadline: Duration) -> 
 }
 fn text(bytes: &[u8]) -> io::Result<&str> { std::str::from_utf8(bytes).map_err(|_| failure("physical command output is not UTF-8")) }
 
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(super) enum ControllerPolicy<'a> {
+    Zero,
+    WakeDiagnostic {unit:&'a str},
+}
+pub(super) fn validate_controller_unit(unit:&str)->io::Result<()> {
+    let id=unit.strip_prefix("goatr-host-wake-").and_then(|value|value.strip_suffix(".service"))
+        .ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"Wake diagnostic unit is not canonical"))?;
+    uuid_text(id).map_err(|_|io::Error::new(io::ErrorKind::InvalidInput,"Wake diagnostic unit is not canonical"))
+}
 struct HostAuthority {
     _socket:OwnedFd,
     executable:File,
@@ -202,6 +212,9 @@ struct HostDiagnostic {
     caller_caps:Option<HostCaps>,
     manager_caps:Option<HostCaps>,
     proc_view_validated:bool,
+    controller_unit:Option<String>,
+    controller_unit_validated:bool,
+    manager_command_observed:bool,
 }
 #[track_caller]
 fn host_guard(guard:&'static str,error:io::Error,diagnostic:Option<&mut HostDiagnostic>)->io::Error {
@@ -302,6 +315,57 @@ fn controller_environment(unsandboxed:bool,sandboxed:bool)->io::Result<()> {
     if unsandboxed||sandboxed{return Err(prerequisite("physical controller requires the direct authorized host context, not an inherited sandbox/unsandboxed override"));}
     Ok(())
 }
+fn controller_caps_admission(policy:ControllerPolicy<'_>,status:&[u8])->io::Result<()> {
+    let caps=host_caps(status)?;
+    let expected=match policy {ControllerPolicy::Zero=>"0000000000000000",ControllerPolicy::WakeDiagnostic {..}=>"0000000800000000"};
+    if [&caps.inheritable,&caps.permitted,&caps.effective,&caps.ambient].into_iter().any(|value|value.as_str()!=expected) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,"controller capability policy refused the actual mask shape"));
+    }
+    Ok(())
+}
+fn controller_cgroup_admission(expected:&str,bytes:&[u8],diagnostic:&mut HostDiagnostic)->io::Result<()> {
+    diagnostic.controller_unit=None;diagnostic.controller_unit_validated=false;
+    let validate=||->io::Result<()> {
+        validate_controller_unit(expected)?;
+        let text=std::str::from_utf8(bytes).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"controller cgroup is malformed"))?;
+        if text.contains('\r'){return Err(io::Error::new(io::ErrorKind::InvalidData,"controller cgroup has a noncanonical line ending"));}
+        let mut lines=text.lines();
+        let path=lines.next().and_then(|line|line.strip_prefix("0::")).ok_or_else(||io::Error::new(io::ErrorKind::InvalidData,"controller cgroup is not a sole unified membership"))?;
+        if lines.next().is_some()||!path.starts_with('/')||path.len()>4096||path.contains(':')
+            ||path.chars().any(|character|character.is_control()||character.is_whitespace())
+            ||path.split('/').skip(1).any(|component|matches!(component,""|"."|".."))
+            ||path.rsplit('/').next()!=Some(expected) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,"controller cgroup is not the exact expected unit leaf"));
+        }
+        Ok(())
+    };
+    validate().map_err(|error|host_guard("wake_controller_cgroup",error,Some(&mut *diagnostic)))?;
+    diagnostic.controller_unit=Some(expected.to_owned());diagnostic.controller_unit_validated=true;
+    // Historical effect observation is sticky; a failed final check clears CURRENT proof only.
+    diagnostic.manager_command_observed=true;
+    Ok(())
+}
+fn controller_cgroup_read(unit:&str,path:&Path,diagnostic:&mut HostDiagnostic)->io::Result<()> {
+    diagnostic.controller_unit=None;diagnostic.controller_unit_validated=false;
+    let bytes=host_probe_bytes(path,"wake_controller_cgroup_read",diagnostic)?;
+    controller_cgroup_admission(unit,&bytes,diagnostic)
+}
+fn controller_admission(policy:ControllerPolicy<'_>,caller:&ProcessEvidence,mut diagnostic:Option<&mut HostDiagnostic>)->io::Result<()> {
+    match policy {
+        ControllerPolicy::Zero=>dev_continuity::zero_native_caps(caller),
+        ControllerPolicy::WakeDiagnostic {unit}=>{
+            let diagnostic=diagnostic.as_deref_mut().ok_or_else(||host_guard("wake_diagnostic_context",failure("Wake policy is diagnostic only"),None))?;
+            diagnostic.controller_unit=None;diagnostic.controller_unit_validated=false;
+            validate_controller_unit(unit).map_err(|error|host_guard("wake_controller_unit",error,Some(&mut *diagnostic)))?;
+            if !diagnostic.proc_view_validated{return Err(host_guard("wake_controller_procfs_view",failure("Wake diagnostic requires the current checked caller view"),Some(diagnostic)));}
+            // Fresh real admission read: never use the earlier diagnostic display samples as proof.
+            let status=host_probe_bytes(Path::new("/proc/self/status"),"wake_controller_status_read",diagnostic)?;
+            controller_caps_admission(policy,&status).map_err(|error|host_guard("wake_controller_capabilities",error,Some(&mut *diagnostic)))?;
+            drop(status);
+            controller_cgroup_read(unit,Path::new("/proc/self/cgroup"),diagnostic)
+        }
+    }
+}
 fn same_host_namespace_group(caller:&ProcessEvidence,manager:&ProcessEvidence)->bool {
     caller.linux_boot_id==manager.linux_boot_id&&caller.namespaces.pid==manager.namespaces.pid
         &&caller.namespaces.mount==manager.namespaces.mount&&caller.namespaces.user==manager.namespaces.user
@@ -317,11 +381,16 @@ fn recheck_host_processes(caller:&ProcessEvidence,manager:&ProcessEvidence,mut d
     Ok(())
 }
 /// Qualification only: no manager command, creation/restart or capability/namespace changes.
-fn original_host_authority(mut diagnostic:Option<&mut HostDiagnostic>) -> io::Result<HostAuthority> {
+fn original_host_authority(policy:ControllerPolicy<'_>,mut diagnostic:Option<&mut HostDiagnostic>) -> io::Result<HostAuthority> {
+    if let Some(diagnostic)=diagnostic.as_deref_mut() {
+        *diagnostic=HostDiagnostic::default();
+    }
     controller_environment(std::env::var_os("OMP_UNSANDBOXED").is_some(),std::env::var_os("AGENT_SANDBOXED").is_some())
         .map_err(|error|host_guard("controller_environment",error,diagnostic.as_deref_mut()))?;
     let caller=host_process_evidence(std::process::id(),false,"caller_evidence",diagnostic.as_deref_mut())?;
-    dev_continuity::zero_native_caps(&caller).map_err(|error|host_guard("caller_capabilities",error,diagnostic.as_deref_mut()))?;
+    controller_admission(policy,&caller,diagnostic.as_deref_mut()).map_err(|error| {
+        if matches!(policy,ControllerPolicy::Zero){host_guard("caller_capabilities",error,diagnostic.as_deref_mut())}else{error}
+    })?;
     if unsafe { libc::geteuid() } != 1000 || std::env::consts::ARCH != "x86_64" || std::env::consts::OS != "linux" {
         return Err(host_guard("host_platform",failure("physical original-host prerequisite requires the qualified Linux UID 1000 host"),diagnostic));
     }
@@ -373,17 +442,27 @@ fn original_host_authority(mut diagnostic:Option<&mut HostDiagnostic>) -> io::Re
         let hash=binary_sha256(&tool).map_err(|error|host_guard(hash_guard,error,diagnostic.as_deref_mut()))?;
         tools.insert(name,json!({"path":tool,"sha256":hash}));
     }
+    if matches!(policy,ControllerPolicy::WakeDiagnostic {..}) {
+        if let Some(diagnostic)=diagnostic.as_deref_mut(){diagnostic.controller_unit=None;diagnostic.controller_unit_validated=false;}
+    }
     recheck_host_processes(&caller,&manager,diagnostic.as_deref_mut())?;
-    dev_continuity::zero_native_caps(&caller).map_err(|error|host_guard("final_caller_capabilities",error,diagnostic))?;
+    controller_admission(policy,&caller,diagnostic.as_deref_mut()).map_err(|error| {
+        if matches!(policy,ControllerPolicy::Zero){host_guard("final_caller_capabilities",error,diagnostic.as_deref_mut())}else{error}
+    })?;
     let facts=json!({"uid":1000,"manager":manager,"managerExecutable":manager_exe,"socketDevice":before.dev(),"socketInode":before.ino(),"tools":tools,"caller":caller,"mutation":false});
     Ok(HostAuthority {_socket:stream,executable:manager_file,caller,manager,facts})
 }
-fn host_preflight_report(run:&Uuid,qualified:bool,diagnostic:&HostDiagnostic,error:Option<&io::Error>)->Value {
-    let mut report=json!({"gate":"physical-host-preflight","runId":run,"status":if error.is_some(){"blocked"}else{"pass"},
-        "qualification":if qualified{"qualified"}else if diagnostic.guard=="human_tty"{"not_attempted"}else{"refused"},
+fn host_preflight_report(run:&Uuid,policy:ControllerPolicy<'_>,qualified:bool,diagnostic:&HostDiagnostic,error:Option<&io::Error>)->Value {
+    let expected_unit=match policy {ControllerPolicy::Zero=>None,ControllerPolicy::WakeDiagnostic {unit}=>Some(unit)};
+    let wake=expected_unit.is_some();
+    let controller_unit=if wake{diagnostic.controller_unit.as_deref()}else{None};
+    let mut report=json!({"gate":if wake{"physical-host-wake-preflight"}else{"physical-host-preflight"},"runId":run,"status":if error.is_some(){"blocked"}else{"pass"},
+        "qualification":if qualified{"qualified"}else if matches!(diagnostic.guard,"human_tty"|"interactive_tty"){"not_attempted"}else{"refused"},
         "guard":if qualified{"qualified"}else{diagnostic.guard},"errno":diagnostic.errno,"io_kind":"none",
         "callerCaps":diagnostic.caller_caps,"managerCaps":diagnostic.manager_caps,
-        "managerCommand":false,"managerCreatedOrRestarted":false,"nativeLaunch":false,"productInstall":false,
+        "wakeDiagnostic":wake,"expectedControllerUnit":expected_unit,"controllerUnit":controller_unit,
+        "controllerUnitValidated":wake&&diagnostic.controller_unit_validated&&controller_unit==expected_unit,
+        "managerCommand":wake&&diagnostic.manager_command_observed,"managerCreatedOrRestarted":false,"nativeLaunch":false,"productInstall":false,
         "ADB":false,"provider":false,"runtimeAcceptanceClaim":false});
     if let Some(error)=error {
         report.as_object_mut().expect("object").extend(super::super::helper_error_metadata(error).as_object().expect("object").clone());
@@ -395,19 +474,21 @@ fn host_terminal_report(output:&mut impl Write,report:&Value,passed:bool)->bool 
     // Returning false is FAILURE in the existing live/main result owner, not a second error report.
     writeln!(output,"{report}").is_ok()&&passed
 }
-pub(super) fn host_preflight(evidence:&Path)->io::Result<bool> {
+pub(super) fn host_preflight(evidence:&Path,policy:ControllerPolicy<'_>)->io::Result<bool> {
     let run=Uuid::random();let mut diagnostic=HostDiagnostic::default();
     let qualification=if !io::stdin().is_terminal()||!io::stdout().is_terminal() {
-        Err(host_guard("human_tty",prerequisite("physical host preflight requires the real human TTY"),Some(&mut diagnostic)))
+        let guard=match policy {ControllerPolicy::Zero=>"human_tty",ControllerPolicy::WakeDiagnostic {..}=>"interactive_tty"};
+        Err(host_guard(guard,prerequisite("physical host preflight requires an actual interactive host TTY"),Some(&mut diagnostic)))
     }else{
-        original_host_authority(Some(&mut diagnostic))
+        original_host_authority(policy,Some(&mut diagnostic))
     };
     let qualified=qualification.is_ok();
     // err() drops the successful authority/connected socket; preflight never retains a runtime owner.
     let error=qualification.err();
-    let mut report=host_preflight_report(&run,qualified,&diagnostic,error.as_ref());
+    let mut report=host_preflight_report(&run,policy,qualified,&diagnostic,error.as_ref());
     report["evidenceWritten"]=json!(true);
-    let stored=match write_json(&evidence.join("physical-host-preflight.json"),&report) {
+    let filename=match policy {ControllerPolicy::Zero=>"physical-host-preflight.json",ControllerPolicy::WakeDiagnostic {..}=>"physical-host-wake-preflight.json"};
+    let stored=match write_json(&evidence.join(filename),&report) {
         Ok(())=>true,
         Err(error)=>{
             let mut write_diagnostic=HostDiagnostic::default();
@@ -2009,7 +2090,7 @@ fn blocker(error:&io::Error) -> &'static str {
 pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()> {
     if !io::stdin().is_terminal()||!io::stdout().is_terminal(){return Err(failure("physical MVP requires the real local private human TTY; no synthetic camera/input acknowledgement"));}
     let run=Uuid::random();let label=format!("Goatr MVP {}",run.0);
-    let authority=match original_host_authority(None) {
+    let authority=match original_host_authority(ControllerPolicy::Zero,None) {
         Ok(authority)=>authority,
         Err(error)=>{
             write_json(&evidence.join("physical-original-host-blocked.json"),&json!({"runId":run,"gate":"physical-mvp","status":"blocked","stage":"original-host-authority",
@@ -2778,16 +2859,16 @@ mod tests {
     fn host_preflight_report_is_closed_and_never_claims_no_manager_socket_contact() {
         let run=Uuid::random();let mut diagnostic=HostDiagnostic::default();
         let error=host_guard("manager_exe_open",io::Error::from_raw_os_error(libc::EACCES),Some(&mut diagnostic));
-        let report=host_preflight_report(&run,false,&diagnostic,Some(&error));
+        let report=host_preflight_report(&run,ControllerPolicy::Zero,false,&diagnostic,Some(&error));
         assert_eq!(report["runId"],json!(run));assert_eq!(report["status"],"blocked");assert_eq!(report["qualification"],"refused");
         assert_eq!(report["guard"],"manager_exe_open");assert_eq!(report["errno"],13);assert_eq!(report["io_kind"],"permission_denied");
         for field in ["managerCommand","managerCreatedOrRestarted","nativeLaunch","productInstall","ADB","provider","runtimeAcceptanceClaim"]{assert_eq!(report[field],false);}
         assert!(report.get("managerContact").is_none());assert!(report.get("reason").is_none());
         let error=host_guard("human_tty",prerequisite("PRIVATE non-TTY detail"),Some(&mut diagnostic));
-        let refused=host_preflight_report(&run,false,&diagnostic,Some(&error));
+        let refused=host_preflight_report(&run,ControllerPolicy::Zero,false,&diagnostic,Some(&error));
         assert_eq!(refused["qualification"],"not_attempted");assert!(refused["errno"].is_null());assert!(!refused.to_string().contains("PRIVATE"));
         // Report formatting is not a mock successful host admission.
-        let qualified=host_preflight_report(&run,true,&HostDiagnostic::default(),None);
+        let qualified=host_preflight_report(&run,ControllerPolicy::Zero,true,&HostDiagnostic::default(),None);
         assert_eq!(qualified["qualification"],"qualified");assert_eq!(qualified["guard"],"qualified");assert_eq!(qualified["io_kind"],"none");
         assert_eq!(qualified["runtimeAcceptanceClaim"],false);assert!(qualified["errno"].is_null());
     }
@@ -2857,17 +2938,17 @@ mod tests {
         host_status(&path,"self_status_read",false,&mut diagnostic).unwrap();host_status(&path,"manager_status_read",true,&mut diagnostic).unwrap();
         assert_eq!(binary_sha256(&path).unwrap(),before);
         let error=host_guard("manager_ns_pid_stat",io::Error::from_raw_os_error(libc::EACCES),Some(&mut diagnostic));
-        let report=host_preflight_report(&Uuid::random(),false,&diagnostic,Some(&error));
+        let report=host_preflight_report(&Uuid::random(),ControllerPolicy::Zero,false,&diagnostic,Some(&error));
         assert_eq!(report["callerCaps"].as_object().unwrap().len(),4);assert_eq!(report["managerCaps"].as_object().unwrap().len(),4);
         assert!(!report.to_string().contains("PRIVATE"));assert!(report.get("procViewValidated").is_none());assert!(report.get("CapBnd").is_none());
         let error=host_status(&root.join("PRIVATE-missing"),"self_status_read",false,&mut diagnostic).unwrap_err();
         assert_eq!(error.kind(),io::ErrorKind::NotFound);assert_eq!(diagnostic.guard,"self_status_read");assert_eq!(diagnostic.errno,Some(libc::ENOENT));
         assert!(diagnostic.caller_caps.is_none());assert!(diagnostic.manager_caps.is_some());
-        let report=host_preflight_report(&Uuid::random(),false,&diagnostic,Some(&error));assert!(report["callerCaps"].is_null());
+        let report=host_preflight_report(&Uuid::random(),ControllerPolicy::Zero,false,&diagnostic,Some(&error));assert!(report["callerCaps"].is_null());
         fs::write(&path,format!("{}CapInh:\t0000000000000000\n",host_status_fixture())).unwrap();
         let error=host_status(&path,"manager_status_read",true,&mut diagnostic).unwrap_err();
         assert_eq!(diagnostic.guard,"manager_cap_fields");assert_eq!(diagnostic.errno,None);assert!(diagnostic.manager_caps.is_none());
-        let report=host_preflight_report(&Uuid::random(),false,&diagnostic,Some(&error));assert!(report["managerCaps"].is_null());
+        let report=host_preflight_report(&Uuid::random(),ControllerPolicy::Zero,false,&diagnostic,Some(&error));assert!(report["managerCaps"].is_null());
         fs::write(&path,host_status_fixture()).unwrap();host_status(&path,"self_status_read",false,&mut diagnostic).unwrap();
         OpenOptions::new().write(true).open(&path).unwrap().set_len(65_537).unwrap();
         assert!(host_status(&path,"self_status_read",false,&mut diagnostic).is_err());assert!(diagnostic.caller_caps.is_none());assert_eq!(diagnostic.guard,"self_status_read");
@@ -2898,6 +2979,74 @@ mod tests {
         output.clear();
         assert_eq!(crate::mode_exit(Err(io::Error::new(io::ErrorKind::InvalidInput,"closed selection refused")),&mut output),std::process::ExitCode::FAILURE);
         let generic:Value=serde_json::from_slice(&output).unwrap();assert_eq!(generic["gate"],"selected-smoke-mode");assert_eq!(generic["io_kind"],"invalid_input");
+    }
+    fn controller_status(mask:&str)->String {
+        ["CapInh","CapPrm","CapEff","CapAmb"].into_iter().map(|key|format!("{key}:\t{mask}\n")).collect()
+    }
+    #[test]
+    fn controller_zero_and_wake_admission_require_distinct_exact_four_mask_shapes() {
+        let unit=format!("goatr-host-wake-{}.service",Uuid::random().0);let wake=ControllerPolicy::WakeDiagnostic {unit:&unit};
+        let zero_status=controller_status("0000000000000000");let wake_status=controller_status("0000000800000000");
+        controller_caps_admission(ControllerPolicy::Zero,zero_status.as_bytes()).unwrap();controller_caps_admission(wake,wake_status.as_bytes()).unwrap();
+        assert!(controller_caps_admission(ControllerPolicy::Zero,wake_status.as_bytes()).is_err());assert!(controller_caps_admission(wake,zero_status.as_bytes()).is_err());
+        for key in ["CapInh","CapPrm","CapEff","CapAmb"] {
+            let field=format!("{key}:\t0000000800000000\n");
+            for mask in ["0000000000000000","0000000000000001","0000000800000001","0000000000080000","000000080000000A","10000000800000000"] {
+                let changed=wake_status.replace(&field,&format!("{key}:\t{mask}\n"));assert!(controller_caps_admission(wake,changed.as_bytes()).is_err(),"{key}/{mask}");
+            }
+            assert!(controller_caps_admission(wake,wake_status.replace(&field,"").as_bytes()).is_err(),"{key}/missing");
+            assert!(controller_caps_admission(wake,format!("{wake_status}{field}").as_bytes()).is_err(),"{key}/duplicate");
+            assert!(controller_caps_admission(ControllerPolicy::Zero,zero_status.replace(&format!("{key}:\t0000000000000000\n"),&field).as_bytes()).is_err(),"{key}/zero-extra-bit");
+        }
+    }
+    #[test]
+    fn controller_unit_and_unified_cgroup_admission_reject_aliases_and_nonleaf_membership() {
+        let unit=format!("goatr-host-wake-{}.service",Uuid::random().0);validate_controller_unit(&unit).unwrap();
+        for bad in [unit.to_uppercase(),unit.replace("goatr-host-wake-","daily-"),unit.replace(".service",".scope"),
+            format!("/private/{unit}"),format!("{unit}.service"),"goatr-host-wake-not-a-uuid.service".to_owned()] {
+            assert!(validate_controller_unit(&bad).is_err());
+        }
+        let good=format!("0::/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}\n");
+        let other=format!("goatr-host-wake-{}.service",Uuid::random().0);
+        for bad in [String::new(),format!("{good}{good}"),format!("{good}1:name=systemd:/other\n"),format!("{good}\n"),good.replace('\n',"\r\n"),
+            good.replace("0::","1::"),good.replace("0::","0:cpu:"),good.replace("0::/","0::"),
+            good.replace("/app.slice/","/app.slice//"),good.replace("/app.slice/","/app.slice/./"),good.replace("/app.slice/","/app.slice/../"),
+            good.replace(&unit,&other),good.replace(&unit,&format!("{unit}/child")),good.replace(&unit,&format!("{unit}/")),
+            good.replace("/app.slice/","/app.slice :/"),good.replace("/app.slice/","/app.slice\t/")] {
+            let mut diagnostic=HostDiagnostic::default();let error=controller_cgroup_admission(&unit,bad.as_bytes(),&mut diagnostic).unwrap_err();
+            assert!(!diagnostic.controller_unit_validated);assert!(!diagnostic.manager_command_observed);assert!(diagnostic.controller_unit.is_none());
+            let report=host_preflight_report(&Uuid::random(),ControllerPolicy::WakeDiagnostic {unit:&unit},false,&diagnostic,Some(&error));
+            assert_eq!(report["managerCommand"],false);assert_eq!(report["controllerUnitValidated"],false);assert_eq!(report["runtimeAcceptanceClaim"],false);
+        }
+        let mut diagnostic=HostDiagnostic::default();controller_cgroup_admission(&unit,good.as_bytes(),&mut diagnostic).unwrap();
+        assert!(diagnostic.controller_unit_validated);assert!(diagnostic.manager_command_observed);assert_eq!(diagnostic.controller_unit.as_deref(),Some(unit.as_str()));
+    }
+    #[test]
+    fn wake_report_observes_unit_not_selector_and_final_read_failure_keeps_only_historical_effect() {
+        let unit=format!("goatr-host-wake-{}.service",Uuid::random().0);let policy=ControllerPolicy::WakeDiagnostic {unit:&unit};let run=Uuid::random();
+        let mut diagnostic=HostDiagnostic::default();let error=host_guard("wake_controller_capabilities",io::Error::new(io::ErrorKind::PermissionDenied,"closed mask refusal"),Some(&mut diagnostic));
+        let before=host_preflight_report(&run,policy,false,&diagnostic,Some(&error));
+        assert_eq!(before["wakeDiagnostic"],true);assert_eq!(before["expectedControllerUnit"],unit);assert_eq!(before["managerCommand"],false);assert_eq!(before["controllerUnitValidated"],false);
+        {
+            let mut not_attempted=HostDiagnostic::default();let error=host_guard("interactive_tty",prerequisite("actual host TTY required"),Some(&mut not_attempted));
+            let report=host_preflight_report(&run,policy,false,&not_attempted,Some(&error));
+            assert_eq!(report["qualification"],"not_attempted");assert_eq!(report["managerCommand"],false);assert_eq!(report["controllerUnitValidated"],false);
+        }
+        let root=std::env::temp_dir().join(format!("goatr-wake-unit-{}",Uuid::random().0));fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path=root.join("owned-cgroup");let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();
+        file.write_all(format!("0::/owned.slice/{unit}\n").as_bytes()).unwrap();drop(file);
+        let hash=binary_sha256(&path).unwrap();controller_cgroup_read(&unit,&path,&mut diagnostic).unwrap();assert_eq!(binary_sha256(&path).unwrap(),hash);
+        let after=host_preflight_report(&run,policy,false,&diagnostic,Some(&error));
+        assert_eq!(after["managerCommand"],true);assert_eq!(after["controllerUnitValidated"],true);assert_eq!(after["controllerUnit"],unit);
+        fs::remove_file(&path).unwrap();let error=controller_cgroup_read(&unit,&path,&mut diagnostic).unwrap_err();
+        assert_eq!(error.kind(),io::ErrorKind::NotFound);assert_eq!(diagnostic.errno,Some(libc::ENOENT));assert_eq!(diagnostic.guard,"wake_controller_cgroup_read");
+        let final_report=host_preflight_report(&run,policy,false,&diagnostic,Some(&error));
+        assert_eq!(final_report["qualification"],"refused");assert_eq!(final_report["managerCommand"],true);assert_eq!(final_report["controllerUnitValidated"],false);assert!(final_report["controllerUnit"].is_null());
+        fs::write(&path,format!("0::/owned.slice/goatr-host-wake-{}.service\n",Uuid::random().0)).unwrap();
+        let error=controller_cgroup_read(&unit,&path,&mut diagnostic).unwrap_err();assert!(diagnostic.manager_command_observed);assert!(!diagnostic.controller_unit_validated);
+        let ordinary=host_preflight_report(&run,ControllerPolicy::Zero,false,&diagnostic,Some(&error));
+        assert_eq!(ordinary["wakeDiagnostic"],false);assert_eq!(ordinary["managerCommand"],false);assert_eq!(ordinary["controllerUnitValidated"],false);assert!(ordinary["expectedControllerUnit"].is_null());assert!(ordinary["controllerUnit"].is_null());
+        fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
     }
     fn empty_connector(exists:bool) -> Value {
         json!({"databaseExists":exists,"version":if exists{1}else{0},"schemaSha256":if exists{json!("1".repeat(64))}else{Value::Null},

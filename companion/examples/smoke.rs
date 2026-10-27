@@ -1284,7 +1284,7 @@ async fn run() -> io::Result<bool> {
     Ok(transport_observation == "pass")
 }
 fn early_live_argument(argument:&std::ffi::OsStr)->bool {
-    argument.to_str().is_some_and(|argument|["--physical-mvp","--physical-host-preflight","--background"].iter()
+    argument.to_str().is_some_and(|argument|["--physical-mvp","--physical-host-preflight","--physical-host-wake-preflight","--background"].iter()
         .any(|selector|argument==*selector||argument.strip_prefix(*selector).is_some_and(|suffix|suffix.starts_with('='))))
 }
 fn mode_exit(result:io::Result<bool>,output:&mut impl io::Write)->std::process::ExitCode {
