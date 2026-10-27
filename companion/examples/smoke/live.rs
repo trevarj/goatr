@@ -7427,13 +7427,16 @@ fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     Ok(())
 }
 fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
-    if !args.get_flag("physical-mvp"){return Ok(());}
+    if !args.get_flag("physical-mvp") {
+        if args.get_one::<String>("expected-config-sha256").is_some(){return Err(failure("independent seed config pin is physical-mvp only"));}
+        return Ok(());
+    }
     require_shared_backends(args).map_err(|_|failure("physical-mvp requires exactly one OMP and one Codex backend"))?;
     if args.value_source("api")==Some(clap::parser::ValueSource::CommandLine) {
         return Err(failure("physical-mvp discovers the selected physical API/ABI; explicit --api is forbidden"));
     }
-    if args.get_one::<String>("expected-config-sha256").map(String::as_str)!=Some(physical::EXPECTED_CONFIG_SHA256) {
-        return Err(prerequisite("independent_retained_config_pin_unavailable"));
+    if args.get_one::<String>("expected-config-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))) {
+        return Err(prerequisite("independent_seed_config_pin_unavailable"));
     }
     if let Some(pin)=args.get_one::<String>("expected-old-product-audit-sha256") {
         if pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)){return Err(prerequisite("independent_old_product_audit_pin_unavailable"));}
@@ -7515,7 +7518,7 @@ fn arguments_base() -> Command {
             .help("Independent exact APK pin for official F-Droid https://f-droid.org/repo/io.heckel.ntfy_63.apk (1.25.2/code63); not the upstream GitHub fdroid-release build"))
         .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("notification-artifact-mode")
             .help("Independent exact official F-Droid APK-signer pin; physical-mvp/background ntfy only, never persistent"))
-        .arg(Arg::new("expected-config-sha256").long("expected-config-sha256").requires_all(["physical-mvp","config"]).help("Independent exact retained0600 template SHA-256; never measured from the candidate as authority"))
+        .arg(Arg::new("expected-config-sha256").long("expected-config-sha256").requires_all(["physical-mvp","config"]).help("Independent caller SHA-256 of the canonical0600 neutral seed; lowercase64, physical-only, never measured by the runner to authorize its candidate"))
         .arg(Arg::new("old-product-audit").long("old-product-audit").value_parser(value_parser!(PathBuf)).requires_all(["physical-mvp","expected-old-product-audit-sha256"]).help("Independent immutable OLD APK Startup provider/AAR audit, required when OLD differs from the frozen NEW artifact"))
         .arg(Arg::new("expected-old-product-audit-sha256").long("expected-old-product-audit-sha256").requires_all(["physical-mvp","old-product-audit"]))
         .arg(Arg::new("terminal-only").long("terminal-only").action(ArgAction::SetTrue)
@@ -14351,7 +14354,7 @@ mod tests {
             "--evidence-dir=/private/fresh".into(),"--consent-owned-providers".into(),"--serial=owned-physical-serial".into(),
             "--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
         for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
-        args.push(format!("--expected-config-sha256={}",physical::EXPECTED_CONFIG_SHA256));
+        args.push(format!("--expected-config-sha256={}","3".repeat(64)));
         args.push(format!("--expected-ntfy-apk-sha256={NTFY_APK_SHA256}"));
         args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
         args
@@ -14379,9 +14382,6 @@ mod tests {
     }
     #[test]
     fn physical_mvp_requires_independent_template_pin_and_paired_old_audit_inputs_only_in_its_mode() {
-        let mut wrong=physical_mvp_args();wrong.retain(|arg|!arg.starts_with("--expected-config-sha256="));wrong.push(format!("--expected-config-sha256={}","0".repeat(64)));
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(wrong).unwrap();
-        assert!(physical_mode_environment(&parsed).unwrap_err().to_string().contains("independent_retained_config_pin"));
         let audit="--old-product-audit=/private/independent-old-audit.json".to_owned();
         let pin=format!("--expected-old-product-audit-sha256={}","a".repeat(64));
         let mut complete=physical_mvp_args();complete.extend([audit.clone(),pin.clone()]);
@@ -14390,9 +14390,34 @@ mod tests {
             let mut incomplete=physical_mvp_args();incomplete.push(single.clone());
             assert!(feedback_arguments(arguments_base()).try_get_matches_from(incomplete).is_err());
         }
-        for extra in [format!("--expected-config-sha256={}",physical::EXPECTED_CONFIG_SHA256),audit,pin] {
+        for extra in [format!("--expected-config-sha256={}","3".repeat(64)),audit,pin] {
             let mut unrelated=background_args("persistent");unrelated.push(extra);
             assert!(feedback_arguments(arguments_base()).try_get_matches_from(unrelated).is_err());
+        }
+    }
+    #[test]
+    fn physical_mvp_seed_pin_accepts_independent_lowercase_claims_but_rejects_invalid_and_unrelated_inputs() {
+        for pin in ["1".repeat(64),"abcdef0123456789".repeat(4)] {
+            let mut args=physical_mvp_args();args.retain(|arg|!arg.starts_with("--expected-config-sha256="));args.push(format!("--expected-config-sha256={pin}"));
+            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();physical_mode_environment(&parsed).unwrap();
+        }
+        for pin in [String::new(),"a".repeat(63),"a".repeat(65),"A".repeat(64),"g".repeat(64)] {
+            let mut args=physical_mvp_args();args.retain(|arg|!arg.starts_with("--expected-config-sha256="));args.push(format!("--expected-config-sha256={pin}"));
+            let admitted=match feedback_arguments(arguments_base()).try_get_matches_from(args) {
+                Ok(parsed)=>physical_mode_environment(&parsed).is_ok(),
+                Err(_)=>false,
+            };
+            assert!(!admitted);
+        }
+        let missing=physical_mvp_args().into_iter().filter(|arg|!arg.starts_with("--expected-config-sha256=")).collect::<Vec<_>>();
+        assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(missing).unwrap_err().kind(),clap::error::ErrorKind::MissingRequiredArgument);
+        for mut unrelated in [vec!["smoke".to_owned()],background_args("persistent"),background_args("ntfy")] {
+            unrelated.push(format!("--expected-config-sha256={}","1".repeat(64)));
+            let admitted=match feedback_arguments(arguments_base()).try_get_matches_from(unrelated) {
+                Ok(parsed)=>physical_mode_environment(&parsed).is_ok(),
+                Err(_)=>false,
+            };
+            assert!(!admitted);
         }
     }
     #[test]

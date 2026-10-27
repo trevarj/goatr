@@ -18,47 +18,65 @@ const MVP_AARS: [(&str, &str, &str); 5] = [
     ("androidx.profileinstaller", "profileinstaller/1.4.0", "d502141fcce902430f62b674c32aecd0f75262e7ee2cd15c74adb617cd13130a"),
     ("org.unifiedpush.android","connector/3.3.5","fa017cdfabbdc9af021e1f8c8eff2c8098e701d7a2c599937dce0b4ecf1e929b"),
 ];
-pub(super) const EXPECTED_CONFIG_SHA256:&str="4d42ede47b2f4124688359272bcd523d1b1d61ea6094b5f578fe299b12fbc4f2";
 const INSTALLED_HERDR:&str="/nix/store/gpsmifw68ssar7p2gqikvl4c1b0xp9mv-herdr-0.9.1/bin/herdr";
 const INSTALLED_HERDR_SHA256:&str="71add50d05b0cf06c04caf72727bfe9fcedac986e9eba78b8a0ef8332269ee0c";
 fn complete_stamp(m:&fs::Metadata)->(u64,u64,u64,u32,u32,u32,u64,i64,i64,i64,i64) {
     (m.dev(),m.ino(),m.len(),m.mode(),m.uid(),m.gid(),m.nlink(),m.mtime(),m.mtime_nsec(),m.ctime(),m.ctime_nsec())
 }
-fn retained_config_identities(config:&Config) -> io::Result<()> {
+fn seed_source_identities(config:&Config) -> io::Result<()> {
     if fs::canonicalize(&config.executables.herdr)?!=Path::new(INSTALLED_HERDR)||binary_sha256(Path::new(INSTALLED_HERDR))?!=INSTALLED_HERDR_SHA256
         ||config.executables.omp.as_deref()!=Some(Path::new("/nix/store/jnxpnwp4fgia3h02m55921n3rjsfm3g7-omp/bin/omp"))
         ||config.executables.codex.as_deref()!=Some(Path::new("/nix/store/qhb4isrj1vnddb3jm2s0w8383ig1d818-codex/bin/codex"))
         ||config.omp_registry_dir.as_deref()!=Some(Path::new("/home/trev/.omp/run/collab-hosts"))
         ||config.omp_session_roots.len()!=1||config.omp_session_roots.first().map(PathBuf::as_path)!=Some(Path::new("/home/trev/.omp/agent/sessions"))
         ||config.omp_blob_root.as_deref()!=Some(Path::new("/home/trev/.omp/agent/blobs"))
-        ||config.omp_skills_package_root.as_deref()!=Some(Path::new("/home/trev/.local/share/npm/lib/node_modules/@oh-my-pi/pi-coding-agent"))
-        ||!config.allow_scoped_shell_probe||!config.allow_terminal_control||!config.allow_omp_controls {
-        return Err(prerequisite("independently_retained_config_identities_unavailable"));
+        ||config.omp_skills_package_root.as_deref()!=Some(Path::new("/home/trev/.local/share/npm/lib/node_modules/@oh-my-pi/pi-coding-agent")) {
+        return Err(prerequisite("independently_qualified_seed_identities_unavailable"));
     }
     for path in [Some(&config.executables.herdr),config.executables.omp.as_ref(),config.executables.codex.as_ref()] {
-        goatr::config::executable(path.ok_or_else(||prerequisite("retained_provider_wrapper_unavailable"))?)?;
+        goatr::config::executable(path.ok_or_else(||prerequisite("seed_provider_wrapper_unavailable"))?)?;
     }
     Ok(())
 }
-fn qualified_configuration(path:&Path,expected:&str)->io::Result<(Config,File,fs::Metadata)> {
-    if expected!=EXPECTED_CONFIG_SHA256||!hex64(expected){return Err(prerequisite("independent_retained_config_pin_unavailable"));}
+fn read_pinned_config(path:&Path,caller_sha:&str)->io::Result<(Config,File,fs::Metadata)> {
+    if !hex64(caller_sha){return Err(prerequisite("independent_seed_config_pin_unavailable"));}
     goatr::config::absolute(path)?;
-    if fs::canonicalize(path).map_err(|_|prerequisite("retained_config_template_unavailable"))?!=path {return Err(failure("physical retained config is not canonical"));}
-    let parent=path.parent().ok_or_else(||failure("physical retained config has no private parent"))?;
+    if fs::canonicalize(path).map_err(|_|prerequisite("independently_pinned_seed_unavailable"))?!=path {return Err(failure("physical seed config is not canonical"));}
+    let parent=path.parent().ok_or_else(||failure("physical seed config has no private parent"))?;
     private_dir(parent,false)?;let parent_before=fs::symlink_metadata(parent)?;
     private_file(path)?;
     let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(path)?;
     let before=file.metadata()?;
-    if before.len()>goatr::config::CONFIG_BYTES as u64||complete_stamp(&before)!=complete_stamp(&fs::symlink_metadata(path)?) {return Err(failure("physical retained config changed before read"));}
+    if before.len()>goatr::config::CONFIG_BYTES as u64||complete_stamp(&before)!=complete_stamp(&fs::symlink_metadata(path)?) {return Err(failure("physical seed config changed before read"));}
     let mut bytes=Vec::with_capacity(before.len() as usize);(&mut file).take((goatr::config::CONFIG_BYTES+1) as u64).read_to_end(&mut bytes)?;
     private_file(path)?;private_dir(parent,false)?;
     if bytes.len()>goatr::config::CONFIG_BYTES||complete_stamp(&before)!=complete_stamp(&file.metadata()?)
         ||complete_stamp(&before)!=complete_stamp(&fs::symlink_metadata(path)?)||complete_stamp(&parent_before)!=complete_stamp(&fs::symlink_metadata(parent)?)
-        ||fs::canonicalize(path)?!=path {return Err(failure("physical retained config changed across its held read"));}
+        ||fs::canonicalize(path)?!=path {return Err(failure("physical seed config changed across its held read"));}
     use sha2::{Digest,Sha256};
-    if hex(&Sha256::digest(&bytes))!=expected {return Err(prerequisite("retained_config_template_pin_mismatch"));}
-    let text=std::str::from_utf8(&bytes).map_err(|_|failure("physical retained config is not UTF-8"))?;
-    let config=Config::parse(text)?;config.preflight()?;retained_config_identities(&config)?;Ok((config,file,before))
+    if hex(&Sha256::digest(&bytes))!=caller_sha {return Err(prerequisite("independently_pinned_seed_hash_mismatch"));}
+    let text=std::str::from_utf8(&bytes).map_err(|_|failure("physical seed config is not UTF-8"))?;
+    Ok((Config::parse(text)?,file,before))
+}
+fn neutral_seed_policy(config:&Config,parent:&Path)->io::Result<()> {
+    if config.pairing_name.is_some()||config.default_codex_owner_id.is_some()||!config.herdr_sockets.is_empty()
+        ||!config.projects.is_empty()||!config.codex_owners.is_empty()||!config.skill_document_roots.is_empty()
+        ||config.allow_attachments||!config.allow_scoped_shell_probe||!config.allow_terminal_control||!config.allow_omp_controls
+        ||config.push_allowed_origins.len()!=1||config.push_allowed_origins.first().map(String::as_str)!=Some("https://ntfy.sh") {
+        return Err(failure("physical seed must be neutral with only the required control consents and public push origin"));
+    }
+    if config.runtime_dir!=config.runtime_dir_agent||config.runtime_dir==parent||!config.runtime_dir.starts_with(parent) {
+        return Err(failure("physical seed runtime must be identical and strictly beneath its private parent"));
+    }
+    private_dir(parent,false)?;private_dir(&config.runtime_dir,false)?;
+    Ok(())
+}
+fn qualified_configuration(path:&Path,caller_sha:&str)->io::Result<(Config,File,fs::Metadata)> {
+    let (config,file,original)=read_pinned_config(path,caller_sha)?;
+    config.preflight()?;
+    neutral_seed_policy(&config,path.parent().ok_or_else(||failure("physical seed parent is absent"))?)?;
+    seed_source_identities(&config)?;
+    Ok((config,file,original))
 }
 fn descriptor_sha256(file:&mut File,length:u64)->io::Result<String> {
     use sha2::{Digest,Sha256};
@@ -1718,8 +1736,8 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     };
     write_json(&evidence.join("physical-original-host-authority.json"),&authority.3)?;
     let binary=packaged(args)?;
-    let template=args.get_one::<PathBuf>("config").ok_or_else(||failure("physical exact deployment input is missing"))?;
-    let template_sha=args.get_one::<String>("expected-config-sha256").ok_or_else(||prerequisite("independent_retained_config_pin_unavailable"))?;
+    let template=args.get_one::<PathBuf>("config").ok_or_else(||failure("physical independently pinned neutral seed is missing"))?;
+    let template_sha=args.get_one::<String>("expected-config-sha256").ok_or_else(||prerequisite("independent_seed_config_pin_unavailable"))?;
     let (deployment,template_file,template_metadata)=qualified_configuration(template,template_sha)?;
     let expected_binary_sha=args.get_one::<String>("expected-goatr-sha256").ok_or_else(||failure("physical independent serving binary SHA-256 is missing"))?;
     let sdk=canonical_directory(&PathBuf::from(std::env::var_os("ANDROID_HOME").or_else(||std::env::var_os("ANDROID_SDK_ROOT")).ok_or_else(||failure("physical pinned SDK input is missing"))?))?;
@@ -2782,17 +2800,108 @@ mod tests {
         let mut wrong_locale=official_connector();wrong_locale["localeChanges"]=json!(1);assert!(validate_connector(&wrong_locale).is_err());
         wrong_locale=official_connector();wrong_locale["platformMetadataSha256"]=Value::Null;assert!(validate_connector(&wrong_locale).is_err());
     }
+    fn portable_seed_text(runtime:&Path,marker:&str)->String {
+        let runtime=serde_json::to_string(runtime.to_str().unwrap()).unwrap();
+        let executable=fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let executable=serde_json::to_string(executable.to_str().unwrap()).unwrap();
+        format!("# {marker}\nversion=1\nruntime_dir={runtime}\nruntime_dir_agent={runtime}\nallow_scoped_shell_probe=true\nallow_terminal_control=true\nallow_omp_controls=true\nallow_attachments=false\nherdr_sockets=[]\nprojects=[]\ncodex_owners=[]\nskill_document_roots=[]\npush_allowed_origins=[\"https://ntfy.sh\"]\n[executables]\nherdr={executable}\n")
+    }
+    fn write_owned_seed(path:&Path,reference:&[u8]) {
+        OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).unwrap().write_all(reference).unwrap();
+        fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();
+    }
     #[test]
-    fn physical_configuration_cannot_self_pin_a_candidate_or_substitute_missing_retained_bytes() {
-        let root=std::env::temp_dir().join(format!("goatr-physical-config-{}",Uuid::random().0));private_directory(&root).unwrap();
-        let path=root.join("candidate.toml");
-        {
-            let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();file.write_all(b"public-owned-invalid-template\n").unwrap();
+    fn pinned_seed_reader_accepts_two_independent_reference_pins_and_retains_the_parsed_file() {
+        let root=std::env::temp_dir().join(format!("goatr-seed-reader-{}",Uuid::random().0));private_directory(&root).unwrap();
+        let mut pins=Vec::new();
+        for marker in ["first","second"] {
+            let parent=root.join(marker);private_directory(&parent).unwrap();let runtime=parent.join("r");private_directory(&runtime).unwrap();
+            let reference=portable_seed_text(&runtime,marker);let expected=digest_text(&reference);pins.push(expected.clone());
+            let path=parent.join("seed.toml");write_owned_seed(&path,reference.as_bytes());
+            let (config,mut file,original)=read_pinned_config(&path,&expected).unwrap();
+            assert_eq!(config.runtime_dir,runtime);assert_eq!(config.runtime_dir_agent,runtime);assert!(config.allow_terminal_control);
+            neutral_seed_policy(&config,&parent).unwrap();
+            assert_eq!(complete_stamp(&file.metadata().unwrap()),complete_stamp(&original));
+            let flags=unsafe{libc::fcntl(file.as_raw_fd(),libc::F_GETFD)};assert!(flags>=0&&flags&libc::FD_CLOEXEC!=0);
+            std::io::Seek::rewind(&mut file).unwrap();let mut observed=String::new();file.read_to_string(&mut observed).unwrap();
+            assert_eq!(observed,reference);
+            let held=(path,file,original);recheck_inputs(std::slice::from_ref(&held)).unwrap();
         }
-        let candidate=binary_sha256(&path).unwrap();
-        assert!(qualified_configuration(&path,&candidate).is_err());assert_eq!(binary_sha256(&path).unwrap(),candidate);
-        assert_eq!(qualified_configuration(&root.join("missing.toml"),EXPECTED_CONFIG_SHA256).err().unwrap().kind(),io::ErrorKind::NotConnected);
-        fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
+        assert_ne!(pins[0],pins[1]);fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn pinned_seed_reader_rejects_wrong_claim_permissions_links_aliases_bounds_and_bad_decode() {
+        use sha2::{Digest,Sha256};
+        let root=std::env::temp_dir().join(format!("goatr-seed-denials-{}",Uuid::random().0));private_directory(&root).unwrap();
+        let parent=root.join("seed");private_directory(&parent).unwrap();let runtime=parent.join("r");private_directory(&runtime).unwrap();
+        let reference=portable_seed_text(&runtime,"owned reference");let expected=digest_text(&reference);
+        let path=parent.join("seed.toml");write_owned_seed(&path,reference.as_bytes());
+        assert!(read_pinned_config(&path,&"0".repeat(64)).is_err());
+        for pin in [String::new(),"a".repeat(63),"a".repeat(65),"g".repeat(64),"A".repeat(64)] {assert!(read_pinned_config(&path,&pin).is_err());}
+        assert!(read_pinned_config(&parent.join("missing.toml"),&expected).is_err());
+        for mode in [0o400,0o644] {
+            fs::set_permissions(&path,fs::Permissions::from_mode(mode)).unwrap();assert!(read_pinned_config(&path,&expected).is_err());
+        }
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&parent,fs::Permissions::from_mode(0o755)).unwrap();assert!(read_pinned_config(&path,&expected).is_err());
+        fs::set_permissions(&parent,fs::Permissions::from_mode(0o700)).unwrap();
+        let hard=parent.join("hard.toml");fs::hard_link(&path,&hard).unwrap();assert!(read_pinned_config(&path,&expected).is_err());fs::remove_file(hard).unwrap();
+        let alias=parent.join("alias.toml");std::os::unix::fs::symlink(&path,&alias).unwrap();assert!(read_pinned_config(&alias,&expected).is_err());fs::remove_file(alias).unwrap();
+        let parent_alias=root.join("parent-alias");std::os::unix::fs::symlink(&parent,&parent_alias).unwrap();
+        assert!(read_pinned_config(&parent_alias.join("seed.toml"),&expected).is_err());fs::remove_file(parent_alias).unwrap();
+        let oversized=vec![b' ';goatr::config::CONFIG_BYTES+1];let oversized_pin=hex(&Sha256::digest(&oversized));
+        let large=parent.join("large.toml");write_owned_seed(&large,&oversized);assert!(read_pinned_config(&large,&oversized_pin).is_err());
+        for (name,reference) in [("invalid.toml",b"invalid = [".as_slice()),("nonutf8.toml",b"\xff\xfe".as_slice())] {
+            let pin=hex(&Sha256::digest(reference));let bad=parent.join(name);write_owned_seed(&bad,reference);
+            assert!(read_pinned_config(&bad,&pin).is_err());
+        }
+        assert_eq!(fs::read(&path).unwrap(),reference.as_bytes());fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn neutral_seed_policy_rejects_dynamic_resources_extra_authority_and_nonpublic_origins() {
+        let root=std::env::temp_dir().join(format!("goatr-seed-policy-{}",Uuid::random().0));private_directory(&root).unwrap();
+        let runtime=root.join("r");private_directory(&runtime).unwrap();
+        let config=Config::parse(&portable_seed_text(&runtime,"neutral policy")).unwrap();neutral_seed_policy(&config,&root).unwrap();
+        for family in ["name","socket","project","owner","default-owner","documents","attachment","probe","terminal","omp","origin","extra-origin","no-origin"] {
+            let mut changed=config.clone();
+            match family {
+                "name"=>changed.pairing_name=Some(Label::new("Retained name").unwrap()),
+                "socket"=>changed.herdr_sockets.push(runtime.join("source.sock")),
+                "project"=>changed.projects.push(ConfiguredProject {id:Uuid::random(),label:Label::new("Retained project").unwrap(),path:runtime.clone(),allow_read_tools:false}),
+                "owner"=>changed.codex_owners.push(CodexOwner {id:Uuid::random(),socket_host:runtime.join("c.sock"),socket_agent:runtime.join("c.sock"),bindings_dir:runtime.clone(),unit:"owned-test.service".to_owned()}),
+                "default-owner"=>changed.default_codex_owner_id=Some(Uuid::random()),
+                "documents"=>changed.skill_document_roots.push(runtime.clone()),
+                "attachment"=>changed.allow_attachments=true,
+                "probe"=>changed.allow_scoped_shell_probe=false,
+                "terminal"=>changed.allow_terminal_control=false,
+                "omp"=>changed.allow_omp_controls=false,
+                "origin"=>changed.push_allowed_origins=vec!["https://example.invalid".to_owned()],
+                "extra-origin"=>changed.push_allowed_origins.push("https://example.invalid".to_owned()),
+                "no-origin"=>changed.push_allowed_origins.clear(),
+                _=>unreachable!(),
+            }
+            assert!(neutral_seed_policy(&changed,&root).is_err(),"{family}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn neutral_seed_runtime_must_be_same_existing_canonical_private_descendant_not_prefix_or_alias() {
+        let root=std::env::temp_dir().join(format!("goatr-seed-runtime-{}",Uuid::random().0));private_directory(&root).unwrap();
+        let parent=root.join("seed");private_directory(&parent).unwrap();let runtime=parent.join("r");private_directory(&runtime).unwrap();
+        let config=Config::parse(&portable_seed_text(&runtime,"runtime policy")).unwrap();neutral_seed_policy(&config,&parent).unwrap();
+        let outside=root.join("outside");private_directory(&outside).unwrap();let prefix=root.join("seed-suffix");private_directory(&prefix).unwrap();
+        let alias=parent.join("alias");std::os::unix::fs::symlink(&runtime,&alias).unwrap();let missing=parent.join("missing");
+        for candidate in [&outside,&prefix,&parent,&alias,&missing] {
+            let mut changed=config.clone();changed.runtime_dir=candidate.clone();changed.runtime_dir_agent=candidate.clone();
+            assert!(neutral_seed_policy(&changed,&parent).is_err(),"{}",candidate.display());
+        }
+        assert!(!missing.exists());
+        let mut different=config.clone();different.runtime_dir_agent=outside.clone();assert!(neutral_seed_policy(&different,&parent).is_err());
+        assert!(neutral_seed_policy(&config,&outside).is_err());
+        fs::set_permissions(&runtime,fs::Permissions::from_mode(0o755)).unwrap();assert!(neutral_seed_policy(&config,&parent).is_err());
+        fs::set_permissions(&runtime,fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&parent,fs::Permissions::from_mode(0o755)).unwrap();assert!(neutral_seed_policy(&config,&parent).is_err());
+        fs::set_permissions(&parent,fs::Permissions::from_mode(0o700)).unwrap();fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn independent_old_product_audit_binds_subject_manifest_closure_sorted_dependencies_and_closed_schema() {
@@ -2932,14 +3041,16 @@ mod tests {
         assert!(error.to_string().contains("ended without a qualified finish"));
         assert!(instrumentation.epoch.borrow().is_none());assert!(instrumentation.task.is_finished());
     }
-    #[test]
-    fn restored_parent_path_cannot_clear_original_input_failure_or_reauthorize_finish() {
+    #[tokio::test]
+    async fn restored_parent_path_cannot_clear_original_input_failure_or_reauthorize_finish() {
         let root=std::env::temp_dir().join(format!("goatr-transient-input-parent-{}",Uuid::random().0));private_directory(&root).unwrap();
-        let parent=root.join("original");private_directory(&parent).unwrap();let path=parent.join("artifact");
-        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap().write_all(b"PUBLIC_ORIGINAL_INPUT").unwrap();
-        let inputs=vec![frozen_input(&path,&digest_text("PUBLIC_ORIGINAL_INPUT")).unwrap()];let mut input_pin_failed=false;
+        let parent=root.join("original");private_directory(&parent).unwrap();let runtime=parent.join("r");private_directory(&runtime).unwrap();let path=parent.join("seed.toml");
+        let reference=portable_seed_text(&runtime,"held original seed");let expected=digest_text(&reference);write_owned_seed(&path,reference.as_bytes());
+        let (config,file,original)=read_pinned_config(&path,&expected).unwrap();neutral_seed_policy(&config,&parent).unwrap();
+        let inputs=vec![(path.clone(),file,original)];let mut input_pin_failed=false;
         recheck_retained_inputs(&inputs,&mut input_pin_failed).unwrap();
         assert_eq!(finish_authorization(input_pin_failed,"FINISH ORIGINAL"),Some("FINISH ORIGINAL"));
+        tokio::task::yield_now().await;
         let displaced=root.join("displaced");fs::rename(&parent,&displaced).unwrap();
         let observed=recheck_retained_inputs(&inputs,&mut input_pin_failed);
         assert!(observed.is_err());assert!(input_pin_failed,"the failure must latch before its error returns");
@@ -2947,6 +3058,6 @@ mod tests {
         recheck_inputs(&inputs).unwrap();
         assert!(recheck_retained_inputs(&inputs,&mut input_pin_failed).is_err(),"restored named path is not recovery authority");
         assert!(input_pin_failed);assert_eq!(finish_authorization(input_pin_failed,"FINISH ORIGINAL"),None);
-        drop(inputs);fs::remove_file(path).unwrap();fs::remove_dir(parent).unwrap();fs::remove_dir(root).unwrap();
+        drop(inputs);fs::remove_file(path).unwrap();fs::remove_dir(runtime).unwrap();fs::remove_dir(parent).unwrap();fs::remove_dir(root).unwrap();
     }
 }
