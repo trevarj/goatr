@@ -520,11 +520,15 @@ mod tests {
     }
     impl Fixture {
         fn new()->Self {
-            let path=std::env::temp_dir().join(format!("goatr-creation-directories-{}",Uuid::random().0));
+            let executable=fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+            let id=Uuid::random().0;
+            let path=executable.parent().unwrap().join(format!("cd-{}{}{}",&id[..8],&id[9..13],&id[14..18]));
             fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
             fs::create_dir(path.join("alpha")).unwrap();
             fs::create_dir(path.join("empty")).unwrap();
-            let socket=std::os::unix::net::UnixListener::bind(path.join("native.sock")).unwrap();
+            let socket_path=path.join("native.sock");
+            assert!(socket_path.as_os_str().as_encoded_bytes().len()<108);
+            let socket=std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
             fs::set_permissions(path.join("native.sock"),fs::Permissions::from_mode(0o600)).unwrap();
             let root=Arc::new(Root::open(&path,Instant::now()+WORK).unwrap());
             Self{path,root,_socket:socket}

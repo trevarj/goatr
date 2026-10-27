@@ -678,12 +678,15 @@ pub(crate) async fn queue_fixture(state:Arc<State>,server:Uuid)->GridQueueFixtur
 #[cfg(test)]
 async fn queue_fixture_on(state:Arc<State>,server:Uuid,existing:Option<Arc<Topology>>,private_executable:bool)->GridQueueFixture {
     use std::os::unix::fs::{DirBuilderExt,PermissionsExt};
-    let root=fs::canonicalize("/tmp").unwrap().join(format!("goatr-grid-{}",Uuid::random().0));
+    let native_exe=fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let id=Uuid::random().0;
+    let root=native_exe.parent().unwrap().join(format!("gr-{}{}{}",&id[..8],&id[9..13],&id[14..18]));
     fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-    let path=root.join("native.sock");let listener=tokio::net::UnixListener::bind(&path).unwrap();
+    let path=root.join("native.sock");
+    assert!(path.as_os_str().as_encoded_bytes().len()<108);
+    let listener=tokio::net::UnixListener::bind(&path).unwrap();
     fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
     let evidence=Client::connect(&path).await.unwrap().evidence;
-    let native_exe=fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     let exe=if private_executable {
         // Own only a configured link; never replace or execute a substitute process binary.
         let path=root.join("herdr");std::os::unix::fs::symlink(native_exe,&path).unwrap();path
