@@ -41,6 +41,8 @@ mod paging_proof;
 mod setup_acceptance;
 #[path = "ui.rs"]
 mod ui;
+#[path = "physical.rs"]
+mod physical;
 const APP: &str = "io.github.trevarj.goatr.debug";
 #[derive(Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -5856,7 +5858,8 @@ async fn proof(
     s: &SessionSummary,
     _shell: Option<(&str, &str)>,
 ) -> io::Result<NativeProof> {
-    proof_selected(config, socket, s, None).await
+    let original=Client::connect(socket).await?.qualify_executable(&config.executables.herdr)?;
+    proof_selected(config,socket,s,None,&original).await
 }
 async fn created_codex_proof(
     config: &Config,
@@ -5882,9 +5885,10 @@ async fn created_codex_proof(
         .binding_id
         .as_ref()
         .ok_or_else(|| failure("successful Codex receipt has no exact binding"))?;
+    let original=Client::connect(socket).await?.qualify_executable(&config.executables.herdr)?;
     let proof = tokio::time::timeout_at(
         deadline.into(),
-        proof_selected(config, socket, s, Some((binding, deadline))),
+        proof_selected(config,socket,s,Some((binding,deadline)),&original),
     )
     .await
     .map_err(|_| failure("original native scope deadline; no replay"))??;
@@ -6042,18 +6046,27 @@ async fn proof_selected(
     socket: &Path,
     s: &SessionSummary,
     selected: Option<(&Uuid, Instant)>,
+    original:&Client,
 ) -> io::Result<NativeProof> {
-    let (e, snapshot) = surface(socket).await?;
+    original.recheck()?;
+    let client=Client::connect(socket).await?;original.recheck()?;
+    let client=client.qualify_executable(&config.executables.herdr)?;
+    if client.evidence!=original.evidence{return Err(failure("native proof snapshot peer differs from original retained source"));}
+    original.recheck()?;
+    let (e,snapshot)=client.snapshot().await?;original.recheck()?;
+    if e!=original.evidence{return Err(failure("native proof snapshot returned a replacement source"));}
     let pane = snapshot.pane(&s.pane_id)?;
     if pane.terminal_id != s.terminal_id || pane.workspace_id != s.workspace_id {
         return Err(failure(
             "actual native session routing differs from current Herdr surface",
         ));
     }
-    let info = Client::connect(socket)
-        .await?
-        .process_info(&s.pane_id)
-        .await?;
+    original.recheck()?;
+    let client=Client::connect(socket).await?;original.recheck()?;
+    let client=client.qualify_executable(&config.executables.herdr)?;
+    if client.evidence!=original.evidence{return Err(failure("native proof process-info peer differs from original retained source"));}
+    original.recheck()?;
+    let info=client.process_info(&s.pane_id).await?;original.recheck()?;
     let reporter = herdr::process_evidence(e.pid)?;
     match s.provider {
         Provider::Omp => {
@@ -6189,7 +6202,12 @@ async fn proof_selected(
                     "actual OMP registry/owner changed across authenticated FINAL",
                 ));
             }
-            let (current_herdr, current_surface) = surface(socket).await?;
+            original.recheck()?;
+            let client=Client::connect(socket).await?;original.recheck()?;
+            let client=client.qualify_executable(&config.executables.herdr)?;
+            if client.evidence!=original.evidence{return Err(failure("OMP post-FINAL snapshot peer differs from original retained source"));}
+            original.recheck()?;
+            let (current_herdr,current_surface)=client.snapshot().await?;original.recheck()?;
             let current_pane = current_surface.pane(&s.pane_id)?;
             if current_herdr != e
                 || current_pane.terminal_id != pane.terminal_id
@@ -6200,10 +6218,12 @@ async fn proof_selected(
                     "actual OMP native topology changed across authenticated FINAL",
                 ));
             }
-            let current_processes = Client::connect(socket)
-                .await?
-                .process_info(&s.pane_id)
-                .await?;
+            original.recheck()?;
+            let client=Client::connect(socket).await?;original.recheck()?;
+            let client=client.qualify_executable(&config.executables.herdr)?;
+            if client.evidence!=original.evidence{return Err(failure("OMP post-FINAL process-info peer differs from original retained source"));}
+            original.recheck()?;
+            let current_processes=client.process_info(&s.pane_id).await?;original.recheck()?;
             goatr::backends::omp::terminal_owner(&reporter, &owner, &current_processes)?;
             observer.history.lock().refresh()?;
             observer.healthy(&target(s))?;
@@ -7405,8 +7425,47 @@ fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     }
     Ok(())
 }
+fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
+    if !args.get_flag("physical-mvp"){return Ok(());}
+    require_shared_backends(args).map_err(|_|failure("physical-mvp requires exactly one OMP and one Codex backend"))?;
+    if args.value_source("api")==Some(clap::parser::ValueSource::CommandLine) {
+        return Err(failure("physical-mvp discovers the selected physical API/ABI; explicit --api is forbidden"));
+    }
+    if args.get_one::<String>("expected-config-sha256").map(String::as_str)!=Some(physical::EXPECTED_CONFIG_SHA256) {
+        return Err(prerequisite("independent_retained_config_pin_unavailable"));
+    }
+    if let Some(pin)=args.get_one::<String>("expected-old-product-audit-sha256") {
+        if pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)){return Err(prerequisite("independent_old_product_audit_pin_unavailable"));}
+    }
+    if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE",
+        "GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
+        "GOATR_OWNED_OMP_PRODUCER_BUN","GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN",
+        "GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"].iter().any(|name|std::env::var_os(name).is_some()) {
+        return Err(failure("physical-mvp refuses inherited private/provider/Hello/grid capture"));
+    }
+    for (name,expected) in [
+        ("expected-ntfy-apk-sha256","8a1075c0963caa1e0dc404996531bc641cb2b982f92a4bc692d4999f9eb53f39"),
+        ("expected-ntfy-signer-sha256","6e145d7ae685eff75468e5067e03a6c3645453343e4e181dac8b6b17ff67489d"),
+    ] {
+        if args.get_one::<String>(name).map(String::as_str)!=Some(expected) {
+            return Err(failure("physical-mvp requires the independently qualified official ntfy1.25.2 APK and signer pins"));
+        }
+    }
+    Ok(())
+}
 fn arguments_base() -> Command {
     Command::new("smoke")
+        .arg(Arg::new("physical-mvp").long("physical-mvp").action(ArgAction::SetTrue)
+            .requires_all(["backend","goatr","config","workspace-root","evidence-dir","consent-owned-providers",
+                "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-goatr-sha256",
+                "expected-companion-lock-sha256","expected-config-sha256","serial","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"])
+            .conflicts_with_all(["background","admission-only","shared-agent-only","terminal-only","project-read-only",
+                "grid","grid-lease","ui","camera","ime","setup","prepare-emulator","emulator-owner","paging-proof",
+                "codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
+                "development-continuity","development-owner-feedback","development-android-only",
+                "keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs"])
+            .help("Complete retained-phone stock-only BOTH-provider physical MVP; camera/human/native-row ownership, never emulator/private-native/direct-provider input"))
         .arg(Arg::new("background").long("background").value_parser(["persistent","ntfy"])
             .requires_all([
                 "backend",
@@ -7451,8 +7510,11 @@ fn arguments_base() -> Command {
                 "disposable-uid",
             ])
             .help("Finite owned-emulator persistent or official ntfy registration/probe/ACK/native attention/dedup/tap gate for BOTH original providers; retains native resources, no fault stop or replay"))
-        .arg(Arg::new("expected-ntfy-apk-sha256").long("expected-ntfy-apk-sha256").requires("background"))
-        .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("background"))
+        .arg(Arg::new("expected-ntfy-apk-sha256").long("expected-ntfy-apk-sha256").requires("notification-artifact-mode"))
+        .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("notification-artifact-mode"))
+        .arg(Arg::new("expected-config-sha256").long("expected-config-sha256").requires_all(["physical-mvp","config"]).help("Independent exact retained0600 template SHA-256; never measured from the candidate as authority"))
+        .arg(Arg::new("old-product-audit").long("old-product-audit").value_parser(value_parser!(PathBuf)).requires_all(["physical-mvp","expected-old-product-audit-sha256"]).help("Independent immutable OLD APK Startup provider/AAR audit, required when OLD differs from the frozen NEW artifact"))
+        .arg(Arg::new("expected-old-product-audit-sha256").long("expected-old-product-audit-sha256").requires_all(["physical-mvp","old-product-audit"]))
         .arg(Arg::new("terminal-only").long("terminal-only").action(ArgAction::SetTrue)
             .requires_all([
                 "goatr",
@@ -7627,9 +7689,11 @@ fn arguments_base() -> Command {
                     "terminal-only",
                     "project-read-only",
                     "background",
+                    "physical-mvp",
                 ]),
         )
-        .group(ArgGroup::new("android-artifact-mode").args(["development-continuity","background"]))
+        .group(ArgGroup::new("android-artifact-mode").args(["development-continuity","background","physical-mvp"]))
+        .group(ArgGroup::new("notification-artifact-mode").args(["background","physical-mvp"]))
         .arg(Arg::new("grid").long("grid").action(ArgAction::SetTrue)
             .requires_all([
                 "grid-lease",
@@ -7945,6 +8009,7 @@ fn packaged(args: &clap::ArgMatches) -> io::Result<PathBuf> {
         || args.get_flag("omp-creation-diagnostic")
         || args.get_flag("grid")
         || args.get_one::<String>("background").is_some()
+        || args.get_flag("physical-mvp")
     {
         return dev_continuity::frozen_package(args);
     }
@@ -9392,6 +9457,12 @@ fn start_serve_with_capture(
     if retain_process {
         use std::os::unix::process::CommandExt;
         c.process_group(0);
+    }
+    #[cfg(target_os="linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        // Inspection authority belongs to the controller, never its Goatr child.
+        c.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
     }
     let spawned = c.spawn();
     let pin = if let (Some(hold), Ok(child)) = (launch.grid_hold.as_deref_mut(), &spawned) {
@@ -14099,6 +14170,13 @@ async fn checkpoint_held(
 }
 pub async fn run() -> io::Result<bool> {
     let args = arguments();
+    physical_mode_environment(&args)?;
+    if args.get_flag("physical-mvp") {
+        let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required physical evidence"))?;
+        fresh_shared_evidence(&evidence)?;
+        physical::run(&args,&evidence).await?;
+        return Ok(true);
+    }
     terminal_mode_environment(&args)?;
     project_read_mode_environment(&args)?;
     background_mode_environment(&args)?;
@@ -14260,6 +14338,92 @@ mod tests {
         for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
         if mode=="ntfy"{for field in ["expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"]{args.push(format!("--{field}={}","2".repeat(64)));}}
         args
+    }
+    fn physical_mvp_args()->Vec<String> {
+        let mut args=vec!["smoke".into(),"--physical-mvp".into(),"--backend=omp".into(),"--backend=codex".into(),
+            "--goatr=/private/frozen-goatr".into(),"--config=/private/config.toml".into(),"--workspace-root=/private/workspace".into(),
+            "--evidence-dir=/private/fresh".into(),"--consent-owned-providers".into(),"--serial=owned-physical-serial".into(),
+            "--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
+        for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
+        args.push(format!("--expected-config-sha256={}",physical::EXPECTED_CONFIG_SHA256));
+        args.push("--expected-ntfy-apk-sha256=8a1075c0963caa1e0dc404996531bc641cb2b982f92a4bc692d4999f9eb53f39".into());
+        args.push("--expected-ntfy-signer-sha256=6e145d7ae685eff75468e5067e03a6c3645453343e4e181dac8b6b17ff67489d".into());
+        args
+    }
+    #[test]
+    fn physical_mvp_cli_requires_all_frozen_inputs_and_accepts_both_backend_orders() {
+        let args=physical_mvp_args();
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+        physical_mode_environment(&parsed).unwrap();
+        assert!(parsed.get_flag("physical-mvp"));assert!(!parsed.get_flag("automate-native-inputs"));
+        assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::DefaultValue));
+        for required in ["--goatr=","--config=","--workspace-root=","--evidence-dir=","--serial=","--apk=","--test-apk=",
+            "--expected-goatr-sha256=","--expected-companion-lock-sha256=","--expected-apk-sha256=","--expected-test-apk-sha256=",
+            "--expected-config-sha256=","--expected-ntfy-apk-sha256=","--expected-ntfy-signer-sha256=","--consent-owned-providers"] {
+            let missing=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(missing).is_err(),"{required}");
+        }
+        let mut reversed=args.clone();reversed.swap(2,3);
+        physical_mode_environment(&feedback_arguments(arguments_base()).try_get_matches_from(reversed).unwrap()).unwrap();
+        for providers in [vec!["--backend=omp"],vec!["--backend=omp","--backend=omp"],vec!["--backend=codex","--backend=omp","--backend=codex"]] {
+            let mut invalid=args.iter().filter(|arg|!arg.starts_with("--backend=")).cloned().collect::<Vec<_>>();
+            invalid.extend(providers.into_iter().map(str::to_owned));
+            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(invalid).unwrap();assert!(require_shared_backends(&parsed).is_err());
+        }
+    }
+    #[test]
+    fn physical_mvp_requires_independent_template_pin_and_paired_old_audit_inputs_only_in_its_mode() {
+        let mut wrong=physical_mvp_args();wrong.retain(|arg|!arg.starts_with("--expected-config-sha256="));wrong.push(format!("--expected-config-sha256={}","0".repeat(64)));
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(wrong).unwrap();
+        assert!(physical_mode_environment(&parsed).unwrap_err().to_string().contains("independent_retained_config_pin"));
+        let audit="--old-product-audit=/private/independent-old-audit.json".to_owned();
+        let pin=format!("--expected-old-product-audit-sha256={}","a".repeat(64));
+        let mut complete=physical_mvp_args();complete.extend([audit.clone(),pin.clone()]);
+        physical_mode_environment(&feedback_arguments(arguments_base()).try_get_matches_from(complete).unwrap()).unwrap();
+        for single in [&audit,&pin] {
+            let mut incomplete=physical_mvp_args();incomplete.push(single.clone());
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(incomplete).is_err());
+        }
+        for extra in [format!("--expected-config-sha256={}",physical::EXPECTED_CONFIG_SHA256),audit,pin] {
+            let mut unrelated=background_args("persistent");unrelated.push(extra);
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(unrelated).is_err());
+        }
+    }
+    #[test]
+    fn physical_mvp_rejects_explicit_api30_and_explicit_default34_by_value_source() {
+        for api in ["30","34"] {
+            let mut args=physical_mvp_args();args.push(format!("--api={api}"));
+            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();
+            assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::CommandLine));
+            let error=physical_mode_environment(&parsed).unwrap_err();
+            assert!(error.to_string().contains("explicit --api is forbidden"));
+        }
+    }
+    #[test]
+    fn physical_mvp_rejects_all_legacy_owners_private_native_modes_and_direct_input() {
+        for selector in ["--background=persistent","--admission-only","--shared-agent-only","--terminal-only","--project-read-only",
+            "--grid","--grid-lease=/private/lease.json","--ui","--camera","--ime","--setup","--prepare-emulator",
+            "--emulator-owner=/private/emulator.json","--paging-proof","--codex-invalidation-diagnostic","--omp-creation-diagnostic",
+            "--physical-hello-capture","--physical-relay-ephemeral","--development-continuity","--development-owner-feedback",
+            "--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing",
+            "--admin-socket=/private/admin.sock","--disposable-uid=1901","--automate-native-inputs"] {
+            let mut args=physical_mvp_args();args.push(selector.into());
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err(),"{selector}");
+        }
+    }
+    #[test]
+    fn physical_mvp_requires_exact_official_ntfy_pins_without_leaking_them_to_other_modes() {
+        for field in ["expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"] {
+            let mut args=physical_mvp_args();args.retain(|arg|!arg.starts_with(&format!("--{field}=")));args.push(format!("--{field}={}","0".repeat(64)));
+            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();
+            assert!(physical_mode_environment(&parsed).unwrap_err().to_string().contains("independently qualified official ntfy"));
+        }
+        let pins=physical_mvp_args().into_iter().filter(|arg|arg.starts_with("--expected-ntfy-")).collect::<Vec<_>>();
+        let mut unrelated=vec!["smoke".to_owned()];unrelated.extend(pins.clone());
+        assert!(feedback_arguments(arguments_base()).try_get_matches_from(unrelated).is_err());
+        let mut persistent=background_args("persistent");persistent.extend(pins);
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(persistent).unwrap();
+        assert!(background_mode_environment(&parsed).is_err());
     }
     #[test]
     fn finite_background_parser_accepts_both_explicit_modes_and_refuses_effectful_mixed_routes() {

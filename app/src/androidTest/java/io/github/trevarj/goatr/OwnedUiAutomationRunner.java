@@ -38,6 +38,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import org.json.JSONObject;
+import java.security.KeyFactory;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Collections;
 
 /**
  * Test-package-only native UI owner. Ordinary observer actions never start the product.
@@ -46,6 +51,7 @@ import java.util.regex.Pattern;
  */
 public final class OwnedUiAutomationRunner extends Instrumentation {
     private Bundle runnerArguments = new Bundle();
+    private Request activeRequest;
 
     @Override
     public void onCreate(Bundle arguments) {
@@ -72,6 +78,8 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             request = requiredRequest();
             requireEligible(getContext(), getTargetContext());
             requireBeforeDeadline(preflightDeadline);
+            UiAutomation physicalAutomation=request.physical==null?null:getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+            requireBeforeDeadline(preflightDeadline);
             stage.stage = Stage.INTENT;
             File cacheDir = getContext().getCacheDir();
             writeExclusive(cacheDir, intentFile(getContext(), request.runId), intentJson(request, self));
@@ -82,9 +90,11 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             sendStatus(1, processStatus);
             awaitReleaseDirectory(releaseDirectory, SystemClock.elapsedRealtime() + PRE_INPUT_RELEASE_TIMEOUT_MILLIS);
             final long deadline = SystemClock.elapsedRealtime() + TIMEOUT_MILLIS;
+            activeRequest = request;
+            requirePhysicalEpoch(request);
             requireBeforeDeadline(deadline);
             stage.stage = Stage.AUTOMATION;
-            UiAutomation automation = getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+            UiAutomation automation = physicalAutomation!=null?physicalAutomation:getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
             InteractiveWindowsService interactiveWindows = needsInteractiveWindows(request.action) ? enableInteractiveWindows(automation) : null;
             try {
             stage.stage = Stage.OBSERVATION;
@@ -97,14 +107,17 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             } else if (request.action == Action.REFRESH_CHANGES || request.action == Action.CLOSE_CHANGES || request.action == Action.OBSERVE_CHANGES) {
                 changesTargetWindow(automation, request.sessionId, request.sessionGeneration, deadline);
             }
-            Observation before = request.action.isRouteAction() || request.action == Action.BACKGROUND_OWNED_APP || request.action == Action.OBSERVE_CREATION_PICKER || request.action == Action.CONTINUE_OWNED_CREATION_SERVER || request.action == Action.CONTINUE_OWNED_CREATION_PROJECT
+            Observation before = request.action.isPhysicalAction() || request.physical!=null&&request.action==Action.OBSERVE || request.action.isRouteAction() || request.action == Action.BACKGROUND_OWNED_APP || request.action == Action.OBSERVE_CREATION_PICKER || request.action == Action.CONTINUE_OWNED_CREATION_SERVER || request.action == Action.CONTINUE_OWNED_CREATION_PROJECT
                     ? Observation.empty()
                     : observe(automation, deadline);
             observation = before;
             ActionResult result;
-            if (request.action.isRouteAction()) {
+            if (request.action.isPhysicalAction() || request.physical!=null&&request.action.physicalHostNavigation()) {
+                result = physicalAction(automation, request, deadline, acknowledgement, stage);
+            } else if (request.action.isRouteAction()) {
                 result = ownedRouteAction(automation, request, deadline, acknowledgement, stage, observation);
             } else if (request.action == Action.OBSERVE) {
+                if(request.physical!=null)physicalObservation(automation,request,deadline);
                 expectedScreenObserved = true;
                 result = new ActionResult(false, true, before);
             } else if (request.action == Action.OBSERVE_APPEARANCE) {
@@ -200,6 +213,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             } else if (request.action == Action.CLOSE_SNIPPET_EDITOR) {
                 result = closeSnippetEditor(automation, request, deadline, acknowledgement, stage);
             } else if (request.action == Action.OBSERVE_TERMINAL) {
+                if(request.physical!=null)physicalAgentReadOnly(automation,request,deadline);
                 expectedScreenObserved = true;
                 result = new ActionResult(false, true, before);
             } else if (request.action == Action.OBSERVE_WORKTREES) {
@@ -253,6 +267,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
     }
 
     private Request requiredRequest() {
+        requireKnownArguments(runnerArguments);
         String runId = runnerArguments.getString(RUN_ID_ARGUMENT);
         if (runId == null) throw new Blocked("run_id_missing");
         try {
@@ -380,7 +395,501 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             if(action==Action.SET_OWNED_ROUTE_DIRECT || action==Action.SAVE_OWNED_ROUTE_HINTS || action==Action.RECONNECT_OWNED_ROUTE_HOST) requireCondition(validOwnedRouteDirect(routeDirect),"route_direct_invalid");
             else if(routeDirect!=null) requireCondition(action==Action.OBSERVE_OWNED_HOST_ROUTES && validOwnedRouteDirect(routeDirect),"route_direct_invalid");
         } else requireCondition(routeHostId==null && routeDirect==null,"route_arguments_unexpected");
-        return new Request(runId, action, appearance, sessionListPreference, sessionListPreferenceValue, creationServerLabel, creationServerId, creationProjectLabel, creationName, previousCreationName, composerText, sessionId, sessionGeneration, historyRecordId, receiptId, excluded, workflowId, snippetId, snippetVersion, routeHostId, routeDirect);
+        PhysicalSelectors physical = PhysicalSelectors.parse(runnerArguments, action);
+        return new Request(runId, action, appearance, sessionListPreference, sessionListPreferenceValue, creationServerLabel, creationServerId, creationProjectLabel, creationName, previousCreationName, composerText, sessionId, sessionGeneration, historyRecordId, receiptId, excluded, workflowId, snippetId, snippetVersion, routeHostId, routeDirect, physical);
+    }
+
+    private static final Set<String> PHYSICAL_KEYS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+            "ownedUiHostId","ownedUiShellId","ownedUiShellGeneration","ownedUiProjectId","ownedUiServerId","ownedUiWorkspaceId",
+            "ownedUiRequestId","ownedUiRequestAnswer","ownedUiKey","ownedUiSizeField","ownedUiColumns","ownedUiRows",
+            "ownedUiScrollOffset","ownedUiScrollDirection","ownedUiDeliveryMode","ownedUiEnabled","ownedUiEventId",
+            "ownedUiNotificationCategory","ownedUiNotificationHint","ownedUiHostLabel","ownedUiMvpRunId","ownedUiProductPid",
+            "ownedUiProductStart","ownedUiObserverPublicSha256","ownedUiExpectedProductSha256","ownedUiExpectedServiceRequested","ownedUiOwnedStartRunId")));
+    private static void requireKnownArguments(Bundle arguments) {
+        Set<String> known = new HashSet<>(PHYSICAL_KEYS);
+        known.addAll(Arrays.asList(RUN_ID_ARGUMENT,ACTION_ARGUMENT,APPEARANCE_ARGUMENT,SESSION_LIST_PREFERENCE_ARGUMENT,
+                SESSION_LIST_PREFERENCE_VALUE_ARGUMENT,CREATION_SERVER_LABEL_ARGUMENT,CREATION_SERVER_ID_ARGUMENT,
+                CREATION_PROJECT_LABEL_ARGUMENT,CREATION_NAME_ARGUMENT,PREVIOUS_CREATION_NAME_ARGUMENT,COMPOSER_TEXT_ARGUMENT,
+                SESSION_ID_ARGUMENT,SESSION_GENERATION_ARGUMENT,HISTORY_RECORD_ID_ARGUMENT,RECEIPT_ID_ARGUMENT,
+                EXCLUDED_RECEIPT_IDS_ARGUMENT,SNIPPET_WORKFLOW_ID_ARGUMENT,SNIPPET_ID_ARGUMENT,SNIPPET_VERSION_ARGUMENT,
+                ROUTE_HOST_ID_ARGUMENT,ROUTE_DIRECT_ARGUMENT));
+        for(String key:arguments.keySet())requireCondition(known.contains(key),"argument_unknown");
+    }
+    /** The exact closed parser consumed before private intent/release or any UI effect. */
+    static void validatePhysicalArguments(Bundle arguments) {
+        OwnedUiAutomationRunner parser=new OwnedUiAutomationRunner();
+        parser.runnerArguments=new Bundle(arguments);
+        parser.requiredRequest();
+    }
+    static final class PhysicalSelectors {
+        final Map<String,String> values;
+        final int productPid;
+        final long productStart;
+        final String argumentHash;
+        private PhysicalSelectors(Map<String,String> values,int pid,long start,String argumentHash) {
+            this.values=Collections.unmodifiableMap(values);this.productPid=pid;this.productStart=start;this.argumentHash=argumentHash;
+        }
+        String get(String key) {return values.get(key);}
+        String host() {return get("ownedUiHostId");}
+        String shellScope(String prefix) {return prefix+host()+"_"+get("ownedUiShellId")+"_"+get("ownedUiShellGeneration");}
+        String marker() {return "GOATR_MVP_"+get("ownedUiMvpRunId");}
+        static PhysicalSelectors parse(Bundle arguments,Action action) {
+            boolean selected=action.isPhysicalAction();
+            for(String key:PHYSICAL_KEYS)selected|=arguments.containsKey(key);
+            if(!selected)return null;
+            requireCondition(action.isPhysicalAction()||action.physicalLegacyAllowed(),"physical_action_forbidden");
+            Set<String> allowed=new HashSet<>(Arrays.asList("ownedUiHostId","ownedUiMvpRunId","ownedUiProductPid","ownedUiProductStart","ownedUiObserverPublicSha256","ownedUiExpectedProductSha256"));
+            if(action.shellScoped())allowed.addAll(Arrays.asList("ownedUiShellId","ownedUiShellGeneration"));
+            if(action==Action.SELECT_TERMINAL_PROJECT||action==Action.SUBMIT_TERMINAL_CREATION||action==Action.SELECT_TERMINAL_WORKSPACE)
+                allowed.addAll(Arrays.asList("ownedUiServerId","ownedUiWorkspaceId"));
+            if(action==Action.SELECT_TERMINAL_PROJECT||action==Action.SUBMIT_TERMINAL_CREATION)allowed.add("ownedUiProjectId");
+            if(action==Action.SELECT_REQUEST||action==Action.SUBMIT_REQUEST_ANSWER)allowed.add("ownedUiRequestId");
+            if(action==Action.SUBMIT_REQUEST_ANSWER)allowed.add("ownedUiRequestAnswer");
+            if(action==Action.SEND_SHELL_KEY||action==Action.SET_SHELL_MODIFIER)allowed.add("ownedUiKey");
+            if(action==Action.SET_SHELL_SIZE||action==Action.CONFIRM_SHELL_RESIZE)allowed.addAll(Arrays.asList("ownedUiColumns","ownedUiRows"));
+            if(action==Action.SET_SHELL_SIZE)allowed.add("ownedUiSizeField");
+            if(action==Action.SCROLL_SHELL_HISTORY)allowed.addAll(Arrays.asList("ownedUiScrollOffset","ownedUiScrollDirection"));
+            if(action==Action.SELECT_DELIVERY_MODE)allowed.add("ownedUiDeliveryMode");
+            if(action==Action.ENABLE_ATTENTION||action==Action.ENABLE_COMPLETED)allowed.add("ownedUiEnabled");
+            if(action==Action.START_DELIVERY||action==Action.STOP_DELIVERY)allowed.add("ownedUiExpectedServiceRequested");
+            if(action==Action.STOP_DELIVERY)allowed.add("ownedUiOwnedStartRunId");
+            if(action==Action.TAP_ATTENTION_NOTIFICATION)allowed.addAll(Arrays.asList("ownedUiEventId","ownedUiNotificationCategory","ownedUiNotificationHint","ownedUiHostLabel"));
+            Map<String,String> values=new HashMap<>();
+            for(String key:PHYSICAL_KEYS) {
+                if(!allowed.contains(key)) {requireCondition(!arguments.containsKey(key),"physical_selector_unexpected");continue;}
+                String value=arguments.getString(key);
+                requireCondition(value!=null&&!value.isEmpty()&&value.length()<=512,"physical_selector_required");
+                values.put(key,value);
+            }
+            requireCondition(values.get("ownedUiHostId").matches("[0-9a-f]{64}"),"physical_host_invalid");
+            for(String key:Arrays.asList("ownedUiMvpRunId","ownedUiShellId","ownedUiShellGeneration","ownedUiProjectId","ownedUiServerId","ownedUiRequestId","ownedUiEventId","ownedUiOwnedStartRunId")) {
+                String value=values.get(key);if(value!=null)strictPhysicalUuid(value);
+            }
+            String workspace=values.get("ownedUiWorkspaceId");
+            if(workspace!=null)requireCondition(workspace.matches("[A-Za-z0-9_.:-]{1,128}"),"physical_workspace_invalid");
+            requireCondition(values.get("ownedUiObserverPublicSha256").matches("[0-9a-f]{64}"),"physical_observer_invalid");
+            requireCondition(values.get("ownedUiExpectedProductSha256").matches("[0-9a-f]{64}"),"physical_artifact_invalid");
+            int pid=(int)physicalNumber(values.get("ownedUiProductPid"),1,Integer.MAX_VALUE);
+            long start=physicalNumber(values.get("ownedUiProductStart"),1,Long.MAX_VALUE);
+            if(values.containsKey("ownedUiColumns")) {
+                long columns=physicalNumber(values.get("ownedUiColumns"),1,512),rows=physicalNumber(values.get("ownedUiRows"),1,256);
+                requireCondition(columns*rows<=32768,"physical_dimensions_invalid");
+            }
+            if(values.containsKey("ownedUiSizeField"))requireCondition(Arrays.asList("Columns","Rows").contains(values.get("ownedUiSizeField")),"physical_dimension_field_invalid");
+            if(values.containsKey("ownedUiScrollOffset")) {
+                physicalNumber(values.get("ownedUiScrollOffset"),0,9_007_199_254_740_991L);
+                requireCondition(Arrays.asList("Older","Newer").contains(values.get("ownedUiScrollDirection")),"physical_scroll_invalid");
+            }
+            if(values.containsKey("ownedUiDeliveryMode"))requireCondition(Arrays.asList("Persistent","Ntfy").contains(values.get("ownedUiDeliveryMode")),"physical_delivery_invalid");
+            for(String key:Arrays.asList("ownedUiEnabled","ownedUiNotificationHint","ownedUiExpectedServiceRequested"))
+                if(values.containsKey(key))requireCondition(Arrays.asList("true","false").contains(values.get(key)),"physical_boolean_invalid");
+            if(values.containsKey("ownedUiHostLabel"))requireCondition(values.get("ownedUiHostLabel").equals("Goatr MVP "+values.get("ownedUiMvpRunId")),"physical_label_invalid");
+            if(values.containsKey("ownedUiNotificationCategory"))requireCondition(Arrays.asList("Attention","Completed").contains(values.get("ownedUiNotificationCategory")),"physical_category_invalid");
+            if(values.containsKey("ownedUiRequestAnswer"))requireCondition(Arrays.asList("SubmitPrepared","SelectFirst","Reject","Cancel").contains(values.get("ownedUiRequestAnswer")),"physical_answer_invalid");
+            if(values.containsKey("ownedUiKey")) {
+                String key=values.get("ownedUiKey");
+                if(action==Action.SET_SHELL_MODIFIER)requireCondition(Arrays.asList("Ctrl","Alt","Shift","Super").contains(key),"physical_key_invalid");
+                else requireCondition(Arrays.asList("Enter","Tab","Escape","Backspace","Delete","Insert","Left","Right","Up","Down","Home","End","PageUp","PageDown","F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12").contains(key),"physical_key_invalid");
+            }
+            return new PhysicalSelectors(values,pid,start,physicalArgumentHash(arguments));
+        }
+    }
+    static String physicalArgumentHash(Bundle arguments) {
+        StringBuilder material=new StringBuilder();
+        for(String key:new java.util.TreeSet<>(arguments.keySet())) {
+            String value=arguments.getString(key);
+            requireCondition(value!=null&&key.length()<=128&&value.length()<=4096,"physical_selector_required");
+            requireCondition(key.chars().allMatch(character->character>=32&&character<127)&&value.chars().allMatch(character->character>=32&&character<127),"physical_selector_required");
+            material.append(key.length()).append(':').append(key).append(value.length()).append(':').append(value);
+        }
+        requireCondition(material.length()<=65536,"physical_selector_required");
+        return digest(material.toString().getBytes(StandardCharsets.US_ASCII));
+    }
+    private static void strictPhysicalUuid(String value) {
+        try {requireCondition(UUID.fromString(value).toString().equals(value),"physical_uuid_invalid");}
+        catch(IllegalArgumentException error) {throw new Blocked("physical_uuid_invalid");}
+    }
+    private static long physicalNumber(String value,long minimum,long maximum) {
+        requireCondition(value!=null&&value.matches("0|[1-9][0-9]{0,18}"),"physical_number_invalid");
+        try {long result=Long.parseLong(value);requireCondition(result>=minimum&&result<=maximum,"physical_number_invalid");return result;}
+        catch(NumberFormatException error) {throw new Blocked("physical_number_invalid");}
+    }
+
+    private static Set<String> jsonKeys(JSONObject value) {
+        Set<String> keys=new HashSet<>();java.util.Iterator<String> names=value.keys();
+        while(names.hasNext())keys.add(names.next());return keys;
+    }
+    private static byte[] physicalHex(String text,int minimum,int maximum) {
+        requireCondition(text!=null&&text.length()%2==0&&text.length()/2>=minimum&&text.length()/2<=maximum&&text.matches("[0-9a-f]+"),"physical_epoch_proof");
+        byte[] result=new byte[text.length()/2];for(int i=0;i<result.length;i++)result[i]=(byte)Integer.parseInt(text.substring(i*2,i*2+2),16);return result;
+    }
+    /** Signed original-product witness, private to this one release directory and action UUID. */
+    private JSONObject requirePhysicalEpoch(Request request) {
+        if(request==null||request.physical==null)return null;
+        try {
+            PhysicalSelectors selected=request.physical;
+            File directory=releaseDirectory(getContext().getCacheDir(),request.runId);
+            File file=new File(directory,"product-epoch.json");
+            requireCondition(directory.getCanonicalFile().equals(directory)&&file.getCanonicalFile().equals(file)&&file.length()>=2&&file.length()<=131072,"physical_epoch_proof");
+            android.system.StructStat stat=Os.lstat(file.getPath());
+            requireCondition(OsConstants.S_ISREG(stat.st_mode)&&stat.st_uid==Process.myUid()&&(stat.st_mode&0777)==0600,"physical_epoch_proof");
+            JSONObject witness=new JSONObject(new String(Files.readAllBytes(file.toPath()),StandardCharsets.UTF_8));
+            requireCondition(jsonKeys(witness).equals(new HashSet<>(Arrays.asList("public","challenge","signature","request"))),"physical_epoch_proof");
+            byte[] point=physicalHex(witness.getString("public"),65,65);
+            requireCondition(point[0]==4&&digest(point).equals(selected.get("ownedUiObserverPublicSha256")),"physical_epoch_proof");
+            byte[] prefix=new byte[]{0x30,0x59,0x30,0x13,0x06,0x07,0x2a,(byte)0x86,0x48,(byte)0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,(byte)0x86,0x48,(byte)0xce,0x3d,0x03,0x01,0x07,0x03,0x42,0x00};
+            byte[] encoded=Arrays.copyOf(prefix,prefix.length+point.length);System.arraycopy(point,0,encoded,prefix.length,point.length);
+            byte[] bytes=witness.getString("request").getBytes(StandardCharsets.UTF_8);
+            requireCondition(bytes.length>=1&&bytes.length<=65536,"physical_epoch_proof");
+            Signature verifier=Signature.getInstance("SHA256withECDSA");
+            verifier.initVerify(KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(encoded)));
+            verifier.update("GOATR-STOCK-CONTROL-v1".getBytes(StandardCharsets.US_ASCII));verifier.update((byte)0);
+            verifier.update(physicalHex(witness.getString("challenge"),32,32));verifier.update(ByteBuffer.allocate(4).putInt(bytes.length).array());verifier.update(bytes);
+            requireCondition(verifier.verify(physicalHex(witness.getString("signature"),8,72)),"physical_epoch_proof");
+            JSONObject envelope=new JSONObject(new String(bytes,StandardCharsets.UTF_8));Arrays.fill(bytes,(byte)0);
+            requireCondition(jsonKeys(envelope).equals(new HashSet<>(Arrays.asList("method","runId","sequence","report")))
+                    &&"physical_report".equals(envelope.getString("method"))&&selected.get("ownedUiMvpRunId").equals(envelope.getString("runId")),"physical_epoch_proof");
+            JSONObject report=envelope.getJSONObject("report"),process=report.getJSONObject("process");
+            PackageManager packages=getContext().getPackageManager();
+            android.content.pm.PackageInfo productInfo=packages.getPackageInfo(PRODUCT_PACKAGE,0),testInfo=packages.getPackageInfo(TEST_PACKAGE,PackageManager.GET_INSTRUMENTATION);
+            ApplicationInfo productApp=productInfo.applicationInfo,testApp=testInfo.applicationInfo;
+            requireCondition(productApp!=null&&testApp!=null&&productApp.uid!=testApp.uid&&Process.myUid()==testApp.uid
+                    &&TEST_PACKAGE.equals(android.app.Application.getProcessName())&&PRODUCT_PACKAGE.equals(productApp.processName)
+                    &&TEST_PACKAGE.equals(testApp.processName)&&productInfo.sharedUserId==null&&testInfo.sharedUserId==null
+                    &&process.getInt("uid")==productApp.uid&&PRODUCT_PACKAGE.equals(process.getString("name")),"physical_product_epoch");
+            requireCondition(testInfo.instrumentation!=null&&testInfo.instrumentation.length==2,"physical_product_epoch");
+            for(android.content.pm.InstrumentationInfo instrument:testInfo.instrumentation)requireCondition(instrument.targetProcesses==null,"physical_product_epoch");
+            long age=SystemClock.elapsedRealtime()-report.getLong("observedAt");
+            requireCondition("epoch".equals(report.getString("kind"))&&request.runId.equals(report.getString("actionRunId"))
+                    &&process.getInt("pid")==selected.productPid&&selected.productStart==Long.parseLong(process.getString("start"))
+                    &&age>=0&&age<=5000&&selected.get("ownedUiExpectedProductSha256").equals(report.getString("apkSha256"))
+                    &&selected.get("ownedUiHostId").equals(report.getJSONObject("snapshot").getString("host")),"physical_product_epoch");
+            return report.getJSONObject("snapshot");
+        }catch(Blocked refused) {throw refused;}
+        catch(Exception error) {throw new Blocked("physical_epoch_proof");}
+    }
+    private void physicalObservation(UiAutomation automation,Request request,long deadline) {
+        JSONObject state=requirePhysicalEpoch(request);
+        try {
+            JSONObject pairing=state.getJSONObject("pairing");
+            if(!pairing.getBoolean("screenPairing")) {
+                AccessibilityNodeInfo root=currentProductRoot(automation,deadline);
+                try {
+                    requireCondition(state.getBoolean("foreground"),"physical_product_epoch");
+                    if(!state.isNull("selectedSession"))requireCondition(exactConversationWindow(automation,state.getString("selectedSession"),state.getString("selectedGeneration"),deadline)==root.getWindowId(),"physical_postcondition");
+                    else if(!state.isNull("selectedShell"))requireCondition(physicalWindow(automation,"shell_scope_"+request.physical.host()+"_"+state.getString("selectedShell")+"_"+state.getString("selectedShellGeneration"),deadline)==root.getWindowId(),"physical_postcondition");
+                }finally{root.recycle();}
+                return;
+            }
+            if(pairing.getBoolean("previewPresent")) {
+                requireCondition(pairing.getBoolean("hostMatches")&&pairing.getBoolean("nameMatches")&&pairing.getBoolean("fingerprintMatches"),"physical_pairing_preview");
+                NodeRef confirm=uniqueClickableTag(automation,"pair_confirm",deadline,NO_WINDOW);
+                confirm.node.recycle();
+                try {NodeRef paste=uniqueVisibleTag(automation,"pair_paste",deadline);paste.node.recycle();throw new Blocked("physical_pairing_preview");}
+                catch(Blocked absent) {if(!"ui_tag_missing".equals(absent.code))throw absent;}
+            }else {
+                int window=physicalWindow(automation,"pair_camera",deadline);
+                requireTagTextExact(automation,"camera_status","Scanning QR · preview only",deadline);
+                NodeRef paste=uniqueVisibleTag(automation,"pair_paste",deadline,window);
+                try {CharSequence value=paste.node.getText();requireCondition(value==null||value.length()==0,"physical_pairing_paste_not_empty");}
+                finally{paste.node.recycle();}
+            }
+        }catch(org.json.JSONException malformed){throw new Blocked("physical_product_epoch");}
+    }
+    /** Inspect ONLY the terminal-root identifier; never properties, text, or descendants. */
+    private void requirePhysicalGridIdentifier(UiAutomation automation,int window,long deadline) {
+        AccessibilityNodeInfo root=currentProductRoot(automation,deadline);
+        if(root.getWindowId()!=window){root.recycle();throw new Blocked("ui_root_changed");}
+        ArrayDeque<AccessibilityNodeInfo> queue=new ArrayDeque<>();queue.add(root);int discovered=1,grids=0;
+        try {
+            while(!queue.isEmpty()) {
+                AccessibilityNodeInfo node=queue.removeFirst();
+                try {
+                    requireBeforeDeadline(deadline);
+                    if(TERMINAL_OUTPUT_TAG.equals(node.getViewIdResourceName())) {requireCondition(++grids==1,"physical_postcondition");continue;}
+                    if(isSensitiveContent(node))continue;
+                    NodeMetadata meta=metadata(node);requireCondition(PRODUCT_PACKAGE.equals(meta.packageName)&&meta.windowId==window,"ui_root_changed");
+                    for(int index=0;index<node.getChildCount();index++) {
+                        requireCondition(++discovered<=MAX_NODES,"ui_tree_bound");
+                        AccessibilityNodeInfo child=node.getChild(index);if(child!=null)queue.add(child);
+                    }
+                }finally{node.recycle();}
+            }
+            requireCondition(grids==1,"physical_postcondition");
+        }finally{while(!queue.isEmpty())queue.removeFirst().recycle();}
+    }
+    private void physicalAgentReadOnly(UiAutomation automation,Request request,long deadline) {
+        requirePhysicalEpoch(request);
+        int window=terminalTargetWindow(automation,request.sessionId,request.sessionGeneration,deadline);
+        requirePhysicalGridIdentifier(automation,window,deadline);
+        NodeRef dialog=uniqueVisibleTag(automation,TERMINAL_DIALOG_TAG,deadline,window);
+        ArrayDeque<AccessibilityNodeInfo> queue=new ArrayDeque<>();queue.add(dialog.node);int discovered=1;
+        try {
+            while(!queue.isEmpty()) {
+                AccessibilityNodeInfo node=queue.removeFirst();
+                try {
+                    if(isTerminalOutput(node))continue;
+                    requireBeforeDeadline(deadline);NodeMetadata meta=metadata(node);
+                    requireCondition(PRODUCT_PACKAGE.equals(meta.packageName)&&meta.windowId==window,"ui_root_changed");
+                    String tag=meta.viewId;
+                    requireCondition(!node.isEditable()&&!meta.supports(AccessibilityNodeInfo.ACTION_SET_TEXT)
+                            &&(tag==null||!tag.startsWith("shell_")&&!tag.equals("terminal_focus")&&!tag.equals("terminal_resize")),"physical_agent_not_read_only");
+                    if(isSensitiveContent(node))continue;
+                    for(int index=0;index<node.getChildCount();index++) {
+                        requireCondition(++discovered<=MAX_NODES,"ui_tree_bound");
+                        AccessibilityNodeInfo child=node.getChild(index);if(child!=null)queue.add(child);
+                    }
+                }finally{node.recycle();}
+            }
+        }finally{while(!queue.isEmpty())queue.removeFirst().recycle();}
+    }
+    private int physicalWindow(UiAutomation automation,String scope,long deadline) {
+        NodeRef node=uniqueVisibleTag(automation,scope,deadline);
+        try {return node.windowId;}finally{node.node.recycle();}
+    }
+    private void awaitPhysicalScope(UiAutomation automation,String scope,long deadline) {
+        while(SystemClock.elapsedRealtime()<deadline) {
+            try {NodeRef node=uniqueVisibleTag(automation,scope,deadline);node.node.recycle();return;}
+            catch(Blocked missing) {if(!"ui_tag_missing".equals(missing.code))throw missing;}
+            SystemClock.sleep(POLL_MILLIS);
+        }
+        throw new Blocked("physical_postcondition");
+    }
+    private ActionResult physicalAction(UiAutomation automation,Request request,long deadline,Acknowledgement acknowledgement,StageTracker stage) {
+        PhysicalSelectors p=request.physical;requireCondition(p!=null,"physical_selector_required");
+        if(request.action==Action.TAP_ATTENTION_NOTIFICATION)return physicalNotificationTap(automation,request,deadline,acknowledgement,stage);
+        if(request.action==Action.OPEN_ATTENTION_SHADE) {
+            requirePhysicalEpoch(request);requireBeforeDeadline(deadline);stage.stage=Stage.CLICK;
+            boolean accepted=automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS);
+            acknowledgement.value=accepted;requireCondition(accepted,"ui_global_action_acknowledgement");
+            stage.stage=Stage.POSTCONDITION;physicalShadeRoot(automation,deadline).recycle();
+            return new ActionResult(true,true,Observation.empty());
+        }
+        String shell=request.action.shellScoped()?p.shellScope("shell_scope_"):null,scope="scene_host_"+p.host(),after=scope,tag=null,value=null;
+        int input=AccessibilityNodeInfo.ACTION_CLICK;
+        switch(request.action) {
+            case VIEW_SESSIONS:scope=SESSIONS_TAG;tag="host_sessions_"+p.host();break;
+            case OPEN_HOST_SETTINGS:scope=SESSIONS_TAG;tag="host_settings_"+p.host();break;
+            case OPEN_SHELLS:scope=SESSIONS_TAG;tag="host_terminals_"+p.host();after="shell_list_host_"+p.host();break;
+            case OPEN_SHELL: scope="shell_list_host_"+p.host();physicalWindow(automation,"shell_row_target_"+p.get("ownedUiShellId")+"_"+p.get("ownedUiShellGeneration"),deadline);tag="shell_open_"+p.get("ownedUiShellId");after=shell;break;
+            case BEGIN_SHELL_CONTROL:scope=shell;tag="shell_begin_control";after=p.shellScope("shell_begin_scope_");break;
+            case CONFIRM_SHELL_CONTROL:scope=p.shellScope("shell_begin_scope_");tag="shell_begin_confirm";after=shell;break;
+            case SET_SHELL_DRAFT:scope=shell;tag="shell_input_text";input=AccessibilityNodeInfo.ACTION_SET_TEXT;value="echo "+p.marker();break;
+            case SEND_SHELL_DRAFT:scope=shell;tag="shell_input_send";requireTagTextExact(automation,"shell_input_text","echo "+p.marker(),deadline);break;
+            case SEND_SHELL_KEY:scope=shell;tag="shell_key_"+p.get("ownedUiKey");break;
+            case SET_SHELL_MODIFIER:scope=shell;tag="shell_modifier_"+p.get("ownedUiKey");break;
+            case OPEN_SHELL_RESIZE:scope=shell;tag="shell_resize";after=p.shellScope("shell_resize_scope_");break;
+            case SET_SHELL_SIZE:scope=p.shellScope("shell_resize_scope_");tag="Columns".equals(p.get("ownedUiSizeField"))?"shell_resize_columns":"shell_resize_rows";value=p.get("Columns".equals(p.get("ownedUiSizeField"))?"ownedUiColumns":"ownedUiRows");input=AccessibilityNodeInfo.ACTION_SET_TEXT;break;
+            case CONFIRM_SHELL_RESIZE:scope=p.shellScope("shell_resize_scope_");tag="shell_resize_confirm";requireTagTextExact(automation,"shell_resize_columns",p.get("ownedUiColumns"),deadline);requireTagTextExact(automation,"shell_resize_rows",p.get("ownedUiRows"),deadline);after=shell;break;
+            case SCROLL_SHELL_HISTORY: {
+                scope=shell;JSONObject observed=requirePhysicalEpoch(request);
+                try {
+                    long offset=observed.getLong("scrollOffset"),maximum=observed.getLong("scrollMaximum"),rows=observed.getLong("scrollViewport");
+                    requireCondition(offset>=0&&maximum>=offset&&rows>0,"physical_history_unavailable");
+                    long expected="Older".equals(p.get("ownedUiScrollDirection"))?Math.min(maximum,offset+rows):Math.max(0,offset-rows);
+                    requireCondition(expected==physicalNumber(p.get("ownedUiScrollOffset"),0,9_007_199_254_740_991L),"physical_history_changed");
+                }catch(org.json.JSONException error) {throw new Blocked("physical_history_unavailable");}
+                tag="Older".equals(p.get("ownedUiScrollDirection"))?"shell_history_older":"shell_history_newer";break;
+            }
+            case SHELL_HISTORY_BOTTOM:scope=shell;tag="shell_history_bottom";break;
+            case RELEASE_SHELL_CONTROL:scope=shell;tag="shell_release_control";break;
+            case OPEN_SHELL_DETAILS:scope=shell;tag="shell_viewer_details";after=p.shellScope("shell_details_scope_");break;
+            case OBSERVE_SHELL:int shellWindow=physicalWindow(automation,shell,deadline);requirePhysicalGridIdentifier(automation,shellWindow,deadline);return new ActionResult(false,true,Observation.empty());
+            case OPEN_TERMINAL_CREATION:scope="shell_list_host_"+p.host();tag="terminal_create_workspace";after="terminal_workspace_picker_"+p.host();break;
+            case SELECT_TERMINAL_WORKSPACE:scope="terminal_workspace_picker_"+p.host();tag="terminal_workspace_"+p.get("ownedUiServerId")+"_"+p.get("ownedUiWorkspaceId");after="terminal_creation_scope_"+p.host()+"_"+p.get("ownedUiServerId")+"_"+p.get("ownedUiWorkspaceId");break;
+            case SELECT_TERMINAL_PROJECT:scope="terminal_creation_scope_"+p.host()+"_"+p.get("ownedUiServerId")+"_"+p.get("ownedUiWorkspaceId");physicalWindow(automation,"terminal_creation_source_workspace",deadline);tag="terminal_project_"+p.get("ownedUiProjectId");after=scope;break;
+            case SUBMIT_TERMINAL_CREATION:scope="terminal_creation_scope_"+p.host()+"_"+p.get("ownedUiServerId")+"_"+p.get("ownedUiWorkspaceId");physicalWindow(automation,"terminal_creation_source_workspace",deadline);tag="terminal_create_confirm";after=scope;break;
+            case STOP_SESSION:physicalWindow(automation,scope,deadline);exactConversationWindow(automation,request.sessionId,request.sessionGeneration,deadline);tag="turn_stop";break;
+            case SELECT_REQUEST:physicalWindow(automation,scope,deadline);exactConversationWindow(automation,request.sessionId,request.sessionGeneration,deadline);tag="request_select_"+p.get("ownedUiRequestId");after="request_editor_"+p.get("ownedUiRequestId");break;
+            case SUBMIT_REQUEST_ANSWER:
+                scope="request_editor_"+p.get("ownedUiRequestId");physicalWindow(automation,"form_request_"+p.get("ownedUiRequestId"),deadline);
+                if("SubmitPrepared".equals(p.get("ownedUiRequestAnswer")))tag="form_submit";
+                else if("SelectFirst".equals(p.get("ownedUiRequestAnswer"))) {physicalWindow(automation,"form_OmpSelect",deadline);tag="omp_option_0";}
+                else if("Reject".equals(p.get("ownedUiRequestAnswer"))) {physicalWindow(automation,"form_CodexForm",deadline);tag="form_decline";}
+                else tag="form_cancel";
+                after="scene_host_"+p.host();break;
+            case SELECT_DELIVERY_MODE:tag="delivery_mode_"+p.get("ownedUiDeliveryMode")+"_"+p.host();break;
+            case ENABLE_ATTENTION:tag="delivery_enabled_"+p.host();break;
+            case ENABLE_COMPLETED:tag="delivery_completed_"+p.host();break;
+            case START_DELIVERY:
+            case STOP_DELIVERY: {
+                JSONObject state=requirePhysicalEpoch(request);
+                try {
+                    JSONObject keeper=state.getJSONObject("keeper");
+                    requireCondition("Settings".equals(state.getString("screen"))&&p.host().equals(state.getString("selectedHost"))
+                            &&keeper.getBoolean("serviceRequested")==Boolean.parseBoolean(p.get("ownedUiExpectedServiceRequested")),"physical_delivery_changed");
+                    if(request.action==Action.START_DELIVERY)requireCondition(!keeper.getBoolean("running"),"physical_delivery_already_running");
+                    else {
+                        requireCondition(keeper.getBoolean("serviceRequested")&&keeper.getBoolean("privateEnabled")&&"Ntfy".equals(keeper.getString("privateMode"))
+                                &&keeper.getBoolean("privateVerified")&&!keeper.getBoolean("privateRequiresKeeper"),"physical_cleanup_not_owned");
+                        org.json.JSONArray retained=keeper.getJSONArray("retained");
+                        for(int i=0;i<retained.length();i++)requireCondition(!retained.getJSONObject(i).getBoolean("requiresKeeper"),"physical_retained_keeper");
+                    }
+                }catch(org.json.JSONException error) {throw new Blocked("physical_delivery_changed");}
+                tag=(request.action==Action.START_DELIVERY?"delivery_start_":"delivery_stop_")+p.host();break;
+            }
+            case BACKGROUND_PRIVATE_SETTINGS:
+                physicalWindow(automation,scope,deadline);physicalWindow(automation,HOST_SETTINGS_PANEL_TAG,deadline);
+                requirePhysicalEpoch(request);requireBeforeDeadline(deadline);stage.stage=Stage.CLICK;
+                boolean home=automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME);
+                acknowledgement.value=home;requireCondition(home,"ui_global_action_acknowledgement");stage.stage=Stage.POSTCONDITION;
+                AccessibilityNodeInfo background=automation.getRootInActiveWindow();requireCondition(background!=null,"ui_root_missing");
+                try {requireCondition(!PRODUCT_PACKAGE.contentEquals(background.getPackageName()),"physical_postcondition");}finally{background.recycle();}
+                return new ActionResult(true,true,Observation.empty());
+            default:throw new Blocked("physical_action_forbidden");
+        }
+        if(after.equals("scene_host_"+p.host())&&request.action.shellScoped())after=scope;
+        int window=physicalWindow(automation,scope,deadline);stage.stage=Stage.SELECTION;
+        NodeRef selected;
+        if(request.action==Action.ENABLE_ATTENTION||request.action==Action.ENABLE_COMPLETED) {
+            NodeRef row=uniqueVisibleTag(automation,tag,deadline,window);
+            try {selected=uniqueCheckableDescendant(row.node,window,tag,deadline);}finally{row.node.recycle();}
+            requireCondition(selected.node.isChecked()!=Boolean.parseBoolean(p.get("ownedUiEnabled")),"physical_precondition_not_fresh");
+        }else selected=uniqueActionTag(automation,tag,input,deadline,window);
+        boolean accepted;
+        try {
+            stage.stage=Stage.CLICK;
+            boolean toggle=request.action==Action.ENABLE_ATTENTION||request.action==Action.ENABLE_COMPLETED;
+            boolean valid=toggle ? selected.node.refresh()&&selected.node.isVisibleToUser()&&selected.node.isEnabled()
+                    &&(tag.equals(selected.node.getViewIdResourceName())||hasAncestorTag(selected.node,window,tag,deadline))
+                    : revalidateAction(automation,selected,tag,input,deadline);
+            requireCondition(valid,"ui_revalidation");
+            requireCondition(physicalWindow(automation,scope,deadline)==window,"ui_root_changed");
+            if(toggle)requireCondition(selected.node.isChecked()!=Boolean.parseBoolean(p.get("ownedUiEnabled")),"physical_precondition_not_fresh");
+            if(request.action==Action.SET_SHELL_MODIFIER)requireCondition(!selected.node.isSelected(),"physical_precondition_not_fresh");
+            if(request.action==Action.SUBMIT_TERMINAL_CREATION) {
+                NodeRef project=uniqueVisibleTag(automation,"terminal_project_"+p.get("ownedUiProjectId"),deadline,window);
+                try {requireCondition(project.node.refresh()&&project.node.isSelected(),"physical_precondition_not_fresh");}finally{project.node.recycle();}
+            }
+            if(value!=null) {
+                CharSequence previous=selected.node.getText();
+                if(request.action==Action.SET_SHELL_SIZE) {
+                    JSONObject state=requirePhysicalEpoch(request);
+                    try {String expected=Long.toString(state.getLong("Columns".equals(p.get("ownedUiSizeField"))?"columns":"rows"));requireCondition(expected.contentEquals(previous),"physical_precondition_not_fresh");}
+                    catch(org.json.JSONException error){throw new Blocked("physical_product_epoch");}
+                }else requireCondition(previous==null||previous.length()==0,"physical_field_not_empty");
+                Bundle text=new Bundle();text.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,value);
+                requirePhysicalEpoch(request);requireBeforeDeadline(deadline);accepted=selected.node.performAction(input,text);
+            }else {requirePhysicalEpoch(request);requireBeforeDeadline(deadline);accepted=selected.node.performAction(input);}
+        }finally{selected.node.recycle();}
+        acknowledgement.value=accepted;requireCondition(accepted,input==AccessibilityNodeInfo.ACTION_SET_TEXT?"ui_set_text_acknowledgement":"ui_click_acknowledgement");
+        stage.stage=Stage.POSTCONDITION;awaitPhysicalScope(automation,after,deadline);
+        if(value!=null)requireTagTextExact(automation,tag,value,deadline);
+        return new ActionResult(true,true,Observation.empty());
+    }
+
+    private String physicalSystemUiPackage() {
+        try {
+            android.content.res.Resources resources=android.content.res.Resources.getSystem();
+            int id=resources.getIdentifier("config_systemUIServiceComponent","string","android");
+            requireCondition(id!=0,"physical_systemui_unqualified");
+            android.content.ComponentName component=android.content.ComponentName.unflattenFromString(resources.getString(id));
+            requireCondition(component!=null,"physical_systemui_unqualified");
+            ApplicationInfo app=getContext().getPackageManager().getApplicationInfo(component.getPackageName(),0);
+            requireCondition((app.flags&ApplicationInfo.FLAG_SYSTEM)!=0&&app.uid==1000&&!PRODUCT_PACKAGE.equals(app.packageName)&&!TEST_PACKAGE.equals(app.packageName),"physical_systemui_unqualified");
+            return component.getPackageName();
+        }catch(PackageManager.NameNotFoundException error) {throw new Blocked("physical_systemui_unqualified");}
+    }
+    private AccessibilityNodeInfo physicalShadeRoot(UiAutomation automation,long deadline) {
+        String system=physicalSystemUiPackage();
+        while(SystemClock.elapsedRealtime()<deadline) {
+            AccessibilityNodeInfo root=automation.getRootInActiveWindow();
+            if(root!=null) {
+                if(system.contentEquals(root.getPackageName())&&root.isVisibleToUser()) {
+                    AccessibilityWindowInfo window=root.getWindow();
+                    boolean qualified;
+                    try {qualified=window!=null&&window.getType()==AccessibilityWindowInfo.TYPE_SYSTEM;}
+                    finally {if(window!=null)window.recycle();}
+                    if(!qualified){root.recycle();throw new Blocked("physical_systemui_unqualified");}
+                    return root;
+                }
+                root.recycle();
+            }
+            SystemClock.sleep(POLL_MILLIS);
+        }
+        throw new Blocked("physical_notification_shade");
+    }
+    private boolean physicalRowMatches(AccessibilityNodeInfo root,String system,String app,String label,String title,long deadline) {
+        ArrayDeque<AccessibilityNodeInfo> queue=new ArrayDeque<>();queue.add(AccessibilityNodeInfo.obtain(root));
+        int count=0,apps=0,labels=0,titles=0,closedTitles=0;
+        try {
+            while(!queue.isEmpty()) {
+                AccessibilityNodeInfo node=queue.removeFirst();
+                try {
+                    requireBeforeDeadline(deadline);requireCondition(++count<=MAX_NODES,"ui_node_bound");
+                    if(node.isPassword()||!system.contentEquals(node.getPackageName())||node.getWindowId()!=root.getWindowId())return false;
+                    CharSequence text=node.getText();
+                    if(node.isVisibleToUser()&&text!=null) {
+                        if(app.contentEquals(text))apps++;
+                        if(label.contentEquals(text))labels++;
+                        if(title.contentEquals(text))titles++;
+                        if(Arrays.asList("Agent needs attention","Agent finished","Desktop needs attention","Work finished on desktop").contains(text.toString()))closedTitles++;
+                    }
+                    for(int i=0;i<node.getChildCount();i++) {AccessibilityNodeInfo child=node.getChild(i);if(child!=null)queue.add(child);}
+                }finally{node.recycle();}
+            }
+            return apps>=1&&labels==1&&titles==1&&closedTitles==1;
+        }finally{recycleQueue(queue);}
+    }
+    private NodeRef physicalNotificationRow(AccessibilityNodeInfo root,String system,String app,String label,String title,long deadline) {
+        ArrayDeque<AccessibilityNodeInfo> queue=new ArrayDeque<>();queue.add(AccessibilityNodeInfo.obtain(root));
+        AccessibilityNodeInfo selected=null;int count=0;
+        try {
+            while(!queue.isEmpty()) {
+                AccessibilityNodeInfo node=queue.removeFirst();
+                try {
+                    requireBeforeDeadline(deadline);requireCondition(++count<=MAX_NODES,"ui_node_bound");
+                    requireCondition(system.contentEquals(node.getPackageName())&&!node.isPassword(),"physical_systemui_unqualified");
+                    if(node.isVisibleToUser()&&title.contentEquals(node.getText())) {
+                        AccessibilityNodeInfo ancestor=AccessibilityNodeInfo.obtain(node);
+                        try {
+                            for(int depth=0;ancestor!=null&&depth<16;depth++) {
+                                if(ancestor.isVisibleToUser()&&ancestor.isEnabled()&&ancestor.isClickable()
+                                        &&physicalRowMatches(ancestor,system,app,label,title,deadline)) {
+                                    requireCondition(selected==null||selected.equals(ancestor),"physical_notification_row_ambiguous");
+                                    if(selected==null)selected=AccessibilityNodeInfo.obtain(ancestor);
+                                    break;
+                                }
+                                AccessibilityNodeInfo next=ancestor.getParent();ancestor.recycle();ancestor=next;
+                            }
+                        }finally{if(ancestor!=null)ancestor.recycle();}
+                    }
+                    for(int i=0;i<node.getChildCount();i++) {AccessibilityNodeInfo child=node.getChild(i);if(child!=null)queue.add(child);}
+                }finally{node.recycle();}
+            }
+            requireCondition(selected!=null,"physical_notification_row_missing");
+            NodeRef result=new NodeRef(selected,root.getWindowId());selected=null;return result;
+        }finally{recycleQueue(queue);if(selected!=null)selected.recycle();}
+    }
+    private ActionResult physicalNotificationTap(UiAutomation automation,Request request,long deadline,Acknowledgement acknowledgement,StageTracker stage) {
+        PhysicalSelectors p=request.physical;String system=physicalSystemUiPackage();
+        String app;
+        try {app=getContext().getPackageManager().getApplicationInfo(PRODUCT_PACKAGE,0).loadLabel(getContext().getPackageManager()).toString();}
+        catch(PackageManager.NameNotFoundException error) {throw new Blocked("physical_systemui_unqualified");}
+        boolean hint=Boolean.parseBoolean(p.get("ownedUiNotificationHint")),completed="Completed".equals(p.get("ownedUiNotificationCategory"));
+        String title=hint?(completed?"Work finished on desktop":"Desktop needs attention"):(completed?"Agent finished":"Agent needs attention");
+        String label=p.get("ownedUiHostLabel")+(hint?" · Open to synchronize":"");
+        AccessibilityNodeInfo original=physicalShadeRoot(automation,deadline);
+        try {
+            stage.stage=Stage.SELECTION;NodeRef row=physicalNotificationRow(original,system,app,label,title,deadline);
+            try {
+                requirePhysicalEpoch(request);
+                AccessibilityNodeInfo current=physicalShadeRoot(automation,deadline);
+                try {
+                    requireCondition(current.equals(original)&&current.getWindowId()==row.windowId,"ui_root_changed");
+                    NodeRef same=physicalNotificationRow(current,system,app,label,title,deadline);
+                    try {requireCondition(same.node.equals(row.node)&&row.node.refresh()&&physicalRowMatches(row.node,system,app,label,title,deadline),"ui_revalidation");}
+                    finally{same.node.recycle();}
+                }finally{current.recycle();}
+                stage.stage=Stage.CLICK;requirePhysicalEpoch(request);requireBeforeDeadline(deadline);
+                boolean accepted=row.node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                acknowledgement.value=accepted;requireCondition(accepted,"ui_click_acknowledgement");
+            }finally{row.node.recycle();}
+        }finally{original.recycle();}
+        stage.stage=Stage.POSTCONDITION;
+        Observation after=awaitExactConversation(automation,request.sessionId,request.sessionGeneration,deadline);
+        physicalWindow(automation,"scene_host_"+p.host(),deadline);
+        return new ActionResult(true,true,after);
     }
 
     private void requireUuid(String value, String code) {
@@ -2753,7 +3262,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
     }
 
     private boolean needsInteractiveWindows(Action action) {
-        return action == Action.BACKGROUND_OWNED_APP || action == Action.FOCUS_COMPOSER || action == Action.DISMISS_COMPOSER_KEYBOARD || action == Action.SELECT_OWNED_CREATION_SERVER || action == Action.SELECT_OWNED_CREATION_PROJECT || action == Action.CONTINUE_OWNED_CREATION_SERVER || action == Action.CONTINUE_OWNED_CREATION_PROJECT || action == Action.OBSERVE_CREATION_PICKER;
+        return action.isPhysicalAction() || action == Action.BACKGROUND_OWNED_APP || action == Action.FOCUS_COMPOSER || action == Action.DISMISS_COMPOSER_KEYBOARD || action == Action.SELECT_OWNED_CREATION_SERVER || action == Action.SELECT_OWNED_CREATION_PROJECT || action == Action.CONTINUE_OWNED_CREATION_SERVER || action == Action.CONTINUE_OWNED_CREATION_PROJECT || action == Action.OBSERVE_CREATION_PICKER;
     }
 
     private boolean historyOriginalExpandPresent(UiAutomation automation, String recordId, int conversationWindow, long deadline) {
@@ -3518,6 +4027,12 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
     }
 
     private boolean revalidateAction(UiAutomation automation, NodeRef node, String tag, int actionId, long deadline) {
+        requirePhysicalEpoch(activeRequest);
+        if(activeRequest!=null&&activeRequest.physical!=null&&!activeRequest.action.isPhysicalAction()&&!activeRequest.action.physicalHostNavigation()
+                &&activeRequest.action!=Action.NAV_SESSIONS&&activeRequest.action!=Action.NAV_HOSTS&&activeRequest.action!=Action.OBSERVE) {
+            JSONObject state=requirePhysicalEpoch(activeRequest);
+            requireCondition(activeRequest.physical.host().equals(state.optString("selectedHost","")),"physical_product_epoch");
+        }
         if (isSensitiveContent(node.node)) return false;
         if (!node.node.refresh()) return false;
         requireBeforeDeadline(deadline);
@@ -3851,7 +4366,8 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         String routeArguments=request.routeHostId==null ? "null" : "\""+digest((request.routeHostId+"\n"+(request.routeDirect==null?"":request.routeDirect)).getBytes(StandardCharsets.UTF_8))+"\"";
         String routeClass=request.routeHostId==null ? "none" : request.routeDirect==null ? "host_scope" : "literal_ipv4";
         String routeIntent=request.routeHostId==null ? "" : ",\"routeArgumentClass\":\""+routeClass+"\",\"routeArgumentHash\":"+routeArguments;
-        return "{\"phase\":\"intent\",\"runId\":\"" + request.runId + "\",\"action\":\"" + request.action.wire + "\",\"creationName\":" + creationName + ",\"creationServerId\":" + creationServerId + routeIntent + ",\"excludedReceiptCount\":" + request.excludedReceiptIds.size() + ",\"runnerPid\":" + self.pid + ",\"runnerStart\":" + self.start + "}";
+        String physicalIntent=request.physical==null?"":",\"physicalArgumentHash\":\""+request.physical.argumentHash+"\"";
+        return "{\"phase\":\"intent\",\"runId\":\"" + request.runId + "\",\"action\":\"" + request.action.wire + "\",\"creationName\":" + creationName + ",\"creationServerId\":" + creationServerId + routeIntent + physicalIntent + ",\"excludedReceiptCount\":" + request.excludedReceiptIds.size() + ",\"runnerPid\":" + self.pid + ",\"runnerStart\":" + self.start + "}";
     }
 
     private String processJson(Request request, RunnerIdentity self) {
@@ -3860,6 +4376,16 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
 
     private String blockedCode(Throwable failure) {
         String code = failure instanceof Blocked ? ((Blocked) failure).code : failure.getMessage();
+        if("argument_unknown".equals(code))return "request";
+        if(Arrays.asList("physical_action_forbidden","physical_selector_unexpected","physical_selector_required","physical_host_invalid",
+                "physical_uuid_invalid","physical_workspace_invalid","physical_observer_invalid","physical_artifact_invalid",
+                "physical_dimensions_invalid","physical_dimension_field_invalid","physical_scroll_invalid","physical_delivery_invalid",
+                "physical_boolean_invalid","physical_label_invalid","physical_category_invalid","physical_answer_invalid","physical_key_invalid",
+                "physical_number_invalid","physical_epoch_proof","physical_product_epoch","physical_postcondition","physical_history_unavailable",
+                "physical_history_changed","physical_delivery_changed","physical_delivery_already_running","physical_cleanup_not_owned",
+                "physical_retained_keeper","physical_precondition_not_fresh","physical_field_not_empty","physical_systemui_unqualified",
+                "physical_notification_shade","physical_notification_row_ambiguous","physical_notification_row_missing",
+                "physical_pairing_preview","physical_pairing_paste_not_empty","physical_agent_not_read_only").contains(code))return code;
         if ("run_id_missing".equals(code) || "run_id_invalid".equals(code) || "action_invalid".equals(code) || "appearance_invalid".equals(code) || "appearance_unexpected".equals(code) || "session_list_preference_invalid".equals(code) || "session_list_preference_value_invalid".equals(code) || "session_list_preference_unexpected".equals(code) || "creation_project_label_invalid".equals(code) || "creation_project_label_unexpected".equals(code) || "creation_server_id_invalid".equals(code) || "creation_server_id_unexpected".equals(code) || "creation_name_invalid".equals(code) || "creation_name_unexpected".equals(code) || "previous_creation_name_invalid".equals(code) || "previous_creation_name_unexpected".equals(code) || "composer_text_invalid".equals(code) || "composer_text_unexpected".equals(code) || "session_id_invalid".equals(code) || "session_id_unexpected".equals(code) || "session_generation_invalid".equals(code) || "session_generation_unexpected".equals(code) || "history_record_id_invalid".equals(code) || "history_record_id_unexpected".equals(code) || "receipt_id_invalid".equals(code) || "receipt_id_unexpected".equals(code) || "excluded_receipts_invalid".equals(code) || "excluded_receipts_unexpected".equals(code) || "snippet_workflow_invalid".equals(code) || "snippet_workflow_unexpected".equals(code) || "snippet_id_invalid".equals(code) || "snippet_id_unexpected".equals(code) || "snippet_version_invalid".equals(code) || "snippet_version_unexpected".equals(code)) return "request";
         if ("route_host_invalid".equals(code) || "route_direct_invalid".equals(code) || "route_arguments_unexpected".equals(code)) return "request";
         if ("route_direct_not_empty".equals(code) || "route_direct_not_owned".equals(code) || "route_reconnect_not_fresh".equals(code) || "route_postcondition_timeout".equals(code)) return code;
@@ -3956,8 +4482,9 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         final SnippetVersion snippetVersion;
         final String routeHostId;
         final String routeDirect;
-        Request(String runId, Action action, UiAppearance appearance, SessionListPreference sessionListPreference, Boolean sessionListPreferenceValue, String creationServerLabel, String creationServerId, String creationProjectLabel, String creationName, String previousCreationName, String composerText, String sessionId, String sessionGeneration, String historyRecordId, String receiptId, Set<String> excludedReceiptIds, String snippetWorkflowId, String snippetId, SnippetVersion snippetVersion) {this(runId,action,appearance,sessionListPreference,sessionListPreferenceValue,creationServerLabel,creationServerId,creationProjectLabel,creationName,previousCreationName,composerText,sessionId,sessionGeneration,historyRecordId,receiptId,excludedReceiptIds,snippetWorkflowId,snippetId,snippetVersion,null,null);}
-        Request(String runId, Action action, UiAppearance appearance, SessionListPreference sessionListPreference, Boolean sessionListPreferenceValue, String creationServerLabel, String creationServerId, String creationProjectLabel, String creationName, String previousCreationName, String composerText, String sessionId, String sessionGeneration, String historyRecordId, String receiptId, Set<String> excludedReceiptIds, String snippetWorkflowId, String snippetId, SnippetVersion snippetVersion,String routeHostId,String routeDirect) {this.routeHostId=routeHostId;this.routeDirect=routeDirect; this.runId = runId; this.action = action; this.appearance = appearance; this.sessionListPreference = sessionListPreference; this.sessionListPreferenceValue = sessionListPreferenceValue; this.creationServerLabel = creationServerLabel; this.creationServerId = creationServerId; this.creationProjectLabel = creationProjectLabel; this.creationName = creationName; this.previousCreationName = previousCreationName; this.composerText = composerText; this.sessionId = sessionId; this.sessionGeneration = sessionGeneration; this.historyRecordId = historyRecordId; this.receiptId = receiptId; this.excludedReceiptIds = excludedReceiptIds; this.snippetWorkflowId = snippetWorkflowId; this.snippetId = snippetId; this.snippetVersion = snippetVersion; }
+        final PhysicalSelectors physical;
+        Request(String runId, Action action, UiAppearance appearance, SessionListPreference sessionListPreference, Boolean sessionListPreferenceValue, String creationServerLabel, String creationServerId, String creationProjectLabel, String creationName, String previousCreationName, String composerText, String sessionId, String sessionGeneration, String historyRecordId, String receiptId, Set<String> excludedReceiptIds, String snippetWorkflowId, String snippetId, SnippetVersion snippetVersion) {this(runId,action,appearance,sessionListPreference,sessionListPreferenceValue,creationServerLabel,creationServerId,creationProjectLabel,creationName,previousCreationName,composerText,sessionId,sessionGeneration,historyRecordId,receiptId,excludedReceiptIds,snippetWorkflowId,snippetId,snippetVersion,null,null,null);}
+        Request(String runId, Action action, UiAppearance appearance, SessionListPreference sessionListPreference, Boolean sessionListPreferenceValue, String creationServerLabel, String creationServerId, String creationProjectLabel, String creationName, String previousCreationName, String composerText, String sessionId, String sessionGeneration, String historyRecordId, String receiptId, Set<String> excludedReceiptIds, String snippetWorkflowId, String snippetId, SnippetVersion snippetVersion,String routeHostId,String routeDirect,PhysicalSelectors physical) {this.physical=physical;this.routeHostId=routeHostId;this.routeDirect=routeDirect;this.runId=runId;this.action=action;this.appearance=appearance;this.sessionListPreference=sessionListPreference;this.sessionListPreferenceValue=sessionListPreferenceValue;this.creationServerLabel=creationServerLabel;this.creationServerId=creationServerId;this.creationProjectLabel=creationProjectLabel;this.creationName=creationName;this.previousCreationName=previousCreationName;this.composerText=composerText;this.sessionId=sessionId;this.sessionGeneration=sessionGeneration;this.historyRecordId=historyRecordId;this.receiptId=receiptId;this.excludedReceiptIds=excludedReceiptIds;this.snippetWorkflowId=snippetWorkflowId;this.snippetId=snippetId;this.snippetVersion=snippetVersion;}
     }
 
     private static final class RunnerIdentity {
@@ -4307,7 +4834,22 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         INSPECT_RECEIPT("InspectReceipt", null, null),
         OPEN_RECEIPT_DETAILS("OpenReceiptDetails", null, null),
         PREPARE_SEPARATE_CREATION("PrepareSeparateCreation", null, null),
-        CONFIRM_SEPARATE_CREATION("ConfirmSeparateCreation", null, null);
+        CONFIRM_SEPARATE_CREATION("ConfirmSeparateCreation", null, null),
+        OPEN_SHELLS("OpenShells",null,null),OPEN_SHELL("OpenShell",null,null),
+        BEGIN_SHELL_CONTROL("BeginShellControl",null,null),CONFIRM_SHELL_CONTROL("ConfirmShellControl",null,null),
+        SET_SHELL_DRAFT("SetShellDraft",null,null),SEND_SHELL_DRAFT("SendShellDraft",null,null),SEND_SHELL_KEY("SendShellKey",null,null),
+        OPEN_SHELL_RESIZE("OpenShellResize",null,null),SET_SHELL_SIZE("SetShellSize",null,null),CONFIRM_SHELL_RESIZE("ConfirmShellResize",null,null),
+        SCROLL_SHELL_HISTORY("ScrollShellHistory",null,null),SHELL_HISTORY_BOTTOM("ShellHistoryBottom",null,null),
+        RELEASE_SHELL_CONTROL("ReleaseShellControl",null,null),OBSERVE_SHELL("ObserveShell",null,null),
+        OPEN_TERMINAL_CREATION("OpenTerminalCreation",null,null),SELECT_TERMINAL_PROJECT("SelectTerminalProject",null,null),
+        SUBMIT_TERMINAL_CREATION("SubmitTerminalCreation",null,null),STOP_SESSION("StopSession",null,null),
+        SELECT_REQUEST("SelectRequest",null,null),SUBMIT_REQUEST_ANSWER("SubmitRequestAnswer",null,null),
+        SELECT_DELIVERY_MODE("SelectDeliveryMode",null,null),ENABLE_ATTENTION("EnableAttention",null,null),
+        ENABLE_COMPLETED("EnableCompleted",null,null),START_DELIVERY("StartDelivery",null,null),
+        TAP_ATTENTION_NOTIFICATION("TapAttentionNotification",null,null),STOP_DELIVERY("StopDelivery",null,null),
+        OPEN_ATTENTION_SHADE("OpenAttentionShade",null,null),BACKGROUND_PRIVATE_SETTINGS("BackgroundPrivateSettings",null,null),
+        OPEN_SHELL_DETAILS("OpenShellDetails",null,null),SELECT_TERMINAL_WORKSPACE("SelectTerminalWorkspace",null,null),
+        SET_SHELL_MODIFIER("SetShellModifier",null,null);
         final String wire;
         final String tag;
         final String expectedTag;
@@ -4318,6 +4860,11 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             return null;
         }
         boolean isRouteAction() {return this==OPEN_OWNED_HOST_ROUTES || this==ADD_OWNED_ROUTE_DIRECT || this==SET_OWNED_ROUTE_DIRECT || this==SAVE_OWNED_ROUTE_HINTS || this==RECONNECT_OWNED_ROUTE_HOST || this==OBSERVE_OWNED_HOST_ROUTES;}
+        boolean isPhysicalAction() {return ordinal()>=OPEN_SHELLS.ordinal();}
+        boolean physicalAgentAction() {return this==STOP_SESSION||this==SELECT_REQUEST||this==SUBMIT_REQUEST_ANSWER||this==TAP_ATTENTION_NOTIFICATION;}
+        boolean shellScoped() {return isPhysicalAction()&&ordinal()>=OPEN_SHELL.ordinal()&&ordinal()<=OBSERVE_SHELL.ordinal()||this==OPEN_SHELL_DETAILS||this==SET_SHELL_MODIFIER;}
+        boolean physicalHostNavigation() {return this==OPEN_HOST_SETTINGS||this==VIEW_SESSIONS;}
+        boolean physicalLegacyAllowed() {return Arrays.asList(OBSERVE,NAV_SESSIONS,NAV_HOSTS,OPEN_HOST_SETTINGS,VIEW_SESSIONS,REFRESH_SESSIONS,OPEN_NEW_SESSION,CLOSE_NEW_SESSION,OBSERVE_CREATION_PICKER,SELECT_OWNED_CREATION_SERVER,SELECT_OWNED_CREATION_PROJECT,CONTINUE_OWNED_CREATION_SERVER,CONTINUE_OWNED_CREATION_PROJECT,SET_CREATION_NAME,SUBMIT_CREATION,SELECT_CODEX_PROVIDER,OPEN_SESSION,SET_COMPOSER,SUBMIT_PROMPT,FOCUS_COMPOSER,DISMISS_COMPOSER_KEYBOARD,OPEN_TERMINAL,OBSERVE_TERMINAL,CLOSE_TERMINAL,BACKGROUND_OWNED_APP).contains(this);}
         boolean requiresCreationName() {
             return this == SET_CREATION_NAME || this == SUBMIT_CREATION;
         }
@@ -4334,9 +4881,11 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
             return this == SELECT_APPEARANCE;
         }
         boolean requiresSessionId() {
+            if(physicalAgentAction())return true;
             return this == OPEN_SESSION || this == BACKGROUND_OWNED_APP || this == SET_COMPOSER || this == SUBMIT_PROMPT || this == OPEN_HISTORY_DETAILS || this == CLOSE_HISTORY_DETAILS || this == OPEN_SNIPPETS || this == CLOSE_SNIPPETS || this == OPEN_SWITCHER || this == CLOSE_SWITCHER || this == REFRESH_CONVERSATION || this == SCROLL_HISTORY_BACKWARD || this == FOCUS_COMPOSER || this == DISMISS_COMPOSER_KEYBOARD || this == OPEN_TERMINAL || this == CLOSE_TERMINAL || this == OBSERVE_TERMINAL || this == OPEN_WORKTREES || this == REFRESH_WORKTREES || this == CLOSE_WORKTREES || this == OBSERVE_WORKTREES || this == OPEN_CHANGES || this == REFRESH_CHANGES || this == CLOSE_CHANGES || this == OBSERVE_CHANGES || isSnippetAction();
         }
         boolean requiresSessionGeneration() {
+            if(physicalAgentAction())return true;
             return this == OPEN_SESSION || this == BACKGROUND_OWNED_APP || this == SET_COMPOSER || this == SUBMIT_PROMPT || this == OPEN_HISTORY_DETAILS || this == CLOSE_HISTORY_DETAILS || this == OPEN_SNIPPETS || this == CLOSE_SNIPPETS || this == OPEN_SWITCHER || this == CLOSE_SWITCHER || this == REFRESH_CONVERSATION || this == SCROLL_HISTORY_BACKWARD || this == FOCUS_COMPOSER || this == DISMISS_COMPOSER_KEYBOARD || this == OPEN_TERMINAL || this == CLOSE_TERMINAL || this == OBSERVE_TERMINAL || this == OPEN_WORKTREES || this == REFRESH_WORKTREES || this == CLOSE_WORKTREES || this == OBSERVE_WORKTREES || this == OPEN_CHANGES || this == REFRESH_CHANGES || this == CLOSE_CHANGES || this == OBSERVE_CHANGES || isSnippetAction();
         }
         boolean requiresHistoryRecordId() {

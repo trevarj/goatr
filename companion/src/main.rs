@@ -290,6 +290,7 @@ async fn run(matches: clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>
             EndpointId(endpoint.id().to_string()),
             boot,
             backends,
+            config.as_ref().and_then(|config| config.pairing_name.clone()),
         );
         let topology = match config {
             Some(config) => Some(
@@ -537,7 +538,7 @@ mod tests {
 
     #[test]
     fn owner_launcher_capability_drop_precedes_fixture_exec() {
-        let mut command = Command::new("/bin/sh");
+        let mut command = Command::new("sh");
         command
             .args([
                 "-c",

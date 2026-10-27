@@ -2258,7 +2258,7 @@ impl Client {
             executable: None,
         })
     }
-    pub(crate) fn qualify_executable(mut self, configured: &Path) -> io::Result<Self> {
+    pub fn qualify_executable(mut self, configured: &Path) -> io::Result<Self> {
         self.executable = Some(InstalledExecutablePin::capture(configured, &self.evidence)?);
         Ok(self)
     }
@@ -7478,7 +7478,7 @@ mod tests {
         storage.pair_device(&device).unwrap();
         let boot=storage.boot_id.clone();
         let security=Security::new(StorageOwner::new(storage).unwrap(),Arc::new(State::default()),
-            EndpointId(host.id().to_string()),boot,vec![]);
+            EndpointId(host.id().to_string()),boot,vec![],None);
         let endpoint=host.clone();
         let incoming=tokio::spawn(async move{endpoint.accept().await.unwrap().await.unwrap()});
         let connection=phone.connect(host.addr(),crate::ALPN).await.unwrap();

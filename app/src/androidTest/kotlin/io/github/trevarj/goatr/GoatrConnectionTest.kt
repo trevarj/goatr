@@ -40,6 +40,94 @@ import androidx.compose.ui.text.AnnotatedString
 class GoatrConnectionTest {
     @get:Rule val ui=createEmptyComposeRule()
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+    private fun physicalArguments(action:String,shell:Boolean=false)=Bundle().apply {
+        putString("ownedUiRunId",Uuid.random().value);putString("ownedUiAction",action)
+        putString("ownedUiHostId","a".repeat(64));putString("ownedUiMvpRunId",Uuid.random().value)
+        putString("ownedUiProductPid","123");putString("ownedUiProductStart","456")
+        putString("ownedUiObserverPublicSha256","1".repeat(64));putString("ownedUiExpectedProductSha256","2".repeat(64))
+        if(shell){putString("ownedUiShellId",Uuid.random().value);putString("ownedUiShellGeneration",Uuid.random().value)}
+    }
+    private fun physicalRejected(arguments:Bundle) {
+        try {OwnedUiAutomationRunner.validatePhysicalArguments(arguments);fail("closed physical selectors must reject")}
+        catch(_:RuntimeException) {}
+    }
+    @Test fun physicalOwnedUiSelectorsRequireOriginalEpochAndRejectMixedAgentShellAuthority() {
+        val shell=physicalArguments("ObserveShell",true)
+        OwnedUiAutomationRunner.validatePhysicalArguments(shell)
+        for(key in listOf("ownedUiHostId","ownedUiMvpRunId","ownedUiProductPid","ownedUiProductStart","ownedUiObserverPublicSha256","ownedUiExpectedProductSha256","ownedUiShellId","ownedUiShellGeneration")) {
+            physicalRejected(Bundle(shell).apply {remove(key)})
+        }
+        physicalRejected(Bundle(shell).apply {putString("ownedUiSessionId",Uuid.random().value);putString("ownedUiSessionGeneration",Uuid.random().value)})
+        val agent=physicalArguments("OpenTerminal").apply {putString("ownedUiSessionId",Uuid.random().value);putString("ownedUiSessionGeneration",Uuid.random().value)}
+        OwnedUiAutomationRunner.validatePhysicalArguments(agent)
+        physicalRejected(Bundle(agent).apply {putString("ownedUiShellId",Uuid.random().value);putString("ownedUiShellGeneration",Uuid.random().value)})
+        physicalRejected(physicalArguments("OpenNativeClose"))
+        physicalRejected(Bundle(shell).apply {putString("ownedUiRawAnsi","not-authorized")})
+    }
+    @Test fun physicalOwnedUiKeysAndDraftCannotBecomeArbitraryNativeInput() {
+        val key=physicalArguments("SendShellKey",true).apply {putString("ownedUiKey","Left")}
+        OwnedUiAutomationRunner.validatePhysicalArguments(key)
+        for(value in listOf("Character","c","Ctrl","Enter\n"))physicalRejected(Bundle(key).apply {putString("ownedUiKey",value)})
+        OwnedUiAutomationRunner.validatePhysicalArguments(physicalArguments("SetShellModifier",true).apply {putString("ownedUiKey","Ctrl")})
+        physicalRejected(physicalArguments("SetShellDraft",true).apply {putString("ownedUiComposerText","arbitrary command")})
+        physicalRejected(physicalArguments("SetShellDraft",true).apply {putString("ownedUiKey","Enter")})
+    }
+    @Test fun physicalOwnedUiResizeUsesActual32768PtyBoundAndHistoryUsesExactUint() {
+        val resize=physicalArguments("SetShellSize",true).apply {putString("ownedUiColumns","512");putString("ownedUiRows","64");putString("ownedUiSizeField","Columns")}
+        OwnedUiAutomationRunner.validatePhysicalArguments(resize)
+        for((key,value) in listOf("ownedUiColumns" to "513","ownedUiColumns" to "0512","ownedUiRows" to "65","ownedUiRows" to "0","ownedUiRows" to "257","ownedUiSizeField" to "Both"))
+            physicalRejected(Bundle(resize).apply {putString(key,value)})
+        val history=physicalArguments("ScrollShellHistory",true).apply {putString("ownedUiScrollOffset","9007199254740991");putString("ownedUiScrollDirection","Older")}
+        OwnedUiAutomationRunner.validatePhysicalArguments(history)
+        physicalRejected(Bundle(history).apply {putString("ownedUiScrollOffset","9007199254740992")})
+        physicalRejected(Bundle(history).apply {putString("ownedUiScrollOffset","-1")})
+        physicalRejected(Bundle(history).apply {putString("ownedUiScrollDirection","AutomaticBottom")})
+    }
+    @Test fun physicalOwnedUiCreationAndCleanupSelectorsAreClosedWithoutFakePaneFields() {
+        val creation=physicalArguments("SelectTerminalProject").apply {
+            putString("ownedUiServerId",Uuid.random().value);putString("ownedUiWorkspaceId","stock-workspace:7");putString("ownedUiProjectId",Uuid.random().value)
+        }
+        OwnedUiAutomationRunner.validatePhysicalArguments(creation)
+        physicalRejected(Bundle(creation).apply {putString("ownedUiPaneId","invented-pane")})
+        physicalRejected(Bundle(creation).apply {putString("ownedUiWorkspaceId","empty workspace")})
+        val stop=physicalArguments("StopDelivery").apply {putString("ownedUiExpectedServiceRequested","true");putString("ownedUiOwnedStartRunId",Uuid.random().value)}
+        OwnedUiAutomationRunner.validatePhysicalArguments(stop)
+        physicalRejected(Bundle(stop).apply {remove("ownedUiOwnedStartRunId")})
+        physicalRejected(Bundle(stop).apply {putString("ownedUiDeliveryMode","Persistent")})
+        physicalRejected(physicalArguments("StartDelivery").apply {putString("ownedUiExpectedServiceRequested","true");putString("ownedUiOwnedStartRunId",Uuid.random().value)})
+    }
+    @Test fun physicalOwnedUiFingerprintBindsEverySelectorAndDoesNotDependOnBundleOrder() {
+        val first=physicalArguments("SendShellKey",true).apply {putString("ownedUiKey","Left")}
+        val second=Bundle();first.keySet().sortedDescending().forEach {second.putString(it,first.getString(it))}
+        val hash=OwnedUiAutomationRunner.physicalArgumentHash(first)
+        assertEquals(hash,OwnedUiAutomationRunner.physicalArgumentHash(second))
+        for(key in listOf("ownedUiKey","ownedUiProductStart","ownedUiShellGeneration","ownedUiHostId","ownedUiExpectedProductSha256")) {
+            val changed=Bundle(first).apply {putString(key,checkNotNull(getString(key))+"0")}
+            assertNotEquals(key,hash,OwnedUiAutomationRunner.physicalArgumentHash(changed))
+        }
+        physicalRejected(Bundle(first).apply {putString("ownedUiKey","Left\n")})
+    }
+    @Test fun physicalOwnedUiDoesNotAddEpochRequirementsToLegacyUnqualifiedObserve() {
+        OwnedUiAutomationRunner.validatePhysicalArguments(Bundle().apply {putString("ownedUiRunId",Uuid.random().value);putString("ownedUiAction","Observe")})
+        physicalRejected(Bundle().apply {putString("ownedUiRunId",Uuid.random().value);putString("ownedUiAction","Observe");putString("ownedUiHostId","a".repeat(64))})
+    }
+    @Suppress("DEPRECATION")
+    @Test fun actualPackagedPhysicalInstrumentationTargetsRemainProductAndStandaloneSeparate() {
+        val manager=context.packageManager
+        val entries=manager.getPackageInfo(PhysicalMvpPlatform.TEST,android.content.pm.PackageManager.GET_INSTRUMENTATION).instrumentation.orEmpty()
+        assertEquals(2,entries.size)
+        assertEquals(mapOf("io.github.trevarj.goatr.OwnedInstrumentationRunner" to PhysicalMvpPlatform.PRODUCT,
+            "io.github.trevarj.goatr.OwnedUiAutomationRunner" to PhysicalMvpPlatform.TEST),entries.associate {it.name to it.targetPackage})
+        assertTrue(entries.all {it.targetProcesses==null})
+        val productInfo=manager.getPackageInfo(PhysicalMvpPlatform.PRODUCT,0);val testInfo=manager.getPackageInfo(PhysicalMvpPlatform.TEST,0)
+        val productApp=checkNotNull(productInfo.applicationInfo);val testApp=checkNotNull(testInfo.applicationInfo)
+        assertNotEquals(productApp.uid,testApp.uid);assertEquals(PhysicalMvpPlatform.PRODUCT,productApp.processName);assertEquals(PhysicalMvpPlatform.TEST,testApp.processName)
+        assertNull(productInfo.sharedUserId);assertNull(testInfo.sharedUserId)
+        val flags=android.content.pm.PackageManager.GET_SIGNATURES
+        val product=manager.getPackageInfo(PhysicalMvpPlatform.PRODUCT,flags).signatures.orEmpty().map {PhysicalMvpPlatform.digest(it.toByteArray())}.toSet()
+        val test=manager.getPackageInfo(PhysicalMvpPlatform.TEST,flags).signatures.orEmpty().map {PhysicalMvpPlatform.digest(it.toByteArray())}.toSet()
+        assertEquals(1,product.size);assertEquals(product,test)
+    }
     private val controlPort: Int get() = InstrumentationRegistry.getArguments().getString("reviewControlPort")
         ?.toIntOrNull()?.takeIf { it in 1..65535 }
         ?: error("Start the owned smoke --review-fixture and pass reviewControlPort; this is not an optional/ignored gate")

@@ -308,6 +308,7 @@ pub async fn run() -> io::Result<bool> {
         host.clone(),
         boot.clone(),
         vec![],
+        None,
     );
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let port = listener.local_addr()?.port();

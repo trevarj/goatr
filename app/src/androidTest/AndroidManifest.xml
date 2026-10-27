@@ -5,6 +5,10 @@
         <package android:name="io.github.trevarj.goatr.debug" />
     </queries>
     <instrumentation
+        android:name="io.github.trevarj.goatr.OwnedInstrumentationRunner"
+        android:targetPackage="io.github.trevarj.goatr.debug"
+        android:label="Goatr owned product observer" />
+    <instrumentation
         android:name="io.github.trevarj.goatr.OwnedUiAutomationRunner"
         android:targetPackage="io.github.trevarj.goatr.debug.test"
         android:label="Goatr owned UI automation" />

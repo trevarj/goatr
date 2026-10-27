@@ -39,6 +39,7 @@ import org.junit.Test
 
 /** One autonomous observation of the existing paired debug installation. */
 class PairedDeviceFeedback {
+    private lateinit var selectedRequest:FeedbackRequest
     @Test fun pairedExistingHostReconnectDetails() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val target = instrumentation.targetContext.applicationContext
@@ -70,7 +71,7 @@ class PairedDeviceFeedback {
         var blocked = false
 
         try {
-            request = requiredRequest()
+            request = requiredRequest().also {selectedRequest=it}
             process = processIdentity()
             progress = ProgressReporter(instrumentation, target, request.runId, process)
             progress.emit(PHASE_METHOD_ENTRY)
@@ -221,7 +222,16 @@ class PairedDeviceFeedback {
         val runId = Uuid(arguments.getString(RUN_ID_ARGUMENT) ?: throw FeedbackBlocked("run_id_required")).value
         val signer = arguments.getString(SIGNER_ARGUMENT)?.lowercase() ?: throw FeedbackBlocked("signer_required")
         require(signer.matches(SIGNER_SHA256)) { "signer_hash_required" }
-        return FeedbackRequest(runId, signer)
+        val selected=arguments.getString(SELECTED_HOST_ARGUMENT) ?: throw FeedbackBlocked("selected_host_required")
+        require(selected.matches(Regex("[0-9a-f]{64}"))) {"selected_host_invalid"}
+        val raw=arguments.getString(BASELINE_HOSTS_ARGUMENT) ?: throw FeedbackBlocked("baseline_hosts_required")
+        require(raw.toByteArray(StandardCharsets.UTF_8).size<=16384) {"baseline_hosts_bound"}
+        val array=org.json.JSONArray(raw);require(array.length()<=128) {"baseline_hosts_bound"}
+        val baseline=buildSet {for(index in 0 until array.length()) {
+            val value=array.getString(index)
+            require(value.matches(Regex("[0-9a-f]{64}"))&&add(value)&&value!=selected) {"baseline_hosts_invalid"}
+        }}
+        return FeedbackRequest(runId, signer,selected,baseline)
     }
 
     private fun requireOwnedDebugTarget(instrumentation: android.app.Instrumentation, target: Context, expectedSigner: String) {
@@ -241,24 +251,21 @@ class PairedDeviceFeedback {
 
     /** Read the existing private database only; this never opens a SessionStore or creates identity state. */
     private fun preflightExistingPairing(context: Context): PairedSnapshot {
-        val database = context.getDatabasePath(DATABASE_NAME)
-        require(database.isFile) { "paired_database_required" }
-        val metadata = SQLiteDatabase.openDatabase(database.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-            val hosts = db.rawQuery("SELECT metadata FROM hosts ORDER BY host", null).use { rows ->
-                buildList { while (rows.moveToNext()) add(Protocol.strictJson.decodeFromString<HostMetadata>(rows.getString(0))) }
+        val database=File(File(context.applicationInfo.dataDir).canonicalFile,"databases/$DATABASE_NAME")
+        require(database.isFile&&database.canonicalFile==database) {"paired_database_required"}
+        val hosts=SQLiteDatabase.openDatabase(database.path,null,SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use {db->
+            val hosts=db.rawQuery("SELECT metadata FROM hosts ORDER BY host",null).use {rows->
+                buildList {while(rows.moveToNext())add(Protocol.strictJson.decodeFromString<HostMetadata>(rows.getString(0)))}
             }
-            val deletionCount = db.rawQuery("SELECT count(*) FROM key_deletion", null).use { rows ->
-                require(rows.moveToFirst()) { "key_deletion_query_failed" }
-                rows.getLong(0)
-            }
-            require(hosts.size == 1) { "exactly_one_paired_host_required" }
-            require(deletionCount == 0L) { "pending_key_deletion_required" }
-            hosts.single()
+            db.rawQuery("SELECT count(*) FROM key_deletion",null).use {rows->require(rows.moveToFirst()&&rows.getLong(0)==0L) {"pending_key_deletion_required"}}
+            hosts
         }
-        require(metadata.deviceId != null) { "paired_device_id_required" }
-        val aliases = keyAliasSnapshot()
-        require(aliases.endpointPresent && aliases.names.containsAll(metadata.keyAliases)) { "paired_key_alias_required" }
-        return PairedSnapshot(metadata.hostId, metadataDigest(metadata), aliases.digest, 1, true, true)
+        require(hosts.size<=129&&hosts.map {it.hostId}.toSet()==selectedRequest.baselineHosts+selectedRequest.hostId) {"selected_and_baseline_hosts_required"}
+        val metadata=hosts.single {it.hostId==selectedRequest.hostId}
+        require(metadata.deviceId!=null) {"paired_device_id_required"}
+        val aliases=keyAliasSnapshot()
+        require(aliases.endpointPresent&&hosts.all {aliases.names.containsAll(it.keyAliases)}) {"paired_key_alias_required"}
+        return PairedSnapshot(metadata.hostId,metadataDigest(hosts),aliases.digest,hosts.size,true,true)
     }
 
     private fun awaitOriginalActivity(lifecycle: MainActivityLifecycle, deadline: Long): MainActivity {
@@ -342,13 +349,13 @@ class PairedDeviceFeedback {
     }
 
     private fun ownerSnapshot(model: GoatrViewModel): PairedSnapshot {
-        val state = model.store.state.value
-        require(state.hosts.size == 1 && state.keyDeletion.isEmpty()) { "owner_paired_state_required" }
-        val metadata = state.hosts.single()
-        require(metadata.deviceId != null) { "owner_device_id_required" }
-        val aliases = keyAliasSnapshot()
-        require(aliases.endpointPresent && aliases.names.containsAll(metadata.keyAliases)) { "owner_key_alias_required" }
-        return PairedSnapshot(metadata.hostId, metadataDigest(metadata), aliases.digest, 1, true, true)
+        val state=model.store.state.value
+        require(state.hosts.size<=129&&state.keyDeletion.isEmpty()&&state.hosts.map {it.hostId}.toSet()==selectedRequest.baselineHosts+selectedRequest.hostId) {"owner_paired_state_required"}
+        val metadata=state.hosts.single {it.hostId==selectedRequest.hostId}
+        require(metadata.deviceId!=null) {"owner_device_id_required"}
+        val aliases=keyAliasSnapshot()
+        require(aliases.endpointPresent&&state.hosts.all {aliases.names.containsAll(it.keyAliases)}) {"owner_key_alias_required"}
+        return PairedSnapshot(metadata.hostId,metadataDigest(state.hosts),aliases.digest,state.hosts.size,true,true)
     }
 
     private fun ownerSnapshotOrNull(model: GoatrViewModel): PairedSnapshot? = runCatching { ownerSnapshot(model) }.getOrNull()
@@ -630,6 +637,7 @@ class PairedDeviceFeedback {
             .joinToString("\u0000")
             .toByteArray(StandardCharsets.UTF_8)
     )
+    private fun metadataDigest(hosts:List<HostMetadata>):String=digest(hosts.sortedBy {it.hostId}.joinToString("\u0000") {metadataDigest(it)}.toByteArray(StandardCharsets.UTF_8))
 
     private fun keyAliasSnapshot(): KeyAliasSnapshot {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -768,7 +776,7 @@ class PairedDeviceFeedback {
     private fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
         .joinToString("") { "%02x".format(it.toInt() and 255) }
 
-    private data class FeedbackRequest(val runId: String, val signerSha256: String)
+    private data class FeedbackRequest(val runId: String, val signerSha256: String,val hostId:String,val baselineHosts:Set<String>)
     private data class KeyAliasSnapshot(val names: Set<String>, val digest: String, val endpointPresent: Boolean)
     private data class PairedSnapshot(
         val hostId: String,
@@ -1031,6 +1039,8 @@ class PairedDeviceFeedback {
     private companion object {
         const val RUN_ID_ARGUMENT = "feedbackRunId"
         const val SIGNER_ARGUMENT = "feedbackExpectedSignerSha256"
+        const val SELECTED_HOST_ARGUMENT="feedbackSelectedHostId"
+        const val BASELINE_HOSTS_ARGUMENT="feedbackBaselineHosts"
         const val TARGET_PACKAGE = "io.github.trevarj.goatr.debug"
         const val TEST_PACKAGE = "io.github.trevarj.goatr.debug.test"
         const val RUN_MARKER_EXTRA = "io.github.trevarj.goatr.feedback.RUN_MARKER"

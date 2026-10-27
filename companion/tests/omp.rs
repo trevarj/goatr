@@ -48,6 +48,7 @@ impl Root {
     fn config(&self) -> Config {
         Config {
             version: 1,
+            pairing_name: None,
             runtime_dir: self.0.clone(),
             runtime_dir_agent: self.0.clone(),
             allow_scoped_shell_probe: false,

@@ -657,6 +657,7 @@ pub struct Security {
     pub host: EndpointId,
     pub boot: Uuid,
     pub backends: Vec<Backend>,
+    pairing_name: Label,
     window: Mutex<Option<Window>>,
     failures: StdMutex<Failures>,
     unauth: Arc<Semaphore>,
@@ -669,6 +670,7 @@ impl Security {
         host: EndpointId,
         boot: Uuid,
         backends: Vec<Backend>,
+        pairing_name: Option<Label>,
     ) -> Arc<Self> {
         Arc::new(Self {
             push:std::sync::OnceLock::new(),
@@ -678,6 +680,7 @@ impl Security {
             host,
             boot,
             backends,
+            pairing_name: pairing_name.unwrap_or_else(display_name),
             window: Mutex::new(None),
             failures: StdMutex::new(Failures::default()),
             unauth: Arc::new(Semaphore::new(8)),
@@ -709,7 +712,7 @@ impl Security {
         let invite = PairInvite {
             v: OneValue(1),
             host: self.host.clone(),
-            name: display_name(),
+            name: self.pairing_name.clone(),
             token: Key32(URL_SAFE_NO_PAD.encode(token)),
             expires_at: expires,
         };
@@ -1959,6 +1962,7 @@ pub(crate) mod tests {
             EndpointId(host.id().to_string()),
             boot,
             vec![],
+            None,
         );
         (host, phone, connection, security)
     }
@@ -2178,6 +2182,7 @@ pub(crate) mod tests {
             EndpointId(host.id().to_string()),
             boot,
             vec![],
+            None,
         );
         let auth = Arc::new(
             security
@@ -2951,6 +2956,7 @@ pub(crate) mod tests {
             EndpointId(iroh::SecretKey::from_bytes(&[99; 32]).public().to_string()),
             boot,
             vec![],
+            None,
         )
     }
     fn review_peer(seed: u16) -> EndpointId {

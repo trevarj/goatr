@@ -1964,6 +1964,7 @@ mod tests {
                 EndpointId(host.id().to_string()),
                 boot,
                 vec![],
+                None,
             );
             let endpoint = host.clone();
             let accept =

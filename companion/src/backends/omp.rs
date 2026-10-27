@@ -5322,6 +5322,7 @@ mod tests {
                 EndpointId(host_endpoint.id().to_string()),
                 boot,
                 vec![],
+                None,
             );
             let endpoint = host_endpoint.clone();
             let incoming =

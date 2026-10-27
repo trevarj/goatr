@@ -29,6 +29,282 @@ class SessionStoreTest {
         val name="state-${Uuid.random().value}.db"; var time=0L; val store=SessionStore(context,name) { time }
         try { store.open(); store.host(HostMetadata(HOST,"host",Uuid.random(),listOf("goatr.test.endpoint","goatr.test.receipt"))); block(store,name,{time},{time=it}) } finally { store.close(); context.deleteDatabase(name) }
     }
+    /** Real production DB8 schema in a real platform context's exclusively owned data directory. */
+    private suspend fun withPhysicalBaseline(block:suspend (android.content.Context,java.io.File,SessionStore)->Unit) {
+        val root=java.io.File(context.cacheDir,"physical-baseline-${Uuid.random().value}");check(root.mkdir());android.system.Os.chmod(root.path,0x1c0)
+        val databases=java.io.File(root,"databases");check(databases.mkdir())
+        val owned=object:android.content.ContextWrapper(context) {
+            override fun getApplicationContext():android.content.Context=this
+            override fun getApplicationInfo()=android.content.pm.ApplicationInfo(baseContext.applicationInfo).apply {dataDir=root.canonicalPath}
+            override fun getDatabasePath(name:String)=java.io.File(databases,name)
+            override fun getNoBackupFilesDir()=java.io.File(root,"no_backup").apply {if(!exists())check(mkdir());android.system.Os.chmod(path,0x1c0)}
+            override fun openOrCreateDatabase(name:String,mode:Int,factory:android.database.sqlite.SQLiteDatabase.CursorFactory?)=
+                openOrCreateDatabase(name,mode,factory,null)
+            override fun openOrCreateDatabase(name:String,mode:Int,factory:android.database.sqlite.SQLiteDatabase.CursorFactory?,handler:android.database.DatabaseErrorHandler?):android.database.sqlite.SQLiteDatabase =
+                android.database.sqlite.SQLiteDatabase.openDatabase(getDatabasePath(name).path,factory,android.database.sqlite.SQLiteDatabase.CREATE_IF_NECESSARY,handler)
+            override fun getSharedPreferences(name:String,mode:Int):android.content.SharedPreferences=error("Raw baseline must not call SharedPreferences APIs")
+        }
+        val store=SessionStore(owned,"goatr-private.db"){0L}
+        try {store.open();block(owned,root,store)}finally{store.close();check(root.deleteRecursively())}
+    }
+    private fun fileHash(file:java.io.File):String {
+        val hash=java.security.MessageDigest.getInstance("SHA-256");val buffer=ByteArray(8192)
+        file.inputStream().use {input->while(true){val count=input.read(buffer);if(count<0)break;hash.update(buffer,0,count)}}
+        return hash.digest().joinToString(""){"%02x".format(it.toInt() and 255)}
+    }
+    private fun keyAliases():Set<String> = java.security.KeyStore.getInstance("AndroidKeyStore").apply {load(null)}.aliases().toList().toSet()
+    private fun physicalBaselineArguments()=org.json.JSONObject().put("mode","baseline").put("hostLabel","Goatr MVP ${Uuid.random().value}").put("host",org.json.JSONObject.NULL)
+    private fun connectorDatabase(root:java.io.File,block:(android.database.sqlite.SQLiteDatabase)->Unit) {
+        val file=java.io.File(root,"databases/unifiedpush-connector")
+        android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.CREATE_IF_NECESSARY).use {db->
+            // Exact qualified connector3.3.5 format fixture, not a connector owner/broker/runtime.
+            db.execSQL("CREATE TABLE distributors (distributor TEXT PRIMARY KEY,fallback_from TEXT,ack INTEGER,date_insertion INTEGER,FOREIGN KEY (fallback_from) REFERENCES distributors(distributor) ON DELETE CASCADE)")
+            db.execSQL("CREATE TABLE registrations (instance TEXT PRIMARY KEY,message TEXT,vapid TEXT)")
+            db.execSQL("CREATE TABLE tokens (connectorToken TEXT PRIMARY KEY,instance TEXT,distributor TEXT,FOREIGN KEY (instance) REFERENCES registrations(instance) ON DELETE CASCADE,FOREIGN KEY (distributor) REFERENCES distributors(distributor) ON DELETE CASCADE)")
+            db.execSQL("CREATE TABLE keys (instance TEXT PRIMARY KEY,auth TEXT,pubkey TEXT,privkey TEXT,iv TEXT,FOREIGN KEY (instance) REFERENCES registrations(instance) ON DELETE CASCADE)")
+            db.version=1;block(db)
+        }
+    }
+    @Test fun physicalRawBaselineReadsDb8WithoutTrimmingExpiredActionsOrTouchingPreferences()=runBlocking {
+        val alias="physical-reader-${Uuid.random().value}"
+        val generator=javax.crypto.KeyGenerator.getInstance(android.security.keystore.KeyProperties.KEY_ALGORITHM_AES,"AndroidKeyStore")
+        generator.init(android.security.keystore.KeyGenParameterSpec.Builder(alias,android.security.keystore.KeyProperties.PURPOSE_ENCRYPT or android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE).build())
+        generator.generateKey()
+        try {
+            withPhysicalBaseline {owned,root,store->
+                store.host(HostMetadata(HOST,"owned baseline",Uuid.random(),listOf(alias)))
+                store.host(HostMetadata("a".repeat(64),"legacy metadata only",null,emptyList()))
+                val request=prompt(summary(),"public owned baseline action");assertTrue(approved(store,request) is PreSendDecision.NewAction)
+                store.close()
+                val preferences=java.io.File(root,"shared_prefs");check(preferences.mkdir())
+                val file=java.io.File(preferences,"delivery_preferences.xml")
+                file.writeText("<map><boolean name=\"service_requested\" value=\"false\"/><string name=\"daily-private-choice\">PRIVATE_PREF_FIXTURE</string></map>")
+                val database=java.io.File(root,"databases/goatr-private.db");val beforeDb=fileHash(database);val beforePrefs=fileHash(file);val beforeAliases=keyAliases()
+                val facts=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")
+                assertEquals(2,facts.getJSONArray("hosts").length());assertEquals(1,facts.getJSONArray("hosts").getJSONObject(0).getInt("actionCount"))
+                assertTrue(facts.getJSONArray("hosts").getJSONObject(1).isNull("device"))
+                assertTrue(facts.getBoolean("serviceRequestedPresent"));assertFalse(facts.getBoolean("serviceRequested"))
+                assertFalse(facts.toString().contains("PRIVATE_PREF_FIXTURE"))
+                assertTrue(facts.getJSONObject("database").getJSONObject("quiescence").getLong("expiredRecovery")>0)
+                val refusal=runCatching {PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments().put("mode","observe"))}.exceptionOrNull()
+                assertEquals("physical_retained_database_not_quiescent",checkNotNull(refusal).message)
+                assertEquals(beforeDb,fileHash(database));assertEquals(beforePrefs,fileHash(file));assertEquals(beforeAliases,keyAliases())
+                android.database.sqlite.SQLiteDatabase.openDatabase(database.path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+                    db.rawQuery("SELECT count(*) FROM actions",null).use {rows->assertTrue(rows.moveToFirst());assertEquals(1,rows.getInt(0))}
+                }
+            }
+        }finally{java.security.KeyStore.getInstance("AndroidKeyStore").apply {load(null)}.deleteEntry(alias)}
+    }
+    @Test fun physicalRawConnectorAcceptsAck1OfficialWithoutMaterialAndNeverCreatesWrappingAlias()=runBlocking {
+        withPhysicalBaseline {owned,root,store->
+            store.close();connectorDatabase(root){it.execSQL("INSERT INTO distributors VALUES ('io.heckel.ntfy',NULL,1,17)")}
+            val database=java.io.File(root,"databases/unifiedpush-connector");val before=fileHash(database);val aliases=keyAliases()
+            val facts=PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments()).getJSONObject("connector")
+            assertEquals(1,facts.getInt("version"));assertEquals(1,facts.getJSONArray("distributors").length())
+            for(table in listOf("registrations","tokens","keys"))assertEquals(0,facts.getJSONArray(table).length())
+            assertEquals(before,fileHash(database));assertEquals(aliases,keyAliases())
+        }
+    }
+    @Test fun physicalRawConnectorBlocksLegacyOtherFallbackUnackedAndUnknownSchemaBeforeMigration()=runBlocking {
+        for(case in listOf("legacy","other","fallback","unacked","version","unknown-table"))withPhysicalBaseline {owned,root,store->
+            store.close();connectorDatabase(root){db->
+                db.execSQL("INSERT INTO distributors VALUES ('io.heckel.ntfy',NULL,1,17)")
+                when(case) {
+                    "other"->db.execSQL("UPDATE distributors SET distributor='other.distributor'")
+                    "fallback"->db.execSQL("UPDATE distributors SET fallback_from='other.distributor'")
+                    "unacked"->db.execSQL("UPDATE distributors SET ack=0")
+                    "version"->db.version=2
+                    "unknown-table"->db.execSQL("CREATE TABLE unknown_connector_state (value TEXT)")
+                }
+            }
+            val preferences=java.io.File(root,"shared_prefs");check(preferences.mkdir())
+            val file=java.io.File(preferences,"unifiedpush.connector.xml")
+            file.writeText(if(case=="legacy")"<map><string name=\"unifiedpush.distributor\">other.distributor</string><set name=\"unifiedpush.instances\"><string>retained-instance</string></set></map>" else "<map/>")
+            val database=java.io.File(root,"databases/unifiedpush-connector");val before=fileHash(database);val beforePrefs=fileHash(file);val aliases=keyAliases()
+            assertNotNull(case,runCatching {PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments())}.exceptionOrNull())
+            assertEquals(case,before,fileHash(database));assertEquals(case,beforePrefs,fileHash(file));assertEquals(case,aliases,keyAliases())
+        }
+    }
+    @Test fun physicalRawConnectorMaterialIsHashedOrRefusedWithoutCreatingMissingGlobalKey()=runBlocking {
+        withPhysicalBaseline {owned,root,store->
+            store.close();connectorDatabase(root){db->
+                db.execSQL("INSERT INTO distributors VALUES ('io.heckel.ntfy',NULL,1,17)")
+                db.execSQL("INSERT INTO registrations VALUES ('owned-format-instance','Goatr paired desktop',NULL)")
+                db.execSQL("INSERT INTO tokens VALUES ('PRIVATE_TOKEN_FIXTURE','owned-format-instance','io.heckel.ntfy')")
+                db.execSQL("INSERT INTO keys VALUES ('owned-format-instance','PRIVATE_AUTH_FIXTURE','PRIVATE_PUBLIC_FIXTURE','PRIVATE_SEALED_FIXTURE','PRIVATE_IV_FIXTURE')")
+            }
+            val database=java.io.File(root,"databases/unifiedpush-connector");val before=fileHash(database);val aliases=keyAliases()
+            val result=runCatching {PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")}
+            if("UnifiedPush" in aliases) {
+                val facts=result.getOrThrow();val connector=facts.getJSONObject("connector")
+                for(table in listOf("registrations","tokens","keys")) {
+                    val row=connector.getJSONArray(table);assertEquals(1,row.length());assertTrue(row.getJSONObject(0).getString("sha256").matches(Regex("[0-9a-f]{64}")))
+                }
+                assertFalse(facts.toString().contains("PRIVATE_TOKEN_FIXTURE"));assertFalse(facts.toString().contains("PRIVATE_AUTH_FIXTURE"));assertFalse(facts.toString().contains("PRIVATE_SEALED_FIXTURE"))
+            }else assertTrue(checkNotNull(result.exceptionOrNull()).message.orEmpty().contains("missing_wrapping_alias"))
+            assertEquals(before,fileHash(database));assertEquals(aliases,keyAliases())
+        }
+    }
+    @Test fun physicalResidentSnapshotRefusesAnUndersizedWindowBeforeAnyRowConsumer()=runBlocking {
+        withPhysicalBaseline {_,root,store->
+            store.close();val file=java.io.File(root,"databases/resident.db")
+            android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.CREATE_IF_NECESSARY).use {db->
+                db.execSQL("CREATE TABLE witness(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
+                for(index in 0 until 64)db.execSQL("INSERT INTO witness VALUES (?,?)",arrayOf<Any?>(index,"PUBLIC_WINDOW_FIXTURE".repeat(128)))
+            }
+            val before=fileHash(file);var consumed=0
+            android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
+                val refused=runCatching {PhysicalMvpPlatform.residentRows(db,"SELECT id,value FROM witness ORDER BY id",4096,64).use {rows->while(rows.moveToNext())consumed++}}
+                assertEquals("physical_retained_snapshot_unavailable",checkNotNull(refused.exceptionOrNull()).message);assertEquals(0,consumed)
+                PhysicalMvpPlatform.residentRows(db,"SELECT id,value FROM witness ORDER BY id",1024L*1024,64).use {rows->
+                    while(rows.moveToNext()){assertEquals(consumed,rows.getInt(0));consumed++}
+                }
+                assertEquals(64,consumed)
+            }
+            assertEquals(before,fileHash(file))
+        }
+    }
+    @Test fun physicalRawDb8FingerprintsEveryFamilyAndActionBlobAndKeepsOrphans()=runBlocking {
+        withPhysicalBaseline {owned,root,store->
+            val metadata=HostMetadata(HOST,"owned DB8 fixture",Uuid.random(),emptyList());store.host(metadata);store.close()
+            val file=java.io.File(root,"databases/goatr-private.db");val now=System.currentTimeMillis()
+            fun facts()=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")
+            fun rowsHash()=facts().getJSONArray("hosts").getJSONObject(0).getString("rowsSha256")
+            android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use {db->
+                val rows=listOf(
+                    Triple("sessions","INSERT INTO sessions VALUES ('$HOST','s','g','{}',0,0,$now,'public-source')","source"),
+                    Triple("records","INSERT INTO records VALUES ('$HOST','s','r',1,'PRIVATE_DB_BODY_FIXTURE',23,$now,'[]')","origins"),
+                    Triple("content","INSERT INTO content VALUES ('$HOST','s','g','source','handle',X'0102',2,$now,${now+86400000},$now)","data"),
+                    Triple("actions","INSERT INTO actions VALUES ('$HOST','a','{}',X'0102',NULL,'Reserved',0,0,$now)","fingerprint"),
+                    Triple("recovery","INSERT INTO recovery VALUES ('$HOST','a','PRIVATE_RECOVERY_FIXTURE',24,$now,${now+86400000},'{}','{}')","options"),
+                    Triple("notifications","INSERT INTO notifications VALUES ('$HOST',1,'n','e','s',$now)","id"),
+                    Triple("notification_state","INSERT OR REPLACE INTO notification_state VALUES ('$HOST',1,1,0)","highwater"),
+                    Triple("readwater","INSERT INTO readwater VALUES ('$HOST','s',1,$now)","through"),
+                    Triple("private_registration","INSERT INTO private_registration VALUES ('$HOST','g',X'0102')","ciphertext"),
+                    Triple("retired_push","INSERT INTO retired_push VALUES ('$HOST','g',$now)","at"),
+                    Triple("inventory","INSERT INTO inventory VALUES ('$HOST','PRIVATE_INVENTORY_FIXTURE',24,$now)","payload"),
+                    Triple("snippets","INSERT INTO snippets VALUES ('i','$HOST','public title','PRIVATE_SNIPPET_FIXTURE',12,23)","body"),
+                    Triple("notification_presentations","INSERT INTO notification_presentations VALUES ('$HOST','e',1,'s','Suppressed',0,$now)","attempted_at"),
+                    Triple("notification_cancel_pending","INSERT INTO notification_cancel_pending VALUES ('$HOST','e',$now,0)","attempts"),
+                    Triple("host_routes","INSERT INTO host_routes VALUES ('$HOST',1,'[]',NULL)","relay"),
+                    Triple("attachment_local","INSERT INTO attachment_local VALUES ('$HOST','u','{}')","record"),
+                    Triple("push_hints","INSERT INTO push_hints VALUES ('$HOST','e',1,'s','Attention',$now)","category"),
+                )
+                for((table,insert,column) in rows) {
+                    db.execSQL(insert);val before=rowsHash()
+                    val value:Any=when(column) {
+                        "data","fingerprint","ciphertext"->byteArrayOf(3,4)
+                        "highwater","through","at","attempted_at","attempts"->now+1
+                        else->"PUBLIC_CHANGED_FIXTURE"
+                    }
+                    db.execSQL("UPDATE \"$table\" SET \"$column\"=?",arrayOf(value))
+                    assertNotEquals("$table.$column must be in the complete typed row fingerprint",before,rowsHash())
+                }
+                val hostBefore=rowsHash()
+                db.execSQL("UPDATE hosts SET metadata=?",arrayOf(Protocol.strictJson.encodeToString(HostMetadata.serializer(),metadata.copy(name="changed owned metadata"))))
+                assertNotEquals(hostBefore,rowsHash())
+                val orphan="f".repeat(64);db.execSQL("INSERT INTO attachment_local VALUES (?,?,?)",arrayOf(orphan,"orphan-upload","PRIVATE_ORPHAN_FIXTURE"))
+                val before=facts();assertEquals(1,before.getJSONArray("orphans").length())
+                assertEquals(orphan,before.getJSONArray("orphans").getJSONObject(0).getString("host"))
+                db.execSQL("UPDATE attachment_local SET record='PUBLIC_ORPHAN_CHANGED' WHERE host=?",arrayOf(orphan))
+                val after=facts();assertNotEquals(before.getJSONArray("orphans").toString(),after.getJSONArray("orphans").toString())
+                assertEquals(before.getJSONArray("hosts").toString(),after.getJSONArray("hosts").toString())
+                assertTrue(after.getJSONObject("database").getJSONObject("quiescence").getLong("pendingCancellation")>0)
+                for(secret in listOf("PRIVATE_DB_BODY_FIXTURE","PRIVATE_RECOVERY_FIXTURE","PRIVATE_INVENTORY_FIXTURE","PRIVATE_SNIPPET_FIXTURE","PRIVATE_ORPHAN_FIXTURE"))assertFalse(after.toString().contains(secret))
+                val preRead=fileHash(file);facts();assertEquals(preRead,fileHash(file))
+                db.execSQL("INSERT INTO key_deletion VALUES (?,?)",arrayOf(HOST,"[]"))
+                assertEquals("physical_pending_key_deletion",checkNotNull(runCatching {facts()}.exceptionOrNull()).message)
+            }
+        }
+    }
+    @Test fun physicalRawViewedAdmissionRefusesBeforeOpeningStoreAndDoesNotNormalize()=runBlocking {
+        withPhysicalBaseline {owned,root,store->
+            store.host(HostMetadata(HOST,"owned fixed point",Uuid.random(),emptyList()));store.close()
+            val file=java.io.File(root,"databases/goatr-private.db")
+            android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use {db->
+                db.execSQL("INSERT INTO sessions VALUES (?,?,?,'{}',0,1,?,NULL)",arrayOf<Any?>(HOST,"owned-session","owned-generation",System.currentTimeMillis()))
+            }
+            val before=fileHash(file);val raw=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")
+            assertEquals(1L,raw.getJSONObject("database").getJSONObject("quiescence").getLong("viewed"))
+            val refused=runCatching {PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments().put("mode","observe"))}
+            assertEquals("physical_retained_database_not_quiescent",checkNotNull(refused.exceptionOrNull()).message)
+            assertEquals(before,fileHash(file))
+        }
+    }
+    @Test fun physicalRawDb8RejectsUnknownColumnForeignKeyIndexAndMissingPlatformMetadata()=runBlocking {
+        for(case in listOf("column","type","foreign-key","index","unique","platform-metadata"))withPhysicalBaseline {owned,root,store->
+            store.close();val file=java.io.File(root,"databases/goatr-private.db")
+            android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use {db->
+                when(case) {
+                    "column"->db.execSQL("ALTER TABLE content ADD COLUMN unknown_content_field TEXT")
+                    "type"->{
+                        db.execSQL("DROP TABLE content")
+                        db.execSQL("CREATE TABLE content(host TEXT NOT NULL,session TEXT NOT NULL,generation TEXT NOT NULL,source TEXT NOT NULL,handle TEXT NOT NULL,data TEXT NOT NULL,bytes INTEGER NOT NULL,at INTEGER NOT NULL,expires INTEGER NOT NULL,used INTEGER NOT NULL,PRIMARY KEY(host,handle),FOREIGN KEY(host,session) REFERENCES sessions(host,session) ON DELETE CASCADE)")
+                    }
+                    "foreign-key"->{
+                        db.execSQL("DROP TABLE records")
+                        db.execSQL("CREATE TABLE records(host TEXT NOT NULL,session TEXT NOT NULL,id TEXT NOT NULL,ord INTEGER NOT NULL,data TEXT NOT NULL,bytes INTEGER NOT NULL,at INTEGER NOT NULL,origins TEXT NOT NULL,PRIMARY KEY(host,session,id))")
+                    }
+                    "index"->db.execSQL("CREATE INDEX unknown_record_index ON records(data)")
+                    "unique"->{
+                        db.execSQL("DROP TABLE host_routes")
+                        db.execSQL("CREATE TABLE host_routes(host TEXT PRIMARY KEY,revision INTEGER NOT NULL,direct TEXT NOT NULL,relay TEXT UNIQUE,FOREIGN KEY(host) REFERENCES hosts(host) ON DELETE CASCADE)")
+                    }
+                    "platform-metadata"->db.execSQL("DROP TABLE android_metadata")
+                }
+            }
+            val before=fileHash(file);val refused=runCatching {PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")}.exceptionOrNull()
+            assertTrue(case,checkNotNull(refused).message.orEmpty().startsWith("physical_db8_"));assertEquals(case,before,fileHash(file))
+        }
+    }
+    @Test fun physicalRawLocaleFactsBlockGoatrAndExistingConnectorBeforeAnyHelperNormalization()=runBlocking {
+        for(case in listOf("mismatch","duplicate","missing"))withPhysicalBaseline {owned,root,store->
+            store.close();connectorDatabase(root){it.execSQL("INSERT INTO distributors VALUES ('io.heckel.ntfy',NULL,1,17)")}
+            val files=listOf(java.io.File(root,"databases/goatr-private.db"),java.io.File(root,"databases/unifiedpush-connector"))
+            for(file in files)android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.OPEN_READWRITE).use {db->
+                when(case) {
+                    "mismatch"->db.execSQL("UPDATE android_metadata SET locale='OWNED_INVALID_LOCALE'")
+                    "duplicate"->db.execSQL("INSERT INTO android_metadata VALUES (?)",arrayOf(java.util.Locale.getDefault().toString()))
+                    "missing"->db.execSQL("DELETE FROM android_metadata")
+                }
+            }
+            val before=files.map(::fileHash);val facts=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")
+            assertTrue(case,facts.getJSONObject("database").getJSONObject("quiescence").getLong("locale")>0)
+            assertTrue(case,facts.getJSONObject("connector").getLong("localeChanges")>0)
+            val refused=runCatching {PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments())}
+            assertEquals("physical_connector_not_quiescent",checkNotNull(refused.exceptionOrNull()).message);assertEquals(before,files.map(::fileHash))
+        }
+    }
+    @Test fun physicalRawEncryptedFilesExposeCipherIdentityAndRefusePartialBackupAndUnknownFiles()=runBlocking {
+        val host=PhysicalMvpPlatform.digest("owned-encrypted-fixture-${Uuid.random().value}")
+        val alias=SecretStore.hostAlias(host,"receipt");val aliasesBefore=keyAliases();assertFalse(alias in aliasesBefore)
+        try {
+            withPhysicalBaseline {owned,root,store->
+                SecretStore(owned).material(alias,true).fill(0);store.close()
+                val directory=java.io.File(root,"no_backup/goatr-keys");val cipher=java.io.File(directory,"$alias.gcm");val marker=java.io.File(directory,"$alias.gcm.initialized")
+                fun files()=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}").getJSONObject("keyFiles")
+                val before=files();assertEquals(2,before.getJSONArray("files").length())
+                val original=cipher.readBytes();val markerBytes=marker.readBytes()
+                try {
+                    val changed=original.copyOf();changed[changed.lastIndex]=(changed.last().toInt() xor 1).toByte();cipher.writeBytes(changed);changed.fill(0)
+                    assertNotEquals(before.toString(),files().toString());cipher.writeBytes(original)
+                    check(marker.delete())
+                    assertEquals("physical_key_file_partial",checkNotNull(runCatching {files()}.exceptionOrNull()).message)
+                    marker.writeBytes(markerBytes);android.system.Os.chmod(marker.path,0x180)
+                    for(name in listOf("$alias.gcm.bak","unrelated.bin")) {
+                        val extra=java.io.File(directory,name);extra.writeBytes(byteArrayOf(1));android.system.Os.chmod(extra.path,0x180)
+                        assertEquals("physical_key_file_unknown_or_backup",checkNotNull(runCatching {files()}.exceptionOrNull()).message);check(extra.delete())
+                    }
+                    val held=files().getJSONArray("files").getJSONObject(0).getLong("inode")
+                    val replacement=java.io.File(directory,"owned-replacement");replacement.writeBytes(original);android.system.Os.chmod(replacement.path,0x180)
+                    check(cipher.delete());check(replacement.renameTo(cipher))
+                    assertNotEquals(held,files().getJSONArray("files").getJSONObject(0).getLong("inode"))
+                }finally{original.fill(0);markerBytes.fill(0)}
+            }
+        }finally{java.security.KeyStore.getInstance("AndroidKeyStore").apply {load(null)}.deleteEntry(alias)}
+        assertEquals(aliasesBefore,keyAliases())
+    }
     private suspend fun approved(store: SessionStore, request: Request, replace: Set<RecoveryIdentity> = emptySet()): PreSendDecision {
         val text=(request.body as RequestBody.PromptSubmit).params.text
         val warning=store.recoveryWarning(HOST,request.id,text)

@@ -70,9 +70,13 @@ fn control_message(challenge: &[u8; 32], bytes: &[u8]) -> Vec<u8> {
     message.extend_from_slice(bytes);
     message
 }
-async fn authenticated_control(
+async fn authenticated_control(stream:&mut tokio::net::TcpStream,public:&[u8;65])->io::Result<Control> {
+    authenticated_control_record(stream,public,None).await
+}
+pub(super) async fn authenticated_control_record(
     stream: &mut tokio::net::TcpStream,
     public: &[u8; 65],
+    mut witness:Option<&mut Value>,
 ) -> io::Result<Control> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let challenge = random32()?;
@@ -107,6 +111,10 @@ async fn authenticated_control(
         } else {
             Err(failure("stock-control signature rejected"))
         };
+        if verified.is_ok() && let Some(record)=witness.as_deref_mut() {
+            *record=json!({"public":hex(public),"challenge":hex(&challenge),"signature":hex(&signature[..signature_len]),
+                "request":std::str::from_utf8(&bytes).map_err(io::Error::other)?});
+        }
         bytes.fill(0);
         serde_json::from_value(value?)
             .map_err(|_| failure("closed authenticated stock-control shape"))
@@ -116,8 +124,13 @@ async fn authenticated_control(
 }
 #[derive(Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
-enum Control {
+pub(super) enum Control {
     // Empty structs enforce a closed map; internally tagged unit variants ignore extra fields.
+    PhysicalReport {
+        #[serde(rename="runId")]run_id:Uuid,
+        sequence:Uint,
+        report:Value,
+    },
     LivePair {},
     LiveInfo {},
     Observe {
@@ -187,7 +200,7 @@ enum Control {
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct DevelopmentHistory {
+pub(super) struct DevelopmentHistory {
     provider: Provider,
     status: DevelopmentHistoryStatus,
 }
@@ -199,7 +212,7 @@ enum DevelopmentHistoryStatus {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Scene {
+pub(super) enum Scene {
     Conversation,
     Older,
     Tools,
@@ -1963,7 +1976,7 @@ pub(super) async fn run(
       for p in native.iter(){p.recheck_processes()?;}
       observed.push(json!({"scenario":"actual-APK-process-death-original-no-replay","lease":lease,"receipt":receipt,"nativeUserCountBefore":death_count,"nativeUserCountAfter":count}));json!({"verified":true})
      },
-     Control::FeedbackPaired{..}|Control::FeedbackReady{..}|Control::DevelopmentReady{..}=>return Err(failure("post-acceptance/development control is unavailable during acceptance")),
+     Control::PhysicalReport{..}|Control::FeedbackPaired{..}|Control::FeedbackReady{..}|Control::DevelopmentReady{..}=>return Err(failure("post-acceptance/development/physical control is unavailable during acceptance")),
      Control::Complete{}=>{if geometry(herdr_socket,&anchor,GeometryPhase::UiAfter).await.map_err(GeometryFailure::into_io)?!=baseline_geometry||focus(&surface(herdr_socket).await?.1)!=baseline_focus{return Err(failure("actual phone flow changed desktop focus/geometry"));}complete=true;json!({"complete":true})}
     };
     let mut encoded=serde_json::to_vec(&response).map_err(io::Error::other)?;if encoded.len()>65536{return Err(failure("stock control response bound"));}encoded.push(b'\n');tokio::time::timeout(Duration::from_secs(5),stream.write_all(&encoded)).await.map_err(|_|failure("stock control response deadline"))??;encoded.fill(0);

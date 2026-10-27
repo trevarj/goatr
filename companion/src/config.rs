@@ -26,6 +26,8 @@ pub(crate) fn default_push_allowed_origins() -> Vec<String> {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_name: Option<Label>,
     pub runtime_dir: PathBuf,
     pub runtime_dir_agent: PathBuf,
     #[serde(default)]
@@ -384,6 +386,9 @@ impl Config {
     fn validate_syntax(&self) -> io::Result<()> {
         if self.version != 1 {
             return Err(invalid("unsupported configuration version"));
+        }
+        if let Some(name) = &self.pairing_name {
+            name.validate().map_err(|_| invalid("invalid pairing name"))?;
         }
         if self.projects.len() > 128
             || self.herdr_sockets.len() > 64

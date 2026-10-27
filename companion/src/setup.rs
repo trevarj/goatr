@@ -325,6 +325,7 @@ fn new_config(sub: &ArgMatches) -> io::Result<Config> {
     })?;
     let mut c = Config {
         version: 1,
+        pairing_name: None,
         runtime_dir_agent: choose_path(sub, "runtime-dir-agent").unwrap_or_else(|| runtime.clone()),
         runtime_dir: runtime,
         allow_scoped_shell_probe: false,

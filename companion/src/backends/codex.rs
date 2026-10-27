@@ -10245,7 +10245,7 @@ mod tests {
             return;
         }
         // The sibling stays alive on a private stdin pipe, without invoking a provider.
-        let mut sibling = std::process::Command::new("/bin/sh")
+        let mut sibling = std::process::Command::new("sh")
             .args(["-c", "read -r unused"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())

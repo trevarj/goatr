@@ -34,10 +34,10 @@ internal class TerminalCreationState(val host:String,val server:Uuid,val workspa
     val workspace=graph?.workspaces?.singleOrNull {it.workspaceId==shown.workspace}
     AlertDialog(onDismissRequest=model::closeTerminalCreation,
         title={GoatrTitleBar("New terminal",connectionLabel(shown.host,view,model.connectingHosts[shown.host]==true),!shown.loaded,
-            compactStatus=compactConnectionLabel(shown.host,view,model.connectingHosts[shown.host]==true))},
+            compactStatus=compactConnectionLabel(shown.host,view,model.connectingHosts[shown.host]==true),titleModifier=Modifier.testTag("terminal_creation_scope_${shown.host}_${shown.server.value}_${shown.workspace.value}"))},
         text={Column(Modifier.fillMaxWidth().heightIn(max=460.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             UiText(hostName,style=MaterialTheme.typography.titleMedium)
-            UiText(workspace?.label?.value ?: "Original workspace",style=MaterialTheme.typography.bodyMedium)
+            UiText(workspace?.label?.value ?: "Original workspace",style=MaterialTheme.typography.bodyMedium,modifier=Modifier.testTag(if(shown.source==null)"terminal_creation_source_workspace"else"terminal_creation_source_bound"))
             UiText("Create one unfocused native tab in this original workspace. Choose an approved project/directory; no cwd is inferred from a conversation or terminal.")
             UiText("Requires the desktop’s explicit terminal-control grant. Goatr verifies the actual new shell directory before enabling input. A directory replacement or lost outcome retains uncertain resources without cd, retry or cleanup.")
             val projects=inventory?.projects.orEmpty().filter {it.available}

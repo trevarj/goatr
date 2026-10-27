@@ -64,6 +64,30 @@ fn exact_version_types_unknown_keys_duplicate_ids_and_local_only_admin() {
     );
 }
 #[test]
+fn pairing_name_is_optional_bounded_and_validated_during_parse_and_serialization() {
+    let root = Root::new();
+    let text = root.text();
+    let default = Config::parse(&text).unwrap();
+    assert!(default.pairing_name.is_none());
+    let omitted = default.serialized().unwrap();
+    assert!(!omitted.contains("pairing_name"));
+    assert!(Config::parse(&omitted).unwrap().pairing_name.is_none());
+    let label = "Goatr MVP 123e4567-e89b-42d3-a456-426614174000";
+    let named = Config::parse(&format!("pairing_name={label:?}\n{text}")).unwrap();
+    let roundtrip = Config::parse(&named.serialized().unwrap()).unwrap();
+    assert_eq!(roundtrip.pairing_name, Some(Label::new(label).unwrap()));
+    assert_eq!(roundtrip.version, default.version);
+    assert_eq!(roundtrip.executables.herdr, default.executables.herdr);
+    for invalid in ["".to_owned(), "a".repeat(129), "bad\nname".to_owned(), "bad\u{7f}name".to_owned()] {
+        let quoted = serde_json::to_string(&invalid).unwrap();
+        assert!(Config::parse(&format!("pairing_name={quoted}\n{text}")).is_err());
+        let mut forged = Config::parse(&text).unwrap();
+        forged.pairing_name = Some(Label(invalid));
+        assert!(forged.serialized().is_err());
+    }
+}
+
+#[test]
 fn private_config_symlink_mode_socket_both_views_and_missing_project() {
     let root = Root::new();
     let text = root.text();

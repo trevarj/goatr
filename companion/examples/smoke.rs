@@ -27,6 +27,8 @@ use std::{
 mod live;
 #[path = "smoke/review.rs"]
 mod review;
+#[path = "smoke/native_inventory.rs"]
+mod native_inventory;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HelperLocation {
     file: &'static str,
@@ -44,6 +46,7 @@ impl HelperLocation {
                 "smoke/paging_proof.rs"
             }
             "examples/smoke/ui.rs" | "companion/examples/smoke/ui.rs" => "smoke/ui.rs",
+            "examples/smoke/physical.rs" | "companion/examples/smoke/physical.rs" => "smoke/physical.rs",
             "examples/smoke/camera.rs" | "companion/examples/smoke/camera.rs" => "smoke/camera.rs",
             "examples/smoke/review.rs" | "companion/examples/smoke/review.rs" => "smoke/review.rs",
             "examples/smoke/setup_acceptance.rs"
@@ -539,7 +542,8 @@ fn drain_terminal_pair_stderr(
         }
     }
 }
-/// libc PTY only: pair insists on terminal stdout. The capability never reaches argv/env/files.
+/// libc PTY only: pair insists on terminal stdout; invitations never reach argv/env/files.
+/// Controller Linux capabilities are dropped before exec.
 fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>) -> io::Result<String> {
     // SAFETY: these POSIX calls allocate/configure an owned PTY descriptor and bounded name buffer.
     let fd = unsafe {
@@ -579,6 +583,12 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>) -> i
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave))
         .stderr(Stdio::piped());
+    #[cfg(target_os="linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        // The existing helper uses only async-signal-safe capability syscalls.
+        command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    }
     let mut child = command.spawn()?;
     let mut stderr = None;
     let mut stderr_nonblocking = false;
@@ -1276,8 +1286,9 @@ async fn run() -> io::Result<bool> {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
     let background=std::env::args_os().skip(1).any(|arg|arg.to_str().is_some_and(|arg|arg=="--background"||arg.starts_with("--background=")));
+    let physical=std::env::args_os().skip(1).any(|arg|arg.to_str().is_some_and(|arg|arg=="--physical-mvp"||arg.starts_with("--physical-mvp=")));
     let mut native_args = std::env::args_os().skip(1);
-    if !background&&native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
+    if !physical&&!background&&native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
         if std::env::args_os().any(|arg|arg==std::ffi::OsStr::new("--project-read-only")){return std::process::ExitCode::FAILURE;}
         let Some(lease) = native_args.next() else {
             return std::process::ExitCode::FAILURE;
@@ -1293,7 +1304,7 @@ async fn main() -> std::process::ExitCode {
             }
         };
     }
-    let result = if background {live::run().await} else if !std::env::args().any(|arg|matches!(arg.as_str(),"--terminal-only"|"--project-read-only"))&&std::env::args().any(|arg| arg == "--review-fixture") {
+    let result = if physical||background {live::run().await} else if !std::env::args().any(|arg|matches!(arg.as_str(),"--terminal-only"|"--project-read-only"))&&std::env::args().any(|arg| arg == "--review-fixture") {
         review::run().await
     } else if std::env::args().any(|arg| {
         matches!(

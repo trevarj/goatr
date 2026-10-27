@@ -23,6 +23,7 @@ fn new_security() -> Arc<Security> {
         EndpointId(iroh::SecretKey::from_bytes(&[3; 32]).public().to_string()),
         boot,
         vec![],
+        None,
     )
 }
 fn new_root() -> std::path::PathBuf {
@@ -50,6 +51,28 @@ async fn completed(host: &iroh::Endpoint, phone: &iroh::Endpoint) -> iroh::endpo
     let _client = phone.connect(host.addr(), goatr::ALPN).await.unwrap();
     accepting.await.unwrap()
 }
+#[tokio::test]
+async fn optional_pairing_name_is_resolved_once_in_real_invitations() {
+    let storage = Storage::memory([19; 32], now_ms()).unwrap();
+    let boot = storage.boot_id.clone();
+    let name = Label::new(format!("Goatr MVP {}", Uuid::random().0)).unwrap();
+    let security = Security::new(
+        StorageOwner::new(storage).unwrap(),
+        Arc::new(State::default()),
+        EndpointId(iroh::SecretKey::from_bytes(&[13; 32]).public().to_string()),
+        boot,
+        vec![],
+        Some(name.clone()),
+    );
+    let first = PairInvite::parse(&security.open_pair().await.unwrap().uri).unwrap();
+    let second = PairInvite::parse(&security.open_pair().await.unwrap().uri).unwrap();
+    assert_eq!(first.name, name);
+    assert_eq!(second.name, name);
+    assert_ne!(first.token, second.token);
+    let fallback = PairInvite::parse(&new_security().open_pair().await.unwrap().uri).unwrap();
+    assert_eq!(fallback.name, display_name());
+}
+
 #[tokio::test]
 async fn exact_invite_atomic_consumption_restart_and_fail_limits() {
     let security = new_security();

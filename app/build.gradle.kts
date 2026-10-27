@@ -1,8 +1,59 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import com.android.build.api.artifact.SingleArtifact
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.OutputFile
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+/** AGP's test-manifest producer otherwise replaces the standalone declaration with its default runner. */
+abstract class OwnedInstrumentationManifest : DefaultTask() {
+    @get:InputFile @get:PathSensitive(PathSensitivity.NONE)
+    abstract val inputManifest: RegularFileProperty
+    @get:OutputFile
+    abstract val outputManifest: RegularFileProperty
+    @TaskAction
+    fun produce() {
+        val factory=javax.xml.parsers.DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware=true
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl",true)
+            setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING,true)
+            setAttribute(javax.xml.XMLConstants.ACCESS_EXTERNAL_DTD,"")
+            setAttribute(javax.xml.XMLConstants.ACCESS_EXTERNAL_SCHEMA,"")
+        }
+        val document=factory.newDocumentBuilder().parse(inputManifest.get().asFile)
+        val android="http://schemas.android.com/apk/res/android"
+        val runners=linkedMapOf(
+            "io.github.trevarj.goatr.OwnedInstrumentationRunner" to "io.github.trevarj.goatr.debug",
+            "io.github.trevarj.goatr.OwnedUiAutomationRunner" to "io.github.trevarj.goatr.debug.test",
+        )
+        val existing=document.getElementsByTagName("instrumentation")
+        while(existing.length>0) {
+            val node=existing.item(0) as org.w3c.dom.Element
+            check(node.getAttributeNS(android,"name") in runners) {"Unexpected instrumentation producer"}
+            node.parentNode.removeChild(node)
+        }
+        for((name,target) in runners)document.documentElement.appendChild(document.createElement("instrumentation").apply {
+            setAttributeNS(android,"android:name",name)
+            setAttributeNS(android,"android:targetPackage",target)
+            setAttributeNS(android,"android:label",if(target.endsWith(".test")) "Goatr owned UI automation" else "Goatr owned product observer")
+        })
+        val file=outputManifest.get().asFile
+        file.parentFile.mkdirs()
+        javax.xml.transform.TransformerFactory.newInstance().apply {
+            setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING,true)
+            setAttribute(javax.xml.XMLConstants.ACCESS_EXTERNAL_DTD,"")
+            setAttribute(javax.xml.XMLConstants.ACCESS_EXTERNAL_STYLESHEET,"")
+        }.newTransformer().transform(javax.xml.transform.dom.DOMSource(document),javax.xml.transform.stream.StreamResult(file))
+    }
 }
 
 android {
@@ -33,6 +84,17 @@ android {
     }
     testOptions { unitTests.all { it.systemProperty("goatr.fixtures", rootProject.file("protocol/fixtures").absolutePath) } }
 }
+
+androidComponents {
+    onVariants(selector().withBuildType("debug")) {variant->
+        variant.androidTest?.let {test->
+            val producer=tasks.register<OwnedInstrumentationManifest>("produce${variant.name.replaceFirstChar {it.uppercase()}}OwnedInstrumentations")
+            test.artifacts.use(producer).wiredWithFiles(
+                OwnedInstrumentationManifest::inputManifest,OwnedInstrumentationManifest::outputManifest,
+            ).toTransform(SingleArtifact.MERGED_MANIFEST)
+        }
+    }
+}
 kotlin { jvmToolchain(21) }
 
 if (providers.gradleProperty("goatrPairedFeedbackOnly").orNull == "true") {
@@ -41,6 +103,7 @@ if (providers.gradleProperty("goatrPairedFeedbackOnly").orNull == "true") {
         listOf(
             "**/OwnedInstrumentationRunner.kt",
             "**/PairedDeviceFeedback.kt",
+            "**/PhysicalMvpObserver.kt",
         ),
     )
 }

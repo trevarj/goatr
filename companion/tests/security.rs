@@ -41,6 +41,7 @@ async fn authorized() -> (
         EndpointId(host.id().to_string()),
         boot,
         vec![],
+        None,
     );
     let endpoint = host.clone();
     let incoming = tokio::spawn(async move { endpoint.accept().await.unwrap().await.unwrap() });

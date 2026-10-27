@@ -133,7 +133,7 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
     ) {padding->
         BoxWithConstraints(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding().padding(horizontal=if(model.screen==Screen.Conversation) 10.dp else 16.dp)) {
             val wide=maxWidth>=840.dp
-            Column(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().testTag("scene_host_${model.selection?.host ?: model.host ?: "none"}")) {
             model.notice?.let {Surface(color=MaterialTheme.colorScheme.errorContainer,shape=MaterialTheme.shapes.small,modifier=Modifier.fillMaxWidth()) {
                 UiText(it,color=MaterialTheme.colorScheme.onErrorContainer,style=MaterialTheme.typography.bodySmall,modifier=Modifier.heightIn(max=96.dp).verticalScroll(rememberScrollState()).padding(6.dp).semantics {liveRegion=LiveRegionMode.Assertive}.testTag("operation_notice"))
             }}

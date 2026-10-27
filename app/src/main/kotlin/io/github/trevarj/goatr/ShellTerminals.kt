@@ -641,7 +641,7 @@ internal fun ShellTerminalsScreen(host:String,store:StoreView,view:ConnectionVie
     LazyColumn(Modifier.fillMaxSize().testTag("shell_terminals"),verticalArrangement=Arrangement.spacedBy(16.dp),contentPadding=PaddingValues(bottom=24.dp)) {
         item {
             GroupedSurface {
-                UiText(hostName,style=MaterialTheme.typography.titleMedium)
+                UiText(hostName,style=MaterialTheme.typography.titleMedium,modifier=Modifier.testTag("shell_list_host_$host"))
                 UiText(if(ready) "Ordinary terminals" else "Last observed terminal list",style=MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                     IconButton(onClick=model::refreshTerminals,enabled=!model.busy && model.foreground && host in view.hello,modifier=Modifier.size(48.dp).testTag("shell_inventory_refresh")) {GoatrIcon(MaterialGlyph.Refresh,"Refresh terminals")}
@@ -664,7 +664,7 @@ internal fun ShellTerminalsScreen(host:String,store:StoreView,view:ConnectionVie
             items(shells,key={"${it.target.shellId.value}_${it.target.generation.value}"}) {shell->
                 val actionable=ready && model.foreground && shell.connectivity==SessionConnectivity.Ready && shell.capabilities.read
                 GroupedSurface(Modifier.testTag("shell_row_${shell.target.shellId.value}")) {
-                    UiText(shell.title.value,style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    UiText(shell.title.value,style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.testTag("shell_row_target_${shell.target.shellId.value}_${shell.target.generation.value}"))
                     var details by remember(host,shell.target) {mutableStateOf(false)}
                     if(!actionable) UiText(when { !ready->"Last observed terminal · current inventory is unavailable";shell.connectivity!=SessionConnectivity.Ready->"${shell.connectivity} · terminal access unavailable";!shell.capabilities.read->"Terminal read capability is unavailable";else->"Terminal access is paused while this app is inactive"},style=MaterialTheme.typography.bodySmall)
                     if(!shell.capabilities.grid)UiText("Stock terminal control unavailable · requires the local terminal-control grant and a current native layout",style=MaterialTheme.typography.bodySmall)
@@ -700,11 +700,11 @@ internal fun ShellTerminalsScreen(host:String,store:StoreView,view:ConnectionVie
             if(graphs.all {it.workspaces.isEmpty()})UiText("Create a workspace in native Herdr first. Goatr does not invent another shell owner.")
             for(graph in graphs)for(workspace in graph.workspaces)TextButton(
                 onClick={choosingWorkspace=false;model.beginTerminalCreation(host,graph.serverId,workspace.workspaceId)},
-                enabled=ready&&model.foreground&&!model.busy,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)){
+                enabled=ready&&model.foreground&&!model.busy,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("terminal_workspace_${graph.serverId.value}_${workspace.workspaceId.value}")){
                 UiText((inventory?.servers?.singleOrNull {it.serverId==graph.serverId}?.name?.value ?: "Original server")+" · "+(workspace.label?.value ?: "Workspace ${workspace.number.value}"))
             }
         }},confirmButton={TextButton(onClick={choosingWorkspace=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},
-        properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn))
+        properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn),modifier=Modifier.testTag("terminal_workspace_picker_$host"))
 }
 
 @Composable
@@ -733,7 +733,7 @@ private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSna
         Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("shell_viewer")) {
             Scaffold(contentWindowInsets=WindowInsets(0,0,0,0),topBar={
                 Column {
-                    GoatrTitleBar(snapshot.summary.title.value,connectionStatus,snapshot.loading,compactStatus=compactConnectionStatus,navigationIcon={
+                    GoatrTitleBar(snapshot.summary.title.value,connectionStatus,snapshot.loading,compactStatus=compactConnectionStatus,titleModifier=Modifier.testTag("shell_scope_${snapshot.selection.host}_${snapshot.selection.target.shellId.value}_${snapshot.selection.target.generation.value}"),navigationIcon={
                         IconButton(onClick=model::closeShell,modifier=Modifier.size(48.dp).testTag("shell_viewer_back")){GoatrIcon(MaterialGlyph.Back,"Back to terminals")}
                     },actions={
                         IconButton(onClick={keyboard?.hide()},modifier=Modifier.size(48.dp).testTag("shell_keyboard_dismiss")){GoatrIcon(MaterialGlyph.ExpandMore,"Hide keyboard")}
@@ -771,20 +771,20 @@ private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSna
             if(snapshot.summary.capabilities.input)ShellInputDiagnostics(snapshot,model)
         }},
         confirmButton={TextButton(onClick={details=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Close details")}},
-        properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn))
+        properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn),modifier=Modifier.testTag("shell_details_scope_${snapshot.selection.host}_${snapshot.selection.target.shellId.value}_${snapshot.selection.target.generation.value}"))
     if(beginConfirm)AlertDialog(onDismissRequest={beginConfirm=false},title={UiText("Begin native control?")},
         text={UiText(NATIVE_CONTROL_DISCLOSURE)},
-        confirmButton={TextButton(onClick={beginConfirm=false;model.beginShellControl(scope)},enabled=model.shellControlAllowed(scope),modifier=Modifier.heightIn(min=48.dp)){UiText("Begin control")}},
-        dismissButton={TextButton(onClick={beginConfirm=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn))
+        confirmButton={TextButton(onClick={beginConfirm=false;model.beginShellControl(scope)},enabled=model.shellControlAllowed(scope),modifier=Modifier.heightIn(min=48.dp).testTag("shell_begin_confirm")){UiText("Begin control")}},
+        dismissButton={TextButton(onClick={beginConfirm=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn),modifier=Modifier.testTag("shell_begin_scope_${snapshot.selection.host}_${snapshot.selection.target.shellId.value}_${snapshot.selection.target.generation.value}"))
     if(resizeConfirm)AlertDialog(onDismissRequest={resizeConfirm=false},title={UiText("Resize native frontend?")},
         text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){
             UiText(NATIVE_CONTROL_DISCLOSURE)
             UiText("These are frontend surface dimensions, not this pane’s crop or a phone fit. This is a new action, never a replay of a prior uncertain resize.")
-            OutlinedTextField(columns,{columns=it.filter(Char::isDigit)},label={UiText("Columns 1–512")},singleLine=true)
-            OutlinedTextField(rows,{rows=it.filter(Char::isDigit)},label={UiText("Rows 1–256 · at most 32768 cells")},singleLine=true)
+            OutlinedTextField(columns,{columns=it.filter(Char::isDigit)},label={UiText("Columns 1–512")},singleLine=true,modifier=Modifier.testTag("shell_resize_columns"))
+            OutlinedTextField(rows,{rows=it.filter(Char::isDigit)},label={UiText("Rows 1–256 · at most 32768 cells")},singleLine=true,modifier=Modifier.testTag("shell_resize_rows"))
         }},
-        confirmButton={val c=columns.toLongOrNull();val r=rows.toLongOrNull();TextButton(onClick={if(c!=null&&r!=null){resizeConfirm=false;model.resizeShell(scope,c,r)}},enabled=!model.busy&&model.shellControlAllowed(scope)&&c!=null&&r!=null&&c in 1..512&&r in 1..256&&c*r<=32768,modifier=Modifier.heightIn(min=48.dp)){UiText("Resize native frontend")}},
-        dismissButton={TextButton(onClick={resizeConfirm=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn))
+        confirmButton={val c=columns.toLongOrNull();val r=rows.toLongOrNull();TextButton(onClick={if(c!=null&&r!=null){resizeConfirm=false;model.resizeShell(scope,c,r)}},enabled=!model.busy&&model.shellControlAllowed(scope)&&c!=null&&r!=null&&c in 1..512&&r in 1..256&&c*r<=32768,modifier=Modifier.heightIn(min=48.dp).testTag("shell_resize_confirm")){UiText("Resize native frontend")}},
+        dismissButton={TextButton(onClick={resizeConfirm=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn),modifier=Modifier.testTag("shell_resize_scope_${snapshot.selection.host}_${snapshot.selection.target.shellId.value}_${snapshot.selection.target.generation.value}"))
 }
 
 /** The native host owns factory/update/release callbacks; its reference belongs to the caller's scope. */
