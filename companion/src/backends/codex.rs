@@ -5837,6 +5837,15 @@ fn service_environment(property: &Value) -> SecurityResult<Vec<(String, String)>
     values.sort();
     Ok(values)
 }
+fn first_owner_service_evidence(pending:&mut Option<crate::codex_relay::ProcessStart>,pid:u32)->std::io::Result<Option<ProcessEvidence>> {
+    if pending.is_none(){*pending=Some(crate::codex_relay::ProcessStart::capture(pid)?);}
+    let original=pending.as_ref().ok_or_else(invalid)?;
+    match original.evidence(pid) {
+        Ok(process)=>Ok(Some(process)),
+        Err(error) if error.kind()==std::io::ErrorKind::PermissionDenied=>{original.check(pid)?;Ok(None)}
+        Err(error)=>Err(error),
+    }
+}
 fn service_pid(properties: &HashMap<String, String>) -> SecurityResult<u32> {
     if properties.get("LoadState").map(String::as_str) != Some("loaded")
         || properties.get("Type").map(String::as_str) != Some("exec")
@@ -6734,6 +6743,7 @@ impl Runtime {
         // take longer than ten seconds before its publisher process is observable.
         let deadline = job_deadline;
         let mut native = None;
+        let mut pending_service: Option<crate::codex_relay::ProcessStart> = None;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 if let Some(reporter) = &reporter {
@@ -6785,8 +6795,14 @@ impl Runtime {
                         return Err(code);
                     }
                 };
-                record.service = match herdr::process_evidence(pid) {
-                    Ok(service) => Some(service),
+                record.service = match first_owner_service_evidence(&mut pending_service,pid) {
+                    Ok(Some(service)) => Some(service),
+                    Ok(None) => {
+                        // Type=exec may expose the ORIGINAL launcher before its post-exec dumpability boundary.
+                        // No new unit/action or deadline: retry only this first read-only proof.
+                        tokio::time::sleep_until((tokio::time::Instant::now()+Duration::from_millis(20)).min(deadline)).await;
+                        continue;
+                    }
                     Err(error) => {
                         if let Some(reporter) = &reporter {
                             reporter.prebinding_error(
@@ -7725,6 +7741,42 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{io::{Read,Write},os::{fd::{AsRawFd,FromRawFd},unix::{net::UnixStream as FileWakeChannel,process::CommandExt}}};
+    struct FileWakeFixtureChild(std::process::Child);
+    impl FileWakeFixtureChild {
+        fn exit(&mut self)->std::process::ExitStatus {
+            let deadline=std::time::Instant::now()+Duration::from_secs(5);
+            loop{if let Some(status)=self.0.try_wait().unwrap(){return status;}assert!(std::time::Instant::now()<deadline,"owned fixture exit timed out");std::thread::sleep(Duration::from_millis(10));}
+        }
+    }
+    impl Drop for FileWakeFixtureChild {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
+    fn file_wake_endpoint(key:&str)->Option<FileWakeChannel> {
+        let fd=std::env::var(key).ok()?.parse::<i32>().unwrap();assert!(fd>2);let channel=unsafe{FileWakeChannel::from_raw_fd(fd)};
+        channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();Some(channel)
+    }
+    fn file_wake_state(channel:&mut FileWakeChannel,expected:u8){let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,[expected]);}
+    #[test]
+    fn owner_first_service_permission_wait_keeps_original_public_epoch_and_never_adopts_pid() {
+        use std::process::{Command,Stdio};
+        if let Some(mut channel)=file_wake_endpoint("GOATR_OWNER_DUMP_TEST_FD") {
+            crate::codex_relay::drop_inherited_capabilities().unwrap();assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);
+            channel.write_all(b"0").unwrap();file_wake_state(&mut channel,b'1');
+            crate::codex_relay::restore_dumpability().unwrap();channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
+        }
+        let test=concat!(module_path!(),"::owner_first_service_permission_wait_keeps_original_public_epoch_and_never_adopts_pid");
+        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
+        let (mut channel,endpoint)=FileWakeChannel::pair().unwrap();channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let fd=endpoint.as_raw_fd();assert!(fd>2);let mut command=Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact",test,"--test-threads=1"]).env("GOATR_OWNER_DUMP_TEST_FD",fd.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe{command.pre_exec(move||{crate::codex_relay::drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(std::io::Error::last_os_error());}Ok(())});}
+        let mut child=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);file_wake_state(&mut channel,b'0');
+        let mut pending=None;assert!(first_owner_service_evidence(&mut pending,child.0.id()).unwrap().is_none());assert!(pending.is_some());
+        assert!(first_owner_service_evidence(&mut pending,std::process::id()).is_err());
+        assert!(first_owner_service_evidence(&mut pending,child.0.id()).unwrap().is_none());
+        channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'1');
+        let proof=first_owner_service_evidence(&mut pending,child.0.id()).unwrap().unwrap();assert_eq!(proof.pid,child.0.id());
+        channel.write_all(b"2").unwrap();assert!(child.exit().success());assert!(first_owner_service_evidence(&mut pending,proof.pid).is_err());
+    }
     use std::path::PathBuf;
     async fn publication_context(state:Arc<State>,target:&Target,epoch:&Uuid)->(crate::herdr::grid::GridQueueFixture,OriginalContext) {
         let server=state.session_state(target,epoch).unwrap().summary.server_id;

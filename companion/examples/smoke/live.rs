@@ -1025,6 +1025,7 @@ struct ServeLaunch<'a> {
     hello_capture: bool,
     grid_hold: Option<&'a mut GridHold>,
     project_read: Option<&'a ProjectReadFixture>,
+    startup_deadline: Option<Instant>,
 }
 struct Companion {
     child: Child,
@@ -7429,7 +7430,11 @@ fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
 fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     if !args.get_flag("physical-mvp") {
         if args.get_one::<String>("expected-config-sha256").is_some(){return Err(failure("independent seed config pin is physical-mvp only"));}
+        if args.get_flag("physical-file-wake")||args.get_one::<String>("expected-controller-sha256").is_some(){return Err(failure("FileWake controller profile and pin are physical-mvp only"));}
         return Ok(());
+    }
+    if !args.get_flag("physical-file-wake")||args.get_one::<String>("expected-controller-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))) {
+        return Err(prerequisite("independent_controller_file_wake_pin_unavailable"));
     }
     require_shared_backends(args).map_err(|_|failure("physical-mvp requires exactly one OMP and one Codex backend"))?;
     if args.value_source("api")==Some(clap::parser::ValueSource::CommandLine) {
@@ -7469,6 +7474,7 @@ fn physical_host_preflight_selection(args:&clap::ArgMatches)->io::Result<Option<
         &&!match policy {
             physical::ControllerPolicy::Zero=>matches!(id.as_str(),"physical-host-preflight"|"evidence-dir"),
             physical::ControllerPolicy::WakeDiagnostic {..}=>matches!(id.as_str(),"physical-host-wake-preflight"|"expected-controller-unit"|"evidence-dir"),
+            physical::ControllerPolicy::FileWake {..}=>false,
         }) {
         return Err(failure("host preflight accepts only its closed selector/unit/evidence inputs; no runtime/device/artifact/effect arguments"));
     }
@@ -7476,6 +7482,11 @@ fn physical_host_preflight_selection(args:&clap::ArgMatches)->io::Result<Option<
 }
 fn arguments_base() -> Command {
     Command::new("smoke")
+        .arg(Arg::new("physical-file-wake").long("physical-file-wake").action(ArgAction::SetTrue)
+            .requires_all(["physical-mvp","expected-controller-sha256"])
+            .help("Explicit full physical private file-EP Wake profile for BOTH controller and Goatr; not ambient/zero fallback"))
+        .arg(Arg::new("expected-controller-sha256").long("expected-controller-sha256").requires_all(["physical-mvp","physical-file-wake"])
+            .help("Independent lowercase SHA256 pin of the private0500 FileWake controller; never measured self-authorization"))
         .arg(Arg::new("physical-host-wake-preflight").long("physical-host-wake-preflight").action(ArgAction::SetTrue)
             .requires_all(["expected-controller-unit","evidence-dir"]).conflicts_with("physical-host-preflight")
             .help("Explicit real-host TTY diagnostic ONLY: exact four-set Wake capability shape plus expected actual controller unit, never full-matrix/runtime authority"))
@@ -7487,7 +7498,7 @@ fn arguments_base() -> Command {
         .arg(Arg::new("physical-mvp").long("physical-mvp").action(ArgAction::SetTrue)
             .requires_all(["backend","goatr","config","workspace-root","evidence-dir","consent-owned-providers",
                 "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-goatr-sha256",
-                "expected-companion-lock-sha256","expected-config-sha256","serial","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256"])
+                "expected-companion-lock-sha256","expected-config-sha256","serial","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256","physical-file-wake","expected-controller-sha256"])
             .conflicts_with_all(["background","admission-only","shared-agent-only","terminal-only","project-read-only",
                 "grid","grid-lease","ui","camera","ime","setup","prepare-emulator","emulator-owner","paging-proof",
                 "codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
@@ -9367,8 +9378,34 @@ fn start_serve_with_codex_capture(
             hello_capture: false,
             grid_hold: None,
             project_read: None,
+            startup_deadline: None,
         },
     )
+}
+fn admit_first_child_evidence(process:ProcessEvidence,deadline:Instant,observed_at:Instant)->io::Result<ProcessEvidence> {
+    if observed_at>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original child proof completed after its absolute deadline"));}
+    Ok(process)
+}
+fn first_child_evidence(child:&mut Child,original:&goatr::codex_relay::ProcessStart,executable:(u64,u64),deadline:Instant)->io::Result<ProcessEvidence> {
+    loop {
+        if child.try_wait()?.is_some(){return Err(failure("original child exited before its first protected identity proof"));}
+        if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original child inspectability deadline expired"));}
+        match original.evidence(child.id()) {
+            Ok(process)=>{
+                if child.try_wait()?.is_some(){return Err(failure("original child exited during its first protected identity proof"));}
+                original.check(child.id())?;
+                let object=fs::metadata(format!("/proc/{}/exe",child.id()))?;
+                if (object.dev(),object.ino())!=executable{return Err(failure("first child proof is not the original executable object"));}
+                return admit_first_child_evidence(process,deadline,Instant::now());
+            }
+            Err(error) if error.kind()==io::ErrorKind::PermissionDenied=>{
+                if child.try_wait()?.is_some(){return Err(failure("original child exited while awaiting inspectability"));}
+                original.check(child.id())?;
+                std::thread::sleep(Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())));
+            }
+            Err(error)=>return Err(error),
+        }
+    }
 }
 fn start_serve_with_capture(
     binary: &Path,
@@ -9378,6 +9415,8 @@ fn start_serve_with_capture(
     listener: Option<&std::net::TcpListener>,
     mut launch: ServeLaunch<'_>,
 ) -> io::Result<Companion> {
+    let startup_deadline=launch.startup_deadline.unwrap_or_else(||Instant::now()+Duration::from_secs(20));
+    let source=fs::metadata(binary)?;let executable=(source.dev(),source.ino());
     let codex_capture = launch.diagnostic_capture
         || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").as_deref()
             == Some(std::ffi::OsStr::new("1"));
@@ -9470,6 +9509,7 @@ fn start_serve_with_capture(
     if let Some(capture) = launch.herdr_report_capture {
         capture.configure_companion(&mut c);
     }
+    if Instant::now()>=startup_deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original startup budget expired before spawn"));}
     let inherited = if let Some(listener) = listener {
         let fd = listener.as_raw_fd();
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -9489,7 +9529,7 @@ fn start_serve_with_capture(
     #[cfg(target_os="linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
-        // Inspection authority belongs to the controller, never its Goatr child.
+        // Discard inherited authority; an explicitly qualified executable file grant is reacquired at exec.
         c.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
     }
     let spawned = c.spawn();
@@ -9510,7 +9550,8 @@ fn start_serve_with_capture(
             &json!({"pid":child.id(),"package":binary,"adminSocket":socket,
                 "scope":"fresh owned child; process proof pending; no automatic teardown"}))?;
     }
-    let process = herdr::process_evidence(child.id())?;
+    let original=goatr::codex_relay::ProcessStart::capture(child.id())?;
+    let process=first_child_evidence(&mut child,&original,executable,startup_deadline.min(Instant::now()+Duration::from_secs(2)))?;
     if launch.retain_process {
         let manifest = root.join("admission-companion.json");
         write_json(&manifest, &json!({"process":process,"package":binary,"adminSocket":socket,
@@ -9700,6 +9741,7 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
             hello_capture: false,
             grid_hold: None,
             project_read: None,
+            startup_deadline: None,
         },
     )?;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -13354,6 +13396,7 @@ async fn checkpoint_held(
                 hello_capture: finite_admission,
                 grid_hold: grid_hold.as_deref_mut(),
                 project_read: project_fixture.as_ref(),
+                startup_deadline: Some(deadline),
             },
         )?
     } else {
@@ -14356,6 +14399,73 @@ pub async fn run() -> io::Result<bool> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::{fd::{AsRawFd,FromRawFd},unix::{net::UnixStream as FileWakeChannel,process::CommandExt}};
+    struct FileWakeFixtureChild(Child);
+    impl FileWakeFixtureChild {
+        fn exit(&mut self)->std::process::ExitStatus {
+            let deadline=Instant::now()+Duration::from_secs(5);
+            loop{if let Some(status)=self.0.try_wait().unwrap(){return status;}assert!(Instant::now()<deadline,"owned fixture exit timed out");std::thread::sleep(Duration::from_millis(10));}
+        }
+    }
+    impl Drop for FileWakeFixtureChild {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
+    fn file_wake_endpoint(key:&str)->Option<FileWakeChannel> {
+        let fd=std::env::var(key).ok()?.parse::<i32>().unwrap();assert!(fd>2);let channel=unsafe{FileWakeChannel::from_raw_fd(fd)};
+        channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();Some(channel)
+    }
+    fn file_wake_state(channel:&mut FileWakeChannel,expected:u8){let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,[expected]);}
+    #[test]
+    fn first_child_final_admission_refuses_exact_or_late_absolute_deadline_with_real_evidence() {
+        let process=herdr::process_evidence(std::process::id()).unwrap();let start=Instant::now();let deadline=start+Duration::from_secs(1);
+        assert_eq!(admit_first_child_evidence(process.clone(),deadline,start).unwrap(),process);
+        for observed in [deadline,deadline+Duration::from_secs(2)] {
+            assert_eq!(admit_first_child_evidence(process.clone(),deadline,observed).unwrap_err().kind(),io::ErrorKind::TimedOut);
+        }
+    }
+    #[test]
+    fn capped_controller_frontend_allows_only_raw_full_route_without_ambient_mask_inference() {
+        assert!(crate::controller_file_frontend(true,false).is_err());
+        crate::controller_file_frontend(false,false).unwrap();crate::controller_file_frontend(false,true).unwrap();crate::controller_file_frontend(true,true).unwrap();
+        for selector in ["--physical-mvp","--physical-mvp=false","--physical-mvp=malformed"] {
+            for shortcut in ["--owned-mcp-stdio","--review-fixture","--terminal-only"] {
+                let args=["smoke",shortcut,selector];let raw=args.iter().any(|arg|crate::full_physical_argument(std::ffi::OsStr::new(arg)));
+                assert!(raw);crate::controller_file_frontend(true,raw).unwrap();
+                assert!(args.iter().any(|arg|crate::early_live_argument(std::ffi::OsStr::new(arg))));
+                assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
+            }
+        }
+        for other in ["--owned-mcp-stdio","--review-fixture","--physical-host-preflight","--physical-host-wake-preflight"] {
+            assert!(!crate::full_physical_argument(std::ffi::OsStr::new(other)));
+        }
+    }
+    #[test]
+    fn first_child_identity_wait_is_read_only_bounded_and_pins_dumpability_transition() {
+        if let Some(mut channel)=file_wake_endpoint("GOATR_SERVE_DUMP_TEST_FD") {
+            goatr::codex_relay::drop_inherited_capabilities().unwrap();assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);
+            channel.write_all(b"0").unwrap();file_wake_state(&mut channel,b'1');
+            goatr::codex_relay::restore_dumpability().unwrap();channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
+        }
+        let test=concat!(module_path!(),"::first_child_identity_wait_is_read_only_bounded_and_pins_dumpability_transition");
+        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();let executable=std::env::current_exe().unwrap();let metadata=fs::metadata(&executable).unwrap();
+        let (mut channel,endpoint)=FileWakeChannel::pair().unwrap();channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let fd=endpoint.as_raw_fd();assert!(fd>2);let object=(metadata.dev(),metadata.ino());let mut command=std::process::Command::new(executable);
+        command.args(["--exact",test,"--test-threads=1"]).env("GOATR_SERVE_DUMP_TEST_FD",fd.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe{command.pre_exec(move||{goatr::codex_relay::drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
+        let mut child=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);let pid=child.0.id();file_wake_state(&mut channel,b'0');
+        let original=goatr::codex_relay::ProcessStart::capture(pid).unwrap();assert_eq!(original.evidence(pid).unwrap_err().kind(),io::ErrorKind::PermissionDenied);
+        let other=goatr::codex_relay::ProcessStart::capture(std::process::id()).unwrap();
+        assert!(first_child_evidence(&mut child.0,&other,object,Instant::now()+Duration::from_secs(1)).is_err());
+        assert_eq!(first_child_evidence(&mut child.0,&original,object,Instant::now()).unwrap_err().kind(),io::ErrorKind::TimedOut);
+        std::thread::scope(|scope| {
+            let (send,receive)=std::sync::mpsc::sync_channel(1);let child=&mut child.0;let original=&original;
+            scope.spawn(move||{send.send(first_child_evidence(child,original,object,Instant::now()+Duration::from_secs(3))).unwrap();});
+            assert!(matches!(receive.recv_timeout(Duration::from_millis(50)),Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+            channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'1');
+            let proof=receive.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();assert_eq!(proof.pid,pid);
+        });
+        assert!(first_child_evidence(&mut child.0,&original,(object.0,object.1+1),Instant::now()+Duration::from_secs(1)).is_err());
+        channel.write_all(b"2").unwrap();assert!(child.exit().success());
+        assert!(first_child_evidence(&mut child.0,&original,object,Instant::now()+Duration::from_secs(1)).is_err());
+    }
     #[test]
     fn unavailable_codex_terminal_capture_is_not_a_smoke_option() {
         let error = feedback_arguments(arguments_base())
@@ -14382,6 +14492,7 @@ mod tests {
             "--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
         for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
         args.push(format!("--expected-config-sha256={}","3".repeat(64)));
+        args.push("--physical-file-wake".to_owned());args.push(format!("--expected-controller-sha256={}","4".repeat(64)));
         args.push(format!("--expected-ntfy-apk-sha256={NTFY_APK_SHA256}"));
         args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
         args
@@ -14484,7 +14595,7 @@ mod tests {
         assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::DefaultValue));
         for required in ["--goatr=","--config=","--workspace-root=","--evidence-dir=","--serial=","--apk=","--test-apk=",
             "--expected-goatr-sha256=","--expected-companion-lock-sha256=","--expected-apk-sha256=","--expected-test-apk-sha256=",
-            "--expected-config-sha256=","--expected-ntfy-apk-sha256=","--expected-ntfy-signer-sha256=","--consent-owned-providers"] {
+            "--expected-config-sha256=","--expected-ntfy-apk-sha256=","--expected-ntfy-signer-sha256=","--consent-owned-providers","--physical-file-wake","--expected-controller-sha256="] {
             let missing=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();
             assert!(feedback_arguments(arguments_base()).try_get_matches_from(missing).is_err(),"{required}");
         }
@@ -14494,6 +14605,26 @@ mod tests {
             let mut invalid=args.iter().filter(|arg|!arg.starts_with("--backend=")).cloned().collect::<Vec<_>>();
             invalid.extend(providers.into_iter().map(str::to_owned));
             let parsed=feedback_arguments(arguments_base()).try_get_matches_from(invalid).unwrap();assert!(require_shared_backends(&parsed).is_err());
+        }
+    }
+    #[test]
+    fn full_physical_file_wake_requires_independent_controller_pin_and_rejects_all_other_modes() {
+        let valid=physical_mvp_args();physical_mode_environment(&feedback_arguments(arguments_base()).try_get_matches_from(&valid).unwrap()).unwrap();
+        for value in ["".to_owned(),"A".repeat(64),"a".repeat(63),"g".repeat(64)] {
+            let mut args=valid.iter().filter(|argument|!argument.starts_with("--expected-controller-sha256=")).cloned().collect::<Vec<_>>();
+            args.push(format!("--expected-controller-sha256={value}"));
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()));
+        }
+        for mut args in [host_preflight_args(false),host_preflight_args(true),background_args("persistent"),background_args("ntfy"),vec!["smoke".to_owned(),"--evidence-dir=/private/fresh".to_owned()]] {
+            args.push(format!("--expected-controller-sha256={}","4".repeat(64)));
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).map_or(true,|parsed| {
+                match physical_host_preflight_selection(&parsed) {Err(_)=>true,Ok(Some(_))=>false,Ok(None)=>physical_mode_environment(&parsed).is_err()}
+            }));
+        }
+        for selector in ["--physical-file-wake=false","--expected-controller-sha256=bad"] {
+            let args=["smoke","--owned-mcp-stdio","/private/lease",selector];
+            assert!(args.iter().any(|argument|crate::early_live_argument(std::ffi::OsStr::new(argument))));
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
         }
     }
     #[test]

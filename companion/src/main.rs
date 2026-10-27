@@ -467,52 +467,47 @@ async fn run(matches: clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>
     }
     Ok(())
 }
-fn codex_owner_boundary<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
-    // This is deliberately before record parsing, subprocesses, or Tokio worker creation.
-    #[cfg(target_os = "linux")]
-    goatr::codex_relay::drop_inherited_capabilities()?;
-    #[cfg(not(target_os = "linux"))]
-    return Err(io::Error::other(
-        "Codex owner launcher requires Linux capability controls",
-    ));
-    operation()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupRole { Retain, Drop }
+fn startup_role(name: &str) -> io::Result<StartupRole> {
+    match name {
+        "serve" | "setup" => Ok(StartupRole::Retain),
+        "pair" | "devices" | "revoke" => Ok(StartupRole::Drop),
+        "codex-owner" | "codex-relay" if cfg!(target_os = "linux") => Ok(StartupRole::Drop),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported executable capability role")),
+    }
 }
 fn codex_owner_main(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
-    codex_owner_boundary(|| {
-        if matches.get_one::<PathBuf>("admin-socket").is_some() {
-            return Err(io::Error::other(
-                "codex-owner has no companion/admin lifetime",
-            ));
-        }
-        let (_, sub) = matches.subcommand().expect("required command");
-        goatr::backends::codex::exec_owner(
-            sub.get_one::<PathBuf>("record").expect("required record"),
-        )
-    })?;
+    if matches.get_one::<PathBuf>("admin-socket").is_some() {
+        return Err("codex-owner has no companion/admin lifetime".into());
+    }
+    let (_, sub) = matches.subcommand().expect("required command");
+    goatr::backends::codex::exec_owner(sub.get_one::<PathBuf>("record").expect("required record"))?;
     Ok(())
 }
 fn main() -> ExitCode {
     let matches = cli().get_matches();
     let is_codex_relay = matches.subcommand_name() == Some("codex-relay");
-    let result = if matches.subcommand_name() == Some("codex-owner") {
-        codex_owner_main(&matches)
-    } else {
-        (|| -> Result<(), Box<dyn std::error::Error>> {
-            if is_codex_relay {
-                if matches.get_one::<PathBuf>("admin-socket").is_some() {
-                    return Err("codex-relay has no companion/admin lifetime".into());
-                }
-                // Linux capabilities are per-thread; future runtime workers must inherit zero sets.
-                #[cfg(target_os = "linux")]
-                goatr::codex_relay::drop_inherited_capabilities()?;
-            }
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("Failed building the Runtime")
-                .block_on(run(matches))
-        })()
-    };
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let role = startup_role(matches.subcommand_name().expect("required command"))?;
+        // Post-exec, before record parsing, admin effects, inherited-FD proofs or Tokio workers.
+        // File capabilities are reacquired by exec even after the parent's pre_exec drop.
+        #[cfg(target_os = "linux")]
+        let _executable_profile = goatr::codex_relay::prepare_current_executable(role == StartupRole::Retain)?;
+        #[cfg(not(target_os = "linux"))]
+        let _ = role;
+        if matches.subcommand_name() == Some("codex-owner") {
+            return codex_owner_main(&matches);
+        }
+        if is_codex_relay && matches.get_one::<PathBuf>("admin-socket").is_some() {
+            return Err("codex-relay has no companion/admin lifetime".into());
+        }
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed building the Runtime")
+            .block_on(run(matches))
+    })();
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -528,6 +523,43 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{io::{Read,Write},os::{fd::{AsRawFd,FromRawFd},unix::net::UnixStream as FileWakeChannel},time::{Duration,Instant}};
+    struct FileWakeFixtureChild(std::process::Child);
+    impl FileWakeFixtureChild {
+        fn exit(&mut self)->std::process::ExitStatus {
+            let deadline=Instant::now()+Duration::from_secs(5);
+            loop{if let Some(status)=self.0.try_wait().unwrap(){return status;}assert!(Instant::now()<deadline,"owned fixture exit timed out");std::thread::sleep(Duration::from_millis(10));}
+        }
+    }
+    impl Drop for FileWakeFixtureChild {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
+    #[test]
+    fn executable_capability_roles_cover_every_cli_command_without_retention_fallback() {
+        let command=cli();
+        for sub in command.get_subcommands() {
+            let expected=match sub.get_name() {"serve"|"setup"=>StartupRole::Retain,"pair"|"devices"|"revoke"|"codex-owner"|"codex-relay"=>StartupRole::Drop,_=>panic!("new role needs an explicit capability decision")};
+            assert_eq!(startup_role(sub.get_name()).unwrap(),expected);
+        }
+        assert!(startup_role("unknown-future-role").is_err());
+    }
+    #[test]
+    fn post_exec_drop_role_precedes_record_or_runtime_fixture() {
+        if let Some(fd)=std::env::var("GOATR_ROLE_BOUNDARY_FD").ok() {
+            let fd=fd.parse::<i32>().unwrap();assert!(fd>2);let mut channel=unsafe{FileWakeChannel::from_raw_fd(fd)};
+            channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let profile=goatr::codex_relay::prepare_current_executable(startup_role("codex-owner").unwrap()==StartupRole::Retain).unwrap();
+            assert!(profile.is_none());assert!(goatr::codex_relay::current_capabilities().unwrap().zero());
+            let error=codex_owner_main(&cli().try_get_matches_from(["goatr","codex-owner","--record","/nonexistent-owned-role-record"]).unwrap()).unwrap_err();
+            assert!(!error.to_string().is_empty());channel.write_all(b"1").unwrap();return;
+        }
+        let test=concat!(module_path!(),"::post_exec_drop_role_precedes_record_or_runtime_fixture");
+        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
+        let (mut channel,endpoint)=FileWakeChannel::pair().unwrap();channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let fd=endpoint.as_raw_fd();assert!(fd>2);let mut command=Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact",test,"--test-threads=1"]).env("GOATR_ROLE_BOUNDARY_FD",fd.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe{command.pre_exec(move||{goatr::codex_relay::drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
+        let mut child=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,*b"1");
+        assert!(child.exit().success());
+    }
     use std::{
         os::unix::{
             fs::{DirBuilderExt, MetadataExt},
@@ -549,7 +581,7 @@ mod tests {
             .stdout(Stdio::piped());
         // SAFETY: this isolated test child runs the same drop before its harmless exec.
         unsafe {
-            command.pre_exec(|| codex_owner_boundary(|| Ok(())));
+            command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
         }
         let output = command.output().unwrap();
         assert!(output.status.success());

@@ -1283,8 +1283,15 @@ async fn run() -> io::Result<bool> {
         "evidence":gate_path,"cleanupCandidate":candidate_path}));
     Ok(transport_observation == "pass")
 }
+fn full_physical_argument(argument:&std::ffi::OsStr)->bool {
+    argument.to_str().is_some_and(|argument|argument=="--physical-mvp"||argument.starts_with("--physical-mvp="))
+}
+fn controller_file_frontend(file_grant_present:bool,raw_full_physical:bool)->io::Result<()> {
+    if file_grant_present&&!raw_full_physical{return Err(prerequisite("file-granted controller is full-physical only; no alternate frontend authority"));}
+    Ok(())
+}
 fn early_live_argument(argument:&std::ffi::OsStr)->bool {
-    argument.to_str().is_some_and(|argument|["--physical-mvp","--physical-host-preflight","--physical-host-wake-preflight","--background"].iter()
+    argument.to_str().is_some_and(|argument|["--physical-mvp","--physical-file-wake","--expected-controller-sha256","--physical-host-preflight","--physical-host-wake-preflight","--background"].iter()
         .any(|selector|argument==*selector||argument.strip_prefix(*selector).is_some_and(|suffix|suffix.starts_with('='))))
 }
 fn mode_exit(result:io::Result<bool>,output:&mut impl io::Write)->std::process::ExitCode {
@@ -1301,6 +1308,14 @@ fn mode_exit(result:io::Result<bool>,output:&mut impl io::Write)->std::process::
 }
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
+    let raw_full_physical=std::env::args_os().skip(1).any(|argument|full_physical_argument(&argument));
+    #[cfg(target_os="linux")]
+    if !raw_full_physical {
+        // Presence is an actual file fact, NOT inferred from nonzero ambient diagnostic masks.
+        // This rejection never restores dumpability or enters an alternate frontend.
+        let admission=goatr::codex_relay::FileWakePin::current().and_then(|pin|controller_file_frontend(pin.is_some(),false));
+        if let Err(error)=admission{return mode_exit(Err(error),&mut io::stdout());}
+    }
     let early_live=std::env::args_os().skip(1).any(|argument|early_live_argument(&argument));
     let mut native_args = std::env::args_os().skip(1);
     if !early_live&&native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
