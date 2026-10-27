@@ -596,7 +596,19 @@ impl PhysicalAdb {
             Ok(())
         }).await.map_err(|_| failure("physical private control record deadline expired"))?
     }
-    async fn qualify(args: &clap::ArgMatches) -> io::Result<(Self, u32, String)> {
+    async fn default_product_process_absent(&self)->io::Result<()> {
+        self.recheck_server().await?;
+        let remote=["pidof",APP].into_iter().map(super::shell_literal).collect::<io::Result<Vec<_>>>()?.join(" ");
+        let mut child=self.command().args(["shell",&remote]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
+        let stdout=child.stdout.take().ok_or_else(||failure("product process stdout unavailable"))?;
+        let stderr=child.stderr.take().ok_or_else(||failure("product process stderr unavailable"))?;
+        let out=async {let mut bytes=Vec::new();stdout.take(1025).read_to_end(&mut bytes).await?;if bytes.len()>1024{return Err(failure("product pidof output is oversized"));}Ok::<_,io::Error>(bytes)};
+        let err=async {let mut bytes=Vec::new();stderr.take(1025).read_to_end(&mut bytes).await?;if bytes.len()>1024{return Err(failure("product pidof error is oversized"));}Ok::<_,io::Error>(bytes)};
+        let (status,stdout,stderr)=timeout(Duration::from_secs(45),async{tokio::try_join!(child.wait(),out,err)}).await.map_err(|_|failure("product process absence query expired"))??;
+        if status.code()!=Some(1)||!stdout.is_empty()||!stderr.is_empty(){return Err(failure("prepared PRODUCT process is present or absence is unproved"));}
+        Ok(())
+    }
+    async fn qualify(args: &clap::ArgMatches) -> io::Result<(Self,PreparedDevice)> {
         let serial = args.get_one::<String>("serial").ok_or_else(|| failure("physical exact serial is required"))?.clone();
         if serial.is_empty() || serial.len() > 128 || serial.starts_with("emulator-") || !serial.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)) {
             return Err(failure("physical serial is not a bounded physical-device selector"));
@@ -604,14 +616,16 @@ impl PhysicalAdb {
         let adb = Self { binary: super::sdk_adb().await?, serial };
         if text(&adb.invoke(&["get-state"], 128).await?)?.trim() != "device" { return Err(failure("physical selected serial is not an authorized device")); }
         let transports=adb.invoke(&["devices","-l"],65_536).await?;
-        let selected:Vec<_>=text(&transports)?.lines().filter(|line|line.split_whitespace().next()==Some(adb.serial.as_str())).collect();
-        if selected.len()!=1||!selected[0].split_whitespace().any(|word|word.starts_with("usb:")&&word.len()>4) {return Err(failure("physical exact serial does not have a current USB transport witness"));}
-        if text(&adb.shell(&["getprop", "ro.kernel.qemu"], 128).await?)?.trim() == "1" { return Err(failure("physical mode rejects emulator devices")); }
+        validate_current_usb_device(text(&transports)?,&adb.serial)?;
+        let qemu=text(&adb.shell(&["getprop","ro.kernel.qemu"],128).await?)?.trim().to_owned();
+        if !matches!(qemu.as_str(),""|"0"){return Err(failure("physical mode rejects emulator/unknown devices"));}
         let api = text(&adb.shell(&["getprop", "ro.build.version.sdk"], 128).await?)?.trim().parse::<u32>().map_err(|_| failure("physical device SDK is invalid"))?;
         if ![30, 34].contains(&api) { return Err(failure("physical matrix requires an actual API 30 or API 34 device")); }
         let abi = text(&adb.shell(&["getprop", "ro.product.cpu.abi"], 128).await?)?.trim().to_owned();
         if !["arm64-v8a", "x86_64"].contains(&abi.as_str()) { return Err(failure("physical device ABI is outside the packaged native closure")); }
-        Ok((adb, api, abi))
+        let model=text(&adb.shell(&["getprop","ro.product.model"],256).await?)?.trim().to_owned();
+        if model.is_empty()||model.len()>128||model.chars().any(char::is_control){return Err(failure("physical model is unavailable"));}
+        let device=PreparedDevice {serial:adb.serial.clone(),model,sdk:api,abi,qemu};Ok((adb,device))
     }
 }
 
@@ -1225,9 +1239,29 @@ fn validate_report(value:&Value,epoch:&ProductEpoch,host:&str) -> io::Result<()>
 
 struct Query { fields:Value, expected:&'static str, answer:oneshot::Sender<io::Result<(Value,Value)>> }
 struct Observer { epoch:ProductEpoch, sender:mpsc::Sender<Query>, task:JoinHandle<io::Result<()>>, instrumentation:ProductInstrumentation }
-async fn control_reply(stream:&mut TcpStream,value:&Value) -> io::Result<()> {
-    let mut bytes=serde_json::to_vec(value).map_err(io::Error::other)?;if bytes.len()>65536{return Err(failure("physical control response exceeds bound"));}bytes.push(b'\n');
-    timeout(Duration::from_secs(5),stream.write_all(&bytes)).await.map_err(|_|failure("physical control response expired"))??;bytes.fill(0);Ok(())
+struct ControlReplyBytes(Vec<u8>);
+fn erase_control_reply(bytes:&mut [u8]) {
+    for byte in bytes{unsafe{std::ptr::write_volatile(byte,0);}}
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+impl Drop for ControlReplyBytes {fn drop(&mut self){erase_control_reply(&mut self.0);}}
+impl io::Write for ControlReplyBytes {
+    fn write(&mut self,bytes:&[u8])->io::Result<usize> {
+        if self.0.len().checked_add(bytes.len()).is_none_or(|length|length>65536){return Err(io::Error::new(io::ErrorKind::InvalidInput,"physical control response exceeds bound"));}
+        self.0.extend_from_slice(bytes);Ok(bytes.len())
+    }
+    fn flush(&mut self)->io::Result<()>{Ok(())}
+}
+async fn control_reply<W:tokio::io::AsyncWrite+Unpin>(stream:&mut W,value:&Value) -> io::Result<()> {
+    // Single bounded serialization, no reallocation/copy of an earlier secret prefix; erase on EVERY exit.
+    let mut bytes=ControlReplyBytes(Vec::with_capacity(65536));
+    serde_json::to_writer(&mut bytes,value).map_err(io::Error::other)?;
+    if !(2..=65536).contains(&bytes.0.len()){return Err(failure("physical control response length is invalid"));}
+    let header=(bytes.0.len() as u32).to_be_bytes();
+    timeout(Duration::from_secs(5),async {
+        stream.write_all(&header).await?;stream.write_all(&bytes.0).await
+    }).await.map_err(|_|failure("physical control response expired"))??;
+    Ok(())
 }
 async fn authenticated_report(stream:&mut TcpStream,epoch:&ProductEpoch,run:&Uuid,sequence:u64) -> io::Result<(Value,Value)> {
     let mut witness=Value::Null;
@@ -1569,6 +1603,8 @@ struct Matrix {
     api:u32,
     control_port:u16, fresh_baseline:RetainedFacts, first_open:Option<RetainedFacts>, paired:Option<RetainedFacts>, last_stage:&'static str,
     baseline_ui:Option<Value>, baseline_network:Option<Value>, retained_keeper_baseline:Option<Value>, owned_start:Option<Uuid>, service_key_restored:bool,
+    product_epoch:InstalledProductEpoch,
+    prepared_record_sha256:Option<String>,
 }
 impl Matrix {
     fn recheck(&mut self) -> io::Result<()> {
@@ -1579,23 +1615,28 @@ impl Matrix {
         retain_profile_observation(result,self.stock.serve_file.failed(),&mut self.input_pin_failed)?;
         Ok(())
     }
+    async fn recheck_product(&mut self)->io::Result<()> {
+        self.recheck()?;require_product_epoch(&self.adb,&self.product_epoch,&self.product_sha,&self.inputs,Some(&mut self.input_pin_failed)).await?;self.recheck()
+    }
     fn first_open_ref(&self)->io::Result<&RetainedFacts> {self.first_open.as_ref().ok_or_else(||failure("physical immutable first-open reference has not been admitted"))}
     fn record(&self,name:&str,facts:&Value) -> io::Result<()> {
         write_json(&self.evidence.join(format!("physical-{name}-{}.json",Uuid::random().0)),&json!({"runId":self.run,"host":self.host,"productPid":self.observer.epoch.pid,
             "productStart":self.observer.epoch.start,"productApkSha256":self.product_sha,"facts":facts,"instrumentedLiveness":true,
+            "preparedRecordSha256":self.prepared_record_sha256,
             "coldSurvivalProved":false,"foregroundServiceSoleLivenessProved":false,"humanAcknowledgementIsNotEffectProof":true}))
     }
     async fn human_stage(&mut self,stage:&'static str,instruction:&str) -> io::Result<()> {
-        self.last_stage=stage;self.recheck()?;self.adb.tunnels(Some(self.control_port)).await?;
+        self.last_stage=stage;self.recheck_product().await?;self.adb.tunnels(Some(self.control_port)).await?;
         timeout(Duration::from_secs(1800),super::human(instruction)).await.map_err(|_|failure("physical real human stage deadline expired; no action is replayed"))??;
-        self.recheck()?;let snapshot=self.observer.snapshot(None).await?;self.record(&format!("{stage}-human-barrier"),&json!({"acknowledged":true,"effectProved":false,"snapshot":snapshot}))?;
+        self.recheck_product().await?;let snapshot=self.observer.snapshot(None).await?;self.record(&format!("{stage}-human-barrier"),&json!({"acknowledged":true,"effectProved":false,"snapshot":snapshot}))?;
         Ok(())
     }
     async fn wait_snapshot(&mut self,stage:&'static str,marker:Option<&str>,deadline:Duration,predicate:impl Fn(&Value)->bool) -> io::Result<Value> {
         self.last_stage=stage;let until=Instant::now()+deadline;
+        self.recheck_product().await?;
         loop {
             self.recheck()?;let snapshot=self.observer.snapshot(marker).await?;self.recheck()?;
-            if predicate(&snapshot){self.record(stage,&snapshot)?;return Ok(snapshot);}
+            if predicate(&snapshot){self.recheck_product().await?;if Instant::now()>=until{return Err(failure("physical effect proof exceeded its original deadline"));}self.record(stage,&snapshot)?;return Ok(snapshot);}
             if Instant::now()>=until{return Err(failure("physical required original-product effect was not observed before its deadline; no replay"));}
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
@@ -1604,7 +1645,7 @@ impl Matrix {
         self.invoke_action(stage,action,arguments,UiExpectation::Completed).await.map(|(run,after,_)|(run,after))
     }
     async fn invoke_action(&mut self,stage:&'static str,action:&str,mut arguments:BTreeMap<String,String>,expectation:UiExpectation) -> io::Result<(Uuid,Value,bool)> {
-        self.last_stage=stage;self.recheck()?;self.adb.tunnels(Some(self.control_port)).await?;
+        self.last_stage=stage;self.recheck_product().await?;self.adb.tunnels(Some(self.control_port)).await?;
         let run=Uuid::random();
         extend(&mut arguments,&[("ownedUiRunId",&run.0),("ownedUiAction",action),("ownedUiHostId",&self.host),("ownedUiMvpRunId",&self.run.0),
             ("ownedUiProductPid",&self.observer.epoch.pid.to_string()),("ownedUiProductStart",&self.observer.epoch.start.to_string()),
@@ -1646,7 +1687,8 @@ impl Matrix {
         object(&intent,&["phase","runId","action","creationName","creationServerId","physicalArgumentHash","excludedReceiptCount","runnerPid","runnerStart"])?;
         if string(&intent,"phase")?!="intent"||intent["runId"]!=process["runId"]||intent["action"]!=process["action"]||intent["runnerPid"]!=process["runnerPid"]||intent["runnerStart"]!=process["runnerStart"]||string(&intent,"physicalArgumentHash")?!=expected_hash{return Err(failure("physical owned UI producer intent/complete-argument/process correlation changed"));}
         write_json(&self.evidence.join(format!("physical-ui-{}.intent.json",run.0)),&intent)?;
-        self.recheck()?;
+        // Complete public epoch/hash admission BEFORE requesting the five-second signed witness.
+        self.recheck_product().await?;
         let (epoch,witness)=self.observer.query(json!({"kind":"epoch","actionRunId":run}),"epoch").await?;
         if string(&epoch,"actionRunId")?!=run.0||string(&epoch,"apkSha256")?!=self.product_sha{return Err(failure("physical pre-input product epoch is not the original action/package"));}
         let bytes=serde_json::to_vec(&witness).map_err(io::Error::other)?;
@@ -1671,7 +1713,7 @@ impl Matrix {
         let projection=json!({"runId":run,"action":action,"argumentHash":expected_hash,"process":process,"outcome":outcome["outcome"],"guard":outcome["guard"],
             "stage":string(&outcome,"stage")?,"qualifiedApi":self.api,"preInputRefusal":ambiguous,"acknowledged":boolean(&outcome,"acknowledged")?,"expectedScreenObserved":boolean(&outcome,"expectedScreenObserved")?,"acknowledgementIsNotNativeEffect":true});
         write_json(&self.evidence.join(format!("physical-ui-{}.outcome.json",run.0)),&projection)?;
-        self.recheck()?;let after=self.observer.snapshot(None).await?;self.record(&format!("{stage}-ui-owner"),&json!({"ui":projection,"before":epoch["snapshot"],"after":after}))?;
+        self.recheck_product().await?;let after=self.observer.snapshot(None).await?;self.record(&format!("{stage}-ui-owner"),&json!({"ui":projection,"before":epoch["snapshot"],"after":after}))?;
         Ok((run,after,ambiguous))
     }
     async fn new_receipt(&mut self,stage:&'static str,before:&BTreeSet<String>,method:&str,target:Option<&Target>,shell:Option<&ShellTarget>) -> io::Result<Value> {
@@ -1713,6 +1755,199 @@ fn maven_aar(group:&str,module:&str,version:&str) -> io::Result<PathBuf> {
 struct PackageRecord {package:String,uid:u32,path:Option<String>}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
 struct PackageOwnership {package:String,uid:u32,first_install_time:String,data_dir:String}
+#[derive(Clone,Debug,PartialEq,Eq,Serialize)]
+struct InstalledProductEpoch {
+    record:PackageRecord, ownership:PackageOwnership, version_code:String, version_name:String,
+    user:BTreeMap<String,String>, default_process:String, launcher:String,
+}
+#[derive(Clone,Debug)]
+struct ProductObservation {epoch:InstalledProductEpoch,stopped:bool,not_launched:bool}
+#[derive(Clone,Debug,PartialEq,Eq,Serialize)]
+struct PreparedDevice {serial:String,model:String,sdk:u32,abi:String,qemu:String}
+#[derive(Clone,Debug)]
+struct PreparedInstall {run:String,device:PreparedDevice,epoch:InstalledProductEpoch,apk_sha256:String,signer:String,apk_bytes:u64,references:Value}
+#[derive(Clone,Debug)]
+enum ProductStart {Absent,Prepared(PreparedInstall)}
+impl ProductStart {
+    fn admit_inventory(&self,packages:&BTreeMap<String,PackageRecord>)->io::Result<()> {
+        match self {
+            Self::Absent=>fresh_product_admission(packages),
+            Self::Prepared(prepared)=>if packages.get(APP)==Some(&prepared.epoch.record){Ok(())}else{Err(failure("prepared PRODUCT is absent or its original package/path/UID changed; no fallback install"))},
+        }
+    }
+    fn prepared(&self)->Option<&PreparedInstall>{match self{Self::Absent=>None,Self::Prepared(prepared)=>Some(prepared)}}
+}
+fn record_text<'a>(value:&'a Value,key:&str,max:usize)->io::Result<&'a str> {
+    value.get(key).and_then(Value::as_str).filter(|text|text.len()<=max).ok_or_else(||failure("prepared record string is missing or oversized"))
+}
+fn record_reference(value:&Value,key:&str)->io::Result<()> {
+    let text=record_text(value,key,4096)?;
+    if !text.starts_with('/')||text.chars().any(char::is_control){return Err(failure("prepared evidence reference is malformed"));}
+    Ok(()) // Evidence string ONLY: never open, canonicalize or derive authority from this path.
+}
+fn record_decimal(value:&Value,key:&str)->io::Result<u64> {
+    let text=record_text(value,key,32)?;
+    if text.is_empty()||(text.len()>1&&text.starts_with('0'))||!text.bytes().all(|byte|byte.is_ascii_digit()){return Err(failure("prepared decimal identity is malformed"));}
+    text.parse().map_err(|_|failure("prepared decimal identity overflows"))
+}
+fn package_user_state(text:&str)->io::Result<(BTreeMap<String,String>,bool,bool)> {
+    if text.len()>8192{return Err(failure("product user state is oversized"));}
+    let text=text.strip_prefix("User 0: ").ok_or_else(||failure("product primary user state is missing"))?;
+    let mut fields=BTreeMap::new();
+    for token in text.split_whitespace() {
+        let (key,value)=token.split_once('=').ok_or_else(||failure("product user state is malformed"))?;
+        if !matches!(key,"ceDataInode"|"installed"|"hidden"|"suspended"|"distractionFlags"|"stopped"|"notLaunched"|"enabled"|"instant"|"virtual")
+            ||fields.insert(key.to_owned(),value.to_owned()).is_some(){return Err(failure("product user state has unknown or duplicate fields"));}
+    }
+    for key in ["installed","hidden","suspended","stopped","notLaunched","instant","virtual"] {
+        if !fields.get(key).is_some_and(|value|matches!(value.as_str(),"true"|"false")){return Err(failure("product user boolean is unavailable"));}
+    }
+    for key in ["enabled","distractionFlags"] {
+        if !fields.get(key).is_some_and(|value|!value.is_empty()&&value.bytes().all(|byte|byte.is_ascii_digit())){return Err(failure("product user policy field is unavailable"));}
+    }
+    if let Some(inode)=fields.get("ceDataInode") {
+        if inode.parse::<u64>().ok().filter(|inode|*inode>0).is_none()||inode.starts_with('0'){return Err(failure("product CE inode is malformed"));}
+    }
+    if fields["installed"]!="true"||fields["hidden"]!="false"||fields["suspended"]!="false"||fields["instant"]!="false"||fields["virtual"]!="false" {
+        return Err(failure("product primary user installation is not admitted"));
+    }
+    let stopped=fields.remove("stopped").as_deref()==Some("true");
+    let not_launched=fields.remove("notLaunched").as_deref()==Some("true");
+    Ok((fields,stopped,not_launched))
+}
+fn checkpoint_package(value:&Value,package:&str,product:bool)->io::Result<ProductObservation> {
+    if product {
+        object(value,&["package","uid","versionCode","versionName","firstInstallTime","dataDir","userState","apkPath","apkSha256",
+            "signerByIdenticalIndependentlySdkVerifiedBytes","defaultProcess","registeredLauncher","defaultProcessAbsent","processObservation"])?;
+    }else{object(value,&["package","uid","versionCode","versionName","firstInstallTime","dataDir","userState","apkPath","apkSha256"])?;}
+    if string(value,"package")?!=package||!hex64(string(value,"apkSha256")?){return Err(failure("prepared package identity is invalid"));}
+    let uid=u32::try_from(record_decimal(value,"uid")?).ok().filter(|uid|*uid>=10000).ok_or_else(||failure("prepared package UID is invalid"))?;
+    let path=record_text(value,"apkPath",4096)?;
+    if !valid_apk_path(path){return Err(failure("prepared APK path is malformed"));}
+    let data=record_text(value,"dataDir",4096)?;
+    if !data.starts_with("/data/")||!data.ends_with(&format!("/{package}"))||data.chars().any(char::is_whitespace)||data.split('/').skip(1).any(|part|matches!(part,""|"."|"..")) {
+        return Err(failure("prepared package data identity is malformed"));
+    }
+    record_decimal(value,"versionCode")?;let first=record_text(value,"firstInstallTime",128)?;
+    if first.is_empty()||first=="null"||first.chars().any(char::is_control){return Err(failure("prepared first-install identity is missing"));}
+    let (user,stopped,not_launched)=package_user_state(record_text(value,"userState",8192)?)?;
+    let default_process=if product{string(value,"defaultProcess")?.to_owned()}else{package.to_owned()};
+    let launcher=if product{string(value,"registeredLauncher")?.to_owned()}else{String::new()};
+    if product&&(default_process!=APP||!valid_launcher(&launcher)){return Err(failure("prepared default process/launcher is invalid"));}
+    Ok(ProductObservation {epoch:InstalledProductEpoch {
+        record:PackageRecord {package:package.to_owned(),uid,path:Some(path.to_owned())},
+        ownership:PackageOwnership {package:package.to_owned(),uid,first_install_time:first.to_owned(),data_dir:data.to_owned()},
+        version_code:string(value,"versionCode")?.to_owned(),version_name:string(value,"versionName")?.to_owned(),user,default_process,launcher,
+    },stopped,not_launched})
+}
+fn record_command(value:&Value,exit:i64)->io::Result<&str> {
+    object(value,&["exit","signal","stdout","stderr"])?;
+    if value["exit"].as_i64()!=Some(exit)||!value["signal"].is_null()||record_text(value,"stderr",65536)?!=""{return Err(failure("prepared command receipt is not successful and unambiguous"));}
+    record_text(value,"stdout",65536)
+}
+fn validate_current_usb_device(output:&str,selected:&str)->io::Result<()> {
+    if output.len()>65536{return Err(failure("physical device inventory exceeds its bound"));}
+    let mut lines=output.lines();
+    if lines.next().map(str::trim)!=Some("List of devices attached"){return Err(failure("physical device inventory header is invalid"));}
+    let mut serials=BTreeSet::new();let mut authorized=None;
+    for line in lines.filter(|line|!line.trim().is_empty()) {
+        let mut words=line.split_whitespace();
+        let serial=words.next().ok_or_else(||failure("physical device row has no serial"))?;
+        let state=words.next().ok_or_else(||failure("physical device row has no state"))?;
+        if serial.len()>128||!serial.bytes().all(|byte|byte.is_ascii_alphanumeric()||b"._:-".contains(&byte))||!serials.insert(serial) {
+            return Err(failure("physical device inventory has an invalid or repeated serial"));
+        }
+        match state {
+            "device"=>if authorized.replace((serial,line)).is_some(){return Err(failure("physical mode requires globally one authorized device"));},
+            "offline"|"unauthorized"=>{},
+            _=>return Err(failure("physical device inventory has an unknown state")),
+        }
+    }
+    let (serial,line)=authorized.ok_or_else(||failure("physical authorized USB device is absent"))?;
+    if serial!=selected||serial.starts_with("emulator-"){return Err(failure("physical sole authorized device differs from the selected physical serial"));}
+    validate_historical_usb(line,selected)
+}
+fn validate_historical_usb(line:&str,serial:&str)->io::Result<()> {
+    let words=line.split_whitespace().collect::<Vec<_>>();
+    if words.len()<3||words[0]!=serial||words[1]!="device"||!words[2..].iter().any(|word|word.starts_with("usb:")&&word.len()>4) {
+        return Err(failure("prepared historical USB witness is invalid"));
+    }
+    let mut keys=BTreeSet::new();
+    for word in &words[2..] {
+        let (key,value)=word.split_once(':').ok_or_else(||failure("prepared USB token is malformed"))?;
+        if !matches!(key,"usb"|"product"|"model"|"device"|"transport_id")||value.is_empty()||value.len()>128||value.chars().any(char::is_control)||!keys.insert(key)
+            ||key=="transport_id"&&!value.bytes().all(|byte|byte.is_ascii_digit()){return Err(failure("prepared USB witness has malformed, unknown or duplicate tokens"));}
+    }
+    Ok(()) // transport_id, display padding and bus location are historical, not installation identity.
+}
+fn parse_prepared_install(value:&Value)->io::Result<PreparedInstall> {
+    object(value,&["version","kind","runId","createdAt","package","device","source","artifact","preinstall","install","installed","preservedPackages",
+        "noReplace","noDowngrade","noGrant","noUninstall","noClear","noLaunch","testHelperUpdated","suppressedApplicationBaselineExecuted","privateAppDataRead","providerOrHerdrLaunch","fullMvpAcceptanceClaim"])?;
+    if value["version"]!=1||string(value,"kind")?!="owned-prepared-fresh-product-install"||string(value,"package")?!=APP{return Err(failure("prepared creator record version/kind/package is unsupported"));}
+    let run=string(value,"runId")?.to_owned();uuid_text(&run)?;if string(value,"createdAt")?.is_empty(){return Err(failure("prepared creation time is missing"));}
+    for key in ["noReplace","noDowngrade","noGrant","noUninstall","noClear","noLaunch"]{if !boolean(value,key)?{return Err(failure("prepared install authorized a forbidden effect"));}}
+    for key in ["testHelperUpdated","suppressedApplicationBaselineExecuted","privateAppDataRead","providerOrHerdrLaunch","fullMvpAcceptanceClaim"]{if boolean(value,key)?{return Err(failure("prepared record already consumed a lifecycle/effect boundary"));}}
+    let device=&value["device"];object(device,&["serial","usbTransport","model","sdk","abi","qemu"])?;
+    let serial=string(device,"serial")?.to_owned();id(&serial)?;if serial.starts_with("emulator-"){return Err(failure("prepared device is an emulator"));}
+    validate_historical_usb(record_text(device,"usbTransport",4096)?,&serial)?;
+    let sdk=u32::try_from(record_decimal(device,"sdk")?).map_err(|_|failure("prepared SDK is invalid"))?;
+    let model=string(device,"model")?.to_owned();let abi=string(device,"abi")?.to_owned();let qemu=string(device,"qemu")?.to_owned();
+    if model.is_empty()||![30,34].contains(&sdk)||!matches!(abi.as_str(),"arm64-v8a"|"x86_64")||!matches!(qemu.as_str(),""|"0"){return Err(failure("prepared physical device properties are invalid"));}
+    let source=&value["source"];object(source,&["apkBuildSource","currentAndroidInputsMatched","qualification"])?;
+    record_reference(source,"apkBuildSource")?;record_reference(source,"qualification")?;
+    if !(1..=4096).contains(&unsigned(source,"currentAndroidInputsMatched")?){return Err(failure("prepared Android source closure is unproved"));}
+    let artifact=&value["artifact"];object(artifact,&["path","sha256","bytes","uid","mode","nlink","device","inode","mtimeNs","ctimeNs","signerSha256"])?;
+    record_reference(artifact,"path")?;
+    if unsigned(artifact,"uid")?!=1000||string(artifact,"mode")?!="0400"||unsigned(artifact,"nlink")?!=1
+        ||!hex64(string(artifact,"sha256")?)||!hex64(string(artifact,"signerSha256")?)||unsigned(artifact,"bytes")?==0{return Err(failure("prepared original APK held-object evidence is invalid"));}
+    for key in ["device","inode","mtimeNs","ctimeNs"]{if record_decimal(artifact,key)?==0{return Err(failure("prepared original APK stamp is missing"));}}
+    let pre=&value["preinstall"];object(pre,&["intent","intentSha256","active","includingUninstalled","exactProductAbsent"])?;
+    record_reference(pre,"intent")?;if !hex64(string(pre,"intentSha256")?)||!boolean(pre,"exactProductAbsent")?{return Err(failure("prepared pre-install intent is unproved"));}
+    let before=coherent_packages(record_command(&pre["active"],0)?,record_command(&pre["includingUninstalled"],0)?)?;fresh_product_admission(&before)?;
+    let install=&value["install"];object(install,&["binary","argv","receipt","receiptSha256","result","attempts"])?;
+    record_reference(install,"binary")?;record_reference(install,"receipt")?;
+    if !hex64(string(install,"receiptSha256")?)||unsigned(install,"attempts")?!=1{return Err(failure("prepared install was not one owned attempt"));}
+    let argv=array(install,"argv",5)?;
+    let expected=["-s",serial.as_str(),"install","-t",record_text(artifact,"path",4096)?];
+    if argv.len()!=expected.len()||argv.iter().zip(expected).any(|(actual,expected)|actual.as_str()!=Some(expected))
+        ||record_command(&install["result"],0)?.lines().filter(|line|line.trim()=="Success").count()!=1{return Err(failure("prepared receipt is not a sole fresh install-t success"));}
+    let installed=&value["installed"];let observed=checkpoint_package(installed,APP,true)?;
+    if !observed.stopped||!observed.not_launched||!boolean(installed,"defaultProcessAbsent")?||record_command(&installed["processObservation"],1)?!=""
+        ||string(installed,"apkSha256")?!=string(artifact,"sha256")?
+        ||string(installed,"signerByIdenticalIndependentlySdkVerifiedBytes")?!=string(artifact,"signerSha256")?{return Err(failure("prepared PRODUCT is not its unopened independently verified fresh image"));}
+    let preserved=&value["preservedPackages"];object(preserved,&["before","after","publicIdentityAndBytesUnchanged","privateBytePreservationClaim"])?;
+    if !boolean(preserved,"publicIdentityAndBytesUnchanged")?||boolean(preserved,"privateBytePreservationClaim")?||preserved["before"]!=preserved["after"]{return Err(failure("prepared install did not preserve other public packages"));}
+    object(&preserved["before"],&[TEST,VERIFY,"io.heckel.ntfy"])?;object(&preserved["after"],&[TEST,VERIFY,"io.heckel.ntfy"])?;
+    for package in [TEST,VERIFY,"io.heckel.ntfy"] {
+        let prior=checkpoint_package(&preserved["before"][package],package,false)?;
+        if package!= "io.heckel.ntfy"&&before.get(package)!=Some(&prior.epoch.record){return Err(failure("prepared absence/public-preservation evidence disagrees"));}
+    }
+    Ok(PreparedInstall {run,device:PreparedDevice {serial,model,sdk,abi,qemu},epoch:observed.epoch,
+        apk_sha256:string(artifact,"sha256")?.to_owned(),signer:string(artifact,"signerSha256")?.to_owned(),apk_bytes:unsigned(artifact,"bytes")?,
+        references:json!({"source":source,"intent":pre["intent"],"receipt":install["receipt"],"originalApkPath":artifact["path"]})})
+}
+fn parse_pinned_prepared_bytes(bytes:&[u8],expected:&str)->io::Result<PreparedInstall> {
+    use sha2::{Digest,Sha256};
+    if !hex64(expected)||bytes.len()>65536||hex(&Sha256::digest(bytes))!=expected{return Err(failure("prepared record differs from independent caller hash"));}
+    parse_prepared_install(&goatr::native_json::parse(bytes,goatr::native_json::REGISTRY)?)
+}
+fn read_prepared_install(path:&Path,expected:&str)->io::Result<(PreparedInstall,(PathBuf,File,fs::Metadata))> {
+    if !hex64(expected){return Err(failure("prepared install requires its independent lowercase SHA256 pin"));}
+    goatr::config::absolute(path)?;if fs::canonicalize(path)?!=path{return Err(failure("prepared record must be canonical without aliases"));}
+    let parent=path.parent().ok_or_else(||failure("prepared record parent missing"))?;private_dir(parent,false)?;let parent_before=fs::symlink_metadata(parent)?;
+    let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(path)?;
+    let original=file.metadata()?;
+    if parent_before.uid()!=1000||!original.is_file()||original.uid()!=1000||original.nlink()!=1||original.mode()&0o7777!=0o400||original.len()>65536{return Err(failure("prepared record is not sealed owned0400/nlink1/bounded"));}
+    let mut bytes=Vec::with_capacity(original.len() as usize);(&mut file).take(65537).read_to_end(&mut bytes)?;
+    if bytes.len()>65536||complete_stamp(&original)!=complete_stamp(&file.metadata()?)||complete_stamp(&original)!=complete_stamp(&fs::symlink_metadata(path)?)
+        ||complete_stamp(&parent_before)!=complete_stamp(&fs::symlink_metadata(parent)?)||fs::canonicalize(path)?!=path{return Err(failure("prepared record changed during its original held read"));}
+    let prepared=parse_pinned_prepared_bytes(&bytes,expected)?;let pin=(path.to_owned(),file,original);recheck_inputs(std::slice::from_ref(&pin))?;Ok((prepared,pin))
+}
+fn valid_apk_path(path:&str)->bool {
+    path.starts_with("/data/app/")&&path.ends_with("/base.apk")&&path.len()<=4096
+        &&!path.chars().any(|character|character.is_control()||character.is_whitespace())
+        &&!path.split('/').skip(1).any(|part|matches!(part,""|"."|".."))
+}
 fn package_records(output:&str)->io::Result<BTreeMap<String,PackageRecord>> {
     if output.len()>65536{return Err(failure("physical package inventory exceeds its bound"));}
     let mut records=BTreeMap::new();let mut uids=BTreeSet::new();
@@ -1723,8 +1958,7 @@ fn package_records(output:&str)->io::Result<BTreeMap<String,PackageRecord>> {
         let uid=uid_text.parse::<u32>().ok().filter(|uid|*uid>=10000).ok_or_else(||failure("physical package UID is malformed"))?;
         let (path,package)=match subject.rsplit_once('=') {
             Some((path,package))=>{
-                if !path.starts_with("/data/app/")||!path.ends_with("/base.apk")||path.len()>4096||path.chars().any(|character|character.is_control()||character.is_whitespace())
-                    ||path.split('/').skip(1).any(|part|matches!(part,""|"."|"..")){return Err(failure("physical package path is malformed or split"));}
+                if !valid_apk_path(path){return Err(failure("physical package path is malformed or split"));}
                 (Some(path.to_owned()),package)
             }
             None=>(None,subject),
@@ -1749,7 +1983,7 @@ async fn package_inventory(adb:&PhysicalAdb)->io::Result<BTreeMap<String,Package
     let retained=adb.shell(&["pm","list","packages","-u","-f","-U","--user","0",APP],65536).await?;
     coherent_packages(text(&active)?,text(&retained)?)
 }
-fn package_ownership_facts(output:&str,record:&PackageRecord)->io::Result<PackageOwnership> {
+fn package_detail_fields<'a>(output:&'a str,record:&PackageRecord)->io::Result<BTreeMap<&'static str,&'a str>> {
     if output.len()>262144{return Err(failure("physical package ownership exceeds its bound"));}
     let header=format!("Package [{}] (",record.package);let lines=output.lines().collect::<Vec<_>>();
     let starts=lines.iter().enumerate().filter(|(_,line)|line.trim_start().starts_with(&header)&&line.ends_with("):")).map(|(index,_)|index).collect::<Vec<_>>();
@@ -1757,12 +1991,17 @@ fn package_ownership_facts(output:&str,record:&PackageRecord)->io::Result<Packag
     let indent=lines[start].len()-lines[start].trim_start().len();let mut fields=BTreeMap::new();
     for line in lines.iter().skip(start+1).take_while(|line|line.trim().is_empty()||line.len()-line.trim_start().len()>indent) {
         let line=line.trim();
-        for key in ["userId","appId","firstInstallTime","dataDir"] {
+        if line.starts_with("User 0: ")&&fields.insert("userState",line).is_some(){return Err(failure("product user state is repeated"));}
+        for key in ["userId","appId","firstInstallTime","dataDir","versionCode","versionName"] {
             if let Some(value)=line.strip_prefix(key).and_then(|value|value.strip_prefix('=')) {
+                let value=if key=="versionCode"{value.split_whitespace().next().unwrap_or("")}else{value};
                 if value.is_empty()||value.len()>4096||value.chars().any(char::is_control)||fields.insert(key,value).is_some(){return Err(failure("physical package ownership field is malformed or repeated"));}
             }
         }
     }
+    Ok(fields)
+}
+fn ownership_from_fields(record:&PackageRecord,fields:&BTreeMap<&str,&str>)->io::Result<PackageOwnership> {
     let uid=match (fields.get("userId"),fields.get("appId")){(Some(uid),None)|(None,Some(uid))=>uid.parse::<u32>().ok(),_=>None};
     let first=fields.get("firstInstallTime").filter(|value|value.len()<=128).ok_or_else(||failure("physical package first-install identity is unavailable"))?;
     let data=fields.get("dataDir").ok_or_else(||failure("physical package data identity is unavailable"))?;
@@ -1771,6 +2010,59 @@ fn package_ownership_facts(output:&str,record:&PackageRecord)->io::Result<Packag
         return Err(failure("physical package ownership does not match the original listed UID/subject"));
     }
     Ok(PackageOwnership {package:record.package.clone(),uid:record.uid,first_install_time:(*first).to_owned(),data_dir:(*data).to_owned()})
+}
+fn package_ownership_facts(output:&str,record:&PackageRecord)->io::Result<PackageOwnership> {ownership_from_fields(record,&package_detail_fields(output,record)?)}
+fn product_observation_fields(output:&str,record:&PackageRecord,launcher:String)->io::Result<ProductObservation> {
+    let fields=package_detail_fields(output,record)?;let ownership=ownership_from_fields(record,&fields)?;
+    let version_code=(*fields.get("versionCode").ok_or_else(||failure("product version code unavailable"))?).to_owned();
+    if version_code.is_empty()||!version_code.bytes().all(|byte|byte.is_ascii_digit())||(version_code.len()>1&&version_code.starts_with('0')){return Err(failure("product version code malformed"));}
+    let version_name=(*fields.get("versionName").ok_or_else(||failure("product version name unavailable"))?).to_owned();
+    let (user,stopped,not_launched)=package_user_state(fields.get("userState").ok_or_else(||failure("product user state unavailable"))?)?;
+    if !valid_launcher(&launcher){return Err(failure("product launcher malformed"));}
+    // The independently qualified CURRENT installed APK manifest proves its default process is APP.
+    Ok(ProductObservation {epoch:InstalledProductEpoch {record:record.clone(),ownership,version_code,version_name,user,default_process:APP.to_owned(),launcher},stopped,not_launched})
+}
+async fn product_observation(adb:&PhysicalAdb,record:&PackageRecord)->io::Result<ProductObservation> {
+    let dump=adb.shell(&["dumpsys","package",APP],262144).await?;
+    product_observation_fields(text(&dump)?,record,product_launcher(adb).await?)
+}
+fn stable_product_epoch_admission(expected:&InstalledProductEpoch,current:&ProductObservation)->io::Result<()> {
+    if &current.epoch!=expected{return Err(failure("original PRODUCT stable public epoch changed"));}
+    Ok(()) // stopped/notLaunched are deliberately consumed after the owned baseline starts.
+}
+fn prepared_observation_admission(prepared:&PreparedInstall,current:&ProductObservation,pristine:bool)->io::Result<()> {
+    stable_product_epoch_admission(&prepared.epoch,current)?;
+    if pristine&&(!current.stopped||!current.not_launched){return Err(failure("prepared PRODUCT unconsumed lifecycle changed"));}
+    Ok(())
+}
+fn recheck_product_inputs(inputs:&[(PathBuf,File,fs::Metadata)],failed:Option<&mut bool>)->io::Result<()> {
+    match failed{Some(failed)=>recheck_retained_inputs(inputs,failed),None=>recheck_inputs(inputs)}
+}
+async fn require_product_epoch(adb:&PhysicalAdb,expected:&InstalledProductEpoch,sha256:&str,inputs:&[(PathBuf,File,fs::Metadata)],mut failed:Option<&mut bool>)->io::Result<()> {
+    recheck_product_inputs(inputs,failed.as_deref_mut())?;let packages=package_inventory(adb).await?;recheck_product_inputs(inputs,failed.as_deref_mut())?;
+    let record=packages.get(APP).ok_or_else(||failure("original PRODUCT disappeared"))?;
+    if record!=&expected.record{return Err(failure("original PRODUCT package/path/UID changed"));}
+    let current=product_observation(adb,record).await?;recheck_product_inputs(inputs,failed.as_deref_mut())?;
+    stable_product_epoch_admission(expected,&current)?;
+    if installed_hash(adb,APP).await?!=sha256{return Err(failure("original PRODUCT qualified bytes changed"));}
+    recheck_product_inputs(inputs,failed)
+}
+fn prepared_artifact_admission(prepared:&PreparedInstall,device:&PreparedDevice,artifact:&Artifact,bytes:u64)->io::Result<()> {
+    if &prepared.device!=device||artifact.package!=APP||artifact.sha256!=prepared.apk_sha256||artifact.signer!=prepared.signer||bytes!=prepared.apk_bytes {
+        return Err(failure("prepared creator device/source-APK pins differ from current independently qualified inputs"));
+    }
+    Ok(())
+}
+async fn admit_product_start(start:&ProductStart,adb:&PhysicalAdb,packages:&BTreeMap<String,PackageRecord>,inputs:&[(PathBuf,File,fs::Metadata)])->io::Result<()> {
+    start.admit_inventory(packages)?;
+    if let Some(prepared)=start.prepared() {
+        recheck_inputs(inputs)?;
+        let current=product_observation(adb,packages.get(APP).ok_or_else(||failure("prepared PRODUCT absent"))?).await?;recheck_inputs(inputs)?;
+        prepared_observation_admission(prepared,&current,true)?;
+        if installed_hash(adb,APP).await?!=prepared.apk_sha256{return Err(failure("prepared current PRODUCT bytes changed"));}
+        recheck_inputs(inputs)?;adb.default_product_process_absent().await?;recheck_inputs(inputs)?;
+    }
+    Ok(())
 }
 async fn package_ownership(adb:&PhysicalAdb,record:&PackageRecord)->io::Result<PackageOwnership> {
     let output=adb.shell(&["dumpsys","package",&record.package],262144).await?;
@@ -1813,9 +2105,9 @@ async fn installed_hash(adb:&PhysicalAdb,package:&str) -> io::Result<String> {
     let bytes=adb.shell(&["sha256sum",path],8192).await?;
     text(&bytes)?.split_whitespace().next().filter(|hash|hex64(hash)).map(str::to_owned).ok_or_else(||failure("physical installed package hash is unavailable"))
 }
-async fn install_test_update(adb:&PhysicalAdb,previous:&Artifact,ownership:&PackageOwnership,artifact:&Artifact,inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<()> {
+async fn install_test_update(adb:&PhysicalAdb,previous:&Artifact,ownership:&PackageOwnership,artifact:&Artifact,start:&ProductStart,inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<()> {
     test_update_admission(previous,artifact)?;
-    recheck_inputs(inputs)?;let packages=package_inventory(adb).await?;recheck_inputs(inputs)?;fresh_product_admission(&packages)?;
+    recheck_inputs(inputs)?;let packages=package_inventory(adb).await?;recheck_inputs(inputs)?;admit_product_start(start,adb,&packages,inputs).await?;
     let record=packages.get(TEST).ok_or_else(||failure("physical original TEST disappeared; do not create a replacement helper"))?;
     if package_ownership(adb,record).await?!=*ownership||installed_hash(adb,TEST).await?!=previous.sha256{return Err(failure("physical original helper installation changed before update"));}
     recheck_inputs(inputs)?;
@@ -1872,11 +2164,18 @@ async fn fresh_baseline(adb:&PhysicalAdb,listener:&TcpListener,arguments:&BTreeM
     write_json(&evidence.join("physical-fresh-baseline-finished.json"),&json!({"runId":run,"pid":epoch.pid,"start":epoch.start,"finished":true,"processAbsent":true,"continuityClaim":false}))?;
     Ok(baseline)
 }
-async fn launch_product(adb:&PhysicalAdb) -> io::Result<()> {
+fn valid_launcher(component:&str)->bool {
+    component.split_once('/').is_some_and(|(package,class)|package==APP&&!class.is_empty()&&!class.contains('/')&&class.bytes().all(|byte|byte.is_ascii_alphanumeric()||b"._$".contains(&byte)))
+}
+async fn product_launcher(adb:&PhysicalAdb)->io::Result<String> {
     let bytes=adb.shell(&["cmd","package","resolve-activity","--brief","-a","android.intent.action.MAIN","-c","android.intent.category.LAUNCHER","-p",APP],16_384).await?;
     let components:Vec<_>=text(&bytes)?.lines().filter(|line|line.starts_with(&format!("{APP}/"))).collect();
-    if components.len()!=1||components[0].len()>512||!components[0].bytes().all(|byte|byte.is_ascii_alphanumeric()||b"._$/".contains(&byte)){return Err(failure("physical exact installed product launcher could not be resolved"));}
-    let result=adb.shell(&["am","start","-W","-n",components[0]],16_384).await?;
+    if components.len()!=1||components[0].len()>512||!valid_launcher(components[0]){return Err(failure("physical exact installed product launcher could not be resolved"));}
+    Ok(components[0].to_owned())
+}
+async fn launch_product(adb:&PhysicalAdb) -> io::Result<()> {
+    let launcher=product_launcher(adb).await?;
+    let result=adb.shell(&["am","start","-W","-n",&launcher],16_384).await?;
     if !text(&result)?.lines().any(|line|line.trim()=="Status: ok"){return Err(failure("physical resolved product launcher did not start"));}
     Ok(())
 }
@@ -2135,6 +2434,11 @@ fn file_wake_profile_error(error:io::Error)->io::Error {
 pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()> {
     if !io::stdin().is_terminal()||!io::stdout().is_terminal(){return Err(failure("physical MVP requires the real local private human TTY; no synthetic camera/input acknowledgement"));}
     let run=Uuid::random();let label=format!("Goatr MVP {}",run.0);
+    let (product_start,prepared_pin)=match (args.get_one::<PathBuf>("prepared-fresh-install"),args.get_one::<String>("expected-prepared-install-sha256")) {
+        (None,None)=>(ProductStart::Absent,None),
+        (Some(path),Some(hash))=>{let (record,pin)=read_prepared_install(path,hash)?;(ProductStart::Prepared(record),Some(pin))},
+        _=>return Err(failure("prepared install record and independent hash must be supplied together")),
+    };
     let controller_sha=args.get_one::<String>("expected-controller-sha256").ok_or_else(||prerequisite("independent_controller_pin_unavailable"))?;
     if args.get_one::<String>("expected-companion-lock-sha256").map(String::as_str)!=Some(transport::lock_sha256()){return Err(failure("physical source lock pin differs"));}
     let binary=canonical_file(args.get_one::<PathBuf>("goatr").ok_or_else(||failure("physical frozen Goatr path missing"))?)?;
@@ -2158,10 +2462,11 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     let test_apk=canonical_file(args.get_one::<PathBuf>("test-apk").ok_or_else(||failure("physical frozen test APK is missing"))?)?;
     let product_sha=args.get_one::<String>("expected-apk-sha256").ok_or_else(||failure("physical product APK hash is missing"))?;
     let test_sha=args.get_one::<String>("expected-test-apk-sha256").ok_or_else(||failure("physical test APK hash is missing"))?;
-    let mut inputs=Vec::with_capacity(5);
+    let mut inputs=Vec::with_capacity(6);
     inputs.push(serve_file.held_input()?);inputs.push(frozen_input(&apk,product_sha)?);inputs.push(frozen_input(&test_apk,test_sha)?);
     inputs.push((template.clone(),template_file,template_metadata));
     inputs.push(authority.controller_file.as_ref().ok_or_else(||failure("physical controller file profile missing"))?.held_input()?);
+    if let Some(pin)=prepared_pin{inputs.push(pin);}
     recheck_inputs(&inputs)?;let product=qualify_artifact(&apk,product_sha,&sdk,APP,false).await?;recheck_inputs(&inputs)?;
     let test=qualify_artifact(&test_apk,test_sha,&sdk,TEST,true).await?;recheck_inputs(&inputs)?;
     if product.signer!=test.signer{return Err(failure("physical product/test artifacts do not have the same qualified signer"));}
@@ -2174,11 +2479,20 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     recheck_inputs(&inputs)?;let inventory=tokio::task::spawn_blocking(move||super::super::native_inventory::inspect(&inventory_inputs)).await.map_err(|_|failure("physical shared static inventory owner failed"))??;recheck_inputs(&inputs)?;
     if inventory["status"]!="pass"||inventory["count"]!=10||inventory["apkSha256"]!=product.sha256{return Err(failure("physical actual shared all-ten native inventory did not qualify this exact frozen APK"));}
     write_json(&evidence.join("physical-native-inventory.json"),&inventory)?;
-    recheck_inputs(&inputs)?;let (adb,api,abi)=PhysicalAdb::qualify(args).await?;recheck_inputs(&inputs)?;
+    recheck_inputs(&inputs)?;let (adb,device)=PhysicalAdb::qualify(args).await?;recheck_inputs(&inputs)?;let api=device.sdk;let abi=device.abi.clone();
     adb.tunnels(None).await?;recheck_inputs(&inputs)?;
     let user=adb.shell(&["am","get-current-user"],128).await?;recheck_inputs(&inputs)?;
     if text(&user)?.trim()!="0"{return Err(failure("physical retained installation must be the exact primary Android user; no profile/user switching"));}
-    let packages_before=package_inventory(&adb).await?;recheck_inputs(&inputs)?;fresh_product_admission(&packages_before)?;
+    let packages_before=package_inventory(&adb).await?;recheck_inputs(&inputs)?;product_start.admit_inventory(&packages_before)?;
+    if let Some(prepared)=product_start.prepared() {
+        prepared_artifact_admission(prepared,&device,&product,inputs[1].2.len())?;
+        // CURRENT installed bytes are pulled and independently SDK/signature/manifest qualified.
+        let current=installed_artifact(&adb,&sdk,APP,evidence,"physical-prepared-product-current.apk").await?;recheck_inputs(&inputs)?;
+        prepared_artifact_admission(prepared,&device,&current,fs::metadata(&current.path)?.len())?;
+        admit_product_start(&product_start,&adb,&packages_before,&inputs).await?;
+        write_json(&evidence.join("physical-prepared-product-intake.json"),&json!({"creatorRun":prepared.run,"originalRecordPin":args.get_one::<String>("expected-prepared-install-sha256"),
+            "epoch":prepared.epoch,"currentSdkArtifactSha256":current.sha256,"evidenceReferencesNotFollowed":prepared.references,"runtimeOrRawBaselineClaim":false}))?;
+    }
     let test_record=packages_before.get(TEST).ok_or_else(||prerequisite("physical residual same-signer TEST installation is required"))?;
     let test_ownership_before=package_ownership(&adb,test_record).await?;recheck_inputs(&inputs)?;
     let previous_test=installed_artifact(&adb,&sdk,TEST,evidence,"physical-residual-test.apk").await?;recheck_inputs(&inputs)?;
@@ -2192,31 +2506,42 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
         "goatr":binary,"goatrSha256":expected_binary_sha,"config":template,"configSha256":template_sha,"lockSha256":transport::lock_sha256(),
         "productApk":{"path":product.path,"sha256":product.sha256,"signer":product.signer,"debuggable":product.debug},
         "testApk":{"path":test.path,"sha256":test.sha256,"signer":test.signer,"debuggable":test.debug,"instrumentations":2,"fullTestArtifact":true},
-        "startingProductAbsent":true,"previousTest":{"sha256":previous_test.sha256,"ownership":test_ownership_before},
+        "startingProductAbsent":matches!(product_start,ProductStart::Absent),"preparedCreator":product_start.prepared().map(|prepared|prepared.run.as_str()),"previousTest":{"sha256":previous_test.sha256,"ownership":test_ownership_before},
         "verify":verify.as_ref().map(|artifact|json!({"sha256":artifact.sha256,"signer":artifact.signer,"ownership":verify_ownership})),
         "officialNtfySha256":ntfy.sha256,"officialNtfySigner":ntfy.signer,"nativeInventory":"actual shared implementation; static only, not JNI/device acceptance"}))?;
     recheck_inputs(&inputs)?;let listener=TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await?;recheck_inputs(&inputs)?;let port=listener.local_addr()?.port();let mapping=format!("tcp:{port}");
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
-    install_test_update(&adb,&previous_test,&test_ownership_before,&test,&inputs).await?;
-    let after_test=package_inventory(&adb).await?;recheck_inputs(&inputs)?;fresh_product_admission(&after_test)?;
+    install_test_update(&adb,&previous_test,&test_ownership_before,&test,&product_start,&inputs).await?;
+    let after_test=package_inventory(&adb).await?;recheck_inputs(&inputs)?;product_start.admit_inventory(&after_test)?;
     if package_ownership(&adb,after_test.get(TEST).ok_or_else(||failure("physical updated TEST disappeared"))?).await?!=test_ownership_before{return Err(failure("physical TEST update changed its original UID/install/data ownership"));}
     verify_unchanged(&adb,verify_record,verify_ownership.as_ref(),verify.as_ref()).await?;recheck_inputs(&inputs)?;
-    install_fresh_product(&adb,&product,&inputs).await?;
+    if matches!(product_start,ProductStart::Absent){install_fresh_product(&adb,&product,&inputs).await?;}
     let installed_packages=package_inventory(&adb).await?;recheck_inputs(&inputs)?;
     let product_record=installed_packages.get(APP).ok_or_else(||failure("physical fresh PRODUCT did not acquire an installed identity"))?;
-    let product_ownership=package_ownership(&adb,product_record).await?;recheck_inputs(&inputs)?;
-    write_json(&evidence.join("physical-fresh-product-installed.json"),&json!({"runId":run,"package":product_record,"ownership":product_ownership,"apkSha256":product.sha256,"signerSha256":product.signer,"freshInstall":true,"replacementAuthorized":false}))?;
+    let current_product=product_observation(&adb,product_record).await?;recheck_inputs(&inputs)?;
+    if let Some(prepared)=product_start.prepared(){prepared_observation_admission(prepared,&current_product,true)?;}
+    if !current_product.stopped||!current_product.not_launched{return Err(failure("fresh PRODUCT lifecycle changed before baseline; never normalize it"));}
+    let product_epoch=current_product.epoch;let product_ownership=product_epoch.ownership.clone();
+    write_json(&evidence.join("physical-fresh-product-installed.json"),&json!({"runId":run,"package":product_record,"epoch":product_epoch,"apkSha256":product.sha256,"signerSha256":product.signer,
+        "newProductInstall":matches!(product_start,ProductStart::Absent),"preparedProductInstallSkipped":product_start.prepared().is_some(),"replacementAuthorized":false}))?;
     adb.invoke(&["reverse","--no-rebind",&mapping,&mapping],4096).await?;recheck_inputs(&inputs)?;adb.tunnels(Some(port)).await?;recheck_inputs(&inputs)?;
+    let before_baseline=package_inventory(&adb).await?;recheck_inputs(&inputs)?;
+    let record=before_baseline.get(APP).ok_or_else(||failure("fresh PRODUCT disappeared before baseline"))?;
+    if record!=&product_epoch.record{return Err(failure("fresh PRODUCT package epoch changed before baseline"));}
+    let current=product_observation(&adb,record).await?;recheck_inputs(&inputs)?;
+    if current.epoch!=product_epoch||!current.stopped||!current.not_launched||installed_hash(&adb,APP).await?!=product.sha256{return Err(failure("fresh/prepared PRODUCT changed immediately before baseline"));}
+    adb.default_product_process_absent().await?;recheck_inputs(&inputs)?;
+    // Ownership begins below. ONLY stopped/notLaunched/process-absence are consumed by this baseline.
     let baseline_args=observer_arguments("baseline",&run,&label,None,&product,product_record.uid,&test,verify.as_ref(),&dependency_sha,port);
     let baseline=fresh_baseline(&adb,&listener,&baseline_args,&run,product_record.uid,&dependency_sha,evidence).await?;recheck_inputs(&inputs)?;
+    require_product_epoch(&adb,&product_epoch,&product.sha256,&inputs,None).await?;
     connector_admission(&baseline,None)?;
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
     let stock=StockRun::start(args,evidence,run.clone(),&label,deployment,binary,template_sha,expected_binary_sha,serve_file,&inputs).await?;recheck_inputs(&inputs)?;
     let host=stock.phone.hello.host_id.0.clone();if !hex64(&host){return Err(failure("physical new private companion host identity is invalid"));}
     connector_admission(&baseline,Some(&host))?;
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
-    if package_inventory(&adb).await?.get(APP)!=Some(product_record)||package_ownership(&adb,product_record).await?!=product_ownership{return Err(failure("physical fresh PRODUCT installation changed before observer admission"));}
-    recheck_inputs(&inputs)?;
+    require_product_epoch(&adb,&product_epoch,&product.sha256,&inputs,None).await?;
     let observe_args=observer_arguments("observe",&run,&label,Some(&host),&product,product_record.uid,&test,verify.as_ref(),&dependency_sha,port);
     let instrumentation=ProductInstrumentation::start(&adb,&observe_args,"observe").await?;recheck_inputs(&inputs)?;
     let (observer,ready)=Observer::start(listener,instrumentation,run.clone(),host.clone()).await?;
@@ -2224,13 +2549,14 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     let public_sha=hex(&Sha256::digest(observer.epoch.public));
     // From this point EVERY failure stays with this same owner until explicit identity-reviewed Finish.
     let mut matrix=Matrix {adb,observer,stock,authority,inputs,input_pin_failed:false,run,host,label,evidence:evidence.to_path_buf(),product_sha:product.sha256.clone(),public_sha,api,
-        control_port:port,fresh_baseline:baseline,first_open:None,paired:None,last_stage:"observer-admission",baseline_ui:None,baseline_network:None,retained_keeper_baseline:None,owned_start:None,service_key_restored:false};
+        control_port:port,fresh_baseline:baseline,first_open:None,paired:None,last_stage:"observer-admission",baseline_ui:None,baseline_network:None,retained_keeper_baseline:None,owned_start:None,service_key_restored:false,product_epoch,
+        prepared_record_sha256:args.get_one::<String>("expected-prepared-install-sha256").cloned()};
     let result=async {
         matrix.recheck()?;
         if matrix.observer.epoch.uid!=product_record.uid{return Err(failure("physical observer UID differs from the pinned fresh PRODUCT"));}
         matrix.fresh_baseline.constructor_ready(&ready,product_record.uid)?;
         matrix.record("constructor-ready",&json!({"originalFreshBaseline":matrix.fresh_baseline,"constructorReady":ready,"normalApplicationCreatedOnlyEmptyKeyDirectory":true}))?;
-        matrix.recheck()?;launch_product(&matrix.adb).await?;matrix.recheck()?;
+        matrix.recheck_product().await?;launch_product(&matrix.adb).await?;matrix.recheck()?;
         // endpointOwned is claimed before key creation; callback follows durable keys and bind.
         let initial=matrix.wait_snapshot("product-normal-first-open-complete",None,Duration::from_secs(45),|snapshot|snapshot["foreground"]==true&&snapshot["keeper"]["endpointOwned"]==true&&snapshot["keeper"]["networkCallback"]==true).await?;
         matrix.baseline_ui=Some(initial["ui"].clone());matrix.baseline_network=Some(initial["network"].clone());
@@ -2250,6 +2576,7 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
         matrix.recheck()?;
         let final_facts=matrix.observer.retained().await?;
         matrix.first_open_ref()?.preserved_with_private_host(&final_facts,&matrix.host,matrix.first_open_ref()?.service_requested,matrix.service_key_restored)?;
+        matrix.recheck_product().await?;
         let final_packages=package_inventory(&matrix.adb).await?;
         if final_packages.get(APP)!=Some(product_record)||package_ownership(&matrix.adb,product_record).await?!=product_ownership
             ||package_ownership(&matrix.adb,final_packages.get(TEST).ok_or_else(||failure("physical TEST installation disappeared"))?).await?!=test_ownership_before
@@ -2659,7 +2986,7 @@ impl Matrix {
                 // Reopen/sync from the normal product lifecycle, never replay a hint or invoke a PendingIntent.
                 self.action("delivery-background-after-read","BackgroundOwnedApp",target_arguments(&proof.target)).await?;
                 if hint {self.wait_keeper("ntfy-socket-free-after-read",Duration::from_secs(45),socket_free).await?;}
-                launch_product(&self.adb).await?;
+                self.recheck_product().await?;launch_product(&self.adb).await?;
                 self.wait_snapshot("delivery-normal-return-after-read",None,Duration::from_secs(60),|snapshot|snapshot["foreground"]==true&&snapshot["hello"]==true&&snapshot["inventoryReady"]==true).await?;
                 let duplicate=self.notification(&event,hint).await?;
                 if duplicate["present"]!=false||duplicate["ledger"]["attemptedAt"]!=posted["ledger"]["attemptedAt"]||duplicate["ledger"]["readThrough"].as_u64().unwrap_or(0)<event.sequence.0 {
@@ -2736,7 +3063,7 @@ impl Matrix {
         keeper_retained_current(&free,self.first_open_ref()?)?;
         write_json(&self.evidence.join("physical-ntfy-auto-socket-free-proof.json"),&json!({"runId":self.run,"facts":free,"beforeAnyStopDelivery":true,
             "productObserverHasNoRuntimeClaim":true,"instrumentedProcessAliveIsNotEndpointOrFgsOwnership":true,"allSocketsOrColdProcessAbsenceClaim":false}))?;
-        launch_product(&self.adb).await?;
+        self.recheck_product().await?;launch_product(&self.adb).await?;
         self.wait_snapshot("ntfy-return-for-real-matrix",None,Duration::from_secs(60),|snapshot|snapshot["foreground"]==true&&snapshot["hello"]==true&&snapshot["mutationReady"]==true).await?;
         let ntfy_proof=self.delivery_matrix("ntfy",providers,Some(&generation)).await?;
         let network=self.baseline_network.clone().ok_or_else(||failure("physical original network transport baseline is missing"))?;
@@ -2829,7 +3156,7 @@ impl Matrix {
                 let authorized=count>0&&std::str::from_utf8(&bytes[..count as usize]).is_ok_and(|value|value.trim()==expected);bytes.fill(0);
                 if authorized {
                     if finish_authorization(self.input_pin_failed,&expected).is_none(){announced=false;continue;}
-                    if let Err(error)=self.recheck(){passed=false;code=blocker(&error);announced=false;continue;}
+                    if let Err(error)=self.recheck_product().await{passed=false;code=blocker(&error);announced=false;continue;}
                     let action=Uuid::random();
                     let current=match self.observer.query(json!({"kind":"epoch","actionRunId":action}),"epoch").await {
                         Ok((current,_))=>current,
@@ -2840,7 +3167,7 @@ impl Matrix {
                     }
                     if passed {
                         let final_check=async {
-                            self.recheck()?;
+                            self.recheck_product().await?;
                             let retained=self.observer.retained().await?;
                             self.first_open_ref()?.preserved_with_private_host(&retained,&self.host,self.first_open_ref()?.service_requested,self.service_key_restored)?;
                             let ui=self.baseline_ui.as_ref().ok_or_else(||failure("physical original UI baseline is missing"))?;
@@ -2864,6 +3191,7 @@ impl Matrix {
                     let outcome=self.observer.finished().await;
                     if recheck_retained_inputs(&self.inputs,&mut self.input_pin_failed).is_err(){passed=false;code="original_frozen_input_changed_during_finish";}
                     if !self.input_pin_failed&&recheck_file_profiles(&self.authority,&self.stock,&mut self.input_pin_failed).is_err(){passed=false;code="original_file_wake_profile_changed_during_finish";}
+                    if require_product_epoch(&self.adb,&self.product_epoch,&self.product_sha,&self.inputs,Some(&mut self.input_pin_failed)).await.is_err(){passed=false;code="original_product_epoch_changed_during_finish";}
                     let mut acknowledged=false;let mut absent=false;let mut reverse_removed=false;
                     if let Ok(finished)=outcome {
                         acknowledged=finished.pid==original.pid&&finished.start==original.start;
@@ -2892,6 +3220,228 @@ impl Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn prepared_fixture_package(package:&str,uid:u32,path:&str,sha:&str,pristine:bool)->Value {
+        json!({"package":package,"uid":uid.to_string(),"versionCode":"1","versionName":"0.1.0","firstInstallTime":"2026-01-01 00:00:00",
+            "dataDir":format!("/data/user/0/{package}"),"userState":format!("User 0: ceDataInode=123 installed=true hidden=false suspended=false distractionFlags=0 stopped={pristine} notLaunched={pristine} enabled=0 instant=false virtual=false"),
+            "apkPath":path,"apkSha256":sha})
+    }
+    fn prepared_fixture()->Value {
+        let sha="1".repeat(64);let signer="2".repeat(64);let serial="owned-physical";
+        let test=prepared_fixture_package(TEST,10001,"/data/app/test/base.apk",&"3".repeat(64),false);
+        let verify=prepared_fixture_package(VERIFY,10002,"/data/app/verify/base.apk",&"4".repeat(64),false);
+        let ntfy=prepared_fixture_package("io.heckel.ntfy",10003,"/data/app/ntfy/base.apk",&"5".repeat(64),false);
+        let before=json!({TEST:test,VERIFY:verify,"io.heckel.ntfy":ntfy});
+        let packages=format!("package:/data/app/test/base.apk={TEST} uid:10001\npackage:/data/app/verify/base.apk={VERIFY} uid:10002\n");
+        let mut installed=prepared_fixture_package(APP,10004,"/data/app/product/base.apk",&sha,true);
+        let fields=installed.as_object_mut().unwrap();
+        fields.insert("signerByIdenticalIndependentlySdkVerifiedBytes".to_owned(),json!(signer));fields.insert("defaultProcess".to_owned(),json!(APP));
+        fields.insert("registeredLauncher".to_owned(),json!(format!("{APP}/{APP}.MainActivity")));fields.insert("defaultProcessAbsent".to_owned(),json!(true));
+        fields.insert("processObservation".to_owned(),json!({"exit":1,"signal":null,"stdout":"","stderr":""}));
+        json!({"version":1,"kind":"owned-prepared-fresh-product-install","runId":Uuid::random().0,"createdAt":"2026-01-01T00:00:01Z","package":APP,
+            "device":{"serial":serial,"usbTransport":format!("{serial} device usb:1-4 product:owned model:Owned device:owned transport_id:15"),"model":"Owned","sdk":"30","abi":"arm64-v8a","qemu":""},
+            "source":{"apkBuildSource":"/evidence/unfollowed/source","currentAndroidInputsMatched":176,"qualification":"/evidence/unfollowed/qualification"},
+            "artifact":{"path":"/evidence/unfollowed/app.apk","sha256":sha,"bytes":128,"uid":1000,"mode":"0400","nlink":1,"device":"1","inode":"2","mtimeNs":"3","ctimeNs":"4","signerSha256":signer},
+            "preinstall":{"intent":"/evidence/unfollowed/intent","intentSha256":"6".repeat(64),"active":{"exit":0,"signal":null,"stdout":packages,"stderr":""},
+                "includingUninstalled":{"exit":0,"signal":null,"stdout":packages,"stderr":""},"exactProductAbsent":true},
+            "install":{"binary":"/evidence/unfollowed/adb","argv":["-s",serial,"install","-t","/evidence/unfollowed/app.apk"],
+                "receipt":"/evidence/unfollowed/receipt","receiptSha256":"7".repeat(64),"result":{"exit":0,"signal":null,"stdout":"Performing Streamed Install\nSuccess\n","stderr":""},"attempts":1},
+            "installed":installed,"preservedPackages":{"before":before,"after":before,"publicIdentityAndBytesUnchanged":true,"privateBytePreservationClaim":false},
+            "noReplace":true,"noDowngrade":true,"noGrant":true,"noUninstall":true,"noClear":true,"noLaunch":true,"testHelperUpdated":false,
+            "suppressedApplicationBaselineExecuted":false,"privateAppDataRead":false,"providerOrHerdrLaunch":false,"fullMvpAcceptanceClaim":false})
+    }
+    fn prepared_pm_dump(fixture:&Value)->String {
+        let installed=&fixture["installed"];
+        format!("Packages:\n  Package [{APP}] (owned):\n    userId=10004\n    dataDir={}\n    firstInstallTime={}\n    versionCode=1 minSdk=26 targetSdk=36\n    versionName=0.1.0\n    {}\nOther:\n",
+            installed["dataDir"].as_str().unwrap(),installed["firstInstallTime"].as_str().unwrap(),installed["userState"].as_str().unwrap())
+    }
+    #[test]
+    fn prepared_creator_record_consumes_closed_owned_receipt_not_reference_path_authority() {
+        let valid=prepared_fixture();let parsed=parse_prepared_install(&valid).unwrap();assert_eq!(parsed.epoch.record.uid,10004);
+        for key in ["noReplace","noDowngrade","noGrant","noUninstall","noClear","noLaunch","testHelperUpdated","suppressedApplicationBaselineExecuted","privateAppDataRead","providerOrHerdrLaunch","fullMvpAcceptanceClaim"] {
+            let mut changed=valid.clone();changed[key]=json!(!changed[key].as_bool().unwrap());assert!(parse_prepared_install(&changed).is_err(),"{key}");
+        }
+        for case in ["version","kind","unknown","attempts","replace","failed-command","prior-product","process-present","used-lifecycle","preserved","source-closure"] {
+            let mut changed=valid.clone();
+            match case {
+                "version"=>changed["version"]=json!(2),"kind"=>changed["kind"]=json!("arbitrary-installed-app"),"unknown"=>changed["extra"]=json!(true),
+                "attempts"=>changed["install"]["attempts"]=json!(2),"replace"=>changed["install"]["argv"][3]=json!("-r"),
+                "failed-command"=>changed["install"]["result"]["exit"]=json!(1),
+                "prior-product"=>changed["preinstall"]["active"]["stdout"]=json!(format!("package:/data/app/product/base.apk={APP} uid:10004\n")),
+                "process-present"=>changed["installed"]["processObservation"]["stdout"]=json!("123\n"),
+                "used-lifecycle"=>changed["installed"]["userState"]=json!(string(&valid["installed"],"userState").unwrap().replace("notLaunched=true","notLaunched=false")),
+                "preserved"=>changed["preservedPackages"]["after"][TEST]["apkSha256"]=json!("0".repeat(64)),
+                "source-closure"=>changed["source"]["currentAndroidInputsMatched"]=json!(0),_=>unreachable!(),
+            }
+            assert!(parse_prepared_install(&changed).is_err(),"{case}");
+        }
+        let mut reconnected=valid.clone();reconnected["device"]["usbTransport"]=json!("owned-physical  device usb:2-7 product:owned model:Owned device:owned transport_id:99");
+        assert_eq!(parse_prepared_install(&reconnected).unwrap().device,parsed.device);
+    }
+    #[test]
+    fn prepared_subject_has_no_implicit_adoption_or_absent_fallback_and_binds_current_sdk_metadata() {
+        let prepared=parse_prepared_install(&prepared_fixture()).unwrap();let mut packages=BTreeMap::new();
+        ProductStart::Absent.admit_inventory(&packages).unwrap();assert!(ProductStart::Prepared(prepared.clone()).admit_inventory(&packages).is_err());
+        packages.insert(APP.to_owned(),prepared.epoch.record.clone());assert!(ProductStart::Absent.admit_inventory(&packages).is_err());
+        ProductStart::Prepared(prepared.clone()).admit_inventory(&packages).unwrap();
+        for field in ["uid","path"] {
+            let mut wrong=packages.clone();let record=wrong.get_mut(APP).unwrap();if field=="uid"{record.uid+=1;}else{record.path=Some("/data/app/replaced/base.apk".to_owned());}
+            assert!(ProductStart::Prepared(prepared.clone()).admit_inventory(&wrong).is_err());
+        }
+        // Pure predicate input; real CURRENT SDK qualification remains installed_artifact's responsibility.
+        let artifact=Artifact {path:PathBuf::from("/owned/sdk-qualified.apk"),sha256:prepared.apk_sha256.clone(),signer:prepared.signer.clone(),package:APP.to_owned(),debug:true};
+        prepared_artifact_admission(&prepared,&prepared.device,&artifact,128).unwrap();
+        let mut wrong=artifact.clone();wrong.signer="0".repeat(64);assert!(prepared_artifact_admission(&prepared,&prepared.device,&wrong,128).is_err());
+        wrong=artifact.clone();wrong.sha256="0".repeat(64);assert!(prepared_artifact_admission(&prepared,&prepared.device,&wrong,128).is_err());
+        assert!(prepared_artifact_admission(&prepared,&prepared.device,&artifact,129).is_err());
+        let mut device=prepared.device.clone();device.serial="other-physical".to_owned();assert!(prepared_artifact_admission(&prepared,&device,&artifact,128).is_err());
+    }
+    #[test]
+    fn prepared_lifecycle_consumption_never_rebases_stable_product_epoch() {
+        let prepared=parse_prepared_install(&prepared_fixture()).unwrap();
+        let pristine=ProductObservation {epoch:prepared.epoch.clone(),stopped:true,not_launched:true};prepared_observation_admission(&prepared,&pristine,true).unwrap();
+        let consumed=ProductObservation {stopped:false,not_launched:false,..pristine.clone()};
+        assert!(prepared_observation_admission(&prepared,&consumed,true).is_err());prepared_observation_admission(&prepared,&consumed,false).unwrap();
+        for field in ["uid","path","first-install","data","ce","version","version-name","default-process","launcher","user-policy"] {
+            let mut changed=consumed.clone();
+            match field {
+                "uid"=>changed.epoch.record.uid+=1,"path"=>changed.epoch.record.path=Some("/data/app/replaced/base.apk".to_owned()),
+                "first-install"=>changed.epoch.ownership.first_install_time="later".to_owned(),"data"=>changed.epoch.ownership.data_dir="/data/other".to_owned(),
+                "ce"=>{changed.epoch.user.insert("ceDataInode".to_owned(),"456".to_owned());},
+                "version"=>changed.epoch.version_code="2".to_owned(),"version-name"=>changed.epoch.version_name="other".to_owned(),
+                "default-process"=>changed.epoch.default_process="other".to_owned(),"launcher"=>changed.epoch.launcher=format!("{APP}/Other"),
+                "user-policy"=>{changed.epoch.user.insert("enabled".to_owned(),"2".to_owned());},_=>unreachable!(),
+            }
+            assert!(prepared_observation_admission(&prepared,&changed,false).is_err(),"{field}");
+        }
+    }
+    #[test]
+    fn prepared_public_pm_epoch_requires_exact_fields_and_only_lifecycle_is_consumed() {
+        let fixture=prepared_fixture();let prepared=parse_prepared_install(&fixture).unwrap();let dump=prepared_pm_dump(&fixture);
+        let parsed=product_observation_fields(&dump,&prepared.epoch.record,prepared.epoch.launcher.clone()).unwrap();prepared_observation_admission(&prepared,&parsed,true).unwrap();
+        let consumed=dump.replace("stopped=true","stopped=false").replace("notLaunched=true","notLaunched=false");
+        let parsed=product_observation_fields(&consumed,&prepared.epoch.record,prepared.epoch.launcher.clone()).unwrap();prepared_observation_admission(&prepared,&parsed,false).unwrap();
+        for changed in [dump.replace("versionCode=1 minSdk=26 targetSdk=36\n",""),dump.replace("    versionName=0.1.0\n",""),dump.replace("ceDataInode=123","ceDataInode=0"),
+            dump.replace("installed=true","installed=false"),dump.replace("enabled=0","enabled=0 extraUnknown=1")] {
+            assert!(product_observation_fields(&changed,&prepared.epoch.record,prepared.epoch.launcher.clone()).is_err());
+        }
+    }
+    #[test]
+    fn current_usb_admission_requires_globally_one_authorized_device_and_allows_reconnect() {
+        let header="List of devices attached\n";
+        let primary="owned-physical  device usb:1-4 product:owned model:Owned device:owned transport_id:15";
+        let with_unavailable=format!("{header}{primary}\noffline-physical offline transport_id:16\nuntrusted-physical unauthorized usb:1-5 transport_id:17\n");
+        validate_current_usb_device(&with_unavailable,"owned-physical").unwrap();
+        let reconnected=format!("{header}owned-physical    device usb:2-7 product:owned model:Owned device:owned transport_id:99\n");
+        validate_current_usb_device(&reconnected,"owned-physical").unwrap();
+        for extra in ["second-physical device usb:1-6 transport_id:18","10.0.0.2:5555 device product:owned transport_id:18","emulator-5554 device product:sdk transport_id:18"] {
+            assert!(validate_current_usb_device(&format!("{header}{primary}\n{extra}\n"),"owned-physical").is_err());
+        }
+        for inventory in [format!("{header}{primary}\n"),with_unavailable,reconnected] {
+            assert!(validate_current_usb_device(&inventory,"other-physical").is_err());
+        }
+        for inventory in [format!("{header}owned-physical device product:owned transport_id:15\n"),
+            format!("{header}owned-physical device usb: transport_id:15\n"),format!("{header}owned-physical offline transport_id:15\n"),
+            format!("{header}{primary}\nowned-physical offline transport_id:16\n"),format!("{header}emulator-5554 device usb:1-4 transport_id:15\n"),
+            "owned-physical device usb:1-4\n".to_owned(),"x".repeat(65537)] {
+            assert!(validate_current_usb_device(&inventory,"owned-physical").is_err());
+        }
+    }
+    #[test]
+    fn post_baseline_current_epoch_admission_refuses_public_pm_changes_but_allows_consumed_flags() {
+        let fixture=prepared_fixture();let prepared=parse_prepared_install(&fixture).unwrap();let original=prepared_pm_dump(&fixture);
+        let consumed=original.replace("stopped=true","stopped=false").replace("notLaunched=true","notLaunched=false");
+        let current=product_observation_fields(&consumed,&prepared.epoch.record,prepared.epoch.launcher.clone()).unwrap();
+        stable_product_epoch_admission(&prepared.epoch,&current).unwrap();
+        assert!(prepared_observation_admission(&prepared,&current,true).is_err());
+        // Exercise the same post-wait production predicate, not a simulated runner or Activity.
+        for changed in [consumed.replace("ceDataInode=123","ceDataInode=456"),consumed.replace("versionCode=1 ","versionCode=2 "),
+            consumed.replace("versionName=0.1.0","versionName=0.2.0"),consumed.replace("2026-01-01 00:00:00","2026-01-02 00:00:00"),
+            consumed.replace("enabled=0","enabled=2"),consumed.replace(&format!("/data/user/0/{APP}"),&format!("/data/user_de/0/{APP}"))] {
+            let current=product_observation_fields(&changed,&prepared.epoch.record,prepared.epoch.launcher.clone()).unwrap();
+            assert!(stable_product_epoch_admission(&prepared.epoch,&current).is_err());
+        }
+        let mut replaced=prepared.epoch.record.clone();replaced.path=Some("/data/app/replaced/base.apk".to_owned());
+        let current=product_observation_fields(&consumed,&replaced,prepared.epoch.launcher.clone()).unwrap();
+        assert!(stable_product_epoch_admission(&prepared.epoch,&current).is_err());
+        let current=product_observation_fields(&consumed,&prepared.epoch.record,format!("{APP}/OtherActivity")).unwrap();
+        assert!(stable_product_epoch_admission(&prepared.epoch,&current).is_err());
+    }
+    #[test]
+    fn prepared_record_reader_is_sealed_hash_pinned_duplicate_strict_and_permanently_latched() {
+        let parent=fs::canonicalize(std::env::temp_dir()).unwrap();let root=parent.join(format!("goatr-prepared-{}",Uuid::random().0));fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path=root.join("record.json");let bytes=serde_json::to_vec(&prepared_fixture()).unwrap();let expected=digest_text(std::str::from_utf8(&bytes).unwrap());
+        parse_pinned_prepared_bytes(&bytes,&expected).unwrap();assert!(parse_pinned_prepared_bytes(&bytes,&"0".repeat(64)).is_err());
+        fs::write(&path,&bytes).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(read_prepared_install(&path,&"0".repeat(64)).is_err());
+        if uid()==1000 {
+            let (_,pin)=read_prepared_install(&path,&expected).unwrap();let inputs=vec![pin];let mut failed=false;
+            recheck_product_inputs(&inputs,Some(&mut failed)).unwrap();
+            let moved=root.with_file_name(format!("goatr-prepared-moved-{}",Uuid::random().0));fs::rename(&root,&moved).unwrap();
+            assert!(recheck_product_inputs(&inputs,Some(&mut failed)).is_err());fs::rename(&moved,&root).unwrap();recheck_inputs(&inputs).unwrap();
+            assert!(recheck_product_inputs(&inputs,Some(&mut failed)).is_err());assert!(finish_authorization(failed,"FINISH ORIGINAL").is_none());
+        }else{assert!(read_prepared_install(&path,&expected).is_err());}
+        let duplicate=format!("{{\"version\":1,{}",std::str::from_utf8(&bytes).unwrap().strip_prefix('{').unwrap());
+        assert!(goatr::native_json::parse(duplicate.as_bytes(),goatr::native_json::REGISTRY).is_err());
+        assert!(parse_pinned_prepared_bytes(duplicate.as_bytes(),&digest_text(&duplicate)).is_err());
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();assert!(read_prepared_install(&path,&expected).is_err());
+        fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
+    }
+    #[tokio::test]
+    async fn private_control_reply_matches_android_big_endian_length_and_exact_json_without_trailer() {
+        timeout(Duration::from_secs(5),async {
+            let listener=TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await.unwrap();
+            let (connected,accepted)=tokio::join!(TcpStream::connect(listener.local_addr().unwrap()),listener.accept());
+            let mut receiver=connected.unwrap();let (mut sender,_)=accepted.unwrap();
+            let reply=json!({"kind":"wait","sequence":0});let expected=serde_json::to_vec(&reply).unwrap();
+            let write=async {
+                control_reply(&mut sender,&reply).await.unwrap();
+                sender.shutdown().await.unwrap();
+            };
+            let read=async {
+                let mut header=[0u8;4];receiver.read_exact(&mut header).await.unwrap();
+                let length=u32::from_be_bytes(header) as usize;
+                // Android readInt admission must precede allocation, including with the broken writer.
+                assert!((2..=65536).contains(&length),"private reply is not an Android bounded big-endian frame: {length}");
+                assert_eq!(length,expected.len());
+                let mut payload=vec![0;length];receiver.read_exact(&mut payload).await.unwrap();
+                assert_eq!(payload,expected);assert_eq!(serde_json::from_slice::<Value>(&payload).unwrap(),reply);
+                let mut trailer=[0u8;1];assert_eq!(receiver.read(&mut trailer).await.unwrap(),0,"private reply has a newline or other trailer");
+            };
+            tokio::join!(write,read);
+        }).await.expect("owned private-control framing exchange exceeded its deadline");
+    }
+    #[tokio::test]
+    async fn private_control_reply_accepts_maximum_and_refuses_invalid_bounds_before_header() {
+        timeout(Duration::from_secs(6),async {
+            let (mut writer,mut reader)=tokio::io::duplex(65540);let value=json!("x".repeat(65534));
+            control_reply(&mut writer,&value).await.unwrap();writer.shutdown().await.unwrap();
+            let mut header=[0;4];reader.read_exact(&mut header).await.unwrap();assert_eq!(u32::from_be_bytes(header),65536);
+            let mut payload=vec![0;65536];reader.read_exact(&mut payload).await.unwrap();assert_eq!(serde_json::from_slice::<Value>(&payload).unwrap(),value);
+            let mut trailer=[0];assert_eq!(reader.read(&mut trailer).await.unwrap(),0);
+            for value in [json!(0),json!("x".repeat(65535))] {
+                let (mut writer,mut reader)=tokio::io::duplex(16);
+                assert!(control_reply(&mut writer,&value).await.is_err());writer.shutdown().await.unwrap();
+                let mut byte=[0];assert_eq!(reader.read(&mut byte).await.unwrap(),0,"invalid response emitted a partial header");
+            }
+        }).await.expect("bounded frame test expired");
+    }
+    #[tokio::test]
+    async fn private_control_reply_truncated_peer_is_an_error_and_erasure_uses_owned_bytes() {
+        timeout(Duration::from_secs(6),async {
+            let (mut writer,mut reader)=tokio::io::duplex(4);let reply=json!({"kind":"wait","sequence":0});
+            let write=async{control_reply(&mut writer,&reply).await};
+            let truncate=async move{let mut prefix=[0;2];reader.read_exact(&mut prefix).await.unwrap();drop(reader);prefix};
+            let (written,prefix)=tokio::join!(write,truncate);assert!(written.is_err());assert_eq!(prefix,[0,0]);
+            let mut owned=ControlReplyBytes(Vec::with_capacity(65536));io::Write::write_all(&mut owned,b"owned private response").unwrap();
+            erase_control_reply(&mut owned.0);assert!(owned.0.iter().all(|byte|*byte==0));
+        }).await.expect("truncated private frame test expired");
+    }
+    #[tokio::test]
+    async fn private_control_reply_backpressure_keeps_the_existing_five_second_timeout() {
+        let (mut writer,_unread)=tokio::io::duplex(1);let reply=json!({"kind":"wait"});
+        let result=timeout(Duration::from_secs(6),control_reply(&mut writer,&reply)).await.expect("control reply extended its original timeout");
+        assert!(result.is_err());
+    }
     use std::os::{fd::{AsRawFd,FromRawFd},unix::{net::UnixStream as FileWakeChannel,process::CommandExt}};
     struct FileWakeFixtureChild(std::process::Child);
     impl FileWakeFixtureChild {

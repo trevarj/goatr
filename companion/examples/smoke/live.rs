@@ -7431,10 +7431,16 @@ fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     if !args.get_flag("physical-mvp") {
         if args.get_one::<String>("expected-config-sha256").is_some(){return Err(failure("independent seed config pin is physical-mvp only"));}
         if args.get_flag("physical-file-wake")||args.get_one::<String>("expected-controller-sha256").is_some(){return Err(failure("FileWake controller profile and pin are physical-mvp only"));}
+        if args.get_one::<PathBuf>("prepared-fresh-install").is_some()||args.get_one::<String>("expected-prepared-install-sha256").is_some(){return Err(failure("prepared install inputs are physical-mvp only"));}
         return Ok(());
     }
     if !args.get_flag("physical-file-wake")||args.get_one::<String>("expected-controller-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))) {
         return Err(prerequisite("independent_controller_file_wake_pin_unavailable"));
+    }
+    match (args.get_one::<PathBuf>("prepared-fresh-install"),args.get_one::<String>("expected-prepared-install-sha256")) {
+        (None,None)=>{},
+        (Some(_),Some(hash)) if hash.len()==64&&hash.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))=>{},
+        _=>return Err(failure("prepared install requires a record and independent lowercase64 SHA256 pair")),
     }
     require_shared_backends(args).map_err(|_|failure("physical-mvp requires exactly one OMP and one Codex backend"))?;
     if args.value_source("api")==Some(clap::parser::ValueSource::CommandLine) {
@@ -7482,6 +7488,10 @@ fn physical_host_preflight_selection(args:&clap::ArgMatches)->io::Result<Option<
 }
 fn arguments_base() -> Command {
     Command::new("smoke")
+        .arg(Arg::new("prepared-fresh-install").long("prepared-fresh-install").value_parser(value_parser!(PathBuf))
+            .requires_all(["physical-mvp","expected-prepared-install-sha256"]).help("Explicit sealed0400 owned fresh-install creator record; skips ONLY the already-owned PRODUCT install, never baseline/runtime"))
+        .arg(Arg::new("expected-prepared-install-sha256").long("expected-prepared-install-sha256")
+            .requires_all(["physical-mvp","prepared-fresh-install"]).help("Independent lowercase64 creator-record pin, not measured candidate authority"))
         .arg(Arg::new("physical-file-wake").long("physical-file-wake").action(ArgAction::SetTrue)
             .requires_all(["physical-mvp","expected-controller-sha256"])
             .help("Explicit full physical private file-EP Wake profile for BOTH controller and Goatr; not ambient/zero fallback"))
@@ -7504,7 +7514,7 @@ fn arguments_base() -> Command {
                 "codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
                 "development-continuity","development-owner-feedback","development-android-only",
                 "keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs"])
-            .help("Fresh-only PRODUCT stock BOTH-provider physical MVP: prove no active or -u PRODUCT record, update same-signer TEST, install PRODUCT once without replacement, then camera/human/native-row ownership; no retained-product fallback"))
+            .help("Stock BOTH-provider physical MVP: explicit genuine PRODUCT absence OR pinned owned-prepared fresh install; same-signer TEST update and full camera/baseline/observer chain, no arbitrary installed-app adoption"))
         .arg(Arg::new("background").long("background").value_parser(["persistent","ntfy"])
             .requires_all([
                 "backend",
@@ -14549,6 +14559,7 @@ mod tests {
             "--physical-relay-ephemeral","--development-continuity","--development-owner-feedback","--development-android-only",
             "--keep-foreground-for-feedback","--defer-retention-crossing","--admin-socket=/private/socket","--disposable-uid=1901",
             "--project-read-seed-pack=/private/pack","--review-fixture","--owned-mcp-stdio=/private/lease",
+            "--prepared-fresh-install=/private/creator.json","--expected-prepared-install-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--physical-host-preflight","--physical-host-wake-preflight",
             "--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=1",
             "--physical-host-wake-preflight=true","--physical-host-wake-preflight=false","--physical-host-wake-preflight=1"] {
@@ -14605,6 +14616,31 @@ mod tests {
             let mut invalid=args.iter().filter(|arg|!arg.starts_with("--backend=")).cloned().collect::<Vec<_>>();
             invalid.extend(providers.into_iter().map(str::to_owned));
             let parsed=feedback_arguments(arguments_base()).try_get_matches_from(invalid).unwrap();assert!(require_shared_backends(&parsed).is_err());
+        }
+    }
+    #[test]
+    fn prepared_install_cli_is_an_explicit_physical_only_pair_not_an_adoption_default() {
+        let base=physical_mvp_args();let mut valid=base.clone();valid.extend(["--prepared-fresh-install=/private/creator.json".to_owned(),format!("--expected-prepared-install-sha256={}","a".repeat(64))]);
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&valid).unwrap();physical_mode_environment(&parsed).unwrap();
+        assert!(parsed.get_one::<PathBuf>("prepared-fresh-install").is_some());
+        let absent=feedback_arguments(arguments_base()).try_get_matches_from(&base).unwrap();physical_mode_environment(&absent).unwrap();assert!(absent.get_one::<PathBuf>("prepared-fresh-install").is_none());
+        for extra in [vec!["--prepared-fresh-install=/private/creator.json".to_owned()],vec![format!("--expected-prepared-install-sha256={}","a".repeat(64))],
+            vec!["--prepared-fresh-install=/private/creator.json".to_owned(),format!("--expected-prepared-install-sha256={}","A".repeat(64))],
+            vec!["--prepared-fresh-install=/private/creator.json".to_owned(),"--expected-prepared-install-sha256=short".to_owned()]] {
+            let mut bad=base.clone();bad.extend(extra);assert!(feedback_arguments(arguments_base()).try_get_matches_from(bad).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()));
+        }
+        for mut other in [host_preflight_args(false),host_preflight_args(true),background_args("persistent"),background_args("ntfy"),
+            vec!["smoke".to_owned(),"--evidence-dir=/private/fresh".to_owned()]] {
+            other.extend(["--prepared-fresh-install=/private/creator.json".to_owned(),format!("--expected-prepared-install-sha256={}","a".repeat(64))]);
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(other).map_or(true,|parsed| {
+                match physical_host_preflight_selection(&parsed){Err(_)=>true,Ok(Some(_))=>false,Ok(None)=>physical_mode_environment(&parsed).is_err()}
+            }));
+        }
+        for selector in ["--prepared-fresh-install=/private/creator.json","--expected-prepared-install-sha256=bad"] {
+            for shortcut in ["--owned-mcp-stdio","--review-fixture","--terminal-only"] {
+                let args=["smoke",shortcut,selector];assert!(args.iter().any(|arg|crate::early_live_argument(std::ffi::OsStr::new(arg))));
+                assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
+            }
         }
     }
     #[test]
