@@ -94,18 +94,6 @@ fn frozen_input(path:&Path,expected:&str)->io::Result<(PathBuf,File,fs::Metadata
     if !hex64(expected)||sha!=expected{return Err(failure("physical held original input does not match its independent caller SHA-256"));}
     Ok(pin)
 }
-fn frozen_old_audit(path:&Path,expected:&str)->io::Result<((PathBuf,File,fs::Metadata),Vec<u8>)> {
-    goatr::config::absolute(path)?;
-    if !hex64(expected)||fs::canonicalize(path).map_err(|_|prerequisite("independent_old_product_audit_unavailable"))?!=path{return Err(prerequisite("independent_old_product_audit_pin_or_path_unavailable"));}
-    let parent=path.parent().ok_or_else(||failure("old product audit has no private parent"))?;private_dir(parent,false)?;let parent_before=fs::symlink_metadata(parent)?;
-    let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(path)?;let original=file.metadata()?;
-    if !original.is_file()||original.uid()!=uid()||original.mode()&0o7777!=0o400||original.nlink()!=1||original.len()>65536{return Err(prerequisite("independent_old_product_audit_not_private_immutable"));}
-    let mut bytes=Vec::with_capacity(original.len() as usize);(&mut file).take(65537).read_to_end(&mut bytes)?;
-    let pin=(path.to_path_buf(),file,original);recheck_inputs(std::slice::from_ref(&pin))?;private_dir(parent,false)?;
-    use sha2::{Digest,Sha256};
-    if complete_stamp(&parent_before)!=complete_stamp(&fs::symlink_metadata(parent)?)||bytes.len()>65536||hex(&Sha256::digest(&bytes))!=expected{return Err(prerequisite("independent_old_product_audit_pin_or_identity_changed"));}
-    Ok((pin,bytes))
-}
 
 fn object<'a>(value: &'a Value, fields: &[&str]) -> io::Result<&'a serde_json::Map<String, Value>> {
     let map = value.as_object().ok_or_else(|| failure("physical report is not an object"))?;
@@ -189,8 +177,31 @@ async fn output(mut command: AsyncCommand, limit: usize, deadline: Duration) -> 
 }
 fn text(bytes: &[u8]) -> io::Result<&str> { std::str::from_utf8(bytes).map_err(|_| failure("physical command output is not UTF-8")) }
 
+struct HostAuthority {
+    _socket:OwnedFd,
+    executable:File,
+    caller:ProcessEvidence,
+    manager:ProcessEvidence,
+    facts:Value,
+}
+fn controller_environment(unsandboxed:bool,sandboxed:bool)->io::Result<()> {
+    if unsandboxed||sandboxed{return Err(prerequisite("physical controller requires the direct authorized host context, not an inherited sandbox/unsandboxed override"));}
+    Ok(())
+}
+fn same_host_namespace_group(caller:&ProcessEvidence,manager:&ProcessEvidence)->bool {
+    caller.linux_boot_id==manager.linux_boot_id&&caller.namespaces.pid==manager.namespaces.pid
+        &&caller.namespaces.mount==manager.namespaces.mount&&caller.namespaces.user==manager.namespaces.user
+        &&!caller.namespaces.nspids.is_empty()&&caller.namespaces.nspids.len()==manager.namespaces.nspids.len()
+}
+fn recheck_host_processes(caller:&ProcessEvidence,manager:&ProcessEvidence)->io::Result<()> {
+    if caller.pid!=std::process::id()||herdr::process_evidence(caller.pid)?!=*caller||herdr::process_evidence(manager.pid)?!=*manager
+        ||!same_host_namespace_group(caller,manager){return Err(failure("physical original caller/manager process or namespace authority changed"));}
+    Ok(())
+}
 /// Qualification only: no starting/replacing a manager and no capability or namespace changes.
-fn original_host_authority() -> io::Result<(OwnedFd,File,ProcessEvidence,Value)> {
+fn original_host_authority() -> io::Result<HostAuthority> {
+    controller_environment(std::env::var_os("OMP_UNSANDBOXED").is_some(),std::env::var_os("AGENT_SANDBOXED").is_some())?;
+    let caller=herdr::process_evidence(std::process::id())?;dev_continuity::zero_native_caps(&caller)?;
     if unsafe { libc::geteuid() } != 1000 || std::env::consts::ARCH != "x86_64" || std::env::consts::OS != "linux" {
         return Err(failure("physical original-host prerequisite requires the qualified Linux UID 1000 host"));
     }
@@ -222,8 +233,7 @@ fn original_host_authority() -> io::Result<(OwnedFd,File,ProcessEvidence,Value)>
         return Err(failure("physical original-host manager socket changed during qualification"));
     }
     let manager = goatr::herdr::process_evidence(peer.pid as u32)?;
-    let caller = goatr::herdr::process_evidence(std::process::id())?;
-    if manager.namespaces != caller.namespaces { return Err(failure("physical original-host manager namespace authority is unavailable")); }
+    if !same_host_namespace_group(&caller,&manager){return Err(failure("physical original-host manager namespace authority is unavailable"));}
     let manager_exe = protected_tool(&fs::read_link(format!("/proc/{}/exe", peer.pid))?)?;
     if manager_exe.file_name().and_then(|name| name.to_str()) != Some("systemd") {
         return Err(failure("physical original-host manager executable is not systemd"));
@@ -236,8 +246,9 @@ fn original_host_authority() -> io::Result<(OwnedFd,File,ProcessEvidence,Value)>
         let tool = resolve_tool(name)?;
         tools.insert(name, json!({"path":tool,"sha256":binary_sha256(&tool)?}));
     }
+    recheck_host_processes(&caller,&manager)?;dev_continuity::zero_native_caps(&caller)?;
     let facts=json!({"uid":1000,"manager":manager,"managerExecutable":manager_exe,"socketDevice":before.dev(),"socketInode":before.ino(),"tools":tools,"caller":caller,"mutation":false});
-    Ok((stream,manager_file,manager,facts))
+    Ok(HostAuthority {_socket:stream,executable:manager_file,caller,manager,facts})
 }
 
 #[derive(Clone)]
@@ -325,7 +336,7 @@ impl PhysicalAdb {
 }
 
 #[derive(Clone)]
-struct Artifact { path: PathBuf, sha256: String, signer: String, package: String, debug: bool, startup:Option<Value> }
+struct Artifact { path: PathBuf, sha256: String, signer: String, package: String, debug: bool }
 #[derive(Debug)]
 struct ManifestNode { kind: String, indent: usize, attributes: BTreeMap<String, String> }
 fn manifest_nodes(value: &str) -> io::Result<Vec<ManifestNode>> {
@@ -414,7 +425,6 @@ async fn qualify_artifact(path: &Path, expected_sha: &str, sdk: &Path, package: 
     recheck_inputs(pins)?;let manifest_bytes = output(manifest_command, 1_048_576, Duration::from_secs(30)).await?;recheck_inputs(pins)?;
     let nodes = manifest_nodes(text(&manifest_bytes)?)?;
     if matches!(package,APP|TEST){packaged_process_manifest(&nodes,package)?;}
-    let mut startup=None;
     if test {
         packaged_instrumentations(&nodes)?;
         let required = ["Lio/github/trevarj/goatr/OwnedInstrumentationRunner;", "Lio/github/trevarj/goatr/OwnedUiAutomationRunner;", "Lio/github/trevarj/goatr/PhysicalMvpObserver;", "Lio/github/trevarj/goatr/PhysicalMvpPlatform;",
@@ -446,35 +456,8 @@ async fn qualify_artifact(path: &Path, expected_sha: &str, sdk: &Path, package: 
             actual.insert(node.attributes.get("android:name").map(String::as_str).ok_or_else(|| failure("startup initializer has no name"))?);
         }
         if actual!=expected { return Err(failure("physical product APK startup initializer closure changed")); }
-        startup=Some(json!({"provider":{"name":"androidx.startup.InitializationProvider","authority":format!("{APP}.androidx-startup"),"exported":false,"enabled":true},"initializers":actual.into_iter().collect::<Vec<_>>()}));
     }
-    recheck_inputs(pins)?;Ok(Artifact {path:pin.0,sha256,signer,package:package.to_owned(),debug,startup})
-}
-fn old_product_audit(value:&Value,old:&Artifact)->io::Result<()> {
-    object(value,&["version","kind","package","apkSha256","signerSha256","provider","initializers","aars"])?;
-    if unsigned(value,"version")?!=1||string(value,"kind")?!="goatr.old-product.startup-provider-audit"||string(value,"package")?!=APP
-        ||string(value,"apkSha256")?!=old.sha256||string(value,"signerSha256")?!=old.signer {return Err(prerequisite("independent_old_product_audit_identity_mismatch"));}
-    let startup=old.startup.as_ref().ok_or_else(||failure("captured old APK has no qualified startup manifest facts"))?;
-    object(&value["provider"],&["name","authority","exported","enabled"])?;
-    if value["provider"]!=startup["provider"]||value["initializers"]!=startup["initializers"] {return Err(prerequisite("independent_old_product_audit_provider_mismatch"));}
-    let mut aars=MVP_AARS.iter().filter(|(group,_,_)|group.starts_with("androidx.")).map(|(group,coordinate,sha)|json!({"coordinate":format!("{group}:{}",coordinate.replace('/',":")),"sha256":sha})).collect::<Vec<_>>();
-    aars.sort_by(|a,b|a["coordinate"].as_str().cmp(&b["coordinate"].as_str()));
-    for aar in array(value,"aars",4)?{object(aar,&["coordinate","sha256"])?;}
-    if value["aars"]!=json!(aars){return Err(prerequisite("independent_old_product_audit_dependency_binding_unavailable"));}
-    Ok(())
-}
-fn qualify_old_product(args:&clap::ArgMatches,old:&Artifact,new:&Artifact,audit_bytes:Option<&[u8]>)->io::Result<Value> {
-    let path=args.get_one::<PathBuf>("old-product-audit");let expected=args.get_one::<String>("expected-old-product-audit-sha256");
-    match (path,expected) {
-        (None,None) if old.sha256==new.sha256&&old.signer==new.signer&&old.startup==new.startup=>Ok(json!({"kind":"same-independent-new-product-artifact","apkSha256":old.sha256,"signerSha256":old.signer,"providerClosure":new.startup})),
-        (Some(path),Some(expected))=>{
-            let bytes=audit_bytes.ok_or_else(||prerequisite("independent_old_product_audit_held_input_unavailable"))?;
-            let value=goatr::native_json::parse(bytes,goatr::native_json::REGISTRY).map_err(|_|failure("old product audit is not strict bounded JSON"))?;
-            old_product_audit(&value,old)?;
-            Ok(json!({"path":path,"sha256":expected,"independentlyAuditedFacts":value}))
-        }
-        _=>Err(prerequisite("independent_old_product_provider_audit_unavailable")),
-    }
+    recheck_inputs(pins)?;Ok(Artifact {path:pin.0,sha256,signer,package:package.to_owned(),debug})
 }
 
 fn provider_dependency_proof() -> io::Result<Value> {
@@ -518,6 +501,48 @@ fn digest_text(text:&str) -> String {
     hex(&Sha256::digest(text.as_bytes()))
 }
 impl RetainedFacts {
+    fn fresh_uninitialized(&self)->io::Result<()> {
+        if self.database_exists||!self.hosts.is_empty()||!self.orphans.as_array().is_some_and(Vec::is_empty)||!self.preferences.is_empty()
+            ||!self.aliases.is_empty()||self.alias_sha256!=digest_text("")||self.service_requested||self.service_requested_present||self.run_label_collision
+            ||self.connector["databaseExists"]!=false||self.connector["legacyFilePresent"]!=false
+            ||!self.key_files["files"].as_array().is_some_and(Vec::is_empty) {
+            return Err(prerequisite("physical fresh install contains unexpected Goatr state"));
+        }
+        validate_database(&self.database,false)?;validate_connector(&self.connector)?;validate_key_files(&self.key_files)?;
+        Ok(())
+    }
+    fn fresh_empty(&self)->io::Result<()> {
+        self.fresh_uninitialized()?;
+        if !self.key_files["directory"].is_null(){return Err(prerequisite("physical fresh install already has a Goatr key directory"));}
+        Ok(())
+    }
+    fn constructor_ready(&self,ready:&Self,uid:u32)->io::Result<()> {
+        self.fresh_empty()?;ready.fresh_uninitialized()?;
+        if ready.key_files["directory"].is_null()||unsigned(&ready.key_files["directory"],"uid")?!=u64::from(uid) {
+            return Err(failure("physical normal Application constructor did not create only its owned empty key directory"));
+        }
+        Ok(())
+    }
+    fn admitted_first_open(&self,constructor:&Self,opened:&Self,uid:u32)->io::Result<()> {
+        self.constructor_ready(constructor,uid)?;
+        // The raw reader admits only android_metadata globally; every other row has a validated host/orphan group.
+        if !opened.database_exists||!opened.hosts.is_empty()||!opened.orphans.as_array().is_some_and(Vec::is_empty)||!opened.preferences.is_empty()
+            ||opened.service_requested||opened.service_requested_present||opened.run_label_collision||opened.connector!=self.connector
+            ||opened.key_files["directory"]!=constructor.key_files["directory"]||opened.aliases.len()!=1
+            ||opened.aliases.first().map(String::as_str)!=Some("goatr.installation.endpoint")
+            ||opened.alias_sha256!=digest_text("goatr.installation.endpoint")
+            ||DB8_QUIESCENCE.iter().any(|name|opened.database["quiescence"][*name].as_u64()!=Some(0)) {
+            return Err(failure("physical first open is not the exact empty DB8/locale plus installation endpoint transition"));
+        }
+        validate_database(&opened.database,true)?;validate_key_files(&opened.key_files)?;
+        let files=key_file_index(&opened.key_files)?;
+        if files.len()!=2||!files.contains_key("goatr.installation.endpoint.gcm")||!files.contains_key("goatr.installation.endpoint.gcm.initialized")
+            ||files.values().any(|file|file["uid"].as_u64()!=Some(u64::from(uid)))
+            ||files["goatr.installation.endpoint.gcm.initialized"]["sha256"]!=digest_text("GAI1") {
+            return Err(failure("physical first open contains missing, foreign or unrelated endpoint material"));
+        }
+        Ok(())
+    }
     fn decode(value:&Value) -> io::Result<Self> {
         let facts=Self::deserialize(value).map_err(|_| failure("physical raw retained baseline has an unknown schema"))?;
         if facts.schema!=1 || facts.hosts.len()>129 || facts.preferences.len()>8192 || facts.aliases.len()>1026 || !hex64(&facts.alias_sha256) { return Err(failure("physical retained baseline is unbounded")); }
@@ -566,11 +591,11 @@ impl RetainedFacts {
         Ok(())
     }
     fn preserved_with_private_host(&self, after:&Self, private:&str, service_requested:bool, normalize_owned_service_key:bool) -> io::Result<()> {
+        if !self.database_exists{return Err(failure("physical private comparison requires the separately admitted immutable first-open reference"));}
         let retained:Vec<_>=after.hosts.iter().filter(|host|host.host!=private).cloned().collect();
         let selected=after.hosts.iter().find(|host|host.host==private).ok_or_else(|| failure("physical private host is absent from retained comparison"))?;
-        if self.database_exists&&(!after.database_exists||self.database["schemaSha256"]!=after.database["schemaSha256"]||self.database["globalSha256"]!=after.database["globalSha256"])
+        if !after.database_exists||self.database["schemaSha256"]!=after.database["schemaSha256"]||self.database["globalSha256"]!=after.database["globalSha256"]
             ||self.orphans!=after.orphans {return Err(failure("physical retained DB8 existence/schema/global/orphan rows changed"));}
-        if !self.database_exists&&after.database_exists&&!self.hosts.is_empty(){return Err(failure("physical existing retained hosts cannot adopt a newly created database"));}
         key_files_preserved(self,after,private)?;
         let private_connector=connector_preserved(&self.connector,&after.connector,private)?;
         let mut expected_aliases:BTreeSet<_>=self.aliases.iter().chain(selected.key_aliases.iter()).map(String::as_str).collect();
@@ -606,19 +631,6 @@ fn validate_database(value:&Value,exists:bool) -> io::Result<()> {
         object(&value["quiescence"],&DB8_QUIESCENCE)?;
         for name in DB8_QUIESCENCE{unsigned(&value["quiescence"],name)?;}
     }else if !checks.is_empty(){return Err(failure("physical absent DB8 reports first-open row facts"));}
-    Ok(())
-}
-fn initialized_retained_phone(facts:&RetainedFacts) -> io::Result<()> {
-    if !facts.database_exists||facts.hosts.is_empty(){return Err(prerequisite("initialized_retained_phone_unavailable"));}
-    if DB8_QUIESCENCE.iter().any(|name|facts.database["quiescence"][*name].as_u64()!=Some(0)){return Err(prerequisite("retained_phone_first_open_not_quiescent"));}
-    let files=key_file_index(&facts.key_files)?;
-    if !files.contains_key("goatr.installation.endpoint.gcm")||!files.contains_key("goatr.installation.endpoint.gcm.initialized")
-        ||!facts.aliases.iter().any(|alias|alias=="goatr.installation.endpoint"){return Err(prerequisite("initialized_retained_endpoint_material_unavailable"));}
-    for host in &facts.hosts {for alias in &host.key_aliases {
-        if goatr_key_alias(&format!("{alias}.gcm")).is_some()&&(!files.contains_key(format!("{alias}.gcm").as_str())||!files.contains_key(format!("{alias}.gcm.initialized").as_str())) {
-            return Err(prerequisite("retained_host_encrypted_material_unavailable"));
-        }
-    }}
     Ok(())
 }
 fn goatr_key_alias(name:&str) -> Option<&str> {
@@ -993,10 +1005,10 @@ impl Observer {
     }
 }
 
-fn recheck_original_host(authority:&(OwnedFd,File,ProcessEvidence,Value)) -> io::Result<()> {
-    let (_,held,process,facts)=authority;
-    if herdr::process_evidence(process.pid)?!=*process{return Err(failure("physical original manager PID/start/namespace changed"));}
-    let current=fs::metadata(format!("/proc/{}/exe",process.pid))?;let original=held.metadata()?;
+fn recheck_original_host(authority:&HostAuthority) -> io::Result<()> {
+    recheck_host_processes(&authority.caller,&authority.manager)?;dev_continuity::zero_native_caps(&authority.caller)?;
+    let facts=&authority.facts;
+    let current=fs::metadata(format!("/proc/{}/exe",authority.manager.pid))?;let original=authority.executable.metadata()?;
     let socket=fs::symlink_metadata("/run/user/1000/systemd/private")?;
     if (current.dev(),current.ino())!=(original.dev(),original.ino())||socket.dev()!=unsigned(facts,"socketDevice")?||socket.ino()!=unsigned(facts,"socketInode")?||socket.uid()!=1000||socket.mode()&0o777!=0o700 {
         return Err(failure("physical original protected manager authority changed"));
@@ -1266,16 +1278,17 @@ fn notification_human_fallback(api:u32,outcome:&Value)->io::Result<bool> {
 }
 fn background_noninteractive(snapshot:&Value)->bool {snapshot["foreground"]==false&&snapshot["ui"]["interactive"]==false&&snapshot["ui"]["measuredAt"].as_u64().is_some_and(|time|time>0)}
 struct Matrix {
-    adb:PhysicalAdb, observer:Observer, stock:StockRun, authority:(OwnedFd,File,ProcessEvidence,Value),
+    adb:PhysicalAdb, observer:Observer, stock:StockRun, authority:HostAuthority,
     inputs:Vec<(PathBuf,File,fs::Metadata)>,
     input_pin_failed:bool,
     run:Uuid, host:String, label:String, evidence:PathBuf, product_sha:String, public_sha:String,
     api:u32,
-    control_port:u16, baseline:RetainedFacts, paired:Option<RetainedFacts>, last_stage:&'static str,
+    control_port:u16, fresh_baseline:RetainedFacts, first_open:Option<RetainedFacts>, paired:Option<RetainedFacts>, last_stage:&'static str,
     baseline_ui:Option<Value>, baseline_network:Option<Value>, retained_keeper_baseline:Option<Value>, owned_start:Option<Uuid>, service_key_restored:bool,
 }
 impl Matrix {
     fn recheck(&mut self) -> io::Result<()> {recheck_retained_inputs(&self.inputs,&mut self.input_pin_failed)?;recheck_original_host(&self.authority)?;self.stock.recheck()}
+    fn first_open_ref(&self)->io::Result<&RetainedFacts> {self.first_open.as_ref().ok_or_else(||failure("physical immutable first-open reference has not been admitted"))}
     fn record(&self,name:&str,facts:&Value) -> io::Result<()> {
         write_json(&self.evidence.join(format!("physical-{name}-{}.json",Uuid::random().0)),&json!({"runId":self.run,"host":self.host,"productPid":self.observer.epoch.pid,
             "productStart":self.observer.epoch.start,"productApkSha256":self.product_sha,"facts":facts,"instrumentedLiveness":true,
@@ -1405,6 +1418,88 @@ fn maven_aar(group:&str,module:&str,version:&str) -> io::Result<PathBuf> {
     if matches.len()!=1{return Err(failure("physical exact resolved Maven AAR is missing or ambiguous"));}
     Ok(matches.remove(0))
 }
+#[derive(Clone,Debug,PartialEq,Eq,Serialize)]
+struct PackageRecord {package:String,uid:u32,path:Option<String>}
+#[derive(Clone,Debug,PartialEq,Eq,Serialize)]
+struct PackageOwnership {package:String,uid:u32,first_install_time:String,data_dir:String}
+fn package_records(output:&str)->io::Result<BTreeMap<String,PackageRecord>> {
+    if output.len()>65536{return Err(failure("physical package inventory exceeds its bound"));}
+    let mut records=BTreeMap::new();let mut uids=BTreeSet::new();
+    for line in output.lines().filter(|line|!line.is_empty()) {
+        let body=line.strip_prefix("package:").ok_or_else(||failure("physical package inventory has an unknown record"))?;
+        let (subject,uid_text)=body.rsplit_once(" uid:").ok_or_else(||failure("physical package inventory has no exact UID"))?;
+        if uid_text.is_empty()||uid_text.starts_with('0')||!uid_text.bytes().all(|byte|byte.is_ascii_digit()){return Err(failure("physical package UID is malformed"));}
+        let uid=uid_text.parse::<u32>().ok().filter(|uid|*uid>=10000).ok_or_else(||failure("physical package UID is malformed"))?;
+        let (path,package)=match subject.rsplit_once('=') {
+            Some((path,package))=>{
+                if !path.starts_with("/data/app/")||!path.ends_with("/base.apk")||path.len()>4096||path.chars().any(|character|character.is_control()||character.is_whitespace())
+                    ||path.split('/').skip(1).any(|part|matches!(part,""|"."|"..")){return Err(failure("physical package path is malformed or split"));}
+                (Some(path.to_owned()),package)
+            }
+            None=>(None,subject),
+        };
+        if !matches!(package,APP|TEST|VERIFY)||!uids.insert(uid){return Err(failure("physical package inventory has an unexpected subject or shared UID"));}
+        let record=PackageRecord {package:package.to_owned(),uid,path};
+        if records.insert(package.to_owned(),record).is_some(){return Err(failure("physical package inventory repeats a subject"));}
+    }
+    Ok(records)
+}
+fn coherent_packages(active:&str,retained:&str)->io::Result<BTreeMap<String,PackageRecord>> {
+    let active=package_records(active)?;let retained=package_records(retained)?;
+    if active!=retained||active.values().any(|record|record.path.is_none()){return Err(failure("physical active and retained package/path/UID evidence is ambiguous"));}
+    Ok(active)
+}
+fn fresh_product_admission(packages:&BTreeMap<String,PackageRecord>)->io::Result<()> {
+    if packages.contains_key(APP){return Err(prerequisite("physical PRODUCT is present or retained; fresh-only install refuses replacement"));}
+    Ok(())
+}
+async fn package_inventory(adb:&PhysicalAdb)->io::Result<BTreeMap<String,PackageRecord>> {
+    let active=adb.shell(&["pm","list","packages","-f","-U","--user","0",APP],65536).await?;
+    let retained=adb.shell(&["pm","list","packages","-u","-f","-U","--user","0",APP],65536).await?;
+    coherent_packages(text(&active)?,text(&retained)?)
+}
+fn package_ownership_facts(output:&str,record:&PackageRecord)->io::Result<PackageOwnership> {
+    if output.len()>262144{return Err(failure("physical package ownership exceeds its bound"));}
+    let header=format!("Package [{}] (",record.package);let lines=output.lines().collect::<Vec<_>>();
+    let starts=lines.iter().enumerate().filter(|(_,line)|line.trim_start().starts_with(&header)&&line.ends_with("):")).map(|(index,_)|index).collect::<Vec<_>>();
+    let start=match starts.as_slice(){[start]=>*start,_=>return Err(failure("physical package ownership subject is missing or ambiguous"))};
+    let indent=lines[start].len()-lines[start].trim_start().len();let mut fields=BTreeMap::new();
+    for line in lines.iter().skip(start+1).take_while(|line|line.trim().is_empty()||line.len()-line.trim_start().len()>indent) {
+        let line=line.trim();
+        for key in ["userId","appId","firstInstallTime","dataDir"] {
+            if let Some(value)=line.strip_prefix(key).and_then(|value|value.strip_prefix('=')) {
+                if value.is_empty()||value.len()>4096||value.chars().any(char::is_control)||fields.insert(key,value).is_some(){return Err(failure("physical package ownership field is malformed or repeated"));}
+            }
+        }
+    }
+    let uid=match (fields.get("userId"),fields.get("appId")){(Some(uid),None)|(None,Some(uid))=>uid.parse::<u32>().ok(),_=>None};
+    let first=fields.get("firstInstallTime").filter(|value|value.len()<=128).ok_or_else(||failure("physical package first-install identity is unavailable"))?;
+    let data=fields.get("dataDir").ok_or_else(||failure("physical package data identity is unavailable"))?;
+    if uid!=Some(record.uid)||!data.starts_with("/data/")||!data.ends_with(&format!("/{}",record.package))
+        ||data.chars().any(char::is_whitespace)||data.split('/').skip(1).any(|part|matches!(part,""|"."|"..")) {
+        return Err(failure("physical package ownership does not match the original listed UID/subject"));
+    }
+    Ok(PackageOwnership {package:record.package.clone(),uid:record.uid,first_install_time:(*first).to_owned(),data_dir:(*data).to_owned()})
+}
+async fn package_ownership(adb:&PhysicalAdb,record:&PackageRecord)->io::Result<PackageOwnership> {
+    let output=adb.shell(&["dumpsys","package",&record.package],262144).await?;
+    package_ownership_facts(text(&output)?,record)
+}
+fn test_update_admission(previous:&Artifact,candidate:&Artifact)->io::Result<()> {
+    if previous.package!=TEST||candidate.package!=TEST||previous.signer!=candidate.signer{return Err(failure("physical helper update requires the original same-signer TEST; never PRODUCT or VERIFY"));}
+    Ok(())
+}
+async fn verify_unchanged(adb:&PhysicalAdb,record:Option<&PackageRecord>,ownership:Option<&PackageOwnership>,artifact:Option<&Artifact>)->io::Result<()> {
+    let current=package_inventory(adb).await?;
+    match (record,current.get(VERIFY),ownership,artifact) {
+        (None,None,None,None)=>Ok(()),
+        (Some(original),Some(current),Some(ownership),Some(artifact)) if original==current=>{
+            if package_ownership(adb,current).await?!=*ownership||installed_hash(adb,VERIFY).await?!=artifact.sha256{return Err(failure("physical untouched VERIFY installation changed"));}
+            Ok(())
+        }
+        _=>Err(failure("physical VERIFY absence or original installation was not preserved")),
+    }
+}
 async fn installed_artifact(adb:&PhysicalAdb,sdk:&Path,package:&str,evidence:&Path,leaf:&str) -> io::Result<Artifact> {
     let paths=adb.shell(&["pm","path",package],16_384).await?;
     let lines:Vec<_>=text(&paths)?.lines().filter(|line|!line.trim().is_empty()).collect();
@@ -1427,7 +1522,12 @@ async fn installed_hash(adb:&PhysicalAdb,package:&str) -> io::Result<String> {
     let bytes=adb.shell(&["sha256sum",path],8192).await?;
     text(&bytes)?.split_whitespace().next().filter(|hash|hex64(hash)).map(str::to_owned).ok_or_else(||failure("physical installed package hash is unavailable"))
 }
-async fn install_update(adb:&PhysicalAdb,artifact:&Artifact,inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<()> {
+async fn install_test_update(adb:&PhysicalAdb,previous:&Artifact,ownership:&PackageOwnership,artifact:&Artifact,inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<()> {
+    test_update_admission(previous,artifact)?;
+    recheck_inputs(inputs)?;let packages=package_inventory(adb).await?;recheck_inputs(inputs)?;fresh_product_admission(&packages)?;
+    let record=packages.get(TEST).ok_or_else(||failure("physical original TEST disappeared; do not create a replacement helper"))?;
+    if package_ownership(adb,record).await?!=*ownership||installed_hash(adb,TEST).await?!=previous.sha256{return Err(failure("physical original helper installation changed before update"));}
+    recheck_inputs(inputs)?;
     let path=artifact.path.to_str().ok_or_else(||failure("physical APK path is not UTF-8"))?;
     recheck_inputs(inputs)?;let result=adb.invoke(&["install","-r","-t",path],65_536).await?;recheck_inputs(inputs)?;
     let installed=installed_hash(adb,&artifact.package).await?;recheck_inputs(inputs)?;
@@ -1436,36 +1536,49 @@ async fn install_update(adb:&PhysicalAdb,artifact:&Artifact,inputs:&[(PathBuf,Fi
     }
     Ok(())
 }
-fn observer_arguments(mode:&str,run:&Uuid,label:&str,host:Option<&str>,product:&Artifact,test:&Artifact,verify:&Artifact,dependency:&str,port:u16) -> BTreeMap<String,String> {
+async fn install_fresh_product(adb:&PhysicalAdb,artifact:&Artifact,inputs:&[(PathBuf,File,fs::Metadata)])->io::Result<()> {
+    if artifact.package!=APP{return Err(failure("physical fresh install subject is not PRODUCT"));}
+    recheck_inputs(inputs)?;let packages=package_inventory(adb).await?;recheck_inputs(inputs)?;fresh_product_admission(&packages)?;
+    let path=artifact.path.to_str().ok_or_else(||failure("physical PRODUCT APK path is not UTF-8"))?;
+    let result=adb.invoke(&["install","-t",path],65536).await?;recheck_inputs(inputs)?;
+    let installed=installed_hash(adb,APP).await?;recheck_inputs(inputs)?;
+    if !text(&result)?.lines().any(|line|line.trim()=="Success")||installed!=artifact.sha256{return Err(failure("physical fresh PRODUCT install failed; no replace, downgrade, clear or retry"));}
+    Ok(())
+}
+fn observer_arguments(mode:&str,run:&Uuid,label:&str,host:Option<&str>,product:&Artifact,product_uid:u32,test:&Artifact,verify:Option<&Artifact>,dependency:&str,port:u16) -> BTreeMap<String,String> {
     let mut arguments=BTreeMap::from([
-        ("physicalMvpMode".to_owned(),mode.to_owned()),("physicalMvpRunId".to_owned(),run.0.clone()),("physicalMvpHostLabel".to_owned(),label.to_owned()),
+        ("physicalMvpMode".to_owned(),mode.to_owned()),("physicalMvpFreshInstall".to_owned(),"true".to_owned()),
+        ("physicalMvpRunId".to_owned(),run.0.clone()),("physicalMvpHostLabel".to_owned(),label.to_owned()),
         ("physicalMvpExpectedSignerSha256".to_owned(),product.signer.clone()),("physicalMvpExpectedProductSha256".to_owned(),product.sha256.clone()),
-        ("physicalMvpExpectedTestSha256".to_owned(),test.sha256.clone()),("physicalMvpExpectedVerifySha256".to_owned(),verify.sha256.clone()),
-        ("physicalMvpExpectedVerifySignerSha256".to_owned(),verify.signer.clone()),("physicalMvpDependencyProof".to_owned(),dependency.to_owned()),
-        ("stockControlPort".to_owned(),port.to_string()),
+        ("physicalMvpExpectedProductUid".to_owned(),product_uid.to_string()),("physicalMvpExpectedTestSha256".to_owned(),test.sha256.clone()),
+        ("physicalMvpDependencyProof".to_owned(),dependency.to_owned()),("stockControlPort".to_owned(),port.to_string()),
     ]);
+    if let Some(verify)=verify {
+        arguments.insert("physicalMvpExpectedVerifySha256".to_owned(),verify.sha256.clone());
+        arguments.insert("physicalMvpExpectedVerifySignerSha256".to_owned(),verify.signer.clone());
+    }
     if let Some(host)=host{arguments.insert("physicalMvpHost".to_owned(),host.to_owned());}
     arguments
 }
-async fn old_baseline(adb:&PhysicalAdb,listener:&TcpListener,arguments:&BTreeMap<String,String>,run:&Uuid,dependency:&str,evidence:&Path) -> io::Result<RetainedFacts> {
+async fn fresh_baseline(adb:&PhysicalAdb,listener:&TcpListener,arguments:&BTreeMap<String,String>,run:&Uuid,product_uid:u32,dependency:&str,evidence:&Path) -> io::Result<RetainedFacts> {
     let mut instrumentation=ProductInstrumentation::start(adb,arguments,"baseline").await?;
     let epoch=instrumentation.original().await?;
-    let (mut stream,peer)=timeout(Duration::from_secs(35),listener.accept()).await.map_err(|_|failure("physical old-product raw baseline expired"))??;
+    if epoch.uid!=product_uid{return Err(failure("physical fresh baseline UID is not the installed PRODUCT"));}
+    let (mut stream,peer)=timeout(Duration::from_secs(35),listener.accept()).await.map_err(|_|failure("physical fresh-product raw baseline expired"))??;
     if !peer.ip().is_loopback(){return Err(failure("physical baseline control peer is not loopback"));}
     let (report,_)=authenticated_report(&mut stream,&epoch,run,0).await?;
     object(&report,&["kind","process","facts","dependencyProof"])?;epoch.verify(&report["process"])?;
-    if string(&report,"kind")?!="baseline"||string(&report,"dependencyProof")?!=dependency{return Err(failure("physical old-product raw baseline has the wrong admission/source proof"));}
-    let baseline=RetainedFacts::decode(&report["facts"])?;
-    if baseline.run_label_collision{return Err(failure("physical private host label already exists in the retained baseline"));}
-    write_json(&evidence.join("physical-retained-before-product-update.json"),&json!({"runId":run,"oldProductTemporaryProcess":report["process"],
+    if string(&report,"kind")?!="baseline"||string(&report,"dependencyProof")?!=dependency{return Err(failure("physical fresh-product raw baseline has the wrong admission/source proof"));}
+    let baseline=RetainedFacts::decode(&report["facts"])?;baseline.fresh_empty()?;
+    write_json(&evidence.join("physical-fresh-empty-baseline.json"),&json!({"runId":run,"freshProductTemporaryProcess":report["process"],
         "facts":baseline,"rawReadOnlyDatabase":true,"rawPreferencesReadOnly":true,"applicationOnCreateInvoked":false,"goatrRuntimeInitialized":false,
         "sessionStoreReadMethodsInvoked":false,"dependencyProof":dependency,"profileAndApplicationFileMarkersExcluded":true}))?;
     control_reply(&mut stream,&json!({"kind":"finished","runId":run,"sequence":0})).await?;drop(stream);
     let finished=instrumentation.finished().await?;
-    if finished.pid!=epoch.pid||finished.start!=epoch.start{return Err(failure("physical old-product baseline finished another process"));}
+    if finished.pid!=epoch.pid||finished.start!=epoch.start{return Err(failure("physical fresh-product baseline finished another process"));}
     // Finishing this temporary instrumentation is an explicit lifetime boundary, not continuity.
     wait_original_process_absent(adb,&epoch).await?;
-    write_json(&evidence.join("physical-old-baseline-finished.json"),&json!({"runId":run,"pid":epoch.pid,"start":epoch.start,"finished":true,"processAbsent":true,"continuityClaim":false}))?;
+    write_json(&evidence.join("physical-fresh-baseline-finished.json"),&json!({"runId":run,"pid":epoch.pid,"start":epoch.start,"finished":true,"processAbsent":true,"continuityClaim":false}))?;
     Ok(baseline)
 }
 async fn launch_product(adb:&PhysicalAdb) -> io::Result<()> {
@@ -1479,6 +1592,7 @@ async fn launch_product(adb:&PhysicalAdb) -> io::Result<()> {
 
 impl Matrix {
     async fn camera_pairing(&mut self) -> io::Result<()> {
+        let unpaired=self.observer.retained().await?;self.first_open_ref()?.before_private(&unpaired,&self.host)?;
         self.human_stage("camera-ready","On this retained phone, open Add desktop and allow the real camera. Keep private Paste empty. Point away from any invitation; the runner has not displayed its new QR yet. Do not paste/type a pairing URI.").await?;
         let camera=self.observer.snapshot(None).await?;
         if camera["pairing"]["screenPairing"]!=true||camera["pairing"]["previewPresent"]!=false{return Err(failure("physical camera stage did not start on an empty current Pairing screen"));}
@@ -1504,7 +1618,7 @@ impl Matrix {
         self.human_stage("camera-confirm-once","Review the private Goatr MVP host name and full fingerprint on the phone. Tap its actual Confirm host-wide pairing ONCE. Do not retry or paste another invitation.").await?;
         let snapshot=self.wait_snapshot("camera-authoritative-phone-pairing",None,Duration::from_secs(45),|snapshot|snapshot["hello"]==true&&snapshot["inventoryReady"]==true&&snapshot["mutationReady"]==true&&!snapshot["device"].is_null()).await?;
         let retained=self.observer.retained().await?;
-        self.baseline.preserved_with_private_host(&retained,&self.host,self.baseline.service_requested,false)?;
+        self.first_open_ref()?.preserved_with_private_host(&retained,&self.host,self.first_open_ref()?.service_requested,false)?;
         let private=retained.hosts.iter().find(|host|host.host==self.host).ok_or_else(||failure("physical camera pairing did not add the exact private host"))?;
         if private.device.is_none()||snapshot["device"].as_str()!=private.device.as_deref()||private.device.as_deref()==Some(self.stock.phone.hello.device_id.0.as_str())||!retained.run_label_collision{return Err(failure("physical new phone device/host/name/Hello identity is not independent of the helper pairing"));}
         self.record("camera-paired-retained-state",&json!({"facts":retained,"phoneDevice":private.device,"helperDeviceIsDifferent":true,"phonePairingProof":"real preview, explicit native confirmation, new retained private host/device and authenticated Hello"}))?;
@@ -1734,7 +1848,7 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
             return Err(error);
         }
     };
-    write_json(&evidence.join("physical-original-host-authority.json"),&authority.3)?;
+    write_json(&evidence.join("physical-original-host-authority.json"),&authority.facts)?;
     let binary=packaged(args)?;
     let template=args.get_one::<PathBuf>("config").ok_or_else(||failure("physical independently pinned neutral seed is missing"))?;
     let template_sha=args.get_one::<String>("expected-config-sha256").ok_or_else(||prerequisite("independent_seed_config_pin_unavailable"))?;
@@ -1745,14 +1859,9 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     let test_apk=canonical_file(args.get_one::<PathBuf>("test-apk").ok_or_else(||failure("physical frozen test APK is missing"))?)?;
     let product_sha=args.get_one::<String>("expected-apk-sha256").ok_or_else(||failure("physical product APK hash is missing"))?;
     let test_sha=args.get_one::<String>("expected-test-apk-sha256").ok_or_else(||failure("physical test APK hash is missing"))?;
-    let mut inputs=Vec::with_capacity(5);
+    let mut inputs=Vec::with_capacity(4);
     inputs.push(frozen_input(&binary,expected_binary_sha)?);inputs.push(frozen_input(&apk,product_sha)?);inputs.push(frozen_input(&test_apk,test_sha)?);
     inputs.push((template.clone(),template_file,template_metadata));
-    let audit_bytes=match (args.get_one::<PathBuf>("old-product-audit"),args.get_one::<String>("expected-old-product-audit-sha256")) {
-        (Some(path),Some(expected))=>{let (pin,bytes)=frozen_old_audit(path,expected)?;inputs.push(pin);Some(bytes)},
-        (None,None)=>None,
-        _=>return Err(prerequisite("independent_old_product_audit_argument_pair_unavailable")),
-    };
     recheck_inputs(&inputs)?;let product=qualify_artifact(&apk,product_sha,&sdk,APP,false).await?;recheck_inputs(&inputs)?;
     let test=qualify_artifact(&test_apk,test_sha,&sdk,TEST,true).await?;recheck_inputs(&inputs)?;
     if product.signer!=test.signer{return Err(failure("physical product/test artifacts do not have the same qualified signer"));}
@@ -1769,47 +1878,67 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     adb.tunnels(None).await?;recheck_inputs(&inputs)?;
     let user=adb.shell(&["am","get-current-user"],128).await?;recheck_inputs(&inputs)?;
     if text(&user)?.trim()!="0"{return Err(failure("physical retained installation must be the exact primary Android user; no profile/user switching"));}
-    let old_product=installed_artifact(&adb,&sdk,APP,evidence,"physical-old-product.apk").await?;recheck_inputs(&inputs)?;
-    let old_test=installed_artifact(&adb,&sdk,TEST,evidence,"physical-old-test.apk").await?;recheck_inputs(&inputs)?;
-    let verify=installed_artifact(&adb,&sdk,VERIFY,evidence,"physical-untouched-verify.apk").await?;recheck_inputs(&inputs)?;
+    let packages_before=package_inventory(&adb).await?;recheck_inputs(&inputs)?;fresh_product_admission(&packages_before)?;
+    let test_record=packages_before.get(TEST).ok_or_else(||prerequisite("physical residual same-signer TEST installation is required"))?;
+    let test_ownership_before=package_ownership(&adb,test_record).await?;recheck_inputs(&inputs)?;
+    let previous_test=installed_artifact(&adb,&sdk,TEST,evidence,"physical-residual-test.apk").await?;recheck_inputs(&inputs)?;
+    test_update_admission(&previous_test,&test)?;
+    let verify_record=packages_before.get(VERIFY);
+    let verify_ownership=match verify_record{Some(record)=>Some(package_ownership(&adb,record).await?),None=>None};recheck_inputs(&inputs)?;
+    let verify=match verify_record{Some(_)=>Some(installed_artifact(&adb,&sdk,VERIFY,evidence,"physical-untouched-verify.apk").await?),None=>None};recheck_inputs(&inputs)?;
     let ntfy=installed_artifact(&adb,&sdk,"io.heckel.ntfy",evidence,"physical-official-ntfy.apk").await?;recheck_inputs(&inputs)?;
-    if old_product.signer!=product.signer||old_test.signer!=test.signer{return Err(failure("physical retained debug app/test signer differs; never uninstall, clear, downgrade or replace trust"));}
     if Some(&ntfy.sha256)!=args.get_one::<String>("expected-ntfy-apk-sha256")||Some(&ntfy.signer)!=args.get_one::<String>("expected-ntfy-signer-sha256"){return Err(failure("physical installed official ntfy does not match both independently qualified pins"));}
-    let old_audit=qualify_old_product(args,&old_product,&product,audit_bytes.as_deref())?;
-    write_json(&evidence.join("physical-independent-old-product-provider-proof.json"),&old_audit)?;
     write_json(&evidence.join("physical-frozen-inputs.json"),&json!({"runId":run,"serial":adb.serial,"api":api,"abi":abi,
         "goatr":binary,"goatrSha256":expected_binary_sha,"config":template,"configSha256":template_sha,"lockSha256":transport::lock_sha256(),
         "productApk":{"path":product.path,"sha256":product.sha256,"signer":product.signer,"debuggable":product.debug},
         "testApk":{"path":test.path,"sha256":test.sha256,"signer":test.signer,"debuggable":test.debug,"instrumentations":2,"fullTestArtifact":true},
-        "oldProductSha256":old_product.sha256,"oldTestSha256":old_test.sha256,"verifySha256":verify.sha256,"verifySigner":verify.signer,
+        "startingProductAbsent":true,"previousTest":{"sha256":previous_test.sha256,"ownership":test_ownership_before},
+        "verify":verify.as_ref().map(|artifact|json!({"sha256":artifact.sha256,"signer":artifact.signer,"ownership":verify_ownership})),
         "officialNtfySha256":ntfy.sha256,"officialNtfySigner":ntfy.signer,"nativeInventory":"actual shared implementation; static only, not JNI/device acceptance"}))?;
     recheck_inputs(&inputs)?;let listener=TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await?;recheck_inputs(&inputs)?;let port=listener.local_addr()?.port();let mapping=format!("tcp:{port}");
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
-    install_update(&adb,&test,&inputs).await?;
+    install_test_update(&adb,&previous_test,&test_ownership_before,&test,&inputs).await?;
+    let after_test=package_inventory(&adb).await?;recheck_inputs(&inputs)?;fresh_product_admission(&after_test)?;
+    if package_ownership(&adb,after_test.get(TEST).ok_or_else(||failure("physical updated TEST disappeared"))?).await?!=test_ownership_before{return Err(failure("physical TEST update changed its original UID/install/data ownership"));}
+    verify_unchanged(&adb,verify_record,verify_ownership.as_ref(),verify.as_ref()).await?;recheck_inputs(&inputs)?;
+    install_fresh_product(&adb,&product,&inputs).await?;
+    let installed_packages=package_inventory(&adb).await?;recheck_inputs(&inputs)?;
+    let product_record=installed_packages.get(APP).ok_or_else(||failure("physical fresh PRODUCT did not acquire an installed identity"))?;
+    let product_ownership=package_ownership(&adb,product_record).await?;recheck_inputs(&inputs)?;
+    write_json(&evidence.join("physical-fresh-product-installed.json"),&json!({"runId":run,"package":product_record,"ownership":product_ownership,"apkSha256":product.sha256,"signerSha256":product.signer,"freshInstall":true,"replacementAuthorized":false}))?;
     adb.invoke(&["reverse","--no-rebind",&mapping,&mapping],4096).await?;recheck_inputs(&inputs)?;adb.tunnels(Some(port)).await?;recheck_inputs(&inputs)?;
-    let baseline_args=observer_arguments("baseline",&run,&label,None,&old_product,&test,&verify,&dependency_sha,port);
-    let baseline=old_baseline(&adb,&listener,&baseline_args,&run,&dependency_sha,evidence).await?;recheck_inputs(&inputs)?;
+    let baseline_args=observer_arguments("baseline",&run,&label,None,&product,product_record.uid,&test,verify.as_ref(),&dependency_sha,port);
+    let baseline=fresh_baseline(&adb,&listener,&baseline_args,&run,product_record.uid,&dependency_sha,evidence).await?;recheck_inputs(&inputs)?;
     connector_admission(&baseline,None)?;
-    initialized_retained_phone(&baseline)?;
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
     let stock=StockRun::start(args,evidence,run.clone(),&label,deployment,binary,template_sha,expected_binary_sha,&inputs).await?;recheck_inputs(&inputs)?;
-    let host=stock.phone.hello.host_id.0.clone();if !hex64(&host)||baseline.hosts.iter().any(|retained|retained.host==host){return Err(failure("physical new private companion host collides with retained authority"));}
+    let host=stock.phone.hello.host_id.0.clone();if !hex64(&host){return Err(failure("physical new private companion host identity is invalid"));}
     connector_admission(&baseline,Some(&host))?;
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
-    install_update(&adb,&product,&inputs).await?;
-    let observe_args=observer_arguments("observe",&run,&label,Some(&host),&product,&test,&verify,&dependency_sha,port);
+    if package_inventory(&adb).await?.get(APP)!=Some(product_record)||package_ownership(&adb,product_record).await?!=product_ownership{return Err(failure("physical fresh PRODUCT installation changed before observer admission"));}
+    recheck_inputs(&inputs)?;
+    let observe_args=observer_arguments("observe",&run,&label,Some(&host),&product,product_record.uid,&test,verify.as_ref(),&dependency_sha,port);
     let instrumentation=ProductInstrumentation::start(&adb,&observe_args,"observe").await?;recheck_inputs(&inputs)?;
-    let (observer,ready)=Observer::start(listener,instrumentation,run.clone(),host.clone()).await?;recheck_inputs(&inputs)?;
+    let (observer,ready)=Observer::start(listener,instrumentation,run.clone(),host.clone()).await?;
     use sha2::{Digest,Sha256};
     let public_sha=hex(&Sha256::digest(observer.epoch.public));
     // From this point EVERY failure stays with this same owner until explicit identity-reviewed Finish.
     let mut matrix=Matrix {adb,observer,stock,authority,inputs,input_pin_failed:false,run,host,label,evidence:evidence.to_path_buf(),product_sha:product.sha256.clone(),public_sha,api,
-        control_port:port,baseline,paired:None,last_stage:"observer-admission",baseline_ui:None,baseline_network:None,retained_keeper_baseline:None,owned_start:None,service_key_restored:false};
+        control_port:port,fresh_baseline:baseline,first_open:None,paired:None,last_stage:"observer-admission",baseline_ui:None,baseline_network:None,retained_keeper_baseline:None,owned_start:None,service_key_restored:false};
     let result=async {
-        matrix.baseline.before_private(&ready,&matrix.host)?;
-        launch_product(&matrix.adb).await?;
-        matrix.wait_snapshot("product-original-foreground",None,Duration::from_secs(30),|snapshot|snapshot["foreground"]==true).await?;
-        let initial=matrix.observer.snapshot(None).await?;matrix.baseline_ui=Some(initial["ui"].clone());matrix.baseline_network=Some(initial["network"].clone());
+        matrix.recheck()?;
+        if matrix.observer.epoch.uid!=product_record.uid{return Err(failure("physical observer UID differs from the pinned fresh PRODUCT"));}
+        matrix.fresh_baseline.constructor_ready(&ready,product_record.uid)?;
+        matrix.record("constructor-ready",&json!({"originalFreshBaseline":matrix.fresh_baseline,"constructorReady":ready,"normalApplicationCreatedOnlyEmptyKeyDirectory":true}))?;
+        matrix.recheck()?;launch_product(&matrix.adb).await?;matrix.recheck()?;
+        // endpointOwned is claimed before key creation; callback follows durable keys and bind.
+        let initial=matrix.wait_snapshot("product-normal-first-open-complete",None,Duration::from_secs(45),|snapshot|snapshot["foreground"]==true&&snapshot["keeper"]["endpointOwned"]==true&&snapshot["keeper"]["networkCallback"]==true).await?;
+        matrix.baseline_ui=Some(initial["ui"].clone());matrix.baseline_network=Some(initial["network"].clone());
+        let first_open=matrix.observer.retained().await?;
+        matrix.fresh_baseline.admitted_first_open(&ready,&first_open,product_record.uid)?;
+        if matrix.first_open.is_some(){return Err(failure("physical first-open reference cannot be refreshed"));}
+        matrix.record("first-open-reference",&json!({"originalFreshBaseline":matrix.fresh_baseline,"firstOpen":first_open,"beforeCameraPairing":true,"measuredStartup":initial["keeper"]}))?;
+        matrix.first_open=Some(first_open);
         matrix.camera_pairing().await?;
         matrix.retained_keeper_baseline=Some(matrix.observer.keeper().await?);
         let (shell,sibling)=matrix.shell_workflow().await?;
@@ -1820,14 +1949,18 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
         for provider in &providers {matrix.verify_provider(provider).await?;}
         matrix.recheck()?;
         let final_facts=matrix.observer.retained().await?;
-        matrix.baseline.preserved_with_private_host(&final_facts,&matrix.host,matrix.baseline.service_requested,matrix.service_key_restored)?;
-        if installed_hash(&matrix.adb,APP).await?!=product.sha256||installed_hash(&matrix.adb,TEST).await?!=test.sha256
-            ||installed_hash(&matrix.adb,VERIFY).await?!=verify.sha256||installed_hash(&matrix.adb,"io.heckel.ntfy").await?!=ntfy.sha256 {return Err(failure("physical final installed artifacts changed; no acceptance or replacement adoption"));}
+        matrix.first_open_ref()?.preserved_with_private_host(&final_facts,&matrix.host,matrix.first_open_ref()?.service_requested,matrix.service_key_restored)?;
+        let final_packages=package_inventory(&matrix.adb).await?;
+        if final_packages.get(APP)!=Some(product_record)||package_ownership(&matrix.adb,product_record).await?!=product_ownership
+            ||package_ownership(&matrix.adb,final_packages.get(TEST).ok_or_else(||failure("physical TEST installation disappeared"))?).await?!=test_ownership_before
+            ||installed_hash(&matrix.adb,APP).await?!=product.sha256||installed_hash(&matrix.adb,TEST).await?!=test.sha256
+            ||installed_hash(&matrix.adb,"io.heckel.ntfy").await?!=ntfy.sha256{return Err(failure("physical final original package/UID/install/data/artifact evidence changed"));}
+        verify_unchanged(&matrix.adb,verify_record,verify_ownership.as_ref(),verify.as_ref()).await?;matrix.recheck()?;
         let proofs=providers.iter().map(proof_facts).collect::<io::Result<Vec<_>>>()?;
         matrix.record("final-retained-and-original-resources",&json!({"retained":final_facts,"providers":proofs,"shell":shell.target,"sibling":sibling.target,
             "native":matrix.stock.desktop.process,"companion":matrix.stock.serve.process,"root":matrix.stock.root,"admin":matrix.stock.admin,"config":matrix.stock.config_path,
             "nativeSocket":matrix.stock.native_socket,"adminSocket":matrix.stock.socket,"herdrSession":matrix.stock.name,
-            "bothDeliveryMatricesDurablyProved":true,"serviceRequestedEffectiveBaselineRestored":matrix.service_key_restored||matrix.baseline.service_requested,
+            "bothDeliveryMatricesDurablyProved":true,"serviceRequestedEffectiveBaselineRestored":matrix.service_key_restored||matrix.first_open_ref()?.service_requested,
             "noNativeCloseOrRestart":true,"noAutomaticNativeCleanup":true,"allRuntimeRowsRequireTheseActualObservations":true}))?;
         Ok(())
     }.await;
@@ -2190,7 +2323,7 @@ impl Matrix {
                 }else {
                     self.wait_keeper("persistent-actual-shared-keeper",Duration::from_secs(45),|keeper|keeper["running"]==true&&keeper["foregroundNotification"]==true&&keeper["endpointOwned"]==true&&keeper["serviceRequested"]==true&&keeper["privateMode"]=="Persistent"&&keeper["privateEnabled"]==true&&keeper["privateCompleted"]==true&&health_ready(keeper)).await?
                 };
-                keeper_retained_current(&keeper,&self.baseline)?;
+                keeper_retained_current(&keeper,self.first_open_ref()?)?;
                 if let Some(generation)=generation {if keeper["privateRegistrationGeneration"]!=*generation{return Err(failure("physical socket-free matrix changed the original verified registration generation"));}}
                 let name=if category==AttentionCategory::Attention{"attention"}else{"completion"};
                 self.human_stage("delivery-real-native-event",&format!("Keep Goatr BACKGROUND and turn the phone screen OFF. On the SAME ORIGINAL owned {:?} native TUI/session {}, cause ONE genuine {name}: {}. Do not open Goatr, inject a notification, use a helper RPC, or answer through a fake provider. Enter yes on this local TTY only after the native effect exists.",proof.provider,proof.native.0,
@@ -2251,14 +2384,15 @@ impl Matrix {
         Ok(proof)
     }
     async fn delivery_workflow(&mut self,providers:&[NativeProof]) -> io::Result<()> {
+        let baseline_requested=self.first_open_ref()?.service_requested;
         self.private_settings().await?;
         let initial=self.observer.keeper().await?;let raw=self.observer.retained().await?;
-        self.baseline.preserved_with_private_host(&raw,&self.host,self.baseline.service_requested,false)?;
+        self.first_open_ref()?.preserved_with_private_host(&raw,&self.host,baseline_requested,false)?;
         connector_admission(&raw,Some(&self.host))?;
         let baseline_keeper=self.retained_keeper_baseline.as_ref().ok_or_else(||failure("physical pre-private-delivery retained keeper baseline is missing"))?;
-        let baseline_needs=keeper_retained_current(baseline_keeper,&self.baseline)?;let current_needs=keeper_retained_current(&initial,&self.baseline)?;
-        if initial["serviceRequested"]!=self.baseline.service_requested{return Err(failure("physical global service request changed before our one Start; no ownership is adopted"));}
-        if !self.baseline.service_requested&&(baseline_needs||current_needs){return Err(prerequisite("physical retained host needs a keeper; do not make an unrestorable owned global request before StartDelivery"));}
+        let baseline_needs=keeper_retained_current(baseline_keeper,self.first_open_ref()?)?;let current_needs=keeper_retained_current(&initial,self.first_open_ref()?)?;
+        if initial["serviceRequested"]!=baseline_requested{return Err(failure("physical global service request changed before our one Start; no ownership is adopted"));}
+        if !baseline_requested&&(baseline_needs||current_needs){return Err(prerequisite("physical retained host needs a keeper; do not make an unrestorable owned global request before StartDelivery"));}
         if initial["privateMode"]!="Persistent"||initial["privateEnabled"]!=false{return Err(failure("physical new private host does not have its observed untouched Persistent/off defaults; never switch/unregister to normalize it"));}
         self.record("delivery-observed-private-defaults",&json!({"facts":initial,"defaultPersistentObserved":true,"selectPersistentGesture":false,"reason":"no idempotent unregister/global-distributor mutation"}))?;
         self.human_stage("delivery-normal-os-health","Using only normal Goatr/Android UI and explicit consent, ensure global app notifications, the Attention channel and Delivery channel are healthy and any normal runtime notification permission is granted. Do not alter another host's delivery preferences, switch distributors or use ADB permission/channel setters. Return to this PRIVATE host's Settings.").await?;
@@ -2267,24 +2401,24 @@ impl Matrix {
         self.action("delivery-enable-private-attention","EnableAttention",enabled.clone()).await?;
         self.action("delivery-enable-private-completed","EnableCompleted",enabled).await?;
         let before=self.wait_keeper("delivery-before-owned-start",Duration::from_secs(30),|keeper|keeper["privateEnabled"]==true&&keeper["privateCompleted"]==true&&keeper["privateMode"]=="Persistent"&&health_ready(keeper)).await?;
-        keeper_retained_current(&before,&self.baseline)?;
-        if before["serviceRequested"]!=self.baseline.service_requested||!self.baseline.service_requested&&before["running"]==true{return Err(failure("physical immediate pre-Start global request/running facts do not establish sole owned transition"));}
+        keeper_retained_current(&before,self.first_open_ref()?)?;
+        if before["serviceRequested"]!=baseline_requested||!baseline_requested&&before["running"]==true{return Err(failure("physical immediate pre-Start global request/running facts do not establish sole owned transition"));}
         if before["running"]!=true {
-            let mut arguments=BTreeMap::new();arguments.insert("ownedUiExpectedServiceRequested".to_owned(),self.baseline.service_requested.to_string());
-            self.record("delivery-start-candidate",&json!({"before":before,"baselineServiceRequested":self.baseline.service_requested,"onlyPrivateSettingsStartAuthorized":true}))?;
+            let mut arguments=BTreeMap::new();arguments.insert("ownedUiExpectedServiceRequested".to_owned(),baseline_requested.to_string());
+            self.record("delivery-start-candidate",&json!({"before":before,"baselineServiceRequested":baseline_requested,"onlyPrivateSettingsStartAuthorized":true}))?;
             let (run,after)=self.action("delivery-one-explicit-start","StartDelivery",arguments).await?;
-            if !self.baseline.service_requested&&after["keeper"]["serviceRequested"]==true {
+            if !baseline_requested&&after["keeper"]["serviceRequested"]==true {
                 self.owned_start=Some(run.clone());
                 self.record("delivery-owned-false-to-true",&json!({"startActionRunId":run,"before":before,"after":after["keeper"],"soleObservedFalseToTrue":true,"restored":false}))?;
             }
-        }else if !self.baseline.service_requested{return Err(failure("physical unowned preexisting running keeper cannot justify an owned request"));}
+        }else if !baseline_requested{return Err(failure("physical unowned preexisting running keeper cannot justify an owned request"));}
         let persistent=self.wait_keeper("delivery-real-persistent-started",Duration::from_secs(45),|keeper|keeper["running"]==true&&keeper["foregroundNotification"]==true&&keeper["serviceRequested"]==true&&keeper["privateRequiresKeeper"]==true&&health_ready(keeper)).await?;
-        if !self.baseline.service_requested&&self.owned_start.is_none(){return Err(failure("physical running Persistent request has no fully correlated owned false-to-true Start evidence"));}
+        if !baseline_requested&&self.owned_start.is_none(){return Err(failure("physical running Persistent request has no fully correlated owned false-to-true Start evidence"));}
         self.record("delivery-actual-persistent-mode",&persistent)?;
         let persistent_proof=self.delivery_matrix("persistent",providers,None).await?;
         self.private_settings().await?;
         let before_ntfy=self.observer.retained().await?;
-        self.baseline.preserved_with_private_host(&before_ntfy,&self.host,true,self.owned_start.is_some())?;
+        self.first_open_ref()?.preserved_with_private_host(&before_ntfy,&self.host,true,self.owned_start.is_some())?;
         connector_admission(&before_ntfy,Some(&self.host))?;
         let mut mode=BTreeMap::new();mode.insert("ownedUiDeliveryMode".to_owned(),"Ntfy".to_owned());
         self.action("delivery-one-official-ntfy-selection","SelectDeliveryMode",mode).await?;
@@ -2299,7 +2433,7 @@ impl Matrix {
             "officialDistributor":"io.heckel.ntfy","qualifiedConnectorVersion":"3.3.5","currentOriginalHelloBound":true}))?;
         self.action("delivery-background-private-ntfy-settings","BackgroundPrivateSettings",BTreeMap::new()).await?;
         let free=self.wait_keeper("delivery-independent-auto-socket-free-proof",Duration::from_secs(45),socket_free).await?;
-        keeper_retained_current(&free,&self.baseline)?;
+        keeper_retained_current(&free,self.first_open_ref()?)?;
         write_json(&self.evidence.join("physical-ntfy-auto-socket-free-proof.json"),&json!({"runId":self.run,"facts":free,"beforeAnyStopDelivery":true,
             "productObserverHasNoRuntimeClaim":true,"instrumentedProcessAliveIsNotEndpointOrFgsOwnership":true,"allSocketsOrColdProcessAbsenceClaim":false}))?;
         launch_product(&self.adb).await?;
@@ -2313,12 +2447,12 @@ impl Matrix {
         let persistent_path=self.evidence.join("physical-persistent-four-event-proof.json");let ntfy_path=self.evidence.join("physical-ntfy-four-event-proof.json");
         let proofs=json!({"persistent":binary_sha256(&persistent_path)?,"ntfy":binary_sha256(&ntfy_path)?,"persistentEvents":persistent_proof["count"],"ntfyEvents":ntfy_proof["count"]});
         let candidate=self.observer.keeper().await?;let retained=self.observer.retained().await?;
-        self.baseline.preserved_with_private_host(&retained,&self.host,boolean(&candidate,"serviceRequested")?,self.owned_start.is_some())?;
-        if keeper_retained_current(&candidate,&self.baseline)?||candidate["privateMode"]!="Ntfy"||candidate["privateEnabled"]!=true||candidate["privateVerified"]!=true||candidate["privateRegistrationGeneration"]!=generation {
+        self.first_open_ref()?.preserved_with_private_host(&retained,&self.host,boolean(&candidate,"serviceRequested")?,self.owned_start.is_some())?;
+        if keeper_retained_current(&candidate,self.first_open_ref()?)?||candidate["privateMode"]!="Ntfy"||candidate["privateEnabled"]!=true||candidate["privateVerified"]!=true||candidate["privateRegistrationGeneration"]!=generation {
             return Err(failure("physical cleanup candidate changed retained keeper needs/private registration; leave ownership and flag intact"));
         }
         let registration=candidate["privateRegistrationSha256"].clone();
-        if !self.baseline.service_requested {
+        if !baseline_requested {
             if candidate["serviceRequested"]==true {
                 let owned=self.owned_start.clone().ok_or_else(||failure("physical current true global request is not our proven owned Start"))?;
                 self.record("delivery-stop-owned-candidate",&json!({"proofFiles":proofs,"startActionRunId":owned,"originalBaselineServiceRequested":false,"candidate":candidate,"retained":retained,"cleanupIsNotSocketFreeProof":true}))?;
@@ -2334,12 +2468,12 @@ impl Matrix {
             self.record("delivery-baseline-true-preserved",&json!({"candidate":candidate,"stopGestureIssued":false,"globalRequestedTruePreserved":true,"proofFiles":proofs}))?;
         }
         self.action("delivery-final-background-private-settings","BackgroundPrivateSettings",BTreeMap::new()).await?;
-        let expected_requested=self.baseline.service_requested;
+        let expected_requested=baseline_requested;
         let final_keeper=self.wait_keeper("delivery-final-real-no-keeper-claim",Duration::from_secs(45),|keeper|socket_free(keeper)&&keeper["serviceRequested"]==expected_requested
             &&keeper["privateRegistrationGeneration"]==generation&&keeper["privateRegistrationSha256"]==registration).await?;
         let after=self.observer.retained().await?;
-        self.baseline.preserved_with_private_host(&after,&self.host,self.baseline.service_requested,self.service_key_restored)?;
-        self.record("delivery-owned-ui-cleanup-outcome",&json!({"proofFiles":proofs,"keeper":final_keeper,"retained":after,"baselineServiceRequested":self.baseline.service_requested,
+        self.first_open_ref()?.preserved_with_private_host(&after,&self.host,baseline_requested,self.service_key_restored)?;
+        self.record("delivery-owned-ui-cleanup-outcome",&json!({"proofFiles":proofs,"keeper":final_keeper,"retained":after,"baselineServiceRequested":baseline_requested,
             "ownedStart":self.owned_start,"effectiveServiceBooleanRestored":self.service_key_restored,"literalAbsentXmlKeyRestorationClaim":false,
             "privateHostStillEnabledNtfy":true,"registrationGeneration":generation,"rawPreferenceOrChannelReset":false,"cleanupNotCountedAsSocketFreeProof":true}))?;Ok(())
     }
@@ -2405,7 +2539,7 @@ impl Matrix {
                         let final_check=async {
                             self.recheck()?;
                             let retained=self.observer.retained().await?;
-                            self.baseline.preserved_with_private_host(&retained,&self.host,self.baseline.service_requested,self.service_key_restored)?;
+                            self.first_open_ref()?.preserved_with_private_host(&retained,&self.host,self.first_open_ref()?.service_requested,self.service_key_restored)?;
                             let ui=self.baseline_ui.as_ref().ok_or_else(||failure("physical original UI baseline is missing"))?;
                             let network=self.baseline_network.as_ref().ok_or_else(||failure("physical original network baseline is missing"))?;
                             if current["snapshot"]["ui"]["orientation"]!=ui["orientation"]||current["snapshot"]["ui"]["fontScale"]!=ui["fontScale"]||current["snapshot"]["network"]!=*network {
@@ -2469,6 +2603,13 @@ mod tests {
             database:json!({"schemaSha256":"d".repeat(64),"globalSha256":"e".repeat(64),"measuredAt":1,
                 "quiescence":DB8_QUIESCENCE.iter().map(|name|((*name).to_owned(),json!(0))).collect::<serde_json::Map<_,_>>()}),
             orphans:json!([]),key_files:json!({"directory":null,"files":[]})}
+    }
+    fn fresh_transition_facts()->(RetainedFacts,RetainedFacts,RetainedFacts) {
+        let mut empty=retained(empty_connector(false));empty.database_exists=false;
+        empty.database=json!({"schemaSha256":null,"globalSha256":null,"measuredAt":1,"quiescence":{}});
+        let mut constructor=empty.clone();constructor.key_files["directory"]=json!({"device":1,"inode":2,"mode":0o700,"uid":10001});
+        let mut opened=retained(empty_connector(false));opened.key_files["directory"]=constructor.key_files["directory"].clone();
+        add_key_pair(&mut opened,"goatr.installation.endpoint");(empty,constructor,opened)
     }
     fn add_key_pair(facts:&mut RetainedFacts,alias:&str) {
         if facts.key_files["directory"].is_null(){facts.key_files["directory"]=json!({"device":1,"inode":2,"mode":0o700,"uid":10001});}
@@ -2736,17 +2877,73 @@ mod tests {
         }
     }
     #[test]
-    fn initialized_retained_phone_requires_existing_host_endpoint_and_every_measured_fixed_point() {
-        let private="b".repeat(64);let mut facts=with_private(&retained(empty_connector(false)),&private);
-        facts.run_label_collision=false;add_key_pair(&mut facts,"goatr.installation.endpoint");
-        initialized_retained_phone(&facts).unwrap();
-        for name in DB8_QUIESCENCE {
-            let mut nonquiescent=facts.clone();nonquiescent.database["quiescence"][name]=json!(1);
-            assert!(initialized_retained_phone(&nonquiescent).is_err(),"{name}");
+    fn fresh_absence_and_constructor_directory_are_distinct_closed_consumer_states() {
+        let (empty,constructor,_)=fresh_transition_facts();empty.fresh_empty().unwrap();empty.constructor_ready(&constructor,10001).unwrap();
+        assert!(constructor.fresh_empty().is_err());assert!(!empty.database_exists);assert!(empty.key_files["directory"].is_null());
+        for family in ["database","host","orphan","preference","alias","request","request-presence","label","connector","legacy","files"] {
+            let mut changed=empty.clone();
+            match family {
+                "database"=>{changed.database_exists=true;changed.database=retained(empty_connector(false)).database;},
+                "host"=>changed.hosts=with_private(&retained(empty_connector(false)),&"a".repeat(64)).hosts,
+                "orphan"=>changed.orphans=json!([{"host":"b".repeat(64),"rowsSha256":"c".repeat(64),"rowCount":1}]),
+                "preference"=>changed.preferences.push(PreferenceFact {file:"unexpected".to_owned(),key_sha256:"1".repeat(64),kind:"boolean".to_owned(),value_sha256:digest_text("false")}),
+                "alias"=>changed.aliases.push("unexpected".to_owned()),
+                "request"=>changed.service_requested=true,
+                "request-presence"=>changed.service_requested_present=true,
+                "label"=>changed.run_label_collision=true,
+                "connector"=>changed.connector=empty_connector(true),
+                "legacy"=>changed.connector["legacyFilePresent"]=json!(true),
+                "files"=>add_key_pair(&mut changed,"goatr.installation.endpoint"),
+                _=>unreachable!(),
+            }
+            assert!(changed.fresh_empty().is_err(),"{family}");
+            assert!(empty.constructor_ready(&changed,10001).is_err(),"{family}");
         }
-        let mut missing=facts.clone();missing.database_exists=false;assert!(initialized_retained_phone(&missing).is_err());
-        missing=facts.clone();missing.hosts.clear();assert!(initialized_retained_phone(&missing).is_err());
-        missing=facts;missing.key_files["files"]=json!([]);assert!(initialized_retained_phone(&missing).is_err());
+        let mut foreign=constructor;foreign.key_files["directory"]["uid"]=json!(10002);assert!(empty.constructor_ready(&foreign,10001).is_err());
+    }
+    #[test]
+    fn first_open_consumer_pins_only_exact_empty_db_locale_and_endpoint_before_private_creation() {
+        let (empty,constructor,opened)=fresh_transition_facts();empty.admitted_first_open(&constructor,&opened,10001).unwrap();
+        for name in DB8_QUIESCENCE {
+            let mut changed=opened.clone();changed.database["quiescence"][name]=json!(1);
+            assert!(empty.admitted_first_open(&constructor,&changed,10001).is_err(),"{name}");
+        }
+        for family in ["missing-db","host","orphan","preference","request","connector","directory","alias","file","marker","uid","schema"] {
+            let mut changed=opened.clone();
+            match family {
+                "missing-db"=>changed.database_exists=false,
+                "host"=>changed.hosts=with_private(&opened,&"a".repeat(64)).hosts,
+                "orphan"=>changed.orphans=json!([{"host":"b".repeat(64),"rowsSha256":"c".repeat(64),"rowCount":1}]),
+                "preference"=>changed.preferences.push(PreferenceFact {file:"unexpected".to_owned(),key_sha256:"1".repeat(64),kind:"boolean".to_owned(),value_sha256:digest_text("false")}),
+                "request"=>changed.service_requested_present=true,
+                "connector"=>changed.connector=empty_connector(true),
+                "directory"=>changed.key_files["directory"]["inode"]=json!(99),
+                "alias"=>changed.aliases.push("foreign".to_owned()),
+                "file"=>changed.key_files["files"].as_array_mut().unwrap().clear(),
+                "marker"=>changed.key_files["files"][1]["sha256"]=json!("0".repeat(64)),
+                "uid"=>changed.key_files["files"][0]["uid"]=json!(10002),
+                "schema"=>changed.database["schemaSha256"]=Value::Null,
+                _=>unreachable!(),
+            }
+            assert!(empty.admitted_first_open(&constructor,&changed,10001).is_err(),"{family}");
+        }
+        let private="a".repeat(64);let created=with_private(&opened,&private);
+        opened.preserved_with_private_host(&created,&private,false,false).unwrap();
+        assert!(empty.preserved_with_private_host(&created,&private,false,false).is_err(),"empty proof cannot replace first-open authority");
+        for family in ["global","host","orphan","endpoint","preference","connector"] {
+            let mut changed=created.clone();
+            match family {
+                "global"=>changed.database["globalSha256"]=json!("0".repeat(64)),
+                "host"=>changed=with_private(&changed,&"b".repeat(64)),
+                "orphan"=>changed.orphans=json!([{"host":"b".repeat(64),"rowsSha256":"c".repeat(64),"rowCount":1}]),
+                "endpoint"=>changed.key_files["files"][0]["inode"]=json!(99),
+                "preference"=>changed.preferences.push(PreferenceFact {file:"unexpected".to_owned(),key_sha256:"1".repeat(64),kind:"boolean".to_owned(),value_sha256:digest_text("false")}),
+                "connector"=>changed.connector=official_connector(),
+                _=>unreachable!(),
+            }
+            assert!(opened.preserved_with_private_host(&changed,&private,false,false).is_err(),"{family}");
+        }
+        assert!(!empty.database_exists);assert!(constructor.aliases.is_empty());
     }
     #[test]
     fn pre_private_database_existence_schema_global_and_orphan_changes_are_not_startup_exceptions() {
@@ -2903,24 +3100,6 @@ mod tests {
         fs::set_permissions(&parent,fs::Permissions::from_mode(0o755)).unwrap();assert!(neutral_seed_policy(&config,&parent).is_err());
         fs::set_permissions(&parent,fs::Permissions::from_mode(0o700)).unwrap();fs::remove_dir_all(root).unwrap();
     }
-    #[test]
-    fn independent_old_product_audit_binds_subject_manifest_closure_sorted_dependencies_and_closed_schema() {
-        let initializers=json!(["androidx.emoji2.text.EmojiCompatInitializer","androidx.lifecycle.ProcessLifecycleInitializer","androidx.profileinstaller.ProfileInstallerInitializer"]);
-        let provider=json!({"name":"androidx.startup.InitializationProvider","authority":format!("{APP}.androidx-startup"),"exported":false,"enabled":true});
-        let old=Artifact {path:PathBuf::from("/owned/old.apk"),sha256:"1".repeat(64),signer:"2".repeat(64),package:APP.to_owned(),debug:true,
-            startup:Some(json!({"provider":provider,"initializers":initializers}))};
-        let mut aars=MVP_AARS.iter().filter(|(group,_,_)|group.starts_with("androidx.")).map(|(group,coordinate,sha)|json!({"coordinate":format!("{group}:{}",coordinate.replace('/',":")),"sha256":sha})).collect::<Vec<_>>();
-        aars.sort_by(|a,b|a["coordinate"].as_str().cmp(&b["coordinate"].as_str()));
-        let valid=json!({"version":1,"kind":"goatr.old-product.startup-provider-audit","package":APP,"apkSha256":old.sha256,"signerSha256":old.signer,
-            "provider":provider,"initializers":initializers,"aars":aars});
-        old_product_audit(&valid,&old).unwrap();
-        for (field,changed) in [("apkSha256",json!("3".repeat(64))),("signerSha256",json!("4".repeat(64))),("package",json!(TEST)),("extra",json!(true))] {
-            let mut value=valid.clone();value[field]=changed;assert!(old_product_audit(&value,&old).is_err(),"{field}");
-        }
-        let mut wrong=valid.clone();wrong["provider"]["enabled"]=json!(false);assert!(old_product_audit(&wrong,&old).is_err());
-        wrong=valid.clone();wrong["initializers"].as_array_mut().unwrap().swap(0,1);assert!(old_product_audit(&wrong,&old).is_err());
-        wrong=valid;wrong["aars"][0]["sha256"]=json!("0".repeat(64));assert!(old_product_audit(&wrong,&old).is_err());
-    }
     #[tokio::test]
     async fn held_frozen_input_rejects_replacement_across_await_without_adopting_new_named_bytes() {
         let root=std::env::temp_dir().join(format!("goatr-physical-fd-{}",Uuid::random().0));private_directory(&root).unwrap();
@@ -2936,20 +3115,6 @@ mod tests {
         std::io::Seek::rewind(&mut pin.1).unwrap();let mut original=Vec::new();pin.1.read_to_end(&mut original).unwrap();
         assert_eq!(original,b"ORIGINAL_PUBLIC_INPUT");drop(pin);
         fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
-    }
-    #[test]
-    fn immutable_old_audit_uses_one_held_private_descriptor_and_rejects_writable_or_changed_identity() {
-        use std::os::unix::fs::PermissionsExt;
-        let root=std::env::temp_dir().join(format!("goatr-physical-audit-{}",Uuid::random().0));private_directory(&root).unwrap();
-        let path=root.join("audit.json");let bytes=b"{\"public\":\"owned audit reader fixture\"}\n";
-        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap().write_all(bytes).unwrap();
-        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
-        let expected=digest_text(std::str::from_utf8(bytes).unwrap());assert!(frozen_old_audit(&path,&expected).is_err());
-        fs::set_permissions(&path,fs::Permissions::from_mode(0o400)).unwrap();
-        let (pin,retained)=frozen_old_audit(&path,&expected).unwrap();assert_eq!(retained,bytes);recheck_inputs(std::slice::from_ref(&pin)).unwrap();
-        let flags=unsafe{libc::fcntl(pin.1.as_raw_fd(),libc::F_GETFD)};assert!(flags>=0&&flags&libc::FD_CLOEXEC!=0);
-        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();assert!(recheck_inputs(std::slice::from_ref(&pin)).is_err());
-        drop(pin);fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
     }
     #[tokio::test]
     async fn initial_native_desktop_join_rejects_same_executable_other_process_before_fresh_client_or_request() {
@@ -2999,10 +3164,10 @@ mod tests {
     }
     #[tokio::test]
     async fn original_frozen_vector_move_rejects_late_stage_and_reviewed_finish_replacement() {
-        for changed in ["product-input","test-input","audit-input"] {
+        for changed in ["product-input","test-input","config-input"] {
             let root=std::env::temp_dir().join(format!("goatr-late-frozen-inputs-{}",Uuid::random().0));private_directory(&root).unwrap();
             let mut inputs=Vec::new();
-            for name in ["binary-input","product-input","test-input","config-input","audit-input"] {
+            for name in ["binary-input","product-input","test-input","config-input"] {
                 let path=root.join(name);OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap().write_all(name.as_bytes()).unwrap();
                 inputs.push(frozen_input(&path,&digest_text(name)).unwrap());
             }
@@ -3059,5 +3224,82 @@ mod tests {
         assert!(recheck_retained_inputs(&inputs,&mut input_pin_failed).is_err(),"restored named path is not recovery authority");
         assert!(input_pin_failed);assert_eq!(finish_authorization(input_pin_failed,"FINISH ORIGINAL"),None);
         drop(inputs);fs::remove_file(path).unwrap();fs::remove_dir(runtime).unwrap();fs::remove_dir(parent).unwrap();fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn package_inventory_consumer_requires_exact_active_and_retained_product_absence() {
+        let helpers=format!("package:/data/app/test==/base.apk={TEST} uid:10101\npackage:/data/app/verify==/base.apk={VERIFY} uid:10526\n");
+        let packages=coherent_packages(&helpers,&helpers).unwrap();fresh_product_admission(&packages).unwrap();
+        assert_eq!(packages.len(),2);fresh_product_admission(&coherent_packages("","").unwrap()).unwrap();
+        let product=format!("{helpers}package:/data/app/product/base.apk={APP} uid:10528\n");
+        assert!(fresh_product_admission(&coherent_packages(&product,&product).unwrap()).is_err());
+        let retained=format!("{helpers}package:{APP} uid:10528\n");assert!(coherent_packages(&helpers,&retained).is_err());
+        assert!(fresh_product_admission(&package_records(&retained).unwrap()).is_err());
+        for malformed in [
+            format!("{helpers}{helpers}"),format!("package:/data/app/a/base.apk={APP}.test.fake uid:10528\n"),
+            format!("package:/sdcard/base.apk={APP} uid:10528\n"),format!("package:/data/app/a/base.apk={APP} uid:010528\n"),
+            format!("package:/data/app/a/../base.apk={APP} uid:10528\n"),format!("package:/data/app/a/./base.apk={APP} uid:10528\n"),
+            format!("package:/data/app/a//base.apk={APP} uid:10528\n"),format!("package:/data/app/a b/base.apk={APP} uid:10528\n"),
+            format!("package:/data/app/a/base.apk={APP} uid:unknown\n"),format!("package:{APP}\n"),
+            format!("package:/data/app/a/base.apk={TEST} uid:10101\npackage:/data/app/b/base.apk={VERIFY} uid:10101\n"),"Error: package query failed\n".to_owned(),
+        ] {assert!(coherent_packages(&malformed,&malformed).is_err());}
+        let product_image=Artifact {path:PathBuf::from("/owned/product.apk"),sha256:"1".repeat(64),signer:"2".repeat(64),package:APP.to_owned(),debug:true};
+        let previous=Artifact {package:TEST.to_owned(),..product_image.clone()};let helper=previous.clone();
+        test_update_admission(&previous,&helper).unwrap();assert!(test_update_admission(&previous,&product_image).is_err());
+        let other_key=Artifact {signer:"3".repeat(64),..helper};assert!(test_update_admission(&previous,&other_key).is_err());
+    }
+    #[test]
+    fn package_ownership_consumer_binds_uid_subject_first_install_and_data_path() {
+        let record=PackageRecord {package:TEST.to_owned(),uid:10101,path:Some("/data/app/test/base.apk".to_owned())};
+        let dump=format!("Packages:\n  Package [{TEST}] (abcd):\n    userId=10101\n    dataDir=/data/user/0/{TEST}\n    firstInstallTime=2026-10-27 04:39:23\nOther section:\n");
+        let actual=package_ownership_facts(&dump,&record).unwrap();assert_eq!(actual.uid,10101);assert_eq!(actual.package,TEST);
+        for changed in [dump.replace("userId=10101","userId=10102"),dump.replace(TEST,VERIFY),
+            dump.replace("    userId=10101","    userId=10101\n    userId=10101"),dump.replace("/data/user/0/","/foreign/"),
+            dump.replace("/data/user/0/","/data/user/0/./"),dump.replace("/data/user/0/","/data/user//0/"),
+            dump.replace("    firstInstallTime=2026-10-27 04:39:23\n","")] {
+            assert!(package_ownership_facts(&changed,&record).is_err());
+        }
+    }
+    #[test]
+    fn host_namespace_group_accepts_owned_processes_with_distinct_nspids_and_rechecks_each_original() {
+        let executable=fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let test=concat!(module_path!(),"::initial_native_desktop_join_rejects_same_executable_other_process_before_fresh_client_or_request");
+        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
+        let mut command=std::process::Command::new(executable);command.args(["--exact",test,"--test-threads=1"]).env("GOATR_PHYSICAL_NATIVE_JOIN_CHILD","1")
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+        }
+        let mut child=command.spawn().unwrap();
+        let caller=herdr::process_evidence(std::process::id()).unwrap();let manager=herdr::process_evidence(child.id()).unwrap();
+        assert_ne!(caller.namespaces.nspids,manager.namespaces.nspids);assert!(same_host_namespace_group(&caller,&manager));
+        recheck_host_processes(&caller,&manager).unwrap();
+        assert!(recheck_host_processes(&manager,&caller).is_err());
+        for family in ["boot","pid-namespace","mount","user","empty-depth","different-depth"] {
+            let mut changed=manager.clone();
+            match family {
+                "boot"=>changed.linux_boot_id=Uuid::random(),
+                "pid-namespace"=>changed.namespaces.pid.1+=1,
+                "mount"=>changed.namespaces.mount.1+=1,
+                "user"=>changed.namespaces.user.1+=1,
+                "empty-depth"=>changed.namespaces.nspids.clear(),
+                "different-depth"=>changed.namespaces.nspids.push(manager.pid),
+                _=>unreachable!(),
+            }
+            assert!(!same_host_namespace_group(&caller,&changed),"{family}");
+        }
+        let mut changed_caller=caller.clone();changed_caller.namespaces.nspids[0]+=1;
+        assert!(recheck_host_processes(&changed_caller,&manager).is_err());
+        let mut changed_manager=manager.clone();changed_manager.namespaces.nspids[0]+=1;
+        assert!(recheck_host_processes(&caller,&changed_manager).is_err());
+        changed_manager=manager.clone();changed_manager.start_ticks+=1;assert!(recheck_host_processes(&caller,&changed_manager).is_err());
+        drop(child.stdin.take());assert!(child.wait().unwrap().success());
+    }
+    #[test]
+    fn controller_environment_consumer_rejects_unsafe_flags_without_normalizing_live_environment() {
+        let original=(std::env::var_os("OMP_UNSANDBOXED"),std::env::var_os("AGENT_SANDBOXED"));
+        controller_environment(false,false).unwrap();
+        for flags in [(true,false),(false,true),(true,true)]{assert!(controller_environment(flags.0,flags.1).is_err());}
+        assert_eq!(original,(std::env::var_os("OMP_UNSANDBOXED"),std::env::var_os("AGENT_SANDBOXED")));
     }
 }

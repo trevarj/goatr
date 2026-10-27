@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package io.github.trevarj.goatr
 
+import android.os.Bundle
 import androidx.test.platform.app.InstrumentationRegistry
 import computer.iroh.IrohAndroid
 import kotlinx.coroutines.*
@@ -29,8 +30,8 @@ class SessionStoreTest {
         val name="state-${Uuid.random().value}.db"; var time=0L; val store=SessionStore(context,name) { time }
         try { store.open(); store.host(HostMetadata(HOST,"host",Uuid.random(),listOf("goatr.test.endpoint","goatr.test.receipt"))); block(store,name,{time},{time=it}) } finally { store.close(); context.deleteDatabase(name) }
     }
-    /** Real production DB8 schema in a real platform context's exclusively owned data directory. */
-    private suspend fun withPhysicalBaseline(block:suspend (android.content.Context,java.io.File,SessionStore)->Unit) {
+    /** Own real platform paths without initializing any Goatr store/key/runtime. */
+    private suspend fun withPhysicalDirectory(block:suspend (android.content.Context,java.io.File)->Unit) {
         val root=java.io.File(context.cacheDir,"physical-baseline-${Uuid.random().value}");check(root.mkdir());android.system.Os.chmod(root.path,0x1c0)
         val databases=java.io.File(root,"databases");check(databases.mkdir())
         val owned=object:android.content.ContextWrapper(context) {
@@ -44,8 +45,11 @@ class SessionStoreTest {
                 android.database.sqlite.SQLiteDatabase.openDatabase(getDatabasePath(name).path,factory,android.database.sqlite.SQLiteDatabase.CREATE_IF_NECESSARY,handler)
             override fun getSharedPreferences(name:String,mode:Int):android.content.SharedPreferences=error("Raw baseline must not call SharedPreferences APIs")
         }
+        try {block(owned,root)}finally{check(root.deleteRecursively())}
+    }
+    private suspend fun withPhysicalBaseline(block:suspend (android.content.Context,java.io.File,SessionStore)->Unit)=withPhysicalDirectory {owned,root->
         val store=SessionStore(owned,"goatr-private.db"){0L}
-        try {store.open();block(owned,root,store)}finally{store.close();check(root.deleteRecursively())}
+        try {store.open();block(owned,root,store)}finally{store.close()}
     }
     private fun fileHash(file:java.io.File):String {
         val hash=java.security.MessageDigest.getInstance("SHA-256");val buffer=ByteArray(8192)
@@ -53,7 +57,7 @@ class SessionStoreTest {
         return hash.digest().joinToString(""){"%02x".format(it.toInt() and 255)}
     }
     private fun keyAliases():Set<String> = java.security.KeyStore.getInstance("AndroidKeyStore").apply {load(null)}.aliases().toList().toSet()
-    private fun physicalBaselineArguments()=org.json.JSONObject().put("mode","baseline").put("hostLabel","Goatr MVP ${Uuid.random().value}").put("host",org.json.JSONObject.NULL)
+    private fun physicalBaselineArguments()=org.json.JSONObject().put("mode","baseline").put("freshInstall",true).put("hostLabel","Goatr MVP ${Uuid.random().value}").put("host",org.json.JSONObject.NULL)
     private fun connectorDatabase(root:java.io.File,block:(android.database.sqlite.SQLiteDatabase)->Unit) {
         val file=java.io.File(root,"databases/unifiedpush-connector")
         android.database.sqlite.SQLiteDatabase.openDatabase(file.path,null,android.database.sqlite.SQLiteDatabase.CREATE_IF_NECESSARY).use {db->
@@ -63,6 +67,95 @@ class SessionStoreTest {
             db.execSQL("CREATE TABLE tokens (connectorToken TEXT PRIMARY KEY,instance TEXT,distributor TEXT,FOREIGN KEY (instance) REFERENCES registrations(instance) ON DELETE CASCADE,FOREIGN KEY (distributor) REFERENCES distributors(distributor) ON DELETE CASCADE)")
             db.execSQL("CREATE TABLE keys (instance TEXT PRIMARY KEY,auth TEXT,pubkey TEXT,privkey TEXT,iv TEXT,FOREIGN KEY (instance) REFERENCES registrations(instance) ON DELETE CASCADE)")
             db.version=1;block(db)
+        }
+    }
+    private fun freshFacts()=org.json.JSONObject().apply {
+        put("schema",1);put("databaseExists",false)
+        put("database",org.json.JSONObject().put("schemaSha256",org.json.JSONObject.NULL).put("globalSha256",org.json.JSONObject.NULL).put("measuredAt",1).put("quiescence",org.json.JSONObject()))
+        for(key in listOf("hosts","orphans","preferences","aliases"))put(key,org.json.JSONArray())
+        put("aliasSha256",PhysicalMvpPlatform.digest(""));put("serviceRequested",false);put("serviceRequestedPresent",false);put("runLabelCollision",false)
+        put("keyFiles",org.json.JSONObject().put("directory",org.json.JSONObject.NULL).put("files",org.json.JSONArray()))
+        put("connector",org.json.JSONObject().apply {
+            put("databaseExists",false);put("version",0);put("schemaSha256",org.json.JSONObject.NULL);put("platformMetadataSha256",org.json.JSONObject.NULL)
+            put("localeChanges",0);put("legacyFilePresent",false);put("legacyKeyCount",0)
+            for(table in listOf("distributors","registrations","tokens","keys"))put(table,org.json.JSONArray())
+        })
+    }
+    @Test fun physicalFreshAdmissionPolicyAcceptsOnlyExactAbsentFactsAcrossEveryFamily() {
+        PhysicalMvpPlatform.requireFreshInstall(freshFacts())
+        for(family in listOf("database","hosts","orphans","preferences","aliases","request","request-presence","label","key-directory","key-files","connector","legacy-file","legacy-keys","connector-rows")) {
+            val facts=freshFacts()
+            when(family) {
+                "database"->facts.put("databaseExists",true)
+                "hosts","orphans","preferences","aliases"->facts.getJSONArray(family).put("UNEXPECTED_TYPED_FACT")
+                "request"->facts.put("serviceRequested",true)
+                "request-presence"->facts.put("serviceRequestedPresent",true)
+                "label"->facts.put("runLabelCollision",true)
+                "key-directory"->facts.getJSONObject("keyFiles").put("directory",org.json.JSONObject())
+                "key-files"->facts.getJSONObject("keyFiles").getJSONArray("files").put(org.json.JSONObject())
+                "connector"->facts.getJSONObject("connector").put("databaseExists",true)
+                "legacy-file"->facts.getJSONObject("connector").put("legacyFilePresent",true)
+                "legacy-keys"->facts.getJSONObject("connector").put("legacyKeyCount",1)
+                "connector-rows"->facts.getJSONObject("connector").getJSONArray("registrations").put(org.json.JSONObject())
+            }
+            assertNotNull(family,runCatching {PhysicalMvpPlatform.requireFreshInstall(facts)}.exceptionOrNull())
+        }
+    }
+    @Test fun physicalFreshRawCaptureDoesNotCreateDatabasePreferencesKeysOrAliases()=runBlocking {
+        withPhysicalDirectory {owned,root->
+            val aliases=keyAliases();val facts=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")
+            assertFalse(facts.getBoolean("databaseExists"));assertEquals(0,facts.getJSONArray("hosts").length());assertEquals(0,facts.getJSONArray("orphans").length())
+            assertEquals(0,facts.getJSONArray("preferences").length());assertTrue(facts.getJSONObject("keyFiles").isNull("directory"))
+            assertFalse(facts.getJSONObject("connector").getBoolean("databaseExists"));assertFalse(facts.getJSONObject("connector").getBoolean("legacyFilePresent"))
+            val observed=facts.getJSONArray("aliases");assertEquals(aliases,(0 until observed.length()).map {observed.getString(it)}.toSet())
+            assertEquals(aliases,keyAliases());assertFalse(java.io.File(root,"databases/goatr-private.db").exists())
+            assertFalse(java.io.File(root,"shared_prefs").exists());assertFalse(java.io.File(root,"no_backup").exists())
+            // The platform alias domain is real and NOT isolated by ContextWrapper; policy positives are typed cases above.
+        }
+    }
+    @Test fun physicalFreshRawStateRefusesActualFilesystemMaterialWithoutClearingIt()=runBlocking {
+        for(family in listOf("database","preference","key-directory","connector","legacy-file"))withPhysicalDirectory {owned,root->
+            when(family) {
+                "database"->{val store=SessionStore(owned,"goatr-private.db"){0L};try{store.open()}finally{store.close()}}
+                "preference","legacy-file"->{
+                    val directory=java.io.File(root,"shared_prefs");check(directory.mkdir())
+                    val file=java.io.File(directory,if(family=="preference")"delivery_preferences.xml" else "unifiedpush.connector.xml")
+                    file.writeText(if(family=="preference")"<map><boolean name=\"service_requested\" value=\"false\"/></map>" else "<map/>")
+                    android.system.Os.chmod(file.path,0x180)
+                }
+                "key-directory"->{val parent=java.io.File(root,"no_backup");check(parent.mkdir());val directory=java.io.File(parent,"goatr-keys");check(directory.mkdir());android.system.Os.chmod(directory.path,0x1c0)}
+                "connector"->connectorDatabase(root){}
+            }
+            val aliases=keyAliases();val files=root.walkTopDown().filter {it.isFile}.associate {it.relativeTo(root).path to fileHash(it)}
+            val facts=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")
+            when(family) {
+                "database"->assertTrue(facts.getBoolean("databaseExists"))
+                "preference"->assertTrue(facts.getBoolean("serviceRequestedPresent"))
+                "key-directory"->assertFalse(facts.getJSONObject("keyFiles").isNull("directory"))
+                "connector"->assertTrue(facts.getJSONObject("connector").getBoolean("databaseExists"))
+                "legacy-file"->assertTrue(facts.getJSONObject("connector").getBoolean("legacyFilePresent"))
+            }
+            assertNotNull(family,runCatching {PhysicalMvpPlatform.requireFreshInstall(facts)}.exceptionOrNull())
+            assertEquals(files,root.walkTopDown().filter {it.isFile}.associate {it.relativeTo(root).path to fileHash(it)});assertEquals(aliases,keyAliases())
+        }
+    }
+    private fun physicalFreshBundle(mode:String)=Bundle().apply {
+        val run=Uuid.random().value
+        putString(PhysicalMvpPlatform.MODE,mode);putString("physicalMvpFreshInstall","true");putString("physicalMvpRunId",run)
+        putString("physicalMvpHostLabel","Goatr MVP $run");putString("stockControlPort","12345");putString("physicalMvpExpectedProductUid","10001")
+        for(key in listOf("physicalMvpExpectedSignerSha256","physicalMvpExpectedProductSha256","physicalMvpExpectedTestSha256","physicalMvpDependencyProof"))putString(key,"1".repeat(64))
+        if(mode=="observe")putString("physicalMvpHost","a".repeat(64))
+    }
+    @Test fun physicalFreshBaselineAndObserveRequireOneTrueClosedArgumentAndVerifyPairs() {
+        for(mode in listOf("baseline","observe")) {
+            val valid=physicalFreshBundle(mode);assertTrue(PhysicalMvpPlatform.arguments(valid).getBoolean("freshInstall"))
+            for(value in listOf<String?>(null,"false","1","TRUE")) {
+                val rejected=Bundle(valid);if(value==null)rejected.remove("physicalMvpFreshInstall")else rejected.putString("physicalMvpFreshInstall",value)
+                assertNotNull("$mode/$value",runCatching {PhysicalMvpPlatform.arguments(rejected)}.exceptionOrNull())
+            }
+            assertNotNull(runCatching {PhysicalMvpPlatform.arguments(Bundle(valid).apply {putString("physicalMvpRetainedInstall","true")})}.exceptionOrNull())
+            assertNotNull(runCatching {PhysicalMvpPlatform.arguments(Bundle(valid).apply {putString("physicalMvpExpectedVerifySha256","2".repeat(64))})}.exceptionOrNull())
+            PhysicalMvpPlatform.arguments(Bundle(valid).apply {putString("physicalMvpExpectedVerifySha256","2".repeat(64));putString("physicalMvpExpectedVerifySignerSha256","3".repeat(64))})
         }
     }
     @Test fun physicalRawBaselineReadsDb8WithoutTrimmingExpiredActionsOrTouchingPreferences()=runBlocking {
@@ -88,7 +181,7 @@ class SessionStoreTest {
                 assertFalse(facts.toString().contains("PRIVATE_PREF_FIXTURE"))
                 assertTrue(facts.getJSONObject("database").getJSONObject("quiescence").getLong("expiredRecovery")>0)
                 val refusal=runCatching {PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments().put("mode","observe"))}.exceptionOrNull()
-                assertEquals("physical_retained_database_not_quiescent",checkNotNull(refusal).message)
+                assertEquals("physical_fresh_database_present",checkNotNull(refusal).message)
                 assertEquals(beforeDb,fileHash(database));assertEquals(beforePrefs,fileHash(file));assertEquals(beforeAliases,keyAliases())
                 android.database.sqlite.SQLiteDatabase.openDatabase(database.path,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use {db->
                     db.rawQuery("SELECT count(*) FROM actions",null).use {rows->assertTrue(rows.moveToFirst());assertEquals(1,rows.getInt(0))}
@@ -100,7 +193,7 @@ class SessionStoreTest {
         withPhysicalBaseline {owned,root,store->
             store.close();connectorDatabase(root){it.execSQL("INSERT INTO distributors VALUES ('io.heckel.ntfy',NULL,1,17)")}
             val database=java.io.File(root,"databases/unifiedpush-connector");val before=fileHash(database);val aliases=keyAliases()
-            val facts=PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments()).getJSONObject("connector")
+            val facts=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}").getJSONObject("connector")
             assertEquals(1,facts.getInt("version"));assertEquals(1,facts.getJSONArray("distributors").length())
             for(table in listOf("registrations","tokens","keys"))assertEquals(0,facts.getJSONArray(table).length())
             assertEquals(before,fileHash(database));assertEquals(aliases,keyAliases())
@@ -228,7 +321,7 @@ class SessionStoreTest {
             val before=fileHash(file);val raw=PhysicalMvpPlatform.retained(owned,"Goatr MVP ${Uuid.random().value}")
             assertEquals(1L,raw.getJSONObject("database").getJSONObject("quiescence").getLong("viewed"))
             val refused=runCatching {PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments().put("mode","observe"))}
-            assertEquals("physical_retained_database_not_quiescent",checkNotNull(refused.exceptionOrNull()).message)
+            assertEquals("physical_fresh_database_present",checkNotNull(refused.exceptionOrNull()).message)
             assertEquals(before,fileHash(file))
         }
     }
@@ -273,7 +366,7 @@ class SessionStoreTest {
             assertTrue(case,facts.getJSONObject("database").getJSONObject("quiescence").getLong("locale")>0)
             assertTrue(case,facts.getJSONObject("connector").getLong("localeChanges")>0)
             val refused=runCatching {PhysicalMvpPlatform.preRuntime(owned,physicalBaselineArguments())}
-            assertEquals("physical_connector_not_quiescent",checkNotNull(refused.exceptionOrNull()).message);assertEquals(before,files.map(::fileHash))
+            assertEquals("physical_fresh_database_present",checkNotNull(refused.exceptionOrNull()).message);assertEquals(before,files.map(::fileHash))
         }
     }
     @Test fun physicalRawEncryptedFilesExposeCipherIdentityAndRefusePartialBackupAndUnknownFiles()=runBlocking {

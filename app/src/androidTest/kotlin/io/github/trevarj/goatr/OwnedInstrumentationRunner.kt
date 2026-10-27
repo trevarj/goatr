@@ -47,7 +47,7 @@ class OwnedInstrumentationRunner : AndroidJUnitRunner() {
     override fun callApplicationOnCreate(app:Application) {
         if(physicalRequested) {
             val mode=physicalArguments?.getString("mode")
-            if(mode!="observe")return // Includes failed baseline admission: never initialize the old product runtime.
+            if(mode!="observe")return // Failed fresh admission/baseline never initializes normal Goatr runtime.
             app.onCreate()
             physicalApplication=app
             applicationCreated.countDown()

@@ -31,7 +31,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import org.xmlpull.v1.XmlPullParser
 
-/** Platform-only closure: baseline mode must not resolve Goatr production classes from an old APK. */
+/** Platform-only fresh-install boundary; baseline never initializes normal Goatr runtime. */
 internal object PhysicalMvpPlatform {
     const val PRODUCT="io.github.trevarj.goatr.debug"
     const val TEST="io.github.trevarj.goatr.debug.test"
@@ -39,19 +39,25 @@ internal object PhysicalMvpPlatform {
     const val MODE="physicalMvpMode"
     private val hex=Regex("[0-9a-f]{64}")
     private val host=Regex("[0-9a-f]{64}")
-    private val allowed=setOf(MODE,"physicalMvpRunId","physicalMvpExpectedSignerSha256","physicalMvpExpectedProductSha256",
+    private val allowed=setOf(MODE,"physicalMvpFreshInstall","physicalMvpRunId","physicalMvpExpectedSignerSha256","physicalMvpExpectedProductSha256","physicalMvpExpectedProductUid",
         "physicalMvpExpectedTestSha256","physicalMvpExpectedVerifySha256","physicalMvpExpectedVerifySignerSha256","physicalMvpDependencyProof","physicalMvpHostLabel","physicalMvpHost","stockControlPort")
     fun requested(arguments:Bundle)=arguments.keySet().any {it.startsWith("physicalMvp")}
     fun arguments(arguments:Bundle):JSONObject {
         check(arguments.keySet().all {it in allowed}) {"physical_arguments_closed"}
         val mode=arguments.getString(MODE);check(mode=="baseline"||mode=="observe") {"physical_mode"}
+        check(arguments.getString("physicalMvpFreshInstall")=="true") {"physical_fresh_install_required"}
         val run=arguments.getString("physicalMvpRunId") ?: error("physical_run")
         check(UUID.fromString(run).toString()==run) {"physical_run"}
-        val result=JSONObject().put("mode",mode).put("runId",run)
-        for(key in listOf("physicalMvpExpectedSignerSha256","physicalMvpExpectedProductSha256","physicalMvpExpectedTestSha256","physicalMvpExpectedVerifySha256","physicalMvpExpectedVerifySignerSha256","physicalMvpDependencyProof")) {
+        val result=JSONObject().put("mode",mode).put("runId",run).put("freshInstall",true)
+        for(key in listOf("physicalMvpExpectedSignerSha256","physicalMvpExpectedProductSha256","physicalMvpExpectedTestSha256","physicalMvpDependencyProof")) {
             val value=arguments.getString(key) ?: error("physical_pin")
             check(hex.matches(value)) {"physical_pin"};result.put(key,value)
         }
+        val uid=arguments.getString("physicalMvpExpectedProductUid") ?: error("physical_product_uid")
+        val productUid=uid.toIntOrNull();check(productUid!=null&&productUid>=10000&&productUid.toString()==uid) {"physical_product_uid"};result.put("productUid",productUid)
+        val verify=arguments.getString("physicalMvpExpectedVerifySha256");val verifySigner=arguments.getString("physicalMvpExpectedVerifySignerSha256")
+        check((verify==null)==(verifySigner==null)) {"physical_verify_pair"}
+        if(verify!=null){check(hex.matches(verify)&&hex.matches(checkNotNull(verifySigner))) {"physical_pin"};result.put("physicalMvpExpectedVerifySha256",verify).put("physicalMvpExpectedVerifySignerSha256",verifySigner)}
         val label=arguments.getString("physicalMvpHostLabel") ?: error("physical_label")
         check(label=="Goatr MVP $run") {"physical_label"};result.put("hostLabel",label)
         val port=arguments.getString("stockControlPort")?.toIntOrNull() ?: error("physical_control_port")
@@ -73,20 +79,25 @@ internal object PhysicalMvpPlatform {
     @Suppress("DEPRECATION")
     fun qualify(test:Context,target:Context,args:JSONObject) {
         check(test.packageName==TEST&&target.packageName==PRODUCT&&target.applicationInfo.uid==Process.myUid()
-            &&test.applicationInfo.uid!=target.applicationInfo.uid&&android.app.Application.getProcessName()==PRODUCT) {"physical_package"}
+            &&target.applicationInfo.uid==args.getInt("productUid")&&test.applicationInfo.uid!=target.applicationInfo.uid&&android.app.Application.getProcessName()==PRODUCT) {"physical_package"}
         check(Build.VERSION.SDK_INT==30||Build.VERSION.SDK_INT==34) {"physical_api"}
         val manager=target.packageManager
         val expected=args.getString("physicalMvpExpectedSignerSha256")
-        for((name,pin) in listOf(PRODUCT to "physicalMvpExpectedProductSha256",TEST to "physicalMvpExpectedTestSha256",VERIFY to "physicalMvpExpectedVerifySha256")) {
+        for((name,pin) in listOf(PRODUCT to "physicalMvpExpectedProductSha256",TEST to "physicalMvpExpectedTestSha256")) {
             val info=manager.getPackageInfo(name,PackageManager.GET_SIGNATURES or PackageManager.GET_PROVIDERS or PackageManager.GET_META_DATA)
             val app=checkNotNull(info.applicationInfo)
-            if(name!=VERIFY)check(app.flags and ApplicationInfo.FLAG_DEBUGGABLE!=0) {"physical_debug_package"}
-            if(name!=VERIFY)check(info.sharedUserId==null&&app.processName==name
+            check(app.flags and ApplicationInfo.FLAG_DEBUGGABLE!=0) {"physical_debug_package"}
+            check(info.sharedUserId==null&&app.processName==name
                 &&app.uid==if(name==PRODUCT)target.applicationInfo.uid else test.applicationInfo.uid) {"physical_process_boundary"}
-            val signer=if(name==VERIFY)args.getString("physicalMvpExpectedVerifySignerSha256")else expected
-            check(info.signatures?.map {digest(it.toByteArray())}?.toSet()==setOf(signer)) {"physical_signer"}
+            check(info.signatures?.map {digest(it.toByteArray())}?.toSet()==setOf(expected)) {"physical_signer"}
             check(fileDigest(File(app.sourceDir))==args.getString(pin)) {"physical_apk_changed"}
         }
+        val verify=try {manager.getPackageInfo(VERIFY,PackageManager.GET_SIGNATURES)}catch(_:PackageManager.NameNotFoundException){null}
+        if(args.has("physicalMvpExpectedVerifySha256")) {
+            checkNotNull(verify) {"physical_verify_missing"}
+            check(verify.signatures?.map {digest(it.toByteArray())}?.toSet()==setOf(args.getString("physicalMvpExpectedVerifySignerSha256"))
+                &&fileDigest(File(checkNotNull(verify.applicationInfo).sourceDir))==args.getString("physicalMvpExpectedVerifySha256")) {"physical_verify_changed"}
+        }else check(verify==null) {"physical_verify_unexpected"}
         val instruments=manager.getPackageInfo(TEST,PackageManager.GET_INSTRUMENTATION).instrumentation.orEmpty()
         check(instruments.size==2&&instruments.associate {it.name to it.targetPackage}==mapOf(
             "io.github.trevarj.goatr.OwnedInstrumentationRunner" to PRODUCT,
@@ -243,42 +254,24 @@ internal object PhysicalMvpPlatform {
             return cursor
         }catch(error:Throwable) {cursor.close();throw error}
     }
+    fun requireFreshInstall(facts:JSONObject) {
+        check(facts.getInt("schema")==1) {"physical_fresh_schema"}
+        check(!facts.getBoolean("databaseExists")) {"physical_fresh_database_present"}
+        val database=facts.getJSONObject("database")
+        check(database.isNull("schemaSha256")&&database.isNull("globalSha256")&&!database.getJSONObject("quiescence").keys().hasNext()) {"physical_fresh_database_facts"}
+        for(key in listOf("hosts","orphans","preferences","aliases"))check(facts.getJSONArray(key).length()==0) {"physical_fresh_${key}_present"}
+        check(facts.getString("aliasSha256")==digest("")) {"physical_fresh_alias_facts"}
+        check(!facts.getBoolean("serviceRequested")&&!facts.getBoolean("serviceRequestedPresent")&&!facts.getBoolean("runLabelCollision")) {"physical_fresh_request_or_label"}
+        val files=facts.getJSONObject("keyFiles")
+        check(files.isNull("directory")&&files.getJSONArray("files").length()==0) {"physical_fresh_key_material_present"}
+        val connector=facts.getJSONObject("connector")
+        check(!connector.getBoolean("databaseExists")&&connector.getInt("version")==0&&connector.isNull("schemaSha256")&&connector.isNull("platformMetadataSha256")
+            &&connector.getLong("localeChanges")==0L&&!connector.getBoolean("legacyFilePresent")&&connector.getInt("legacyKeyCount")==0) {"physical_fresh_connector_present"}
+        for(table in listOf("distributors","registrations","tokens","keys"))check(connector.getJSONArray(table).length()==0) {"physical_fresh_connector_rows"}
+    }
     fun preRuntime(target:Context,args:JSONObject):JSONObject {
-        val facts=retained(target,args.getString("hostLabel"));val connector=facts.getJSONObject("connector")
-        val distributors=connector.getJSONArray("distributors")
-        check(connector.getLong("localeChanges")==0L) {"physical_connector_not_quiescent"}
-        check(distributors.length()<=1) {"physical_connector_other_distributor"}
-        check(distributors.length()!=0||listOf("registrations","tokens","keys").all {connector.getJSONArray(it).length()==0}) {"physical_connector_orphan_material"}
-        if(distributors.length()==1) {
-            val row=distributors.getJSONObject(0)
-            check(row.getString("distributor")=="io.heckel.ntfy"&&row.isNull("fallbackFrom")&&row.getBoolean("ack")) {"physical_connector_other_distributor"}
-        }
-        val selected=args.optString("host","").takeIf {it.isNotEmpty()&&it!="null"}
-        if(selected!=null) {
-            val expected=digest("goatr.$PRODUCT.$selected")
-            for(table in listOf("registrations","tokens","keys")) {
-                val rows=connector.getJSONArray(table)
-                check((0 until rows.length()).none {rows.getJSONObject(it).getString("instanceSha256")==expected}) {"physical_connector_private_instance_collision"}
-            }
-        }
-        if(args.getString("mode")=="observe") {
-            check(facts.getBoolean("databaseExists")) {"initialized_retained_phone_unavailable"}
-            val checks=facts.getJSONObject("database").getJSONObject("quiescence")
-            check(checks.keys().asSequence().all {checks.getLong(it)==0L}) {"physical_retained_database_not_quiescent"}
-            val material=facts.getJSONObject("keyFiles").getJSONArray("files")
-            val names=(0 until material.length()).map {material.getJSONObject(it).getString("name")}.toSet()
-            val hosts=facts.getJSONArray("hosts")
-            if(hosts.length()>0)check("goatr.installation.endpoint.gcm" in names&&"goatr.installation.endpoint.gcm.initialized" in names) {"physical_retained_endpoint_material_unavailable"}
-            for(index in 0 until hosts.length()) {
-                val aliases=hosts.getJSONObject(index).getJSONArray("keyAliases")
-                for(at in 0 until aliases.length()) {
-                    val alias=aliases.getString(at)
-                    if(alias=="goatr.installation.endpoint"||alias.matches(Regex("goatr\\.host\\.[0-9a-f]{64}\\.(receipt|push)")))
-                        check("$alias.gcm" in names&&"$alias.gcm.initialized" in names) {"physical_retained_host_material_unavailable"}
-                }
-            }
-        }
-        return facts
+        check(args.getBoolean("freshInstall")) {"physical_fresh_install_required"}
+        val facts=retained(target,args.getString("hostLabel"));requireFreshInstall(facts);return facts
     }
     private val db8Columns=sortedMapOf(
         "android_metadata" to mapOf("locale" to "TEXT:0:<null>:0"),

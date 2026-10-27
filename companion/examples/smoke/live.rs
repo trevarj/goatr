@@ -7438,9 +7438,6 @@ fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     if args.get_one::<String>("expected-config-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))) {
         return Err(prerequisite("independent_seed_config_pin_unavailable"));
     }
-    if let Some(pin)=args.get_one::<String>("expected-old-product-audit-sha256") {
-        if pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)){return Err(prerequisite("independent_old_product_audit_pin_unavailable"));}
-    }
     if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE",
         "GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
         "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
@@ -7469,7 +7466,7 @@ fn arguments_base() -> Command {
                 "codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
                 "development-continuity","development-owner-feedback","development-android-only",
                 "keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs"])
-            .help("Complete retained-phone stock-only BOTH-provider physical MVP; camera/human/native-row ownership, never emulator/private-native/direct-provider input"))
+            .help("Fresh-only PRODUCT stock BOTH-provider physical MVP: prove no active or -u PRODUCT record, update same-signer TEST, install PRODUCT once without replacement, then camera/human/native-row ownership; no retained-product fallback"))
         .arg(Arg::new("background").long("background").value_parser(["persistent","ntfy"])
             .requires_all([
                 "backend",
@@ -7519,8 +7516,6 @@ fn arguments_base() -> Command {
         .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("notification-artifact-mode")
             .help("Independent exact official F-Droid APK-signer pin; physical-mvp/background ntfy only, never persistent"))
         .arg(Arg::new("expected-config-sha256").long("expected-config-sha256").requires_all(["physical-mvp","config"]).help("Independent caller SHA-256 of the canonical0600 neutral seed; lowercase64, physical-only, never measured by the runner to authorize its candidate"))
-        .arg(Arg::new("old-product-audit").long("old-product-audit").value_parser(value_parser!(PathBuf)).requires_all(["physical-mvp","expected-old-product-audit-sha256"]).help("Independent immutable OLD APK Startup provider/AAR audit, required when OLD differs from the frozen NEW artifact"))
-        .arg(Arg::new("expected-old-product-audit-sha256").long("expected-old-product-audit-sha256").requires_all(["physical-mvp","old-product-audit"]))
         .arg(Arg::new("terminal-only").long("terminal-only").action(ArgAction::SetTrue)
             .requires_all([
                 "goatr",
@@ -14381,18 +14376,10 @@ mod tests {
         }
     }
     #[test]
-    fn physical_mvp_requires_independent_template_pin_and_paired_old_audit_inputs_only_in_its_mode() {
-        let audit="--old-product-audit=/private/independent-old-audit.json".to_owned();
-        let pin=format!("--expected-old-product-audit-sha256={}","a".repeat(64));
-        let mut complete=physical_mvp_args();complete.extend([audit.clone(),pin.clone()]);
-        physical_mode_environment(&feedback_arguments(arguments_base()).try_get_matches_from(complete).unwrap()).unwrap();
-        for single in [&audit,&pin] {
-            let mut incomplete=physical_mvp_args();incomplete.push(single.clone());
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(incomplete).is_err());
-        }
-        for extra in [format!("--expected-config-sha256={}","3".repeat(64)),audit,pin] {
-            let mut unrelated=background_args("persistent");unrelated.push(extra);
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(unrelated).is_err());
+    fn physical_mvp_rejects_removed_old_product_audit_interface() {
+        for removed in ["--old-product-audit=/private/obsolete.json","--expected-old-product-audit-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] {
+            let mut args=physical_mvp_args();args.push(removed.to_owned());
+            assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap_err().kind(),clap::error::ErrorKind::UnknownArgument);
         }
     }
     #[test]
