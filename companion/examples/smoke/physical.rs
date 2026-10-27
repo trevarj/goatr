@@ -184,6 +184,120 @@ struct HostAuthority {
     manager:ProcessEvidence,
     facts:Value,
 }
+#[derive(Debug,PartialEq,Eq,Serialize)]
+struct HostCaps {
+    #[serde(rename="CapInh")]
+    inheritable:String,
+    #[serde(rename="CapPrm")]
+    permitted:String,
+    #[serde(rename="CapEff")]
+    effective:String,
+    #[serde(rename="CapAmb")]
+    ambient:String,
+}
+#[derive(Default,Debug,PartialEq,Eq)]
+struct HostDiagnostic {
+    guard:&'static str,
+    errno:Option<i32>,
+    caller_caps:Option<HostCaps>,
+    manager_caps:Option<HostCaps>,
+    proc_view_validated:bool,
+}
+#[track_caller]
+fn host_guard(guard:&'static str,error:io::Error,diagnostic:Option<&mut HostDiagnostic>)->io::Error {
+    let errno=error.raw_os_error();
+    if let Some(diagnostic)=diagnostic {diagnostic.guard=guard;diagnostic.errno=errno;}
+    super::super::located_message(error.kind(),&format!("guard={guard}; errno={}; no mutation",errno.map_or_else(||"none".to_owned(),|errno|errno.to_string())),
+        super::super::helper_error_location(&error))
+}
+fn host_probe_read(path:&Path,guard:&'static str,diagnostic:&mut HostDiagnostic)->io::Result<()> {
+    let file=File::open(path).map_err(|error|host_guard(guard,error,Some(&mut *diagnostic)))?;
+    let count=io::copy(&mut file.take(65_537),&mut io::sink()).map_err(|error|host_guard(guard,error,Some(&mut *diagnostic)))?;
+    if count>65_536{return Err(host_guard(guard,failure("physical bounded proc read exceeded its limit"),Some(diagnostic)));}
+    Ok(())
+}
+fn host_probe_bytes(path:&Path,guard:&'static str,diagnostic:&mut HostDiagnostic)->io::Result<Vec<u8>> {
+    let file=File::open(path).map_err(|error|host_guard(guard,error,Some(&mut *diagnostic)))?;
+    let mut bytes=Vec::new();
+    file.take(65_537).read_to_end(&mut bytes).map_err(|error|host_guard(guard,error,Some(&mut *diagnostic)))?;
+    if bytes.len()>65_536{return Err(host_guard(guard,failure("physical bounded proc read exceeded its limit"),Some(diagnostic)));}
+    Ok(bytes)
+}
+fn host_caps(status:&[u8])->io::Result<HostCaps> {
+    let status=std::str::from_utf8(status).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"physical capability fields are malformed"))?;
+    let mut masks=[None;4];
+    for line in status.lines() {
+        let Some((key,value))=line.split_once(':')else{continue};
+        let index=match key {"CapInh"=>0,"CapPrm"=>1,"CapEff"=>2,"CapAmb"=>3,_=>continue};
+        let value=value.trim_matches(|character|matches!(character,' '|'\t'));
+        if masks[index].is_some()||value.len()!=16||!value.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,"physical capability fields are malformed or repeated"));
+        }
+        masks[index]=Some(value);
+    }
+    let [Some(inheritable),Some(permitted),Some(effective),Some(ambient)]=masks else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,"physical capability fields are missing"));
+    };
+    Ok(HostCaps {inheritable:inheritable.to_owned(),permitted:permitted.to_owned(),effective:effective.to_owned(),ambient:ambient.to_owned()})
+}
+fn host_status(path:&Path,guard:&'static str,manager:bool,diagnostic:&mut HostDiagnostic)->io::Result<Vec<u8>> {
+    if manager{diagnostic.manager_caps=None;}else{diagnostic.caller_caps=None;}
+    let bytes=host_probe_bytes(path,guard,diagnostic)?;
+    let parse_guard=if manager{"manager_cap_fields"}else{"caller_cap_fields"};
+    let caps=host_caps(&bytes).map_err(|error|host_guard(parse_guard,error,Some(&mut *diagnostic)))?;
+    if manager{diagnostic.manager_caps=Some(caps);}else{diagnostic.caller_caps=Some(caps);}
+    Ok(bytes)
+}
+fn host_validate_proc_view(stat:&[u8],status:&[u8],diagnostic:&mut HostDiagnostic)->io::Result<()> {
+    diagnostic.proc_view_validated=false;
+    let validate=||->io::Result<()> {
+        let actual=std::process::id();
+        if u32::try_from(unsafe{libc::getpid()}).ok()!=Some(actual) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,"physical actual caller PID is unavailable"));
+        }
+        let stat=std::str::from_utf8(stat).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"physical caller proc view is malformed"))?;
+        let status=std::str::from_utf8(status).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"physical caller proc view is malformed"))?;
+        herdr::validate_procfs_view(stat,status,actual)
+    };
+    validate().map_err(|error|host_guard("caller_procfs_view",error,Some(&mut *diagnostic)))?;
+    diagnostic.proc_view_validated=true;
+    Ok(())
+}
+fn host_manager_reads(pid:u32,diagnostic:&mut HostDiagnostic)->io::Result<()> {
+    if !diagnostic.proc_view_validated {
+        return Err(host_guard("manager_procfs_view_required",io::Error::new(io::ErrorKind::InvalidData,"physical numeric proc path requires this invocation's checked caller view"),Some(diagnostic)));
+    }
+    // No numeric pathname is even formed until the /proc/self numbering proof above.
+    let root=PathBuf::from(format!("/proc/{pid}"));
+    fs::metadata(&root).map_err(|error|host_guard("manager_proc_stat",error,Some(&mut *diagnostic)))?;
+    host_probe_read(&root.join("stat"),"manager_stat_read",diagnostic)?;
+    host_status(&root.join("status"),"manager_status_read",true,diagnostic)?;
+    for (name,guard) in [("pid","manager_ns_pid_stat"),("mnt","manager_ns_mnt_stat"),("user","manager_ns_user_stat")] {
+        fs::metadata(root.join("ns").join(name)).map_err(|error|host_guard(guard,error,Some(&mut *diagnostic)))?;
+    }
+    Ok(())
+}
+fn host_proc_reads(pid:u32,manager:bool,diagnostic:&mut HostDiagnostic)->io::Result<()> {
+    // Revalidate each initial/final capture. Failed reads cannot retain an earlier view/sample.
+    diagnostic.proc_view_validated=false;diagnostic.caller_caps=None;
+    if manager{diagnostic.manager_caps=None;}
+    let stat=host_probe_bytes(Path::new("/proc/self/stat"),"self_stat_read",diagnostic)?;
+    let status=host_status(Path::new("/proc/self/status"),"self_status_read",false,diagnostic)?;
+    host_validate_proc_view(&stat,&status,diagnostic)?;
+    drop(stat);drop(status); // Only the four closed masks survive the numbering check.
+    for (path,guard) in [("/proc/self/ns/pid","self_ns_pid_stat"),("/proc/self/ns/mnt","self_ns_mnt_stat"),("/proc/self/ns/user","self_ns_user_stat")] {
+        fs::metadata(path).map_err(|error|host_guard(guard,error,Some(&mut *diagnostic)))?;
+    }
+    fs::metadata("/proc/self").map_err(|error|host_guard("caller_proc_stat",error,Some(&mut *diagnostic)))?;
+    host_probe_read(Path::new("/proc/sys/kernel/random/boot_id"),"boot_id_read",diagnostic)?;
+    if manager{host_manager_reads(pid,diagnostic)?;}
+    Ok(())
+}
+fn host_process_evidence(pid:u32,manager:bool,guard:&'static str,mut diagnostic:Option<&mut HostDiagnostic>)->io::Result<ProcessEvidence> {
+    if let Some(diagnostic)=diagnostic.as_deref_mut(){host_proc_reads(pid,manager,diagnostic)?;}
+    // Always run the complete original capture after diagnostic reads; never use their results.
+    herdr::process_evidence(pid).map_err(|error|host_guard(guard,error,diagnostic))
+}
 fn controller_environment(unsandboxed:bool,sandboxed:bool)->io::Result<()> {
     if unsandboxed||sandboxed{return Err(prerequisite("physical controller requires the direct authorized host context, not an inherited sandbox/unsandboxed override"));}
     Ok(())
@@ -193,62 +307,117 @@ fn same_host_namespace_group(caller:&ProcessEvidence,manager:&ProcessEvidence)->
         &&caller.namespaces.mount==manager.namespaces.mount&&caller.namespaces.user==manager.namespaces.user
         &&!caller.namespaces.nspids.is_empty()&&caller.namespaces.nspids.len()==manager.namespaces.nspids.len()
 }
-fn recheck_host_processes(caller:&ProcessEvidence,manager:&ProcessEvidence)->io::Result<()> {
-    if caller.pid!=std::process::id()||herdr::process_evidence(caller.pid)?!=*caller||herdr::process_evidence(manager.pid)?!=*manager
-        ||!same_host_namespace_group(caller,manager){return Err(failure("physical original caller/manager process or namespace authority changed"));}
+fn recheck_host_processes(caller:&ProcessEvidence,manager:&ProcessEvidence,mut diagnostic:Option<&mut HostDiagnostic>)->io::Result<()> {
+    if caller.pid!=std::process::id()
+        ||host_process_evidence(caller.pid,false,"final_caller_evidence",diagnostic.as_deref_mut())?!=*caller
+        ||host_process_evidence(manager.pid,true,"final_manager_evidence",diagnostic.as_deref_mut())?!=*manager
+        ||!same_host_namespace_group(caller,manager) {
+        return Err(host_guard("original_process_identity",failure("physical original caller/manager process or namespace authority changed"),diagnostic));
+    }
     Ok(())
 }
-/// Qualification only: no starting/replacing a manager and no capability or namespace changes.
-fn original_host_authority() -> io::Result<HostAuthority> {
-    controller_environment(std::env::var_os("OMP_UNSANDBOXED").is_some(),std::env::var_os("AGENT_SANDBOXED").is_some())?;
-    let caller=herdr::process_evidence(std::process::id())?;dev_continuity::zero_native_caps(&caller)?;
+/// Qualification only: no manager command, creation/restart or capability/namespace changes.
+fn original_host_authority(mut diagnostic:Option<&mut HostDiagnostic>) -> io::Result<HostAuthority> {
+    controller_environment(std::env::var_os("OMP_UNSANDBOXED").is_some(),std::env::var_os("AGENT_SANDBOXED").is_some())
+        .map_err(|error|host_guard("controller_environment",error,diagnostic.as_deref_mut()))?;
+    let caller=host_process_evidence(std::process::id(),false,"caller_evidence",diagnostic.as_deref_mut())?;
+    dev_continuity::zero_native_caps(&caller).map_err(|error|host_guard("caller_capabilities",error,diagnostic.as_deref_mut()))?;
     if unsafe { libc::geteuid() } != 1000 || std::env::consts::ARCH != "x86_64" || std::env::consts::OS != "linux" {
-        return Err(failure("physical original-host prerequisite requires the qualified Linux UID 1000 host"));
+        return Err(host_guard("host_platform",failure("physical original-host prerequisite requires the qualified Linux UID 1000 host"),diagnostic));
     }
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
-        .filter(|path| path == Path::new("/run/user/1000")).ok_or_else(|| failure("physical original-host runtime is unavailable"))?;
-    goatr::pairing::private_dir(&runtime,false)?;
+        .filter(|path| path == Path::new("/run/user/1000"))
+        .ok_or_else(||host_guard("runtime_selection",failure("physical original-host runtime is unavailable"),diagnostic.as_deref_mut()))?;
+    goatr::pairing::private_dir(&runtime,false).map_err(|error|host_guard("runtime_directory",error,diagnostic.as_deref_mut()))?;
     let socket = runtime.join("systemd/private");
-    let before = fs::symlink_metadata(&socket).map_err(|_| failure("physical original-host protected manager is unavailable"))?;
+    let before=fs::symlink_metadata(&socket).map_err(|error|host_guard("socket_initial_stat",error,diagnostic.as_deref_mut()))?;
     if !std::os::unix::fs::FileTypeExt::is_socket(&before.file_type()) || before.uid() != 1000 || before.mode() & 0o777 != 0o700 {
-        return Err(failure("physical original-host protected manager socket is unavailable"));
+        return Err(host_guard("socket_policy",failure("physical original-host protected manager socket is unavailable"),diagnostic));
     }
     let raw=unsafe {libc::socket(libc::AF_UNIX,libc::SOCK_STREAM|libc::SOCK_CLOEXEC|libc::SOCK_NONBLOCK,0)};
-    if raw<0{return Err(failure("physical original-host manager socket creation failed"));}
+    if raw<0{return Err(host_guard("socket_create",io::Error::last_os_error(),diagnostic));}
     let stream=unsafe {OwnedFd::from_raw_fd(raw)};
     let bytes=socket.as_os_str().as_encoded_bytes();
-    if bytes.len()>107{return Err(failure("physical original-host manager socket path exceeds bound"));}
+    if bytes.len()>107{return Err(host_guard("socket_path_bound",failure("physical original-host manager socket path exceeds bound"),diagnostic));}
     let mut address:libc::sockaddr_un=unsafe {std::mem::zeroed()};
     address.sun_family=libc::AF_UNIX as libc::sa_family_t;
     for (out,byte) in address.sun_path.iter_mut().zip(bytes){*out=*byte as libc::c_char;}
     let length=(std::mem::offset_of!(libc::sockaddr_un,sun_path)+bytes.len()+1) as libc::socklen_t;
-    if unsafe {libc::connect(stream.as_raw_fd(),(&address as *const libc::sockaddr_un).cast(),length)}!=0{return Err(failure("physical original-host protected manager is unreachable"));}
-    let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    if unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut peer as *mut libc::ucred).cast(), &mut size) } != 0 || peer.uid != 1000 || peer.pid <= 0 {
-        return Err(failure("physical original-host manager peer is not the qualified user"));
+    if unsafe {libc::connect(stream.as_raw_fd(),(&address as *const libc::sockaddr_un).cast(),length)}!=0 {
+        return Err(host_guard("socket_connect",io::Error::last_os_error(),diagnostic));
     }
-    let after = fs::symlink_metadata(&socket)?;
-    if (before.dev(), before.ino(), before.uid(), before.mode()) != (after.dev(), after.ino(), after.uid(), after.mode()) {
-        return Err(failure("physical original-host manager socket changed during qualification"));
+    let mut peer:libc::ucred=unsafe {std::mem::zeroed()};
+    let mut size=std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    if unsafe {libc::getsockopt(stream.as_raw_fd(),libc::SOL_SOCKET,libc::SO_PEERCRED,(&mut peer as *mut libc::ucred).cast(),&mut size)}!=0 {
+        return Err(host_guard("socket_peer",io::Error::last_os_error(),diagnostic));
     }
-    let manager = goatr::herdr::process_evidence(peer.pid as u32)?;
-    if !same_host_namespace_group(&caller,&manager){return Err(failure("physical original-host manager namespace authority is unavailable"));}
-    let manager_exe = protected_tool(&fs::read_link(format!("/proc/{}/exe", peer.pid))?)?;
-    if manager_exe.file_name().and_then(|name| name.to_str()) != Some("systemd") {
-        return Err(failure("physical original-host manager executable is not systemd"));
+    if peer.uid!=1000||peer.pid<=0{return Err(host_guard("socket_peer_identity",failure("physical original-host manager peer is not the qualified user"),diagnostic));}
+    let after=fs::symlink_metadata(&socket).map_err(|error|host_guard("socket_post_stat",error,diagnostic.as_deref_mut()))?;
+    if (before.dev(),before.ino(),before.uid(),before.mode())!=(after.dev(),after.ino(),after.uid(),after.mode()) {
+        return Err(host_guard("socket_object_identity",failure("physical original-host manager socket changed during qualification"),diagnostic));
     }
-    let manager_file=File::open(format!("/proc/{}/exe",peer.pid))?;
-    let held=manager_file.metadata()?;let configured=fs::metadata(&manager_exe)?;
-    if (held.dev(),held.ino())!=(configured.dev(),configured.ino()){return Err(failure("physical original-host manager executable changed during qualification"));}
-    let mut tools = BTreeMap::new();
-    for name in ["systemd-run", "systemctl", "busctl"] {
-        let tool = resolve_tool(name)?;
-        tools.insert(name, json!({"path":tool,"sha256":binary_sha256(&tool)?}));
+    let manager=host_process_evidence(peer.pid as u32,true,"manager_evidence",diagnostic.as_deref_mut())?;
+    if !same_host_namespace_group(&caller,&manager){return Err(host_guard("manager_namespace_group",failure("physical original-host manager namespace authority is unavailable"),diagnostic));}
+    let exe_path=fs::read_link(format!("/proc/{}/exe",peer.pid)).map_err(|error|host_guard("manager_exe_readlink",error,diagnostic.as_deref_mut()))?;
+    let manager_exe=protected_tool(&exe_path).map_err(|error|host_guard("manager_exe_policy",error,diagnostic.as_deref_mut()))?;
+    if manager_exe.file_name().and_then(|name|name.to_str())!=Some("systemd") {
+        return Err(host_guard("manager_exe_name",failure("physical original-host manager executable is not systemd"),diagnostic));
     }
-    recheck_host_processes(&caller,&manager)?;dev_continuity::zero_native_caps(&caller)?;
+    let manager_file=File::open(format!("/proc/{}/exe",peer.pid)).map_err(|error|host_guard("manager_exe_open",error,diagnostic.as_deref_mut()))?;
+    let held=manager_file.metadata().map_err(|error|host_guard("manager_exe_fstat",error,diagnostic.as_deref_mut()))?;
+    let configured=fs::metadata(&manager_exe).map_err(|error|host_guard("manager_exe_stat",error,diagnostic.as_deref_mut()))?;
+    if (held.dev(),held.ino())!=(configured.dev(),configured.ino()){return Err(host_guard("manager_exe_identity",failure("physical original-host manager executable changed during qualification"),diagnostic));}
+    let mut tools=BTreeMap::new();
+    for (name,resolve_guard,hash_guard) in [("systemd-run","systemd_run_resolve","systemd_run_hash"),("systemctl","systemctl_resolve","systemctl_hash"),("busctl","busctl_resolve","busctl_hash")] {
+        let tool=resolve_tool(name).map_err(|error|host_guard(resolve_guard,error,diagnostic.as_deref_mut()))?;
+        let hash=binary_sha256(&tool).map_err(|error|host_guard(hash_guard,error,diagnostic.as_deref_mut()))?;
+        tools.insert(name,json!({"path":tool,"sha256":hash}));
+    }
+    recheck_host_processes(&caller,&manager,diagnostic.as_deref_mut())?;
+    dev_continuity::zero_native_caps(&caller).map_err(|error|host_guard("final_caller_capabilities",error,diagnostic))?;
     let facts=json!({"uid":1000,"manager":manager,"managerExecutable":manager_exe,"socketDevice":before.dev(),"socketInode":before.ino(),"tools":tools,"caller":caller,"mutation":false});
     Ok(HostAuthority {_socket:stream,executable:manager_file,caller,manager,facts})
+}
+fn host_preflight_report(run:&Uuid,qualified:bool,diagnostic:&HostDiagnostic,error:Option<&io::Error>)->Value {
+    let mut report=json!({"gate":"physical-host-preflight","runId":run,"status":if error.is_some(){"blocked"}else{"pass"},
+        "qualification":if qualified{"qualified"}else if diagnostic.guard=="human_tty"{"not_attempted"}else{"refused"},
+        "guard":if qualified{"qualified"}else{diagnostic.guard},"errno":diagnostic.errno,"io_kind":"none",
+        "callerCaps":diagnostic.caller_caps,"managerCaps":diagnostic.manager_caps,
+        "managerCommand":false,"managerCreatedOrRestarted":false,"nativeLaunch":false,"productInstall":false,
+        "ADB":false,"provider":false,"runtimeAcceptanceClaim":false});
+    if let Some(error)=error {
+        report.as_object_mut().expect("object").extend(super::super::helper_error_metadata(error).as_object().expect("object").clone());
+    }
+    report
+}
+fn host_terminal_report(output:&mut impl Write,report:&Value,passed:bool)->bool {
+    // Entry owns the single terminal attempt, even if write_fmt emits bytes before failing.
+    // Returning false is FAILURE in the existing live/main result owner, not a second error report.
+    writeln!(output,"{report}").is_ok()&&passed
+}
+pub(super) fn host_preflight(evidence:&Path)->io::Result<bool> {
+    let run=Uuid::random();let mut diagnostic=HostDiagnostic::default();
+    let qualification=if !io::stdin().is_terminal()||!io::stdout().is_terminal() {
+        Err(host_guard("human_tty",prerequisite("physical host preflight requires the real human TTY"),Some(&mut diagnostic)))
+    }else{
+        original_host_authority(Some(&mut diagnostic))
+    };
+    let qualified=qualification.is_ok();
+    // err() drops the successful authority/connected socket; preflight never retains a runtime owner.
+    let error=qualification.err();
+    let mut report=host_preflight_report(&run,qualified,&diagnostic,error.as_ref());
+    report["evidenceWritten"]=json!(true);
+    let stored=match write_json(&evidence.join("physical-host-preflight.json"),&report) {
+        Ok(())=>true,
+        Err(error)=>{
+            let mut write_diagnostic=HostDiagnostic::default();
+            let error=host_guard("evidence_write",error,Some(&mut write_diagnostic));
+            let mut boundary=super::super::helper_error_metadata(&error);
+            boundary["guard"]=json!(write_diagnostic.guard);boundary["errno"]=json!(write_diagnostic.errno);
+            report["status"]=json!("fail");report["evidenceWritten"]=json!(false);report["evidenceWrite"]=boundary;false
+        }
+    };
+    Ok(host_terminal_report(&mut io::stdout(),&report,qualified&&stored))
 }
 
 #[derive(Clone)]
@@ -1006,7 +1175,7 @@ impl Observer {
 }
 
 fn recheck_original_host(authority:&HostAuthority) -> io::Result<()> {
-    recheck_host_processes(&authority.caller,&authority.manager)?;dev_continuity::zero_native_caps(&authority.caller)?;
+    recheck_host_processes(&authority.caller,&authority.manager,None)?;dev_continuity::zero_native_caps(&authority.caller)?;
     let facts=&authority.facts;
     let current=fs::metadata(format!("/proc/{}/exe",authority.manager.pid))?;let original=authority.executable.metadata()?;
     let socket=fs::symlink_metadata("/run/user/1000/systemd/private")?;
@@ -1840,7 +2009,7 @@ fn blocker(error:&io::Error) -> &'static str {
 pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()> {
     if !io::stdin().is_terminal()||!io::stdout().is_terminal(){return Err(failure("physical MVP requires the real local private human TTY; no synthetic camera/input acknowledgement"));}
     let run=Uuid::random();let label=format!("Goatr MVP {}",run.0);
-    let authority=match original_host_authority() {
+    let authority=match original_host_authority(None) {
         Ok(authority)=>authority,
         Err(error)=>{
             write_json(&evidence.join("physical-original-host-blocked.json"),&json!({"runId":run,"gate":"physical-mvp","status":"blocked","stage":"original-host-authority",
@@ -2588,6 +2757,148 @@ impl Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_guard_captures_original_errno_kind_and_location_without_private_reason() {
+        let mut diagnostic=HostDiagnostic::default();
+        let error=host_guard("manager_ns_pid_stat",io::Error::from_raw_os_error(libc::EACCES),Some(&mut diagnostic));
+        assert_eq!(error.kind(),io::ErrorKind::PermissionDenied);assert_eq!(diagnostic.errno,Some(13));assert_eq!(diagnostic.guard,"manager_ns_pid_stat");
+        assert_eq!(error.raw_os_error(),None); // located_message is NOT an errno-preserving io::Error.
+        assert!(crate::helper_error_location(&error).is_some());
+        let original=crate::HelperLocation::from_parts("examples/smoke/physical.rs",23).unwrap();
+        let error=crate::located_message(io::ErrorKind::InvalidData,"PRIVATE filesystem path/token/error text",Some(original));
+        let error=host_guard("manager_evidence",error,Some(&mut diagnostic));
+        assert_eq!(error.kind(),io::ErrorKind::InvalidData);assert_eq!(diagnostic.errno,None);
+        assert_eq!(crate::helper_error_location(&error),Some(original));
+        assert_eq!(error.to_string(),"guard=manager_evidence; errno=none; no mutation");
+        assert!(!crate::helper_error_metadata(&error).to_string().contains("PRIVATE"));
+        let error=host_guard("caller_evidence",io::Error::from_raw_os_error(libc::EACCES),None);
+        assert_eq!(error.kind(),io::ErrorKind::PermissionDenied);assert!(error.to_string().contains("errno=13"));
+    }
+    #[test]
+    fn host_preflight_report_is_closed_and_never_claims_no_manager_socket_contact() {
+        let run=Uuid::random();let mut diagnostic=HostDiagnostic::default();
+        let error=host_guard("manager_exe_open",io::Error::from_raw_os_error(libc::EACCES),Some(&mut diagnostic));
+        let report=host_preflight_report(&run,false,&diagnostic,Some(&error));
+        assert_eq!(report["runId"],json!(run));assert_eq!(report["status"],"blocked");assert_eq!(report["qualification"],"refused");
+        assert_eq!(report["guard"],"manager_exe_open");assert_eq!(report["errno"],13);assert_eq!(report["io_kind"],"permission_denied");
+        for field in ["managerCommand","managerCreatedOrRestarted","nativeLaunch","productInstall","ADB","provider","runtimeAcceptanceClaim"]{assert_eq!(report[field],false);}
+        assert!(report.get("managerContact").is_none());assert!(report.get("reason").is_none());
+        let error=host_guard("human_tty",prerequisite("PRIVATE non-TTY detail"),Some(&mut diagnostic));
+        let refused=host_preflight_report(&run,false,&diagnostic,Some(&error));
+        assert_eq!(refused["qualification"],"not_attempted");assert!(refused["errno"].is_null());assert!(!refused.to_string().contains("PRIVATE"));
+        // Report formatting is not a mock successful host admission.
+        let qualified=host_preflight_report(&run,true,&HostDiagnostic::default(),None);
+        assert_eq!(qualified["qualification"],"qualified");assert_eq!(qualified["guard"],"qualified");assert_eq!(qualified["io_kind"],"none");
+        assert_eq!(qualified["runtimeAcceptanceClaim"],false);assert!(qualified["errno"].is_null());
+    }
+    #[test]
+    fn host_diagnostic_read_bounds_real_owned_files_without_export_or_mutation() {
+        let root=std::env::temp_dir().join(format!("goatr-host-diagnostic-{}",Uuid::random().0));fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path=root.join("owned-proc-fixture");let file=OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();file.set_len(65_536).unwrap();drop(file);
+        let before=binary_sha256(&path).unwrap();let mut diagnostic=HostDiagnostic::default();
+        host_probe_read(&path,"caller_stat_read",&mut diagnostic).unwrap();assert_eq!(binary_sha256(&path).unwrap(),before);
+        OpenOptions::new().write(true).open(&path).unwrap().set_len(65_537).unwrap();
+        let before=binary_sha256(&path).unwrap();let error=host_probe_read(&path,"caller_stat_read",&mut diagnostic).unwrap_err();
+        assert_eq!(diagnostic.guard,"caller_stat_read");assert_eq!(diagnostic.errno,None);assert!(!error.to_string().contains(path.to_str().unwrap()));
+        assert_eq!(binary_sha256(&path).unwrap(),before);
+        let error=host_probe_read(&root.join("PRIVATE-missing"),"caller_status_read",&mut diagnostic).unwrap_err();
+        assert_eq!(error.kind(),io::ErrorKind::NotFound);assert_eq!(diagnostic.errno,Some(libc::ENOENT));assert!(!error.to_string().contains("PRIVATE"));
+        fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
+    }
+    fn host_status_fixture()->&'static str {
+        "Name:\tPRIVATE-process-name\nGroups:\t1000 1234\nCapBnd:\tffffffffffffffff\nCapInh:\t0000000000000000\nCapPrm:\t 0000000800000000 \nCapEff:\t00000000000000af\nCapAmb:\t0000000000000000\n"
+    }
+    #[test]
+    fn host_procfs_numbering_gate_refuses_before_numeric_target_access() {
+        let stat=fs::read_to_string("/proc/self/stat").unwrap();let status=fs::read_to_string("/proc/self/status").unwrap();
+        let actual=std::process::id();let wrong=actual.checked_add(1).unwrap();
+        let bad_stat=stat.replacen(&format!("{actual} "),&format!("{wrong} "),1);assert_ne!(bad_stat,stat);
+        let bad_status=status.lines().map(|line|if line.starts_with("NSpid:"){format!("NSpid:\t{wrong}")}else{line.to_owned()}).collect::<Vec<_>>().join("\n");
+        assert_ne!(bad_status,status);
+        let mut diagnostic=HostDiagnostic::default();
+        host_validate_proc_view(stat.as_bytes(),status.as_bytes(),&mut diagnostic).unwrap();assert!(diagnostic.proc_view_validated);
+        for (stat,status) in [(bad_stat.as_bytes(),status.as_bytes()),(stat.as_bytes(),bad_status.as_bytes())] {
+            // A previous successful capture is deliberately stale; a failed new view must erase it.
+            diagnostic.proc_view_validated=true;
+            let error=host_validate_proc_view(stat,status,&mut diagnostic).unwrap_err();
+            assert_eq!(error.kind(),io::ErrorKind::InvalidData);assert_eq!(diagnostic.guard,"caller_procfs_view");assert!(!diagnostic.proc_view_validated);
+            // This is the actual production numeric-read entry, not a copied decision or host success.
+            // Without the PRE gate, /proc/0 metadata would instead fail with a kernel ENOENT.
+            let error=host_manager_reads(0,&mut diagnostic).unwrap_err();
+            assert_eq!(error.kind(),io::ErrorKind::InvalidData);assert_eq!(diagnostic.guard,"manager_procfs_view_required");assert_eq!(diagnostic.errno,None);
+        }
+    }
+    #[test]
+    fn host_caps_parser_exports_exactly_four_canonical_masks_and_refuses_bad_fields() {
+        let parsed=serde_json::to_value(host_caps(host_status_fixture().as_bytes()).unwrap()).unwrap();
+        assert_eq!(parsed,json!({"CapInh":"0000000000000000","CapPrm":"0000000800000000","CapEff":"00000000000000af","CapAmb":"0000000000000000"}));
+        assert_eq!(parsed.as_object().unwrap().len(),4);assert!(!parsed.to_string().contains("PRIVATE"));assert!(parsed.get("CapBnd").is_none());assert!(parsed.get("Groups").is_none());
+        for value in parsed.as_object().unwrap().values() {
+            let value=value.as_str().unwrap();assert_eq!(value.len(),16);assert!(value.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)));
+        }
+        let valid=host_status_fixture();
+        for key in ["CapInh","CapPrm","CapEff","CapAmb"] {
+            let prefix=format!("{key}:");let field=valid.lines().find(|line|line.starts_with(&prefix)).unwrap();
+            let missing=valid.lines().filter(|line|!line.starts_with(&prefix)).collect::<Vec<_>>().join("\n");
+            for malformed in [missing,format!("{valid}{field}\n")] {assert!(host_caps(malformed.as_bytes()).is_err(),"{key}");}
+        }
+        for malformed in [valid.replace("00000000000000af","00000000000000AF"),valid.replace("00000000000000af","00000000000000a"),
+            valid.replace("00000000000000af","10000000000000000"),valid.replace("00000000000000af","0000000000000x0f"),
+            valid.replace("00000000000000af","-00000000000000f")] {
+            let error=host_caps(malformed.as_bytes()).unwrap_err();assert_eq!(error.kind(),io::ErrorKind::InvalidData);assert!(!error.to_string().contains("PRIVATE"));
+        }
+    }
+    #[test]
+    fn host_status_same_read_capture_clears_failed_samples_and_closes_report_fields() {
+        let root=std::env::temp_dir().join(format!("goatr-host-status-{}",Uuid::random().0));fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path=root.join("owned-status");let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();
+        file.write_all(host_status_fixture().as_bytes()).unwrap();drop(file);
+        let before=binary_sha256(&path).unwrap();let mut diagnostic=HostDiagnostic::default();
+        host_status(&path,"self_status_read",false,&mut diagnostic).unwrap();host_status(&path,"manager_status_read",true,&mut diagnostic).unwrap();
+        assert_eq!(binary_sha256(&path).unwrap(),before);
+        let error=host_guard("manager_ns_pid_stat",io::Error::from_raw_os_error(libc::EACCES),Some(&mut diagnostic));
+        let report=host_preflight_report(&Uuid::random(),false,&diagnostic,Some(&error));
+        assert_eq!(report["callerCaps"].as_object().unwrap().len(),4);assert_eq!(report["managerCaps"].as_object().unwrap().len(),4);
+        assert!(!report.to_string().contains("PRIVATE"));assert!(report.get("procViewValidated").is_none());assert!(report.get("CapBnd").is_none());
+        let error=host_status(&root.join("PRIVATE-missing"),"self_status_read",false,&mut diagnostic).unwrap_err();
+        assert_eq!(error.kind(),io::ErrorKind::NotFound);assert_eq!(diagnostic.guard,"self_status_read");assert_eq!(diagnostic.errno,Some(libc::ENOENT));
+        assert!(diagnostic.caller_caps.is_none());assert!(diagnostic.manager_caps.is_some());
+        let report=host_preflight_report(&Uuid::random(),false,&diagnostic,Some(&error));assert!(report["callerCaps"].is_null());
+        fs::write(&path,format!("{}CapInh:\t0000000000000000\n",host_status_fixture())).unwrap();
+        let error=host_status(&path,"manager_status_read",true,&mut diagnostic).unwrap_err();
+        assert_eq!(diagnostic.guard,"manager_cap_fields");assert_eq!(diagnostic.errno,None);assert!(diagnostic.manager_caps.is_none());
+        let report=host_preflight_report(&Uuid::random(),false,&diagnostic,Some(&error));assert!(report["managerCaps"].is_null());
+        fs::write(&path,host_status_fixture()).unwrap();host_status(&path,"self_status_read",false,&mut diagnostic).unwrap();
+        OpenOptions::new().write(true).open(&path).unwrap().set_len(65_537).unwrap();
+        assert!(host_status(&path,"self_status_read",false,&mut diagnostic).is_err());assert!(diagnostic.caller_caps.is_none());assert_eq!(diagnostic.guard,"self_status_read");
+        fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn host_terminal_partial_write_failure_has_one_owner_and_failure_exit() {
+        struct PartialFailure {remaining:usize,bytes:Vec<u8>,calls:usize}
+        impl Write for PartialFailure {
+            fn write(&mut self,bytes:&[u8])->io::Result<usize> {
+                self.calls+=1;if self.remaining==0{return Err(io::Error::new(io::ErrorKind::BrokenPipe,"PRIVATE terminal failure"));}
+                let count=bytes.len().min(self.remaining);self.bytes.extend_from_slice(&bytes[..count]);self.remaining-=count;Ok(count)
+            }
+            fn flush(&mut self)->io::Result<()>{Ok(())}
+        }
+        // Only the actual writer/outcome boundary is under test; no host qualification is mocked.
+        let report=json!({"gate":"owned-output-consumer","runtimeAcceptanceClaim":false});
+        for budget in [0,7] {
+            let mut output=PartialFailure {remaining:budget,bytes:Vec::new(),calls:0};
+            let passed=host_terminal_report(&mut output,&report,true);assert!(!passed);
+            if budget>0{assert!(!output.bytes.is_empty());}
+            let calls=output.calls;let bytes=output.bytes.len();
+            assert_eq!(crate::mode_exit(Ok(passed),&mut output),std::process::ExitCode::FAILURE);
+            assert_eq!(output.calls,calls);assert_eq!(output.bytes.len(),bytes);assert!(!String::from_utf8_lossy(&output.bytes).contains("selected-smoke-mode"));
+        }
+        let mut output=Vec::new();let passed=host_terminal_report(&mut output,&report,true);assert!(passed);let length=output.len();
+        assert_eq!(crate::mode_exit(Ok(passed),&mut output),std::process::ExitCode::SUCCESS);assert_eq!(output.len(),length);
+        output.clear();
+        assert_eq!(crate::mode_exit(Err(io::Error::new(io::ErrorKind::InvalidInput,"closed selection refused")),&mut output),std::process::ExitCode::FAILURE);
+        let generic:Value=serde_json::from_slice(&output).unwrap();assert_eq!(generic["gate"],"selected-smoke-mode");assert_eq!(generic["io_kind"],"invalid_input");
+    }
     fn empty_connector(exists:bool) -> Value {
         json!({"databaseExists":exists,"version":if exists{1}else{0},"schemaSha256":if exists{json!("1".repeat(64))}else{Value::Null},
             "platformMetadataSha256":if exists{json!("f".repeat(64))}else{Value::Null},"localeChanges":0,"legacyFilePresent":false,"legacyKeyCount":0,"distributors":[],"registrations":[],"tokens":[],"keys":[]})
@@ -3273,8 +3584,8 @@ mod tests {
         let mut child=command.spawn().unwrap();
         let caller=herdr::process_evidence(std::process::id()).unwrap();let manager=herdr::process_evidence(child.id()).unwrap();
         assert_ne!(caller.namespaces.nspids,manager.namespaces.nspids);assert!(same_host_namespace_group(&caller,&manager));
-        recheck_host_processes(&caller,&manager).unwrap();
-        assert!(recheck_host_processes(&manager,&caller).is_err());
+        recheck_host_processes(&caller,&manager,None).unwrap();
+        assert!(recheck_host_processes(&manager,&caller,None).is_err());
         for family in ["boot","pid-namespace","mount","user","empty-depth","different-depth"] {
             let mut changed=manager.clone();
             match family {
@@ -3289,10 +3600,10 @@ mod tests {
             assert!(!same_host_namespace_group(&caller,&changed),"{family}");
         }
         let mut changed_caller=caller.clone();changed_caller.namespaces.nspids[0]+=1;
-        assert!(recheck_host_processes(&changed_caller,&manager).is_err());
+        assert!(recheck_host_processes(&changed_caller,&manager,None).is_err());
         let mut changed_manager=manager.clone();changed_manager.namespaces.nspids[0]+=1;
-        assert!(recheck_host_processes(&caller,&changed_manager).is_err());
-        changed_manager=manager.clone();changed_manager.start_ticks+=1;assert!(recheck_host_processes(&caller,&changed_manager).is_err());
+        assert!(recheck_host_processes(&caller,&changed_manager,None).is_err());
+        changed_manager=manager.clone();changed_manager.start_ticks+=1;assert!(recheck_host_processes(&caller,&changed_manager,None).is_err());
         drop(child.stdin.take());assert!(child.wait().unwrap().success());
     }
     #[test]

@@ -1283,12 +1283,27 @@ async fn run() -> io::Result<bool> {
         "evidence":gate_path,"cleanupCandidate":candidate_path}));
     Ok(transport_observation == "pass")
 }
+fn early_live_argument(argument:&std::ffi::OsStr)->bool {
+    argument.to_str().is_some_and(|argument|["--physical-mvp","--physical-host-preflight","--background"].iter()
+        .any(|selector|argument==*selector||argument.strip_prefix(*selector).is_some_and(|suffix|suffix.starts_with('='))))
+}
+fn mode_exit(result:io::Result<bool>,output:&mut impl io::Write)->std::process::ExitCode {
+    match result {
+        Ok(true)=>std::process::ExitCode::SUCCESS,
+        Ok(false)=>std::process::ExitCode::FAILURE,
+        Err(error)=>{
+            let mut outcome=json!({"gate":"selected-smoke-mode","status":if matches!(error.kind(),io::ErrorKind::NotFound|io::ErrorKind::NotConnected|io::ErrorKind::ConnectionRefused|io::ErrorKind::TimedOut|io::ErrorKind::PermissionDenied){"blocked"}else{"fail"},"reason":error.to_string()});
+            outcome.as_object_mut().expect("object").extend(helper_error_metadata(&error).as_object().expect("object").clone());
+            let _=writeln!(output,"{outcome}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
-    let background=std::env::args_os().skip(1).any(|arg|arg.to_str().is_some_and(|arg|arg=="--background"||arg.starts_with("--background=")));
-    let physical=std::env::args_os().skip(1).any(|arg|arg.to_str().is_some_and(|arg|arg=="--physical-mvp"||arg.starts_with("--physical-mvp=")));
+    let early_live=std::env::args_os().skip(1).any(|argument|early_live_argument(&argument));
     let mut native_args = std::env::args_os().skip(1);
-    if !physical&&!background&&native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
+    if !early_live&&native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
         if std::env::args_os().any(|arg|arg==std::ffi::OsStr::new("--project-read-only")){return std::process::ExitCode::FAILURE;}
         let Some(lease) = native_args.next() else {
             return std::process::ExitCode::FAILURE;
@@ -1304,7 +1319,7 @@ async fn main() -> std::process::ExitCode {
             }
         };
     }
-    let result = if physical||background {live::run().await} else if !std::env::args().any(|arg|matches!(arg.as_str(),"--terminal-only"|"--project-read-only"))&&std::env::args().any(|arg| arg == "--review-fixture") {
+    let result = if early_live {live::run().await} else if !std::env::args().any(|arg|matches!(arg.as_str(),"--terminal-only"|"--project-read-only"))&&std::env::args().any(|arg| arg == "--review-fixture") {
         review::run().await
     } else if std::env::args().any(|arg| {
         matches!(
@@ -1329,19 +1344,5 @@ async fn main() -> std::process::ExitCode {
     } else {
         run().await
     };
-    match result {
-        Ok(true) => std::process::ExitCode::SUCCESS,
-        Ok(false) => std::process::ExitCode::FAILURE,
-        Err(e) => {
-            let mut outcome = json!({"gate":"selected-smoke-mode","status":if matches!(e.kind(),io::ErrorKind::NotFound|io::ErrorKind::NotConnected|io::ErrorKind::ConnectionRefused|io::ErrorKind::TimedOut|io::ErrorKind::PermissionDenied){"blocked"}else{"fail"},"reason":e.to_string()});
-            outcome.as_object_mut().expect("object").extend(
-                helper_error_metadata(&e)
-                    .as_object()
-                    .expect("object")
-                    .clone(),
-            );
-            println!("{}", outcome);
-            std::process::ExitCode::FAILURE
-        }
-    }
+    mode_exit(result,&mut io::stdout())
 }

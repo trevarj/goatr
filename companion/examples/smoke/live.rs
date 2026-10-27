@@ -7455,8 +7455,19 @@ fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     }
     Ok(())
 }
+fn physical_host_preflight_selection(args:&clap::ArgMatches)->io::Result<bool> {
+    if !args.get_flag("physical-host-preflight"){return Ok(false);}
+    if args.ids().any(|id|args.value_source(id.as_str())==Some(clap::parser::ValueSource::CommandLine)
+        &&!matches!(id.as_str(),"physical-host-preflight"|"evidence-dir")) {
+        return Err(failure("physical-host-preflight accepts only its selector and fresh evidence directory; no runtime/device/artifact/effect arguments"));
+    }
+    Ok(true)
+}
 fn arguments_base() -> Command {
     Command::new("smoke")
+        .arg(Arg::new("physical-host-preflight").long("physical-host-preflight").action(ArgAction::SetTrue)
+            .requires("evidence-dir")
+            .help("Human real-host TTY only: qualify the unchanged original-host guard and record closed permission diagnostics; evidence only, no native/provider/ADB/product effect or full-MVP claim"))
         .arg(Arg::new("physical-mvp").long("physical-mvp").action(ArgAction::SetTrue)
             .requires_all(["backend","goatr","config","workspace-root","evidence-dir","consent-owned-providers",
                 "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-goatr-sha256",
@@ -14171,6 +14182,11 @@ async fn checkpoint_held(
 }
 pub async fn run() -> io::Result<bool> {
     let args = arguments();
+    if physical_host_preflight_selection(&args)? {
+        let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required host preflight evidence"))?;
+        fresh_shared_evidence(&evidence)?;
+        return physical::host_preflight(&evidence);
+    }
     physical_mode_environment(&args)?;
     if args.get_flag("physical-mvp") {
         let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required physical evidence"))?;
@@ -14353,6 +14369,61 @@ mod tests {
         args.push(format!("--expected-ntfy-apk-sha256={NTFY_APK_SHA256}"));
         args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
         args
+    }
+    #[test]
+    fn physical_host_preflight_policy_accepts_only_selector_and_fresh_evidence() {
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--physical-host-preflight","--evidence-dir=/private/fresh"]).unwrap();
+        assert!(physical_host_preflight_selection(&parsed).unwrap());
+        assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::DefaultValue));
+        assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--physical-host-preflight"]).unwrap_err().kind(),clap::error::ErrorKind::MissingRequiredArgument);
+        let ordinary=feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--evidence-dir=/private/fresh"]).unwrap();
+        assert!(!physical_host_preflight_selection(&ordinary).unwrap());
+        for ordinary in [physical_mvp_args(),background_args("persistent"),background_args("ntfy")] {
+            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(ordinary).unwrap();
+            assert!(!physical_host_preflight_selection(&parsed).unwrap());
+        }
+    }
+    #[test]
+    fn physical_host_preflight_policy_refuses_effect_inputs_and_complete_runtime_modes() {
+        for selector in ["--api=30","--api=34","--backend=omp","--config=/private/config","--goatr=/private/goatr",
+            "--workspace-root=/private/workspace","--serial=74110723","--apk=/private/app.apk","--test-apk=/private/test.apk",
+            "--expected-goatr-sha256=pin","--expected-companion-lock-sha256=pin","--expected-apk-sha256=pin",
+            "--expected-test-apk-sha256=pin","--expected-config-sha256=pin","--expected-ntfy-apk-sha256=pin","--expected-ntfy-signer-sha256=pin",
+            "--consent-owned-providers","--automate-native-inputs","--physical-mvp","--background=persistent","--background=ntfy",
+            "--admission-only","--shared-agent-only","--terminal-only","--project-read-only","--grid","--grid-lease=/private/lease",
+            "--ui","--camera","--ime","--setup","--prepare-emulator","--emulator-owner=/private/owner",
+            "--paging-proof","--codex-invalidation-diagnostic","--omp-creation-diagnostic","--physical-hello-capture",
+            "--physical-relay-ephemeral","--development-continuity","--development-owner-feedback","--development-android-only",
+            "--keep-foreground-for-feedback","--defer-retention-crossing","--admin-socket=/private/socket","--disposable-uid=1901",
+            "--project-read-seed-pack=/private/pack","--review-fixture","--owned-mcp-stdio=/private/lease",
+            "--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=1"] {
+            let args=["smoke","--physical-host-preflight","--evidence-dir=/private/fresh",selector];
+            let admitted=feedback_arguments(arguments_base()).try_get_matches_from(args).is_ok_and(|parsed|physical_host_preflight_selection(&parsed).is_ok_and(|selected|selected));
+            assert!(!admitted,"{selector}");
+        }
+        for mut complete in [physical_mvp_args(),background_args("persistent"),background_args("ntfy")] {
+            complete.push("--physical-host-preflight".to_owned());
+            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(complete).unwrap();
+            assert!(physical_host_preflight_selection(&parsed).is_err());
+        }
+    }
+    #[test]
+    fn physical_host_preflight_early_frontend_routes_malformed_and_mixed_selectors_to_rejection() {
+        for selector in ["--physical-host-preflight","--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=garbage"] {
+            for shortcut in [vec!["--owned-mcp-stdio","/private/lease"],vec!["--review-fixture"],vec!["--terminal-only"],vec!["--project-read-only"]] {
+                for first in [true,false] {
+                    let mut args=vec!["smoke","--evidence-dir=/private/fresh"];
+                    if first{args.push(selector);}args.extend(shortcut.iter().copied());if !first{args.push(selector);}
+                    assert!(args.iter().skip(1).any(|argument|super::super::early_live_argument(std::ffi::OsStr::new(argument))));
+                    let admitted=feedback_arguments(arguments_base()).try_get_matches_from(args).is_ok_and(|parsed|physical_host_preflight_selection(&parsed).is_ok_and(|selected|selected));
+                    assert!(!admitted);
+                }
+            }
+        }
+        for existing in ["--physical-mvp","--physical-mvp=false","--background=ntfy"] {
+            assert!(super::super::early_live_argument(std::ffi::OsStr::new(existing)));
+        }
+        assert!(!super::super::early_live_argument(std::ffi::OsStr::new("--review-fixture")));
     }
     #[test]
     fn physical_mvp_cli_requires_all_frozen_inputs_and_accepts_both_backend_orders() {
