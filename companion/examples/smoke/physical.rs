@@ -642,12 +642,14 @@ fn manifest_nodes(value: &str) -> io::Result<Vec<ManifestNode>> {
             nodes.push(ManifestNode { kind: kind.to_owned(), indent: line.len()-trimmed.len(), attributes: BTreeMap::new() });
         } else if let Some(rest) = trimmed.strip_prefix("A: ") {
             let (name, value) = rest.split_once('=').ok_or_else(|| failure("APK manifest attribute is invalid"))?;
-            if let Some(quoted) = value.strip_prefix('"') {
+            let value = if let Some(quoted) = value.strip_prefix('"') {
                 let end = quoted.find('"').ok_or_else(|| failure("APK manifest quoted attribute is invalid"))?;
-                let key = name.split('(').next().unwrap_or(name).to_owned();
-                if let Some(node) = nodes.last_mut() { if node.attributes.insert(key, quoted[..end].to_owned()).is_some() { return Err(failure("APK manifest has duplicate attributes")); } }
-            } else if let Some(node) = nodes.last_mut() {
-                node.attributes.insert(name.split('(').next().unwrap_or(name).to_owned(), value.trim().to_owned());
+                &quoted[..end]
+            } else { value.trim() };
+            if let Some(node) = nodes.last_mut() {
+                let name = name.split('(').next().unwrap_or(name);
+                let key = if let Some(local) = name.strip_prefix("http://schemas.android.com/apk/res/android:") { format!("android:{local}") } else { name.to_owned() };
+                if node.attributes.insert(key,value.to_owned()).is_some() { return Err(failure("APK manifest has duplicate attributes")); }
             }
         }
     }
@@ -700,6 +702,23 @@ fn packaged_instrumentations(nodes:&[ManifestNode])->io::Result<()> {
         ||instrumentations.iter().any(|node|node.attributes.contains_key("android:targetProcesses")){return Err(failure("physical packaged instrumentation targets/processes are not the exact two isolated owners"));}
     Ok(())
 }
+fn packaged_startup_provider(nodes:&[ManifestNode])->io::Result<()> {
+    let providers: Vec<_> = nodes.iter().enumerate().filter(|(_,node)| node.kind == "provider").collect();
+    if providers.len()!=1 { return Err(failure("physical product APK has an unaudited pre-Application provider")); }
+    let (index,provider)=providers[0];
+    if provider.attributes.get("android:name").map(String::as_str)!=Some("androidx.startup.InitializationProvider") || provider.attributes.get("android:authorities").map(String::as_str)!=Some("io.github.trevarj.goatr.debug.androidx-startup") || provider.attributes.get("android:exported").map(String::as_str)!=Some("false")
+        ||provider.attributes.get("android:enabled").is_some_and(|value|value!="true") {
+        return Err(failure("physical product APK startup provider is outside the audited closure"));
+    }
+    let expected = ["androidx.emoji2.text.EmojiCompatInitializer","androidx.lifecycle.ProcessLifecycleInitializer","androidx.profileinstaller.ProfileInstallerInitializer"].into_iter().collect::<BTreeSet<_>>();
+    let mut actual=BTreeSet::new();
+    for node in nodes.iter().skip(index+1).take_while(|node| node.indent>provider.indent) {
+        if node.kind!="meta-data" || node.attributes.get("android:value").map(String::as_str)!=Some("androidx.startup") { return Err(failure("physical product APK has an unaudited startup initializer")); }
+        actual.insert(node.attributes.get("android:name").map(String::as_str).ok_or_else(|| failure("startup initializer has no name"))?);
+    }
+    if actual!=expected { return Err(failure("physical product APK startup initializer closure changed")); }
+    Ok(())
+}
 async fn qualify_artifact(path: &Path, expected_sha: &str, sdk: &Path, package: &str, test: bool) -> io::Result<Artifact> {
     let pin=frozen_input(path,expected_sha)?;let pins=std::slice::from_ref(&pin);let path=&pin.0;let sha256=expected_sha.to_owned();
     let aapt = protected_tool(&sdk.join("build-tools/36.0.0/aapt2"))?;
@@ -736,20 +755,7 @@ async fn qualify_artifact(path: &Path, expected_sha: &str, sdk: &Path, package: 
         }
         if found != required { return Err(failure("physical test APK does not contain the packaged observer and both runner class definitions")); }
     } else if package == APP {
-        let providers: Vec<_> = nodes.iter().enumerate().filter(|(_,node)| node.kind == "provider").collect();
-        if providers.len()!=1 { return Err(failure("physical product APK has an unaudited pre-Application provider")); }
-        let (index,provider)=providers[0];
-        if provider.attributes.get("android:name").map(String::as_str)!=Some("androidx.startup.InitializationProvider") || provider.attributes.get("android:authorities").map(String::as_str)!=Some("io.github.trevarj.goatr.debug.androidx-startup") || provider.attributes.get("android:exported").map(String::as_str)!=Some("(type 0x12)0x0")
-            ||provider.attributes.get("android:enabled").is_some_and(|value|value!="(type 0x12)0xffffffff"&&value!="true") {
-            return Err(failure("physical product APK startup provider is outside the audited closure"));
-        }
-        let expected = ["androidx.emoji2.text.EmojiCompatInitializer","androidx.lifecycle.ProcessLifecycleInitializer","androidx.profileinstaller.ProfileInstallerInitializer"].into_iter().collect::<BTreeSet<_>>();
-        let mut actual=BTreeSet::new();
-        for node in nodes.iter().skip(index+1).take_while(|node| node.indent>provider.indent) {
-            if node.kind!="meta-data" || node.attributes.get("android:value").map(String::as_str)!=Some("androidx.startup") { return Err(failure("physical product APK has an unaudited startup initializer")); }
-            actual.insert(node.attributes.get("android:name").map(String::as_str).ok_or_else(|| failure("startup initializer has no name"))?);
-        }
-        if actual!=expected { return Err(failure("physical product APK startup initializer closure changed")); }
+        packaged_startup_provider(&nodes)?;
     }
     recheck_inputs(pins)?;Ok(Artifact {path:pin.0,sha256,signer,package:package.to_owned(),debug})
 }
@@ -3861,6 +3867,128 @@ mod tests {
         assert_eq!(dex_classes(&dex_fixture(descriptor,true),&wanted).unwrap(),wanted);
         let mut broken=dex_fixture(descriptor,true);broken[120..124].copy_from_slice(&1u32.to_le_bytes());
         assert!(dex_classes(&broken,&wanted).is_err());
+    }
+    fn startup_provider_sdk_manifest()->&'static str {
+        // Pinned SDK36 APP dump d8b95254f502db22afae3892ebda82e1bb36c19eb2319933d5793dd6786e4af8:
+        // keep the actual URI-qualified provider subtree, literal false and quoted Raw values.
+        r#"N: android=http://schemas.android.com/apk/res/android (line=3)
+  E: manifest (line=3)
+    A: package="io.github.trevarj.goatr.debug" (Raw: "io.github.trevarj.goatr.debug")
+      E: application (line=25)
+          E: provider (line=104)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.startup.InitializationProvider" (Raw: "androidx.startup.InitializationProvider")
+            A: http://schemas.android.com/apk/res/android:exported(0x01010010)=false
+            A: http://schemas.android.com/apk/res/android:authorities(0x01010018)="io.github.trevarj.goatr.debug.androidx-startup" (Raw: "io.github.trevarj.goatr.debug.androidx-startup")
+              E: meta-data (line=108)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.emoji2.text.EmojiCompatInitializer" (Raw: "androidx.emoji2.text.EmojiCompatInitializer")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="androidx.startup" (Raw: "androidx.startup")
+              E: meta-data (line=111)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.lifecycle.ProcessLifecycleInitializer" (Raw: "androidx.lifecycle.ProcessLifecycleInitializer")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="androidx.startup" (Raw: "androidx.startup")
+              E: meta-data (line=114)
+                A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.profileinstaller.ProfileInstallerInitializer" (Raw: "androidx.profileinstaller.ProfileInstallerInitializer")
+                A: http://schemas.android.com/apk/res/android:value(0x01010024)="androidx.startup" (Raw: "androidx.startup")
+          E: uses-library (line=119)
+"#
+    }
+    #[test]
+    fn startup_provider_manifest_accepts_captured_sdk_uri_and_literal_booleans() {
+        let captured=startup_provider_sdk_manifest();
+        let enabled=captured.replace(":exported(0x01010010)=false\n",":exported(0x01010010)=false\n            A: http://schemas.android.com/apk/res/android:enabled(0x0101000e)=true\n");
+        for manifest in [captured,enabled.as_str()] {
+            let nodes=manifest_nodes(manifest).unwrap();packaged_process_manifest(&nodes,APP).unwrap();
+            packaged_startup_provider(&nodes).expect("the captured non-exported enabled SDK36 provider closure must qualify");
+        }
+    }
+    #[test]
+    fn startup_provider_manifest_requires_literal_booleans_without_obsolete_hex_aliases() {
+        // Internal key spelling isolates literal-boolean admission from URI decoding.
+        let manifest=startup_provider_sdk_manifest().replace("http://schemas.android.com/apk/res/android:","android:");
+        packaged_startup_provider(&manifest_nodes(&manifest).unwrap()).unwrap();
+        for value in ["true","(type 0x12)0x0","0","@bool/exported","unknown"] {
+            let changed=manifest.replace("android:exported(0x01010010)=false",&format!("android:exported(0x01010010)={value}"));
+            assert!(packaged_startup_provider(&manifest_nodes(&changed).unwrap()).is_err(),"{value}");
+        }
+        let missing=manifest.lines().filter(|line|!line.contains("android:exported(")).collect::<Vec<_>>().join("\n");
+        assert!(packaged_startup_provider(&manifest_nodes(&missing).unwrap()).is_err());
+        for value in ["false","(type 0x12)0xffffffff","1","@bool/enabled","unknown"] {
+            let changed=manifest.replace("android:exported(0x01010010)=false\n",&format!("android:exported(0x01010010)=false\n            A: android:enabled(0x0101000e)={value}\n"));
+            assert!(packaged_startup_provider(&manifest_nodes(&changed).unwrap()).is_err(),"{value}");
+        }
+    }
+    #[test]
+    fn startup_provider_manifest_rejects_provider_and_initializer_closure_mutations() {
+        let manifest=startup_provider_sdk_manifest();packaged_startup_provider(&manifest_nodes(manifest).unwrap()).unwrap();
+        let first=manifest.find("              E: meta-data (line=108)").unwrap();let next=manifest.find("              E: meta-data (line=111)").unwrap();
+        let missing_initializer=format!("{}{}",&manifest[..first],&manifest[next..]);
+        let extra_initializer=manifest.replace("          E: uses-library (line=119)",
+            "              E: meta-data (line=118)\n                A: http://schemas.android.com/apk/res/android:name(0x01010003)=\"unknown.Initializer\"\n                A: http://schemas.android.com/apk/res/android:value(0x01010024)=\"androidx.startup\"\n          E: uses-library (line=119)");
+        for changed in [manifest.replace("E: provider (line=104)","E: receiver (line=104)"),
+            format!("{manifest}          E: provider (line=125)\n"),
+            manifest.replace("androidx.startup.InitializationProvider","unknown.Provider"),
+            manifest.replace("io.github.trevarj.goatr.debug.androidx-startup","other.androidx-startup"),
+            manifest.replace("androidx.emoji2.text.EmojiCompatInitializer","unknown.Initializer"),
+            manifest.replace("=\"androidx.startup\"","=\"unknown.value\""),
+            manifest.replace("E: meta-data (line=108)","E: receiver (line=108)"),missing_initializer,extra_initializer] {
+            assert!(packaged_startup_provider(&manifest_nodes(&changed).unwrap()).is_err());
+        }
+    }
+    #[test]
+    fn manifest_android_uri_shared_uid_and_process_overrides_remain_forbidden() {
+        let manifest="N: android=http://schemas.android.com/apk/res/android\n  E: manifest\n      E: application\n";
+        packaged_process_manifest(&manifest_nodes(manifest).unwrap(),APP).unwrap();
+        let ordinary=format!("{manifest}        A: http://schemas.android.com/apk/res/android:process(0x01010011)=\"{APP}\"\n");
+        packaged_process_manifest(&manifest_nodes(&ordinary).unwrap(),APP).unwrap();
+        let shared=manifest.replace("  E: manifest\n","  E: manifest\n    A: http://schemas.android.com/apk/res/android:sharedUserId(0x0101000b)=\"shared.owner\"\n");
+        assert!(packaged_process_manifest(&manifest_nodes(&shared).unwrap(),APP).is_err());
+        for process in [":remote","unrelated.owner"] {
+            let changed=format!("{manifest}        A: http://schemas.android.com/apk/res/android:process(0x01010011)=\"{process}\"\n");
+            assert!(packaged_process_manifest(&manifest_nodes(&changed).unwrap(),APP).is_err());
+        }
+    }
+    #[test]
+    fn manifest_android_uri_instrumentations_keep_distinct_targets_and_no_target_processes() {
+        let manifest=format!(r#"N: android=http://schemas.android.com/apk/res/android
+  E: manifest
+      E: application
+      E: instrumentation (line=4)
+        A: http://schemas.android.com/apk/res/android:name(0x01010003)="io.github.trevarj.goatr.OwnedInstrumentationRunner" (Raw: "io.github.trevarj.goatr.OwnedInstrumentationRunner")
+        A: http://schemas.android.com/apk/res/android:targetPackage(0x01010021)="{APP}" (Raw: "{APP}")
+      E: instrumentation (line=8)
+        A: http://schemas.android.com/apk/res/android:name(0x01010003)="io.github.trevarj.goatr.OwnedUiAutomationRunner" (Raw: "io.github.trevarj.goatr.OwnedUiAutomationRunner")
+        A: http://schemas.android.com/apk/res/android:targetPackage(0x01010021)="{TEST}" (Raw: "{TEST}")
+"#);
+        let nodes=manifest_nodes(&manifest).unwrap();packaged_process_manifest(&nodes,TEST).unwrap();packaged_instrumentations(&nodes).unwrap();
+        for line in [4,8] {
+            let marker=format!("      E: instrumentation (line={line})\n");
+            let changed=manifest.replace(&marker,&format!("{marker}        A: http://schemas.android.com/apk/res/android:targetProcesses(0x0101054f)=\"*\"\n"));
+            assert!(packaged_instrumentations(&manifest_nodes(&changed).unwrap()).is_err());
+        }
+        let wrong=manifest.replace(&format!("targetPackage(0x01010021)=\"{APP}\""),&format!("targetPackage(0x01010021)=\"{TEST}\""));
+        assert!(packaged_instrumentations(&manifest_nodes(&wrong).unwrap()).is_err());
+    }
+    #[test]
+    fn manifest_foreign_namespace_lookalikes_do_not_gain_android_attribute_authority() {
+        for namespace in ["https://schemas.android.com/apk/res/android:","http://schemas.android.com/apk/res/androidish:","urn:foreign:android:"] {
+            let manifest=format!("E: manifest\n  A: {namespace}sharedUserId(0x0101000b)=\"shared.owner\"\n  E: application\n    A: {namespace}process(0x01010011)=\"other.owner\"\n");
+            let nodes=manifest_nodes(&manifest).unwrap();
+            assert!(nodes[0].attributes.contains_key(&format!("{namespace}sharedUserId")));assert!(!nodes[0].attributes.contains_key("android:sharedUserId"));
+            assert!(nodes[1].attributes.contains_key(&format!("{namespace}process")));assert!(!nodes[1].attributes.contains_key("android:process"));
+            packaged_process_manifest(&nodes,APP).unwrap();
+            let provider=startup_provider_sdk_manifest().replace("http://schemas.android.com/apk/res/android:",namespace);
+            assert!(packaged_startup_provider(&manifest_nodes(&provider).unwrap()).is_err());
+        }
+    }
+    #[test]
+    fn manifest_canonical_attribute_duplicates_reject_quoted_and_unquoted_collisions() {
+        let uri_quoted="http://schemas.android.com/apk/res/android:exported(0x01010010)=\"false\"";
+        let uri_unquoted="http://schemas.android.com/apk/res/android:exported(0x01010010)=false";
+        let internal_quoted="android:exported(0x01010010)=\"false\"";let internal_unquoted="android:exported(0x01010010)=false";
+        for (first,second) in [(uri_quoted,uri_quoted),(uri_unquoted,uri_unquoted),(uri_quoted,uri_unquoted),(uri_unquoted,uri_quoted),
+            (uri_quoted,internal_quoted),(uri_unquoted,internal_unquoted),(uri_quoted,internal_unquoted),(internal_unquoted,uri_quoted)] {
+            let manifest=format!("E: manifest\n  A: {first}\n  A: {second}\n  E: application\n");
+            assert!(manifest_nodes(&manifest).is_err(),"{first}; {second}");
+        }
     }
     #[test]
     fn packaged_instrumentation_manifest_metadata_remains_distinct_and_closed() {
