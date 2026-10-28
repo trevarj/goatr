@@ -91,7 +91,7 @@ class ConversationContentTest {
             val density=LocalDensity.current
             GoatrTheme {CompositionLocalProvider(LocalDensity provides Density(density.density,2f)) {
                 // Available conversation space after app bar and IME, using the production frame.
-                BoxWithConstraints(Modifier.width(320.dp).height(availableHeight)) {
+                Box(Modifier.width(320.dp).height(availableHeight)) {
                     ConversationFrame(chrome={
                         RequestDock(listOf(request)) {}
                         androidx.compose.material3.Text("All branches; desktop-selected branch unavailable",modifier=Modifier.testTag("omp_branches"))
@@ -247,7 +247,7 @@ class ConversationContentTest {
         var fontScale by mutableStateOf(1f)
         var text by mutableStateOf("A")
         ui.setContent {val density=LocalDensity.current;GoatrTheme {CompositionLocalProvider(LocalDensity provides Density(density.density,fontScale)) {
-            BoxWithConstraints(Modifier.width(360.dp).height(760.dp)) {
+            Box(Modifier.width(360.dp).height(760.dp)) {
                 ConversationFrame(chrome={},history={androidx.compose.material3.Text("Original transcript")},editor={ConversationControlRail(false,"Read-only",{},{}) {}},actions={ConversationDraftControls(text,{text=it},false,{})})
             }
         }}}

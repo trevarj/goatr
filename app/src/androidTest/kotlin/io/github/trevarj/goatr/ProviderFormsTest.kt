@@ -54,7 +54,7 @@ class ProviderFormsTest {
                 ProviderForm(PendingRequest(requestKey,provider,kind,presentation),memory,enabled,"Stale source: writes disabled",{content,loaded->ContentView(content,null,null,null,onLoaded=loaded)},{url->openHttpUrl(context,url)}) {received=it}
             }
             val bounds=if(narrow)Modifier.width(300.dp).height(260.dp) else Modifier.fillMaxSize()
-            if(pinned)BoxWithConstraints(bounds.semantics {testTagsAsResourceId=true}) {
+            if(pinned)Box(bounds.semantics {testTagsAsResourceId=true}) {
                 ConversationFrame(chrome={},history={
                     if(requestOpen)ConversationRequestPanel(requestKey,{requestOpen=false},memory){actualForm()}
                     else androidx.compose.material3.Text("Original conversation remains")
