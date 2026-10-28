@@ -42,7 +42,11 @@ private data class ShellSubmittedInput(val selection:ShellSelection,val revision
 enum class Screen { Connections, Pairing, Sessions, Conversation, Terminals, Settings }
 data class SendReservation(val key: ConversationKey, val action: Uuid, val text: String, val warning: RecoveryWarning,val options:ComposerOptions=ComposerOptions())
 private data class SubmittedComposer(val key:ConversationKey,val text:String,val options:ComposerOptions,val action:Uuid)
-private data class ForegroundGeneration(val claim: RuntimeClaim, val ready: CompletableDeferred<Unit>)
+private data class ForegroundGeneration(
+    val claim:RuntimeClaim,
+    var ready:CompletableDeferred<Unit>,
+    var relayReplacement:CompletableDeferred<Unit>?=null,
+)
 /** Resolve the displayed continuation before a read can advance its loaded-view revision. */
 internal fun nativeQueueReadCursor(shown:SessionControlsState,currentRevision:Long,cursor:Id?):Id? {
     if(cursor==null||currentRevision==shown.queueRevision)return cursor
@@ -153,6 +157,8 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     var busy by mutableStateOf(false)
         private set
     var notice by mutableStateOf<String?>(null)
+        private set
+    var homeRelayNotice by mutableStateOf<String?>(null)
         private set
     var preview by mutableStateOf<PairingPreview?>(null)
         private set
@@ -458,6 +464,7 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
         foreground = active
         if(active)refreshNotificationHealth()
         if (!active) {
+            homeRelayNotice=null
             closeAttentionInbox()
             // Admission guards change immediately, before queued native cleanup finishes.
             foreground = false
@@ -539,8 +546,76 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
     fun sessions() { navigate(Screen.Sessions,null) }
     fun sessions(host: String) { navigate(Screen.Sessions,host) }
     fun settings(host: String? = null) { navigate(Screen.Settings,host) }
+    suspend fun loadHomeRelayRegions() {
+        try {connection.loadHomeRelayRegions()}
+        catch(cancel:CancellationException) {throw cancel}
+        catch(_:Exception) {if(screen==Screen.Settings&&host==null)homeRelayNotice="The native relay catalog could not be loaded. No setting was changed."}
+    }
+    fun saveHomeRelayRegion(url:String?) {
+        val generation=foregroundGeneration ?: return
+        val settingsTicket=navigationTicket
+        fun admitted()=foreground && foregroundGeneration===generation && navigationTicket===settingsTicket && screen==Screen.Settings && host==null
+        if(!admitted())return
+        perform {
+            if(!admitted())return@perform
+            homeRelayNotice=null
+            // Startup's catch uses generation.ready. Settle it before replacing that deferred.
+            startup?.cancelAndJoin()
+            if(!admitted())return@perform
+            val ready=CompletableDeferred<Unit>()
+            generation.ready=ready
+            generation.relayReplacement=ready
+            fun requireForeground() {if(!foreground || foregroundGeneration!==generation)throw CancellationException("Foreground runtime is no longer active")}
+            fun requireSettings() {if(!admitted())throw CancellationException("Home relay settings are no longer active")}
+            try {
+                homeRelayNotice="Saving home relay region and retiring the previous endpoint…"
+                connection.saveHomeRelayRegion(url,::admitted)
+                // The accepted setting is global. Leaving Settings alone must not strand the
+                // continuing foreground generation without its local runtime readiness.
+                requireForeground()
+                if(admitted())homeRelayNotice="Saved. Rebinding the endpoint and reconnecting paired desktops…"
+                // Never acquire a claim under hostOperations (claimsMutex takes that lock).
+                runtime.acquire(generation.claim)
+                requireForeground()
+                connection.start() // An existing UI/delivery claim may survive endpoint retirement.
+                requireForeground()
+                ready.complete(Unit) // Local runtime readiness, not connected home-relay readiness.
+                generation.relayReplacement=null
+                if(!admitted())return@perform
+                var failed=0
+                for(paired in store.state.value.hosts) {
+                    requireSettings()
+                    connectingHosts[paired.hostId]=true
+                    try {
+                        connection.ensureConnectedIfNeeded(paired.hostId)
+                        requireSettings()
+                        connection.snapshot(paired.hostId)
+                    } catch(timeout:TimeoutCancellationException) {
+                        currentCoroutineContext().ensureActive();failed+=1
+                    } catch(cancel:CancellationException) {throw cancel}
+                    catch(_:Exception) {failed+=1}
+                    finally {connectingHosts.remove(paired.hostId)}
+                }
+                requireSettings()
+                homeRelayNotice=if(failed==0)"Saved and applied to the bound endpoint. Home relay connectivity has not been verified."
+                    else "Saved and applied. $failed desktop connection(s) could not be restored; reconnect them explicitly. Home relay connectivity has not been verified."
+                // No conversation reopen, control restoration, input or mutation replay.
+            } catch(timeout:TimeoutCancellationException) {
+                ready.completeExceptionally(timeout);currentCoroutineContext().ensureActive()
+                if(admitted())homeRelayNotice="Reconnect timed out. The saved selection below is retained; relay connectivity is not confirmed."
+            } catch(cancel:CancellationException) {
+                ready.completeExceptionally(cancel)
+                if(admitted())homeRelayNotice="Reconnect was interrupted. The saved selection below is retained."
+                throw cancel
+            } catch(error:Exception) {
+                ready.completeExceptionally(error)
+                if(admitted())homeRelayNotice="Save or reconnect failed. Check the saved selection below; no automatic fallback was applied."
+            }
+        }
+    }
     private fun navigate(next: Screen, nextHost: String?,old:ConversationSubscription?=selection?.let {connection.retireConversationSubscription(it.host,it.target)}) {
         navigationTicket=Any();pendingAttention=null;permissionRequest=null
+        homeRelayNotice=null
         attentionRouteJob?.cancel();attentionRouteJob=null
         closeAttentionInbox()
         closeArtifacts()
@@ -645,7 +720,32 @@ class GoatrViewModel(application: Application) : AndroidViewModel(application) {
             var expected=connection.state.value.hello[entry.host]
             fun original()=admitted()&&connection.state.value.hello[entry.host]===expected
             try {
-                generation.ready.await()
+                val awaitedReady=generation.ready
+                try {awaitedReady.await()}
+                catch(error:Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if(generation.relayReplacement!==awaitedReady)throw error
+                    if(!admitted())return@perform
+                    // Only readiness replaced by a relay operation is repairable here. A
+                    // refused save can leave the old endpoint healthy; an interrupted accepted
+                    // save can leave it retired. Neither changes this consumer's claim.
+                    val ready=CompletableDeferred<Unit>()
+                    generation.ready=ready
+                    generation.relayReplacement=null
+                    try {
+                        runtime.acquire(generation.claim)
+                        if(!admitted())throw CancellationException("Attention foreground is no longer active")
+                        connection.start()
+                        if(!admitted())throw CancellationException("Attention foreground is no longer active")
+                        ready.complete(Unit)
+                    } catch(cancel:CancellationException) {
+                        // Another legitimate consumer may finish an interrupted repair, but
+                        // an actual native timeout/failure does not become a retry owner.
+                        if((!currentCoroutineContext().isActive||!admitted())&&foreground&&foregroundGeneration===generation)
+                            generation.relayReplacement=ready
+                        ready.completeExceptionally(cancel);throw cancel
+                    } catch(error:Exception) {ready.completeExceptionally(error);throw error}
+                }
                 if(!admitted())return@perform
                 if(expected==null)expected=connection.state.value.hello[entry.host]
                 if(!original())return@perform

@@ -14,6 +14,11 @@ be provided when the product is ready.
 - Pair a phone with a desktop by scanning a QR code, then connect directly or
   through a public relay without setting up DNS, port forwarding, SSH, Termux,
   or a VPN.
+- In **Settings → Home relay region**, leave **Automatic** (recommended) or
+  choose a region, then explicitly **Save and reconnect**; all phone connections
+  briefly disconnect. A fixed region restricts this phone's home-relay candidates,
+  with no soft fallback to other regions. It does not confine all traffic
+  geographically: direct connections and a desktop's own relay remain available.
 - Share existing same-user Herdr sessions and create new sessions without
   taking over the desktop.
 - Read conversations and tool activity, send prompts, cancel work, and respond

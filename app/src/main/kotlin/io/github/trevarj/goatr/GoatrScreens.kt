@@ -1909,6 +1909,7 @@ private fun SettingsScreen(host: String?,store: StoreView,connection: Connection
                 }}
             }
         }
+        item {HomeRelayRegionSettings(model)}
         item {
             val preferences=model.sessionListPreferences
             GroupedSurface {
@@ -1954,6 +1955,53 @@ private fun SettingsScreen(host: String?,store: StoreView,connection: Connection
                 IconAction(MaterialGlyph.Scan,"Add desktop","settings_add_desktop",enabled=!model.busy,onClick=model::beginPairing)
             }
         }
+    }
+}
+
+@Composable
+private fun HomeRelayRegionSettings(model:GoatrViewModel) {
+    val settings by model.connection.homeRelaySettings.collectAsStateWithLifecycle()
+    var draft by remember(settings.savedUrl) {mutableStateOf(settings.savedUrl)}
+    var expanded by remember {mutableStateOf(false)}
+    LaunchedEffect(model) {model.loadHomeRelayRegions()}
+    val validDraft=draft==null || settings.regions.any {it.url==draft}
+    GroupedSurface {
+        GoatrSection("Home relay region","One phone-wide transport setting, not a desktop route hint.")
+        Box(Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick={expanded=true},enabled=settings.loaded && !model.busy,
+                modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("home_relay_region"),
+            ) {
+                UiText(if(settings.loaded)settings.label(draft) else "Reading native relay catalog…",modifier=Modifier.weight(1f),maxLines=1,overflow=TextOverflow.Ellipsis)
+                GoatrIcon(MaterialGlyph.ExpandMore,null)
+            }
+            DropdownMenu(expanded=expanded,onDismissRequest={expanded=false},modifier=Modifier.semantics {testTagsAsResourceId=true}) {
+                DropdownMenuItem(
+                    text={UiText("Automatic (recommended)")},onClick={draft=null;expanded=false},
+                    modifier=Modifier.testTag("home_relay_region_automatic"),
+                )
+                settings.regions.forEachIndexed {index,region->
+                    DropdownMenuItem(
+                        text={UiText(region.label)},onClick={draft=region.url;expanded=false},
+                        modifier=Modifier.testTag("home_relay_region_$index"),
+                    )
+                }
+            }
+        }
+        UiText("Saved: ${if(settings.loaded)settings.label(settings.savedUrl) else "Reading native relay catalog…"}",style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("home_relay_saved"))
+        if(settings.loaded && !settings.available)UiText("Unavailable saved region. Choose Automatic or an available region, then Save and reconnect. Nothing is reset automatically.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("home_relay_unavailable"))
+        UiText(
+            if(!settings.bound)"No endpoint is currently bound. The saved choice will apply when an owner starts it."
+            else "Bound endpoint: ${settings.label(settings.boundUrl)}. This is configuration, not proof of relay connectivity.",
+            style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("home_relay_bound"),
+        )
+        UiText("A fixed region restricts this phone's home-relay candidates to that region, with no other-region home fallback. Direct traffic and a desktop's different relay remain possible; this is not a geographic traffic allowlist.",style=MaterialTheme.typography.bodySmall)
+        UiText("Saving briefly disconnects ALL this phone's desktops and socket delivery. Pairing and identity stay unchanged; no input or action is resent.",style=MaterialTheme.typography.bodySmall)
+        Button(
+            onClick={model.saveHomeRelayRegion(draft)},enabled=model.foreground && !model.busy && settings.loaded && validDraft,
+            modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).testTag("home_relay_save"),
+        ) {UiText("Save and reconnect")}
+        model.homeRelayNotice?.let {UiText(it,style=MaterialTheme.typography.bodySmall,modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite}.testTag("home_relay_notice"))}
     }
 }
 

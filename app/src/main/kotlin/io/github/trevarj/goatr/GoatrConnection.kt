@@ -22,6 +22,9 @@ import computer.iroh.OwnedReadObservation
 import computer.iroh.OwnedReadPhase
 import computer.iroh.readExactObserved
 import computer.iroh.SendStream
+import computer.iroh.RelayConfig
+import computer.iroh.RelayMap
+import computer.iroh.RelayMode
 import computer.iroh.WatchHandle
 import java.nio.ByteBuffer
 import java.util.UUID
@@ -68,6 +71,17 @@ enum class HelloReceivePhase { NotStarted, Header, Payload, Decode, Apply, Compl
 data class ConnectionFailure(val phase: ConnectionFailurePhase,val category: ConnectionFailureCategory,val code: ErrorCode? = null,val helloTransmissionCompleted:Boolean? = null,val helloReceivePhase:HelloReceivePhase? = null,val helloNativeReadPhase:OwnedReadPhase? = null)
 /** A bounded post-commit hint only. Delivery always re-reads SessionStore before presentation. */
 data class NotificationWakeup(val host: String,val syncRequired:Boolean=false)
+data class HomeRelayRegion(val url:String,val label:String)
+data class HomeRelaySettings(
+    val savedUrl:String?,
+    val regions:List<HomeRelayRegion> = emptyList(),
+    val loaded:Boolean = false,
+    val bound:Boolean = false,
+    val boundUrl:String? = null,
+) {
+    val available get()=loaded && (savedUrl==null || regions.any {it.url==savedUrl})
+    fun label(url:String?)=if(url==null)"Automatic (recommended)" else regions.firstOrNull {it.url==url}?.label ?: "Unavailable saved region"
+}
 // Reducers mutate in place; each ordered publication must have a distinct observable identity.
 class ConnectionView(
     val hello: Map<String,HelloResult> = emptyMap(),
@@ -136,6 +150,12 @@ class QueueMutationContext internal constructor(internal val publication:Any?,in
 class GoatrConnection(context: Context, val store: SessionStore, val secrets: SecretStore) {
     companion object {private val endpointOwned=AtomicBoolean(false);private val alpn="goatr/2".toByteArray(Charsets.UTF_8);internal fun endpointIsOwned():Boolean=endpointOwned.get()}
     private val app=context.applicationContext
+    private val transportPreferences=app.getSharedPreferences("local_transport",Context.MODE_PRIVATE)
+    private val homeRelayMutable=MutableStateFlow(HomeRelaySettings(
+        savedUrl=try {transportPreferences.getString("home_relay_region",null)} catch(_:ClassCastException) {""},
+    ))
+    val homeRelaySettings:StateFlow<HomeRelaySettings> = homeRelayMutable.asStateFlow()
+    private var homeRelayCatalog:Map<String,RelayConfig>?=null
     private val connectivity=app.getSystemService(ConnectivityManager::class.java)
     private val serial=Dispatchers.IO.limitedParallelism(1)
     private val scope=CoroutineScope(SupervisorJob()+serial)
@@ -464,9 +484,62 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     private fun captureActionAdmission(host:String,action:Uuid,phase:ActionAdmissionPhase,guard:ActionAdmissionGuard,code:ErrorCode,sent:Boolean?=null,frameStarted:Boolean?=null) {
         actionAdmissionCapture.get()?.takeIf {it.host==host && it.action==action}?.failure?.compareAndSet(null,ActionAdmissionFailure(phase,guard,code,sent,frameStarted))
     }
+    /** Native production configurations are copied records, never retained shared native maps. */
+    private fun homeRelayCatalog():Map<String,RelayConfig> {
+        homeRelayCatalog?.let {return it}
+        IrohAndroid.installAndroidContext(app)
+        val labels=mapOf(
+            "https://use1-1.relay.n0.iroh.link./" to "North America East",
+            "https://usw1-1.relay.n0.iroh.link./" to "North America West",
+            "https://euc1-1.relay.n0.iroh.link./" to "Europe",
+            "https://aps1-1.relay.n0.iroh.link./" to "Asia-Pacific",
+        )
+        val catalog=RelayMode.defaultMode().use {mode->mode.relayMap().use {map->
+            map.urls().filter {it in labels}.associateWith {url->checkNotNull(map.get(url)).copy()}
+        }}
+        check(catalog.isNotEmpty()) {"Native production relay catalog is unavailable"}
+        homeRelayCatalog=catalog
+        homeRelayMutable.value=homeRelayMutable.value.copy(
+            regions=labels.mapNotNull {(url,label)->if(url in catalog)HomeRelayRegion(url,label) else null},
+            loaded=true,
+        )
+        return catalog
+    }
+    suspend fun loadHomeRelayRegions() = withContext(Dispatchers.IO) {hostOperations.withLock {homeRelayCatalog();Unit}}
+    private fun homeRelayConfig(url:String?):RelayConfig? {
+        if(url==null)return null
+        return requireNotNull(homeRelayCatalog()[url]) {"Unavailable saved region. Choose a home relay region in Settings."}
+    }
+    private fun homeRelayMode(config:RelayConfig?):RelayMode? = config?.let {
+        // A fresh map avoids sharing/mutating the native production catalog's storage.
+        RelayMap.empty().use {map->map.insert(it.copy());RelayMode.custom(map)}
+    }
+    /** Saving is also the retirement boundary, even when startup failed before obtaining a claim. */
+    suspend fun saveHomeRelayRegion(url:String?,admitted:()->Boolean) = hostOperations.withLock {
+        currentCoroutineContext().ensureActive()
+        homeRelayConfig(url)
+        check(admitted()) {"Home relay settings are no longer active"}
+        withContext(NonCancellable+Dispatchers.IO) {
+            check(admitted()) {"Home relay settings are no longer active"}
+            val editor=transportPreferences.edit()
+            if(url==null)editor.remove("home_relay_region") else editor.putString("home_relay_region",url)
+            check(editor.commit()) {"Home relay region could not be saved"}
+            homeRelayMutable.value=homeRelayMutable.value.copy(savedUrl=url)
+            // Protect entry to lifecycle as well as its existing bounded native teardown.
+            shutdownEndpoint()
+        }
+    }
+    /** Real native readiness, not a saved/configured candidate echo. Call after fresh recreation. */
+    internal suspend fun awaitConnectedHomeRelay():String = hostOperations.withLock {
+        val owner=endpoint ?: throw StorePolicy(ErrorCode.NotReady)
+        withTimeout(45000) {owner.online()}
+        owner.addr().use {it.relayUrl()} ?: throw StorePolicy(ErrorCode.NotReady)
+    }
     suspend fun start():String = hostOperations.withLock {bindEndpoint()}
     private suspend fun bindEndpoint():String = lifecycle.withLock {
         endpoint?.let {return@withLock it.id().use {id->id.toString()}}
+        val selected=homeRelayMutable.value.savedUrl
+        val relayConfig=homeRelayConfig(selected)
         secrets.completeDeletions(store)
         if (!endpointOwned.compareAndSet(false,true)) throw StorePolicy(ErrorCode.Busy)
         var bound:Endpoint?=null
@@ -474,7 +547,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
         try {
             IrohAndroid.installAndroidContext(app)
             val secret=secrets.endpoint(store);bytes=secret
-            val options=EndpointOptions(preset=object:Preset {override fun apply(builder:EndpointBuilder) {builder.applyN0();builder.disablePortMapping()}},secretKey=secret,alpns=listOf(alpn))
+            val options=EndpointOptions(preset=object:Preset {override fun apply(builder:EndpointBuilder) {builder.applyN0();builder.disablePortMapping()}},secretKey=secret,alpns=listOf(alpn),relayMode=homeRelayMode(relayConfig))
             bound=try {withTimeout(15000) {Endpoint.bind(options)}} finally {options.destroy();secret.fill(0)}
             val owner=bound ?: throw StorePolicy(ErrorCode.NotReady)
             val channel=Channel<Unit>(Channel.CONFLATED)
@@ -489,6 +562,7 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
             withTimeout(5000) {owner.networkChange()}
             networkJob=scope.launch {for (ignored in channel) {delay(100);while(channel.tryReceive().isSuccess) {}; try {withTimeout(5000) {owner.networkChange()}} catch (cancel:CancellationException) {if (!isActive) throw cancel} catch (_:Exception) { /* A future connectivity hint may recover the same retained endpoint. */ }}}
             endpoint=owner
+            homeRelayMutable.value=homeRelayMutable.value.copy(bound=true,boundUrl=selected)
             owner.id().use {it.toString()}
         } catch (failure:Exception) {
             bytes?.fill(0)
@@ -1890,12 +1964,23 @@ class GoatrConnection(context: Context, val store: SessionStore, val secrets: Se
     suspend fun shutdown() = hostOperations.withLock {shutdownEndpoint()}
     private suspend fun shutdownEndpoint() = lifecycle.withLock {withContext(NonCancellable) {
         val owner=endpoint ?: return@withContext
-        try {callback?.let(connectivity::unregisterNetworkCallback)} finally {
-            callback=null;changes?.close();changes=null
-            networkJob?.cancel();withTimeoutOrNull(5000) {networkJob?.join()};networkJob=null
-            clearConnectionAttempts()
-            for(live in (sessions.values.toList()+retiring.keys.toList()).distinct()) teardown(live);sessions.clear();publish()
-            try {withTimeout(5000) {owner.shutdown()}} finally {owner.close();endpoint=null;endpointOwned.set(false)}
+        try {
+            try {callback?.let(connectivity::unregisterNetworkCallback)} finally {
+                callback=null;changes?.close();changes=null
+                networkJob?.cancel();withTimeoutOrNull(5000) {networkJob?.join()};networkJob=null
+                clearConnectionAttempts()
+                var failure:Exception?=null
+                for(live in (sessions.values.toList()+retiring.keys.toList()).distinct()) {
+                    try {teardown(live)} catch(error:Exception) {if(failure==null)failure=error}
+                }
+                sessions.clear();publish()
+                failure?.let {throw it}
+            }
+        } finally {
+            try {withTimeout(5000) {owner.shutdown()}} finally {
+                owner.close();endpoint=null;endpointOwned.set(false)
+                homeRelayMutable.value=homeRelayMutable.value.copy(bound=false,boundUrl=null)
+            }
         }
     }}
     internal fun ownsNetworkCallback():Boolean=callback!=null
