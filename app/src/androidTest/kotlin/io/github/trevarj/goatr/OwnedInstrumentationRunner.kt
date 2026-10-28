@@ -21,8 +21,11 @@ class OwnedInstrumentationRunner : AndroidJUnitRunner() {
     private var controlKey: KeyPair? = null
     private var publicIdentity: ByteArray? = null
     private var physicalRequested=false
-    private var physicalArguments:JSONObject?=null
-    private var physicalBaseline:JSONObject?=null
+    private sealed interface PhysicalPreflight {
+        data class Ready(val request:JSONObject,val baseline:JSONObject):PhysicalPreflight
+        data class Blocked(val code:String):PhysicalPreflight
+    }
+    private var physicalPreflight:PhysicalPreflight?=null
     private var physicalApplication:Application?=null
     private val applicationCreated=CountDownLatch(1)
 
@@ -30,25 +33,24 @@ class OwnedInstrumentationRunner : AndroidJUnitRunner() {
         val supplied=arguments ?: Bundle()
         physicalRequested=PhysicalMvpPlatform.requested(supplied)
         if(!physicalRequested) {super.onCreate(arguments);return}
-        try {
+        physicalPreflight=try {
             val request=PhysicalMvpPlatform.arguments(supplied)
             PhysicalMvpPlatform.qualify(context,targetContext,request)
-            physicalBaseline=PhysicalMvpPlatform.preRuntime(targetContext,request)
-            physicalArguments=request
+            val baseline=PhysicalMvpPlatform.preRuntime(targetContext,request)
             prepareControlKey()
-            // Instrumentation.start calls this class's plain onStart, not JUnit.
-            start()
+            PhysicalPreflight.Ready(request,baseline)
         }catch(error:Throwable) {
-            val code=if(error.message=="physical_retained_snapshot_unavailable")"retained_state_snapshot_unavailable" else "physical_preflight"
-            finish(Activity.RESULT_CANCELED,Bundle().apply {putString("goatrPhysicalOutcome",JSONObject().put("status","blocked").put("code",code).toString())})
+            PhysicalPreflight.Blocked(if(error.message=="physical_retained_snapshot_unavailable")"retained_state_snapshot_unavailable" else "physical_preflight")
         }
+        // Physical state owns the request; never pass rejected JUnit options into SDK initialization.
+        super.onCreate(Bundle())
     }
 
     override fun callApplicationOnCreate(app:Application) {
         if(physicalRequested) {
-            val mode=physicalArguments?.getString("mode")
-            if(mode!="observe")return // Failed fresh admission/baseline never initializes normal Goatr runtime.
-            app.onCreate()
+            val ready=physicalPreflight as? PhysicalPreflight.Ready ?: return
+            if(ready.request.getString("mode")!="observe")return // Failed fresh admission/baseline never initializes normal Goatr runtime.
+            super.callApplicationOnCreate(app)
             physicalApplication=app
             applicationCreated.countDown()
             return
@@ -66,7 +68,8 @@ class OwnedInstrumentationRunner : AndroidJUnitRunner() {
         controlKey=pair
     }
 
-    private fun physicalStart(request:JSONObject) {
+    private fun physicalStart(ready:PhysicalPreflight.Ready) {
+        val request=ready.request
         try {
             val process=PhysicalMvpPlatform.process()
             sendStatus(1,Bundle().apply {
@@ -77,7 +80,7 @@ class OwnedInstrumentationRunner : AndroidJUnitRunner() {
             })
             if(request.getString("mode")=="baseline") {
                 val report=JSONObject().put("method","physical_report").put("runId",request.getString("runId")).put("sequence",0)
-                    .put("report",JSONObject().put("kind","baseline").put("process",process).put("facts",checkNotNull(physicalBaseline))
+                    .put("report",JSONObject().put("kind","baseline").put("process",process).put("facts",ready.baseline)
                         .put("dependencyProof",request.getString("physicalMvpDependencyProof")))
                 val reply=PhysicalMvpPlatform.exchange(this,request.getInt("port"),report)
                 check(reply.keys().asSequence().toSet()==setOf("kind","runId","sequence")&&reply.getString("kind")=="finished"
@@ -94,8 +97,16 @@ class OwnedInstrumentationRunner : AndroidJUnitRunner() {
     }
 
     override fun onStart() {
-        physicalArguments?.let {physicalStart(it);return}
-        check(!physicalRequested)
+        if(physicalRequested) {
+            when(val preflight=physicalPreflight) {
+                is PhysicalPreflight.Ready -> physicalStart(preflight)
+                is PhysicalPreflight.Blocked,null -> {
+                    val code=preflight?.code ?: "physical_preflight"
+                    finish(Activity.RESULT_CANCELED,Bundle().apply {putString("goatrPhysicalOutcome",JSONObject().put("status","blocked").put("code",code).toString())})
+                }
+            }
+            return
+        }
         val pid = android.os.Process.myPid()
         val stat = File("/proc/self/stat").readText()
         check(stat.substringBefore(' ').toInt() == pid) { "Instrumentation kernel PID mismatch" }
