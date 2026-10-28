@@ -46,20 +46,23 @@ internal fun GoatrTitleBar(
         verticalAlignment=Alignment.CenterVertically,
     ) {
         navigationIcon()
-        Icon(
-            painterResource(R.drawable.ic_notification_goat),
-            contentDescription=null,
-            modifier=Modifier.size(24.dp),
-            tint=MaterialTheme.colorScheme.onSurface,
-        )
-        Column(Modifier.weight(1f).padding(start=8.dp,end=4.dp),verticalArrangement=Arrangement.spacedBy(2.dp)) {
-            UiText(
-                title.ifEmpty {"Goatr"},
-                style=if(title.isEmpty()) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleMedium,
-                maxLines=1,
-                overflow=TextOverflow.Ellipsis,
-                modifier=titleModifier.fillMaxWidth().semantics {heading()},
-            )
+        Column(Modifier.weight(1f).padding(end=4.dp),verticalArrangement=Arrangement.spacedBy(2.dp)) {
+            Row(verticalAlignment=Alignment.CenterVertically) {
+                Icon(
+                    painterResource(R.drawable.ic_goatr_title),
+                    contentDescription=null,
+                    modifier=Modifier.size(24.dp).testTag("titlebar_goat"),
+                    tint=MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.width(8.dp))
+                UiText(
+                    title.ifEmpty {"Goatr"},
+                    style=if(title.isEmpty()) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleMedium,
+                    maxLines=1,
+                    overflow=TextOverflow.Ellipsis,
+                    modifier=titleModifier.weight(1f).semantics {heading()},
+                )
+            }
             UiText(
                 compactStatus,
                 style=statusStyle,
@@ -67,7 +70,7 @@ internal fun GoatrTitleBar(
                 minLines=2,
                 maxLines=2,
                 overflow=TextOverflow.Ellipsis,
-                modifier=Modifier.fillMaxWidth().semantics {contentDescription=status},
+                modifier=Modifier.padding(start=32.dp).fillMaxWidth().semantics {contentDescription=status},
             )
         }
         // Decorative progress never repeats the full accessible status or moves the trailing actions.

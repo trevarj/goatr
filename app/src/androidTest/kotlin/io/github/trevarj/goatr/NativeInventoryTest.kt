@@ -10,8 +10,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
@@ -35,6 +37,7 @@ class NativeInventoryTest {
         var view by mutableStateOf(offline)
         var connecting by mutableStateOf(false)
         var fontScale by mutableStateOf(1f)
+        var layoutDirection by mutableStateOf(LayoutDirection.Ltr)
         var pageTitle by mutableStateOf("")
         var width by mutableStateOf(320.dp)
         var horizontalPadding by mutableStateOf(0.dp)
@@ -43,7 +46,7 @@ class NativeInventoryTest {
         var backs=0;var menus=0
         ui.setContent {
             val density=LocalDensity.current
-            GoatrTheme {CompositionLocalProvider(LocalDensity provides Density(density.density,fontScale)) {
+            GoatrTheme {CompositionLocalProvider(LocalDensity provides Density(density.density,fontScale),LocalLayoutDirection provides layoutDirection) {
                 // Filters uses this horizontal sheet inset: a 320dp screen supplies a 288dp bar.
                 Column(Modifier.width(width).padding(horizontal=horizontalPadding)) {
                     val status=rootCount?.let {"$it connected"} ?: connectionLabel(host,view,connecting)
@@ -59,15 +62,19 @@ class NativeInventoryTest {
         val progress=hasProgressBarRangeInfo(androidx.compose.ui.semantics.ProgressBarRangeInfo.Indeterminate)
         val states:List<Triple<ConnectionView,Boolean,Int?>> = listOf(Triple(offline,false,null),Triple(offline,true,null),Triple(syncing,false,null),
             Triple(direct,false,null),Triple(relay,false,null),Triple(online,false,null))+listOf(0,1,12,128).map {Triple(online,false,it)}
-        for(actionSlot in listOf(false,true)) for((screenWidth,sheetInset) in listOf(320.dp to 0.dp,360.dp to 0.dp,320.dp to 16.dp)) for(scale in listOf(1f,2f)) for(contextTitle in listOf("","Filters","Original desktop agent with a deliberately long conversation title")) {
-            ui.runOnIdle {width=screenWidth;horizontalPadding=sheetInset;fontScale=scale;pageTitle=contextTitle;hasActions=actionSlot;rootCount=null;view=offline;connecting=false}
+        for(direction in listOf(LayoutDirection.Ltr,LayoutDirection.Rtl)) for(actionSlot in listOf(false,true)) for((screenWidth,sheetInset) in listOf(320.dp to 0.dp,360.dp to 0.dp,320.dp to 16.dp)) for(scale in listOf(1f,2f)) for(contextTitle in listOf("","Filters","Original desktop agent with a deliberately long conversation title")) {
+            ui.runOnIdle {layoutDirection=direction;width=screenWidth;horizontalPadding=sheetInset;fontScale=scale;pageTitle=contextTitle;hasActions=actionSlot;rootCount=null;view=offline;connecting=false}
             val header=ui.onNodeWithTag("compact_header").fetchSemanticsNode().boundsInRoot
             val back=if(contextTitle.isNotEmpty()) ui.onNodeWithTag("compact_back").assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp).fetchSemanticsNode().boundsInRoot else null
             val menu=if(actionSlot) ui.onNodeWithTag("compact_menu").assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp).fetchSemanticsNode().boundsInRoot else {ui.onNodeWithTag("compact_menu").assertDoesNotExist();null}
             val renderedTitle=contextTitle.ifEmpty {"Goatr"}
             val title=ui.onNodeWithText(renderedTitle,useUnmergedTree=true).assertIsDisplayed().assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading)).fetchSemanticsNode().boundsInRoot
-            back?.let {assertTrue(it.right<title.left)}
-            menu?.let {assertTrue(title.right<it.left)}
+            val goat=ui.onNodeWithTag("titlebar_goat",useUnmergedTree=true).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            assertEquals("Goat must center on the title, not the title/status stack",title.center.y,goat.center.y,0.5f)
+            assertTrue(goat.left>=header.left && goat.right<=header.right && goat.top>=header.top && goat.bottom<=header.bottom)
+            assertTrue(if(direction==LayoutDirection.Ltr) goat.right<title.left else goat.left>title.right)
+            back?.let {assertTrue(if(direction==LayoutDirection.Ltr) it.right<goat.left else it.left>goat.right)}
+            menu?.let {assertTrue(if(direction==LayoutDirection.Ltr) title.right<it.left else title.left>it.right)}
             assertTrue(title.top>=header.top && title.bottom<=header.bottom)
             for((observed,inFlight,count) in states) {
                 ui.runOnIdle {view=observed;connecting=inFlight;rootCount=count}
@@ -76,7 +83,8 @@ class NativeInventoryTest {
                 val statusNode=ui.onNodeWithText(shortStatus,useUnmergedTree=true).assertIsDisplayed().assertContentDescriptionEquals(fullStatus)
                 val status=statusNode.fetchSemanticsNode().boundsInRoot
                 assertEquals(title.left,status.left,0.5f)
-                assertTrue(title.bottom<=status.top && status.right<=(menu?.left ?: header.right))
+                assertEquals(title.right,status.right,0.5f)
+                assertTrue(title.bottom<=status.top && if(direction==LayoutDirection.Ltr) status.right<=(menu?.left ?: header.right) else status.left>=(menu?.right ?: header.left))
                 assertTrue("Status vertical containment: screenWidth=$screenWidth sheetInset=$sheetInset scale=$scale titleCategory=${when {contextTitle.isEmpty()->"blank";contextTitle=="Filters"->"filters";else->"long"}} actions=$actionSlot count=$count state=${when {count!=null->"root_count";inFlight->"linking";observed===offline->"offline";observed===syncing->"sync";observed===direct->"direct";observed===relay->"relay";else->"online"}} shortStatus=$shortStatus header=$header status=$status currentHeader=${ui.onNodeWithTag("compact_header").fetchSemanticsNode().boundsInRoot}",status.top>=header.top && status.bottom<=header.bottom)
                 val layouts=mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
                 statusNode.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) {get->get(layouts)}
@@ -87,6 +95,7 @@ class NativeInventoryTest {
                 if(back!=null) assertEquals(back,ui.onNodeWithTag("compact_back").fetchSemanticsNode().boundsInRoot)
                 if(menu!=null) assertEquals(menu,ui.onNodeWithTag("compact_menu").fetchSemanticsNode().boundsInRoot)
                 assertEquals(title,ui.onNodeWithText(renderedTitle,useUnmergedTree=true).fetchSemanticsNode().boundsInRoot)
+                assertEquals(goat,ui.onNodeWithTag("titlebar_goat",useUnmergedTree=true).fetchSemanticsNode().boundsInRoot)
             }
             val transportText=hasAnyAncestor(hasTestTag("compact_header")) and SemanticsMatcher("Rendered transport and its full description") {node->
                 node.config.contains(SemanticsProperties.Text) && node.config.contains(SemanticsProperties.ContentDescription)
@@ -102,6 +111,7 @@ class NativeInventoryTest {
                     assertEquals(renderedBefore,after.config[SemanticsProperties.Text])
                     assertEquals(descriptionBefore,after.config[SemanticsProperties.ContentDescription])
                     assertEquals(before.boundsInRoot,after.boundsInRoot)
+                    assertEquals(goat,ui.onNodeWithTag("titlebar_goat",useUnmergedTree=true).fetchSemanticsNode().boundsInRoot)
                     assertEquals(header,ui.onNodeWithTag("compact_header").fetchSemanticsNode().boundsInRoot)
                     if(back!=null) assertEquals(back,ui.onNodeWithTag("compact_back").fetchSemanticsNode().boundsInRoot)
                     if(menu!=null) assertEquals(menu,ui.onNodeWithTag("compact_menu").fetchSemanticsNode().boundsInRoot)
@@ -620,5 +630,26 @@ class NativeInventoryTest {
         ui.onNodeWithTag(shellTag).assertDoesNotExist()
         ui.onNodeWithTag("mixed_strip_shell_${replacement.shellId.value}_${replacement.generation.value}").performScrollTo().performTouchInput {click()}
         assertEquals(replacement,selectedShell);assertEquals(2,shellOpens);assertEquals(1,agentOpens)
+    }
+}
+
+class TitleGoatAssetTest {
+    @Test fun titleGoatKeepsTransparentGutterAroundCompleteForeground() {
+        val resources=androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext.resources
+        val icon=checkNotNull(android.graphics.BitmapFactory.decodeResource(resources,R.drawable.ic_goatr_title,android.graphics.BitmapFactory.Options().apply {inScaled=false}))
+        try {
+            assertEquals(96,icon.width)
+            assertEquals(96,icon.height)
+            var left=icon.width;var top=icon.height;var right=-1;var bottom=-1
+            for(y in 0 until icon.height) for(x in 0 until icon.width) {
+                if(android.graphics.Color.alpha(icon.getPixel(x,y))!=0) {
+                    left=minOf(left,x);top=minOf(top,y);right=maxOf(right,x);bottom=maxOf(bottom,y)
+                }
+            }
+            assertTrue("Title goat must have visible foreground",right>=left && bottom>=top)
+            assertTrue("Title goat needs at least 8px transparent gutter on every edge",left>=8 && top>=8 && right<icon.width-8 && bottom<icon.height-8)
+        } finally {
+            icon.recycle()
+        }
     }
 }
