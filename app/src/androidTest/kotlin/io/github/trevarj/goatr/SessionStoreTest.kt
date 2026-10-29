@@ -113,6 +113,19 @@ class SessionStoreTest {
             // The platform alias domain is real and NOT isolated by ContextWrapper; policy positives are typed cases above.
         }
     }
+    @Test fun emptyAttachmentSweepDoesNotCreateWrappingAlias()=runBlocking {
+        withPhysicalDirectory {owned,root->
+            val alias="goatr.attachments.staging.v1";val aliasesBefore=keyAliases()
+            assertFalse("Run on a fresh owned fixture without a staging alias; existing keys must not be deleted",alias in aliasesBefore)
+            try {
+                val staging=AttachmentStaging(owned)
+                repeat(2){staging.sweepExpired(emptySet())}
+                assertTrue("Empty attachment sweeps must preserve the complete alias domain",aliasesBefore==keyAliases())
+                val directory=java.io.File(root,"no_backup/attachment-staging")
+                assertTrue(directory.isDirectory);assertEquals(0,directory.listFiles()?.size)
+            }finally{java.security.KeyStore.getInstance("AndroidKeyStore").apply {load(null)}.deleteEntry(alias)}
+        }
+    }
     @Test fun physicalFreshRawStateRefusesActualFilesystemMaterialWithoutClearingIt()=runBlocking {
         for(family in listOf("database","preference","key-directory","connector","legacy-file"))withPhysicalDirectory {owned,root->
             when(family) {

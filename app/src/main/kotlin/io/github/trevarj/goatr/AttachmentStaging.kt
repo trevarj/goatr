@@ -204,8 +204,9 @@ internal class AttachmentStaging(context:Context) {
     }
     /** Orphan expiry requires authenticating the whole bounded object and its UUID/header AAD. */
     suspend fun sweepExpired(retained:Set<String>) {try {withContext(Dispatchers.IO){mutex.withLock {
-        root();val secret=key();val files=directory.listFiles() ?: return@withLock
-        if(files.size>MAX_FILES)return@withLock
+        root();val files=directory.listFiles() ?: return@withLock
+        if(files.isEmpty() || files.size>MAX_FILES)return@withLock
+        val secret=key()
         for(path in files){currentCoroutineContext().ensureActive();if(!NAME.matches(path.name))continue
             val id=try {UUID.fromString(path.name.removeSuffix(".gcm"))}catch(_:Exception){continue};if(id.toString() in retained)continue
             try {val original=check(path);val fd=Os.open(path.path,OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,0)
