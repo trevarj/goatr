@@ -1037,6 +1037,7 @@ struct ServeLaunch<'a> {
     grid_hold: Option<&'a mut GridHold>,
     project_read: Option<&'a ProjectReadFixture>,
     startup_deadline: Option<Instant>,
+    unit_authority: Option<&'a goatr::codex_relay::UnitWakePin>,
 }
 struct Companion {
     child: Child,
@@ -7446,12 +7447,13 @@ fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
 fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     if !args.get_flag("physical-mvp") {
         if args.get_one::<String>("expected-config-sha256").is_some(){return Err(failure("independent seed config pin is physical-mvp only"));}
-        if args.get_flag("physical-file-wake")||args.get_one::<String>("expected-controller-sha256").is_some(){return Err(failure("FileWake controller profile and pin are physical-mvp only"));}
+        if args.get_one::<String>("expected-controller-sha256").is_some(){return Err(failure("controller hash is physical-mvp only"));}
         if args.get_one::<PathBuf>("prepared-fresh-install").is_some()||args.get_one::<String>("expected-prepared-install-sha256").is_some(){return Err(failure("prepared install inputs are physical-mvp only"));}
         return Ok(());
     }
-    if !args.get_flag("physical-file-wake")||args.get_one::<String>("expected-controller-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))) {
-        return Err(prerequisite("independent_controller_file_wake_pin_unavailable"));
+    physical::validate_controller_unit(args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("explicit full controller unit missing"))?)?;
+    if args.get_one::<String>("expected-controller-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))) {
+        return Err(prerequisite("independent_controller_unit_pin_unavailable"));
     }
     match (args.get_one::<PathBuf>("prepared-fresh-install"),args.get_one::<String>("expected-prepared-install-sha256")) {
         (None,None)=>{},
@@ -7492,11 +7494,14 @@ fn physical_host_preflight_selection(args:&clap::ArgMatches)->io::Result<Option<
         }
         (true,true)=>return Err(failure("host preflight policies are mutually exclusive")),
     };
-    if args.ids().any(|id|args.value_source(id.as_str())==Some(clap::parser::ValueSource::CommandLine)
+    // ArgMatches also carries derived group IDs with CommandLine provenance; only
+    // actual declared arguments can be explicit frontend inputs.
+    let command=feedback_arguments(arguments_base());
+    if command.get_arguments().any(|argument|args.value_source(argument.get_id().as_str())==Some(clap::parser::ValueSource::CommandLine)
         &&!match policy {
-            physical::ControllerPolicy::Zero=>matches!(id.as_str(),"physical-host-preflight"|"evidence-dir"),
-            physical::ControllerPolicy::WakeDiagnostic {..}=>matches!(id.as_str(),"physical-host-wake-preflight"|"expected-controller-unit"|"evidence-dir"),
-            physical::ControllerPolicy::FileWake {..}=>false,
+            physical::ControllerPolicy::Zero=>matches!(argument.get_id().as_str(),"physical-host-preflight"|"evidence-dir"),
+            physical::ControllerPolicy::WakeDiagnostic {..}=>matches!(argument.get_id().as_str(),"physical-host-wake-preflight"|"expected-controller-unit"|"evidence-dir"),
+            physical::ControllerPolicy::UnitWake {..}=>false,
         }) {
         return Err(failure("host preflight accepts only its closed selector/unit/evidence inputs; no runtime/device/artifact/effect arguments"));
     }
@@ -7508,23 +7513,21 @@ fn arguments_base() -> Command {
             .requires_all(["physical-mvp","expected-prepared-install-sha256"]).help("Explicit sealed0400 owned fresh-install creator record; skips ONLY the already-owned PRODUCT install, never baseline/runtime"))
         .arg(Arg::new("expected-prepared-install-sha256").long("expected-prepared-install-sha256")
             .requires_all(["physical-mvp","prepared-fresh-install"]).help("Independent lowercase64 creator-record pin, not measured candidate authority"))
-        .arg(Arg::new("physical-file-wake").long("physical-file-wake").action(ArgAction::SetTrue)
-            .requires_all(["physical-mvp","expected-controller-sha256"])
-            .help("Explicit full physical private file-EP Wake profile for BOTH controller and Goatr; not ambient/zero fallback"))
-        .arg(Arg::new("expected-controller-sha256").long("expected-controller-sha256").requires_all(["physical-mvp","physical-file-wake"])
-            .help("Independent lowercase SHA256 pin of the private0500 FileWake controller; never measured self-authorization"))
+        .arg(Arg::new("expected-controller-sha256").long("expected-controller-sha256").requires("physical-mvp")
+            .help("Independent lowercase SHA256 pin of the held controller executable; never measured self-authorization"))
         .arg(Arg::new("physical-host-wake-preflight").long("physical-host-wake-preflight").action(ArgAction::SetTrue)
             .requires_all(["expected-controller-unit","evidence-dir"]).conflicts_with("physical-host-preflight")
             .help("Explicit real-host TTY diagnostic ONLY: exact four-set Wake capability shape plus expected actual controller unit, never full-matrix/runtime authority"))
-        .arg(Arg::new("expected-controller-unit").long("expected-controller-unit").requires("physical-host-wake-preflight")
-            .help("Exact goatr-host-wake-<canonical-lower-UUID>.service observed in the controller's sole unified cgroup leaf"))
+        .arg(Arg::new("expected-controller-unit").long("expected-controller-unit").requires("controller-unit-mode")
+            .help("Explicit expected fresh goatr-host-wake-<canonical-lower-UUID>.service; joined to the original manager, MainPID and full cgroup"))
+        .group(ArgGroup::new("controller-unit-mode").args(["physical-mvp","physical-host-wake-preflight"]))
         .arg(Arg::new("physical-host-preflight").long("physical-host-preflight").action(ArgAction::SetTrue)
             .requires("evidence-dir")
             .help("Human real-host TTY only: qualify the unchanged original-host guard and record closed permission diagnostics; evidence only, no native/provider/ADB/product effect or full-MVP claim"))
         .arg(Arg::new("physical-mvp").long("physical-mvp").action(ArgAction::SetTrue)
             .requires_all(["backend","goatr","config","workspace-root","evidence-dir","consent-owned-providers",
                 "apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-goatr-sha256",
-                "expected-companion-lock-sha256","expected-config-sha256","serial","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256","physical-file-wake","expected-controller-sha256"])
+                "expected-companion-lock-sha256","expected-config-sha256","serial","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256","expected-controller-unit","expected-controller-sha256"])
             .conflicts_with_all(["background","admission-only","shared-agent-only","terminal-only","project-read-only",
                 "grid","grid-lease","ui","camera","ime","setup","prepare-emulator","emulator-owner","paging-proof",
                 "codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
@@ -9405,6 +9408,7 @@ fn start_serve_with_codex_capture(
             grid_hold: None,
             project_read: None,
             startup_deadline: None,
+            unit_authority: None,
         },
     )
 }
@@ -9493,6 +9497,10 @@ fn start_serve_with_capture(
         .arg(config)
         .arg("--admin-socket")
         .arg(socket);
+    if let Some(pin) = launch.unit_authority {
+        pin.serving_controller(Some(startup_deadline))?;
+        c.arg("--expected-unit").arg(pin.unit());
+    }
     if !launch.preserve_xdg_config_home {
         c.env(
             "XDG_CONFIG_HOME",
@@ -9536,6 +9544,8 @@ fn start_serve_with_capture(
         capture.configure_companion(&mut c);
     }
     if Instant::now()>=startup_deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original startup budget expired before spawn"));}
+    if let Some(pin) = launch.unit_authority { pin.serving_controller(Some(startup_deadline))?; }
+    if Instant::now()>=startup_deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original startup budget expired during unit qualification"));}
     let inherited = if let Some(listener) = listener {
         let fd = listener.as_raw_fd();
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -9553,12 +9563,15 @@ fn start_serve_with_capture(
         c.process_group(0);
     }
     #[cfg(target_os="linux")]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        // Discard inherited authority; an explicitly qualified executable file grant is reacquired at exec.
-        c.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    if launch.unit_authority.is_none() {
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            c.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+        }
     }
-    let spawned = c.spawn();
+    let spawned = if Instant::now()>=startup_deadline {
+        Err(io::Error::new(io::ErrorKind::TimedOut,"original startup budget expired immediately before spawn"))
+    } else { c.spawn() };
     let pin = if let (Some(hold), Ok(child)) = (launch.grid_hold.as_deref_mut(), &spawned) {
         hold.pin_child(child)
     } else {
@@ -9768,6 +9781,7 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
             grid_hold: None,
             project_read: None,
             startup_deadline: None,
+            unit_authority: None,
         },
     )?;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -9820,11 +9834,13 @@ async fn pair(
     root: &Path,
     socket: &Path,
     endpoint: &iroh::Endpoint,
+    deadline: Option<Instant>,
 ) -> io::Result<Phone> {
+    if deadline.is_some_and(|deadline|Instant::now()>=deadline){return Err(io::Error::new(io::ErrorKind::TimedOut,"original pairing deadline expired before worker spawn"));}
     let b = binary.to_owned();
     let r = root.to_owned();
     let s = socket.to_owned();
-    let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&b, Some(&r), Some(&s)))
+    let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&b, Some(&r), Some(&s),deadline))
         .await
         .map_err(|_| {
             failure("phone setup failed: phase=phone_pair; guard=task_join; no retry")
@@ -9834,7 +9850,11 @@ async fn pair(
     unsafe { uri.as_bytes_mut().fill(0) };
     uri.clear();
     let host = invite.host.clone();
-    connect(endpoint, &host, Some(invite)).await
+    if let Some(deadline)=deadline {
+        if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pairing deadline expired before connection"));}
+        tokio::time::timeout_at(deadline.into(),connect(endpoint,&host,Some(invite))).await
+            .map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"original pairing connection deadline"))?
+    } else { connect(endpoint, &host, Some(invite)).await }
 }
 
 #[derive(Clone, Copy)]
@@ -13423,6 +13443,7 @@ async fn checkpoint_held(
                 grid_hold: grid_hold.as_deref_mut(),
                 project_read: project_fixture.as_ref(),
                 startup_deadline: Some(deadline),
+                unit_authority: None,
             },
         )?
     } else {
@@ -13460,7 +13481,7 @@ async fn checkpoint_held(
         .bind()
         .await
         .map_err(io::Error::other)?;
-    let mut phone = pair(&binary, &root, &socket, &endpoint).await?;
+    let mut phone = pair(&binary, &root, &socket, &endpoint,None).await?;
     if terminal_only {
         let result=terminal_flow(&mut phone,&config,&herdr_socket,&mut desktop,&source_evidence,admission_native,&name,evidence,&run).await;
         phone.connection.close(0u32.into(),b"finite terminal workflow complete");
@@ -14187,7 +14208,7 @@ async fn checkpoint_held(
                     return Err(failure("fresh feedback guard identity already paired; adoption refused"));
                 }
                 guard_admitted = true;
-                let mut guard = pair(&binary, &root, &socket, &guard_endpoint).await?;
+                let mut guard = pair(&binary, &root, &socket, &guard_endpoint,None).await?;
                 if guard.hello.host_id != host_id || guard.hello.boot_id == phone.hello.boot_id {
                     return Err(failure("feedback guard did not authenticate the original host's new boot"));
                 }
@@ -14265,18 +14286,36 @@ async fn checkpoint_held(
     }
     Ok(true)
 }
-pub async fn run() -> io::Result<bool> {
-    let args = arguments();
+pub(super) struct LiveAdmission {
+    args: clap::ArgMatches,
+    unit: Option<goatr::codex_relay::UnitWakePin>,
+}
+pub(super) fn admit_arguments() -> io::Result<LiveAdmission> {
+    let args = feedback_arguments(arguments_base()).try_get_matches_from(std::env::args_os())
+        .map_err(|error|io::Error::new(io::ErrorKind::InvalidInput,error.to_string()))?;
+    let diagnostic = physical_host_preflight_selection(&args)?;
+    physical_mode_environment(&args)?;
+    let expected = if args.get_flag("physical-mvp") || matches!(diagnostic,Some(physical::ControllerPolicy::WakeDiagnostic {..})) {
+        args.get_one::<String>("expected-controller-unit").map(String::as_str)
+    } else { None };
+    let unit = goatr::codex_relay::prepare_current_executable(true,expected)?;
+    Ok(LiveAdmission {args,unit})
+}
+pub(super) async fn run(admitted: Option<LiveAdmission>) -> io::Result<bool> {
+    let LiveAdmission {args,unit}=match admitted {
+        Some(admitted)=>admitted,
+        None=>LiveAdmission {args:arguments(),unit:None},
+    };
     if let Some(policy)=physical_host_preflight_selection(&args)? {
         let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required host preflight evidence"))?;
         fresh_shared_evidence(&evidence)?;
-        return physical::host_preflight(&evidence,policy);
+        return physical::host_preflight(&evidence,policy,unit);
     }
     physical_mode_environment(&args)?;
     if args.get_flag("physical-mvp") {
         let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required physical evidence"))?;
         fresh_shared_evidence(&evidence)?;
-        physical::run(&args,&evidence).await?;
+        physical::run(&args,&evidence,unit.ok_or_else(||failure("full mode lost its synchronous admitted unit context"))?).await?;
         return Ok(true);
     }
     terminal_mode_environment(&args)?;
@@ -14440,6 +14479,39 @@ mod tests {
     }
     fn file_wake_state(channel:&mut FileWakeChannel,expected:u8){let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,[expected]);}
     #[test]
+    fn terminal_pair_deadline_reaps_the_original_cli_before_returning() {
+        if let Some(mut channel)=file_wake_endpoint("GOATR_PAIR_DEADLINE_TEST_FD") {
+            let parent=std::env::var("GOATR_PAIR_DEADLINE_DRIVER_PARENT").unwrap().parse::<u32>().unwrap();
+            if unsafe{libc::getppid()} as u32!=parent {
+                // This is the actual terminal helper subprocess; its PID travels only over fixed IPC.
+                assert!(goatr::codex_relay::current_capabilities().unwrap().zero());
+                channel.write_all(&std::process::id().to_be_bytes()).unwrap();
+                let mut hold=[0];let _=channel.read_exact(&mut hold);return;
+            }
+            let binary=std::env::current_exe().unwrap();
+            let deadline=Instant::now()+Duration::from_secs(3);
+            let error=terminal_pair(&binary,None,None,Some(deadline)).unwrap_err();
+            assert_eq!(error.kind(),io::ErrorKind::TimedOut);
+            assert_eq!(terminal_pair(Path::new("/nonexistent-goatr-pair-deadline-helper"),None,None,Some(Instant::now())).unwrap_err().kind(),io::ErrorKind::TimedOut);
+            channel.write_all(b"T").unwrap();return;
+        }
+        let test=concat!(module_path!(),"::terminal_pair_deadline_reaps_the_original_cli_before_returning");
+        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
+        let (mut channel,endpoint)=FileWakeChannel::pair().unwrap();
+        channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let fd=endpoint.as_raw_fd();assert!(fd>2);let mut command=std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact",test,"--test-threads=1"]).env("GOATR_PAIR_DEADLINE_TEST_FD",fd.to_string())
+            .env("GOATR_PAIR_DEADLINE_DRIVER_PARENT",std::process::id().to_string())
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe{command.pre_exec(move||{goatr::codex_relay::drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
+        let mut driver=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);
+        let mut bytes=[0;4];channel.read_exact(&mut bytes).unwrap();let pid=u32::from_be_bytes(bytes);
+        let original=goatr::codex_relay::ProcessStart::capture(pid).unwrap();original.evidence(pid).unwrap();
+        file_wake_state(&mut channel,b'T');
+        assert_eq!(fs::symlink_metadata(format!("/proc/{pid}")).unwrap_err().kind(),io::ErrorKind::NotFound);
+        assert!(driver.exit().success());
+    }
+    #[test]
     fn first_child_final_admission_refuses_exact_or_late_absolute_deadline_with_real_evidence() {
         let process=herdr::process_evidence(std::process::id()).unwrap();let start=Instant::now();let deadline=start+Duration::from_secs(1);
         assert_eq!(admit_first_child_evidence(process.clone(),deadline,start).unwrap(),process);
@@ -14448,19 +14520,14 @@ mod tests {
         }
     }
     #[test]
-    fn capped_controller_frontend_allows_only_raw_full_route_without_ambient_mask_inference() {
-        assert!(crate::controller_file_frontend(true,false).is_err());
-        crate::controller_file_frontend(false,false).unwrap();crate::controller_file_frontend(false,true).unwrap();crate::controller_file_frontend(true,true).unwrap();
-        for selector in ["--physical-mvp","--physical-mvp=false","--physical-mvp=malformed"] {
+    fn privileged_frontend_routes_malformed_and_mixed_selectors_before_shortcuts() {
+        for selector in ["--physical-mvp","--physical-mvp=false","--physical-mvp=malformed",
+            "--expected-controller-unit=goatr-host-wake-invalid.service","--expected-controller-sha256=bad"] {
             for shortcut in ["--owned-mcp-stdio","--review-fixture","--terminal-only"] {
-                let args=["smoke",shortcut,selector];let raw=args.iter().any(|arg|crate::full_physical_argument(std::ffi::OsStr::new(arg)));
-                assert!(raw);crate::controller_file_frontend(true,raw).unwrap();
+                let args=["smoke",shortcut,selector];
                 assert!(args.iter().any(|arg|crate::early_live_argument(std::ffi::OsStr::new(arg))));
                 assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
             }
-        }
-        for other in ["--owned-mcp-stdio","--review-fixture","--physical-host-preflight","--physical-host-wake-preflight"] {
-            assert!(!crate::full_physical_argument(std::ffi::OsStr::new(other)));
         }
     }
     #[test]
@@ -14468,7 +14535,7 @@ mod tests {
         if let Some(mut channel)=file_wake_endpoint("GOATR_SERVE_DUMP_TEST_FD") {
             goatr::codex_relay::drop_inherited_capabilities().unwrap();assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);
             channel.write_all(b"0").unwrap();file_wake_state(&mut channel,b'1');
-            goatr::codex_relay::restore_dumpability().unwrap();channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
+            assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,1,0,0,0)},0);channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
         }
         let test=concat!(module_path!(),"::first_child_identity_wait_is_read_only_bounded_and_pins_dumpability_transition");
         let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();let executable=std::env::current_exe().unwrap();let metadata=fs::metadata(&executable).unwrap();
@@ -14518,7 +14585,7 @@ mod tests {
             "--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
         for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
         args.push(format!("--expected-config-sha256={}","3".repeat(64)));
-        args.push("--physical-file-wake".to_owned());args.push(format!("--expected-controller-sha256={}","4".repeat(64)));
+        args.push(format!("--expected-controller-unit=goatr-host-wake-{}.service",Uuid::random().0));args.push(format!("--expected-controller-sha256={}","4".repeat(64)));
         args.push(format!("--expected-ntfy-apk-sha256={NTFY_APK_SHA256}"));
         args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
         args
@@ -14588,8 +14655,8 @@ mod tests {
         for complete in [physical_mvp_args(),background_args("persistent"),background_args("ntfy")] {
             for wake in [false,true] {
                 let mut args=complete.clone();args.extend(host_preflight_args(wake).into_iter().skip(2));
-                let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();
-                assert!(physical_host_preflight_selection(&parsed).is_err());
+                assert!(feedback_arguments(arguments_base()).try_get_matches_from(args)
+                    .map_or(true,|parsed|physical_host_preflight_selection(&parsed).is_err()));
             }
         }
     }
@@ -14622,7 +14689,7 @@ mod tests {
         assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::DefaultValue));
         for required in ["--goatr=","--config=","--workspace-root=","--evidence-dir=","--serial=","--apk=","--test-apk=",
             "--expected-goatr-sha256=","--expected-companion-lock-sha256=","--expected-apk-sha256=","--expected-test-apk-sha256=",
-            "--expected-config-sha256=","--expected-ntfy-apk-sha256=","--expected-ntfy-signer-sha256=","--consent-owned-providers","--physical-file-wake","--expected-controller-sha256="] {
+            "--expected-config-sha256=","--expected-ntfy-apk-sha256=","--expected-ntfy-signer-sha256=","--consent-owned-providers","--expected-controller-unit=","--expected-controller-sha256="] {
             let missing=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();
             assert!(feedback_arguments(arguments_base()).try_get_matches_from(missing).is_err(),"{required}");
         }
@@ -14660,7 +14727,7 @@ mod tests {
         }
     }
     #[test]
-    fn full_physical_file_wake_requires_independent_controller_pin_and_rejects_all_other_modes() {
+    fn full_physical_unit_wake_requires_independent_controller_pin_and_rejects_all_other_modes() {
         let valid=physical_mvp_args();physical_mode_environment(&feedback_arguments(arguments_base()).try_get_matches_from(&valid).unwrap()).unwrap();
         for value in ["".to_owned(),"A".repeat(64),"a".repeat(63),"g".repeat(64)] {
             let mut args=valid.iter().filter(|argument|!argument.starts_with("--expected-controller-sha256=")).cloned().collect::<Vec<_>>();
@@ -14673,7 +14740,7 @@ mod tests {
                 match physical_host_preflight_selection(&parsed) {Err(_)=>true,Ok(Some(_))=>false,Ok(None)=>physical_mode_environment(&parsed).is_err()}
             }));
         }
-        for selector in ["--physical-file-wake=false","--expected-controller-sha256=bad"] {
+        for selector in ["--expected-controller-unit=malformed","--expected-controller-sha256=bad"] {
             let args=["smoke","--owned-mcp-stdio","/private/lease",selector];
             assert!(args.iter().any(|argument|crate::early_live_argument(std::ffi::OsStr::new(argument))));
             assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());

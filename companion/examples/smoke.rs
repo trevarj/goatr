@@ -549,7 +549,9 @@ fn drain_terminal_pair_stderr(
 }
 /// libc PTY only: pair insists on terminal stdout; invitations never reach argv/env/files.
 /// Controller Linux capabilities are dropped before exec.
-fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>) -> io::Result<String> {
+fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>, deadline: Option<Instant>) -> io::Result<String> {
+    let deadline=deadline.unwrap_or_else(||Instant::now()+Duration::from_secs(60));
+    if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pair terminal deadline exceeded before spawn"));}
     // SAFETY: these POSIX calls allocate/configure an owned PTY descriptor and bounded name buffer.
     let fd = unsafe {
         libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
@@ -594,14 +596,13 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>) -> i
         // The existing helper uses only async-signal-safe capability syscalls.
         command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
     }
+    if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pair terminal deadline exceeded before spawn"));}
     let mut child = command.spawn()?;
     let mut stderr = None;
     let mut stderr_nonblocking = false;
     let mut stderr_classifier = TerminalPairStderrClassifier::default();
     let mut bytes = Vec::with_capacity(16384);
     let mut chunk = [0u8; 4096];
-    // Development binaries still complete the real terminal-only QR command.
-    let deadline = Instant::now() + Duration::from_secs(60);
     let mut exited = false;
     let result = (|| {
         stderr = child.stderr.take();
@@ -612,6 +613,7 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>) -> i
         stderr_nonblocking = true;
         let mut pty_finished = false;
         loop {
+            if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pair terminal deadline exceeded"));}
             drain_terminal_pair_stderr(stderr, &mut stderr_classifier);
             if !pty_finished {
                 match master.read(&mut chunk) {
@@ -640,10 +642,7 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>) -> i
             if pty_finished && exited {
                 break;
             }
-            if Instant::now() > deadline {
-                return Err(failure("pair terminal deadline exceeded"));
-            }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())));
         }
         let status = child.wait()?;
         drain_terminal_pair_stderr(stderr, &mut stderr_classifier);
@@ -658,14 +657,15 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>) -> i
             .trim_end_matches('\r')
             .to_owned();
         PairInvite::parse(&uri).map_err(|_| failure("invalid terminal URI"))?;
+        if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pair terminal deadline exceeded after proof"));}
         Ok(uri)
     })();
     bytes.fill(0);
-    if child.try_wait()?.is_none() {
+    if !matches!(child.try_wait(),Ok(Some(_))) {
         if stderr_nonblocking && let Some(stderr) = stderr.as_mut() {
             drain_terminal_pair_stderr(stderr, &mut stderr_classifier);
         }
-        child.kill()?;
+        let _=child.kill();
         child.wait()?;
         if stderr_nonblocking && let Some(stderr) = stderr.as_mut() {
             drain_terminal_pair_stderr(stderr, &mut stderr_classifier);
@@ -1239,11 +1239,11 @@ async fn run() -> io::Result<bool> {
         let mut builder=goatr::endpoint_builder(iroh::SecretKey::from_bytes(&random32()?));if mode=="direct" {builder=builder.relay_mode(iroh::RelayMode::Disabled).clear_address_lookup();if addr.ip_addrs().next().is_none() || addr.relay_urls().next().is_some() {return Err(failure("direct gate requires actual local hints and no relays"));}} else {builder=builder.clear_ip_transports();}
         phone_owner=Some(builder.bind().await.map_err(|_|failure("client endpoint unavailable"))?);let phone=phone_owner.as_ref().expect("bound client");phone_identity=Some(phone.id().to_string());
         async {
-            commands.push(json!({"executable":binary,"command":"pair","adminSocket":socket,"output":"private PTY; URI/token memory only"}));let b=binary.clone();let r=root.clone();let s=socket.clone();let uri=tokio::task::spawn_blocking(move ||terminal_pair(&b,Some(&r),Some(&s))).await.map_err(|_|failure("PTY worker failed"))??;let invite=PairInvite::parse(&uri).map_err(|_|failure("pair URI rejected"))?;drop(uri);
+            commands.push(json!({"executable":binary,"command":"pair","adminSocket":socket,"output":"private PTY; URI/token memory only"}));let b=binary.clone();let r=root.clone();let s=socket.clone();let uri=tokio::task::spawn_blocking(move ||terminal_pair(&b,Some(&r),Some(&s),None)).await.map_err(|_|failure("PTY worker failed"))??;let invite=PairInvite::parse(&uri).map_err(|_|failure("pair URI rejected"))?;drop(uri);
             let (first,id)=exchange(phone,addr.clone(),invite,mode,events.clone(),false).await?;
             let list=local(&binary,&root,&socket,"devices",None,&mut commands).await?;if !list.contains(&id.0) {return Err(failure("real devices command missed paired peer"));}
             local(&binary,&root,&socket,"revoke",Some(&id),&mut commands).await?;first.close(0u32.into(),b"revoked");
-            commands.push(json!({"executable":binary,"command":"pair","adminSocket":socket,"output":"private PTY; URI/token memory only"}));let b=binary.clone();let r=root.clone();let s=socket.clone();let uri=tokio::task::spawn_blocking(move ||terminal_pair(&b,Some(&r),Some(&s))).await.map_err(|_|failure("PTY worker failed"))??;let invite=PairInvite::parse(&uri).map_err(|_|failure("fresh pair URI rejected"))?;drop(uri);
+            commands.push(json!({"executable":binary,"command":"pair","adminSocket":socket,"output":"private PTY; URI/token memory only"}));let b=binary.clone();let r=root.clone();let s=socket.clone();let uri=tokio::task::spawn_blocking(move ||terminal_pair(&b,Some(&r),Some(&s),None)).await.map_err(|_|failure("PTY worker failed"))??;let invite=PairInvite::parse(&uri).map_err(|_|failure("fresh pair URI rejected"))?;drop(uri);
             let (last,_)=exchange(phone,addr,invite,mode,events.clone(),true).await?;last.close(0u32.into(),b"unpaired");if !local(&binary,&root,&socket,"devices",None,&mut commands).await?.is_empty() {return Err(failure("self-unpair did not remove pairing"));}Ok(())
         }.await
     }=>result,_=tokio::signal::ctrl_c()=>Err(failure("transport gate cancelled")),_=terminate.recv()=>Err(failure("transport gate cancelled"))};
@@ -1297,15 +1297,8 @@ async fn run() -> io::Result<bool> {
         "evidence":gate_path,"cleanupCandidate":candidate_path}));
     Ok(transport_observation == "pass")
 }
-fn full_physical_argument(argument:&std::ffi::OsStr)->bool {
-    argument.to_str().is_some_and(|argument|argument=="--physical-mvp"||argument.starts_with("--physical-mvp="))
-}
-fn controller_file_frontend(file_grant_present:bool,raw_full_physical:bool)->io::Result<()> {
-    if file_grant_present&&!raw_full_physical{return Err(prerequisite("file-granted controller is full-physical only; no alternate frontend authority"));}
-    Ok(())
-}
 fn early_live_argument(argument:&std::ffi::OsStr)->bool {
-    argument.to_str().is_some_and(|argument|["--physical-mvp","--physical-file-wake","--expected-controller-sha256","--prepared-fresh-install","--expected-prepared-install-sha256","--physical-host-preflight","--physical-host-wake-preflight","--background"].iter()
+    argument.to_str().is_some_and(|argument|["--physical-mvp","--expected-controller-unit","--expected-controller-sha256","--prepared-fresh-install","--expected-prepared-install-sha256","--physical-host-preflight","--physical-host-wake-preflight","--background"].iter()
         .any(|selector|argument==*selector||argument.strip_prefix(*selector).is_some_and(|suffix|suffix.starts_with('='))))
 }
 fn mode_exit(result:io::Result<bool>,output:&mut impl io::Write)->std::process::ExitCode {
@@ -1320,17 +1313,27 @@ fn mode_exit(result:io::Result<bool>,output:&mut impl io::Write)->std::process::
         }
     }
 }
-#[tokio::main(worker_threads = 2)]
-async fn main() -> std::process::ExitCode {
-    let raw_full_physical=std::env::args_os().skip(1).any(|argument|full_physical_argument(&argument));
-    #[cfg(target_os="linux")]
-    if !raw_full_physical {
-        // Presence is an actual file fact, NOT inferred from nonzero ambient diagnostic masks.
-        // This rejection never restores dumpability or enters an alternate frontend.
-        let admission=goatr::codex_relay::FileWakePin::current().and_then(|pin|controller_file_frontend(pin.is_some(),false));
-        if let Err(error)=admission{return mode_exit(Err(error),&mut io::stdout());}
-    }
+fn main() -> std::process::ExitCode {
     let early_live=std::env::args_os().skip(1).any(|argument|early_live_argument(&argument));
+    // Closed frontend parsing and actual unit/capability admission precede BOTH Tokio workers.
+    let admitted=if early_live {
+        match live::admit_arguments() {
+            Ok(admitted)=>Some(admitted),
+            Err(error)=>return mode_exit(Err(error),&mut io::stdout()),
+        }
+    } else {
+        if let Err(error)=goatr::codex_relay::prepare_current_executable(true,None) {
+            return mode_exit(Err(error),&mut io::stdout());
+        }
+        None
+    };
+    let runtime=match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
+        Ok(runtime)=>runtime,
+        Err(error)=>return mode_exit(Err(error),&mut io::stdout()),
+    };
+    runtime.block_on(async_main(early_live,admitted))
+}
+async fn async_main(early_live:bool,admitted:Option<live::LiveAdmission>) -> std::process::ExitCode {
     let mut native_args = std::env::args_os().skip(1);
     if !early_live&&native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
         if std::env::args_os().any(|arg|arg==std::ffi::OsStr::new("--project-read-only")){return std::process::ExitCode::FAILURE;}
@@ -1348,7 +1351,7 @@ async fn main() -> std::process::ExitCode {
             }
         };
     }
-    let result = if early_live {live::run().await} else if !std::env::args().any(|arg|matches!(arg.as_str(),"--terminal-only"|"--project-read-only"))&&std::env::args().any(|arg| arg == "--review-fixture") {
+    let result = if early_live {live::run(admitted).await} else if !std::env::args().any(|arg|matches!(arg.as_str(),"--terminal-only"|"--project-read-only"))&&std::env::args().any(|arg| arg == "--review-fixture") {
         review::run().await
     } else if std::env::args().any(|arg| {
         matches!(
@@ -1369,7 +1372,7 @@ async fn main() -> std::process::ExitCode {
                 | "--physical-hello-capture"
         )
     }) {
-        live::run().await
+        live::run(None).await
     } else {
         run().await
     };

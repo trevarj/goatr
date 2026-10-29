@@ -63,6 +63,7 @@ fn cli() -> Command {
         .subcommand(
             Command::new("serve")
                 .about("Own retained identity and SQLite; run in the foreground")
+                .arg(Arg::new("expected-unit").long("expected-unit").hide(true).value_name("UNIT"))
                 .arg(config.clone().conflicts_with("transport-smoke"))
                 .arg(
                     Arg::new("transport-smoke")
@@ -83,6 +84,7 @@ fn cli() -> Command {
             Command::new("setup")
                 .about("Explicit private configuration/project approval; separately consented owned serve unit")
                 .arg(config)
+                .arg(Arg::new("expected-unit").long("expected-unit").hide(true).value_name("UNIT").requires("serve-unit"))
                 .arg(
                     Arg::new("project")
                         .long("project")
@@ -171,7 +173,7 @@ fn publish_hints(path: &Path, public: &goatr::transport::LocalHints) -> io::Resu
     }
     result
 }
-async fn run(matches: clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::UnitWakePin>) -> Result<(), Box<dyn std::error::Error>> {
     let (name, sub) = matches.subcommand().expect("required command");
     if name == "codex-relay" {
         goatr::codex_relay::run(sub.get_one::<PathBuf>("binding").expect("required binding"))
@@ -190,12 +192,13 @@ async fn run(matches: clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
-            result = goatr::setup::run(sub, &path) => result?,
+            result = goatr::setup::run(sub, &path, profile.as_ref()) => result?,
             _ = tokio::signal::ctrl_c() => return Err("setup cancelled; committed stages remain durable, no pairing/provider effects".into()),
             _ = terminate.recv() => return Err("setup cancelled; committed stages remain durable, no pairing/provider effects".into()),
         }
         return Ok(());
     }
+    if let Some(pin) = &profile { pin.recheck(None)?; }
     let explicit = matches.get_one::<PathBuf>("admin-socket").cloned();
     let socket = explicit
         .clone()
@@ -491,9 +494,16 @@ fn main() -> ExitCode {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let role = startup_role(matches.subcommand_name().expect("required command"))?;
         // Post-exec, before record parsing, admin effects, inherited-FD proofs or Tokio workers.
-        // File capabilities are reacquired by exec even after the parent's pre_exec drop.
         #[cfg(target_os = "linux")]
-        let _executable_profile = goatr::codex_relay::prepare_current_executable(role == StartupRole::Retain)?;
+        let executable_profile = goatr::codex_relay::prepare_current_executable(role == StartupRole::Retain,
+            matches.subcommand().and_then(|(_, sub)| sub.try_get_one::<String>("expected-unit").ok().flatten()).map(String::as_str))?;
+        if matches.subcommand_name() == Some("serve")
+            && let Some(pin) = &executable_profile
+            && pin.unit() == "goatr.service" {
+            let (_, sub) = matches.subcommand().expect("required command");
+            let path = sub.get_one::<PathBuf>("config").ok_or("owned unit requires exact config")?;
+            goatr::setup::admit_owned_serve(pin, path)?;
+        }
         #[cfg(not(target_os = "linux"))]
         let _ = role;
         if matches.subcommand_name() == Some("codex-owner") {
@@ -506,7 +516,7 @@ fn main() -> ExitCode {
             .enable_all()
             .build()
             .expect("Failed building the Runtime")
-            .block_on(run(matches))
+            .block_on(run(matches, executable_profile))
     })();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -542,11 +552,24 @@ mod tests {
         assert!(startup_role("unknown-future-role").is_err());
     }
     #[test]
+    fn expected_unit_context_is_explicit_and_closed_to_eligible_roles() {
+        for args in [
+            vec!["goatr","serve","--expected-unit=goatr.service"],
+            vec!["goatr","setup","--serve-unit","--expected-unit=goatr-host-wake-00000000-0000-4000-8000-000000000000.service"],
+        ] { assert!(cli().try_get_matches_from(args).is_ok()); }
+        for args in [
+            vec!["goatr","pair","--expected-unit=goatr.service"],
+            vec!["goatr","devices","--expected-unit=goatr.service"],
+            vec!["goatr","codex-relay","--binding=/private/binding","--expected-unit=goatr.service"],
+            vec!["goatr","setup","--expected-unit=goatr.service"],
+        ] { assert!(cli().try_get_matches_from(args).is_err()); }
+    }
+    #[test]
     fn post_exec_drop_role_precedes_record_or_runtime_fixture() {
         if let Some(fd)=std::env::var("GOATR_ROLE_BOUNDARY_FD").ok() {
             let fd=fd.parse::<i32>().unwrap();assert!(fd>2);let mut channel=unsafe{FileWakeChannel::from_raw_fd(fd)};
             channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-            let profile=goatr::codex_relay::prepare_current_executable(startup_role("codex-owner").unwrap()==StartupRole::Retain).unwrap();
+            let profile=goatr::codex_relay::prepare_current_executable(startup_role("codex-owner").unwrap()==StartupRole::Retain,None).unwrap();
             assert!(profile.is_none());assert!(goatr::codex_relay::current_capabilities().unwrap().zero());
             let error=codex_owner_main(&cli().try_get_matches_from(["goatr","codex-owner","--record","/nonexistent-owned-role-record"]).unwrap()).unwrap_err();
             assert!(!error.to_string().is_empty());channel.write_all(b"1").unwrap();return;

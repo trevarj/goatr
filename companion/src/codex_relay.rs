@@ -87,8 +87,9 @@ pub fn drop_inherited_capabilities() -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-mod file_wake {
+mod unit_wake {
     use super::*;
+    use std::time::Instant;
 
     const WAKE: u64 = 1 << 35;
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,10 +102,10 @@ mod file_wake {
     }
     impl CapabilityState {
         pub fn zero(self) -> bool { self.inheritable == 0 && self.permitted == 0 && self.effective == 0 && self.ambient == 0 }
-        pub fn file_wake(self) -> bool { self.inheritable == 0 && self.permitted == WAKE && self.effective == WAKE && self.ambient == 0 && !self.no_new_privs }
-        fn discarded_manager_inheritance(self) -> bool { self.inheritable == WAKE && self.permitted == 0 && self.effective == 0 && self.ambient == 0 }
+        pub fn unit_wake(self) -> bool { self.inheritable == WAKE && self.permitted == WAKE && self.effective == WAKE && self.ambient == WAKE && self.no_new_privs }
     }
     pub fn capability_state(status: &str) -> io::Result<CapabilityState> {
+        if status.len() > 65_536 { return Err(invalid("capability status exceeds bound")); }
         let mut masks = [None; 4]; let mut nnp = None;
         for line in status.lines() {
             let Some((key, value)) = line.split_once(':') else { continue };
@@ -129,174 +130,352 @@ mod file_wake {
         if status.len() > 65_536 { return Err(invalid("capability status exceeds bound")); }
         capability_state(&status)
     }
-    pub fn validate_file_wake_capability(bytes: &[u8]) -> io::Result<()> {
-        if !matches!(bytes.len(), 20 | 24) { return Err(invalid("invalid file capability length")); }
-        let word = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        let revision = match bytes.len() { 20 => 0x0200_0000, 24 => 0x0300_0000, _ => unreachable!() };
-        if word(0) != (revision | 1) || (u64::from(word(4)) | (u64::from(word(12)) << 32)) != WAKE
-            || word(8) != 0 || word(16) != 0 || bytes.len() == 24 && word(20) != 0 {
-            return Err(invalid("file capability is not exact root-context WAKE_ALARM=ep"));
+    pub fn unit_cgroup<'a>(text: &'a str, expected: &str) -> io::Result<&'a str> {
+        if expected.is_empty() || expected.len() > 255 || !expected.ends_with(".service")
+            || !expected.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            || text.len() > 8192 || text.contains('\r') {
+            return Err(invalid("invalid expected unit or unified cgroup"));
         }
-        Ok(())
-    }
-    fn xattr_result(length: isize, bytes: [u8;24]) -> io::Result<Option<[u8;24]>> {
-        if length < 0 {
-            let error = io::Error::last_os_error();
-            return if error.raw_os_error() == Some(libc::ENODATA) { Ok(None) } else { Err(error) };
+        let mut lines = text.lines();
+        let path = lines.next().and_then(|line| line.strip_prefix("0::")).ok_or_else(|| invalid("missing unified cgroup"))?;
+        if lines.next().is_some() || !path.starts_with('/') || path.len() > 4096 || path.contains(':')
+            || path.chars().any(|c| c.is_control() || c.is_whitespace())
+            || path.split('/').skip(1).any(|part| matches!(part, "" | "." | ".."))
+            || path.rsplit('/').next() != Some(expected) {
+            return Err(invalid("not the sole canonical full expected unit cgroup"));
         }
-        let length=usize::try_from(length).ok().filter(|length|*length<=bytes.len()).ok_or_else(||invalid("file capability exceeds bound"))?;
-        validate_file_wake_capability(&bytes[..length])?; Ok(Some(bytes))
+        Ok(path)
     }
-    pub fn file_wake_capability(file: &File) -> io::Result<Option<[u8;24]>> {
-        let mut bytes = [0;24];
-        let length = unsafe { libc::fgetxattr(file.as_raw_fd(), c"security.capability".as_ptr(), bytes.as_mut_ptr().cast(), bytes.len()) };
-        xattr_result(length, bytes)
+    fn bounded_proc(pid: u32, name: &str) -> io::Result<String> {
+        let mut text = String::new();
+        File::open(format!("/proc/{pid}/{name}"))?.take(65_537).read_to_string(&mut text)?;
+        if text.len() > 65_536 { return Err(invalid("process observation exceeds bound")); }
+        Ok(text)
     }
-    #[derive(Debug)]
-    struct MissingFileWakeGrant;
-    impl std::fmt::Display for MissingFileWakeGrant {
-        fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("owned FileWake grant is absent")}
-    }
-    impl std::error::Error for MissingFileWakeGrant {}
-    pub fn file_wake_grant_absent(error:&io::Error)->bool {
-        error.get_ref().is_some_and(|cause|cause.is::<MissingFileWakeGrant>())
-    }
-    fn required_file_capability(file:&File)->io::Result<[u8;24]> {
-        file_wake_capability(file)?.ok_or_else(||io::Error::new(io::ErrorKind::NotConnected,MissingFileWakeGrant))
-    }
-    fn current_file_capability() -> io::Result<Option<[u8;24]>> {
-        let mut bytes = [0;24];
-        let length = unsafe { libc::getxattr(c"/proc/self/exe".as_ptr(), c"security.capability".as_ptr(), bytes.as_mut_ptr().cast(), bytes.len()) };
-        xattr_result(length, bytes)
-    }
-    pub fn dumpable() -> io::Result<bool> {
+    fn dumpable() -> io::Result<bool> {
         let value = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
         if value < 0 { return Err(io::Error::last_os_error()); }
         Ok(value == 1)
     }
-    /// Process-local primitive; production callers require a verified owned FileWake context.
-    pub fn restore_dumpability() -> io::Result<()> {
-        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } != 0 { return Err(io::Error::last_os_error()); }
-        if !dumpable()? { return Err(invalid("owned helper did not become inspectable")); }
+    fn require_inspectable(pid: u32) -> io::Result<()> {
+        if pid == std::process::id() && !dumpable()? {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,"original current unit process became uninspectable"));
+        }
         Ok(())
     }
+    fn before_deadline(deadline: Option<Instant>) -> io::Result<()> {
+        if deadline.is_some_and(|deadline|Instant::now() >= deadline) {
+            return Err(io::Error::new(io::ErrorKind::TimedOut,"original unit qualification deadline"));
+        }
+        Ok(())
+    }
+    fn command_deadline(original: Option<Instant>, now: Instant) -> io::Result<Instant> {
+        let limit=now+Duration::from_secs(5);
+        let deadline=original.map_or(limit,|original|original.min(limit));
+        if now>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original manager command deadline"));}
+        Ok(deadline)
+    }
+    fn manager_command_output(command: &mut std::process::Command, original: Option<Instant>) -> io::Result<String> {
+        let deadline=command_deadline(original,Instant::now())?;
+        before_deadline(Some(deadline))?;
+        let mut child=command.spawn()?;
+        let result=(|| {
+            let mut pipe=child.stdout.take().ok_or_else(||invalid("manager helper pipe unavailable"))?;
+            let fd=pipe.as_raw_fd();let flags=unsafe{libc::fcntl(fd,libc::F_GETFL)};
+            if flags<0||unsafe{libc::fcntl(fd,libc::F_SETFL,flags|libc::O_NONBLOCK)}<0{return Err(io::Error::last_os_error());}
+            let mut bytes=Vec::new();let mut buffer=[0;4096];
+            loop {
+                before_deadline(Some(deadline))?;
+                match pipe.read(&mut buffer) {
+                    Ok(0)=>if let Some(status)=child.try_wait()? {
+                        if !status.success(){return Err(invalid("manager helper refused"));}
+                        break;
+                    },
+                    Ok(n)=>{bytes.extend_from_slice(&buffer[..n]);if bytes.len()>65_536{return Err(invalid("manager reply exceeds bound"));}},
+                    Err(error) if error.kind()==io::ErrorKind::WouldBlock=>{},
+                    Err(error)=>return Err(error),
+                }
+                std::thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())));
+            }
+            let text=String::from_utf8(bytes).map_err(io::Error::other)?;
+            before_deadline(Some(deadline))?;Ok(text)
+        })();
+        if result.is_err(){let _=child.kill();child.wait()?;}
+        result
+    }
     fn sticky_result<T>(failed: &AtomicBool, result: io::Result<T>) -> io::Result<T> {
-        if failed.load(Ordering::Acquire) { return Err(invalid("original FileWake profile was permanently invalidated")); }
+        if failed.load(Ordering::Acquire) { return Err(invalid("original unit Wake profile was permanently invalidated")); }
         if result.is_err() { failed.store(true, Ordering::Release); }
         result
     }
-    pub struct FileWakePin {
-        path: PathBuf, file: File, stamp: ExecutableStamp, parent: File,
-        parent_object: (u64, u64, u32, u32, u32), capability: [u8;24],
-        sha256: Option<String>, failed: AtomicBool,
+    /// The private socket's original peer, not a unit name or environment marker.
+    struct UnitManager {
+        socket: std::os::unix::net::UnixStream,
+        path: PathBuf,
+        object: (u64, u64, u32, u32),
+        process: ProcessEvidence,
+        executable: ExecutableStamp,
     }
-    fn parent_object(m: &fs::Metadata) -> (u64, u64, u32, u32, u32) { (m.dev(), m.ino(), m.mode(), m.uid(), m.gid()) }
-    impl FileWakePin {
-        pub fn capture(path: &Path) -> io::Result<Self> {
-            if pairing::uid() != 1000 || fs::canonicalize(path)? != path { return Err(invalid("FileWake requires the canonical owned UID1000 path")); }
-            let parent_path = path.parent().ok_or_else(|| invalid("FileWake parent missing"))?;
-            pairing::private_dir(parent_path, false)?;
-            let parent = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(parent_path)?;
-            let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(path)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_file() || metadata.uid() != 1000 || metadata.nlink() != 1 || metadata.mode() & 0o7777 != 0o500 {
-                return Err(invalid("FileWake executable must be private regular owned0500/nlink1"));
+    impl UnitManager {
+        fn capture(deadline: Option<Instant>) -> io::Result<Self> {
+            before_deadline(deadline)?;
+            let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| invalid("user runtime unavailable"))?);
+            let expected_runtime = format!("/run/user/{}", pairing::uid());
+            if runtime.as_os_str() != std::ffi::OsStr::new(&expected_runtime) { return Err(invalid("not the original user runtime")); }
+            pairing::private_dir(&runtime, false)?;
+            let path = runtime.join("systemd/private");
+            let before = fs::symlink_metadata(&path)?;
+            if !before.file_type().is_socket() || before.uid() != pairing::uid() || before.mode() & 0o777 != 0o700 {
+                return Err(invalid("unqualified user manager socket"));
             }
-            let capability = required_file_capability(&file)?;
-            let pin = Self { path: path.to_owned(), stamp: executable_stamp(&metadata), parent_object: parent_object(&parent.metadata()?),
-                file, parent, capability, sha256: None, failed: AtomicBool::new(false) };
-            pin.recheck()?; Ok(pin)
+            let raw=unsafe{libc::socket(libc::AF_UNIX,libc::SOCK_STREAM|libc::SOCK_CLOEXEC|libc::SOCK_NONBLOCK,0)};
+            if raw<0{return Err(io::Error::last_os_error());}
+            let socket=unsafe{std::os::unix::net::UnixStream::from_raw_fd(raw)};
+            let bytes=path.as_os_str().as_encoded_bytes();
+            let mut address:libc::sockaddr_un=unsafe{std::mem::zeroed()};
+            if bytes.len()>=address.sun_path.len(){return Err(invalid("manager socket path exceeds bound"));}
+            address.sun_family=libc::AF_UNIX as libc::sa_family_t;
+            for (out,byte) in address.sun_path.iter_mut().zip(bytes){*out=*byte as libc::c_char;}
+            let length=(std::mem::offset_of!(libc::sockaddr_un,sun_path)+bytes.len()+1) as libc::socklen_t;
+            if unsafe{libc::connect(raw,(&address as *const libc::sockaddr_un).cast(),length)}!=0{return Err(io::Error::last_os_error());}
+            let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
+            let mut length = std::mem::size_of_val(&peer) as libc::socklen_t;
+            if unsafe { libc::getsockopt(socket.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut peer as *mut libc::ucred).cast(), &mut length) } != 0 { return Err(io::Error::last_os_error()); }
+            if peer.uid != pairing::uid() || peer.pid <= 0 { return Err(invalid("wrong user manager peer")); }
+            let process = herdr::process_evidence(peer.pid as u32)?;
+            let caller = herdr::process_evidence(std::process::id())?;
+            if process.linux_boot_id != caller.linux_boot_id || process.namespaces.pid != caller.namespaces.pid
+                || process.namespaces.mount != caller.namespaces.mount || process.namespaces.user != caller.namespaces.user
+                || process.namespaces.nspids.len() != caller.namespaces.nspids.len() {
+                return Err(invalid("user manager is outside original namespaces"));
+            }
+            let exe = fs::read_link(format!("/proc/{}/exe", process.pid))?;
+            crate::config::executable(&exe)?;
+            if exe.file_name().and_then(|s| s.to_str()) != Some("systemd") { return Err(invalid("user manager is not direct systemd")); }
+            let pin = Self { socket, path, object: (before.dev(), before.ino(), before.uid(), before.mode()),
+                executable: executable_stamp(&fs::metadata(format!("/proc/{}/exe", process.pid))?), process };
+            pin.recheck()?;before_deadline(deadline)?;Ok(pin)
         }
-        pub fn current() -> io::Result<Option<Self>> {
-            if current_file_capability()?.is_none() { return Ok(None); }
-            let path = std::env::current_exe()?; let pin = Self::capture(&path)?;
-            if executable_stamp(&fs::metadata("/proc/self/exe")?) != pin.stamp { return Err(invalid("FileWake current executable object differs")); }
-            Ok(Some(pin))
+        fn recheck(&self) -> io::Result<()> {
+            let now = fs::symlink_metadata(&self.path)?;
+            let _ = self.socket.as_raw_fd();
+            if (now.dev(), now.ino(), now.uid(), now.mode()) != self.object
+                || herdr::process_evidence(self.process.pid)? != self.process
+                || executable_stamp(&fs::metadata(format!("/proc/{}/exe", self.process.pid))?) != self.executable {
+                return Err(invalid("original manager/socket/executable changed"));
+            }
+            Ok(())
         }
-        pub fn verify_sha256(&mut self, expected: &str) -> io::Result<()> {
-            use sha2::{Digest, Sha256};
-            let result = (|| {
-                if self.sha256.is_some() || expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-                    return Err(invalid("FileWake requires one independent lowercase SHA256 pin"));
-                }
-                self.recheck()?;
-                let mut hash = Sha256::new(); let mut buffer = [0; 65_536]; let mut length = 0u64;
-                let mut reader = (&mut self.file).take(self.stamp.2.checked_add(1).ok_or_else(|| invalid("FileWake file length overflow"))?);
-                loop { let count = reader.read(&mut buffer)?; if count == 0 { break; } length += count as u64; hash.update(&buffer[..count]); }
-                drop(reader);
-                if length != self.stamp.2 || pairing::hex(&hash.finalize()) != expected { return Err(invalid("FileWake held executable hash mismatch")); }
-                self.sha256 = Some(expected.to_owned()); self.recheck()
-            })();
-            if result.is_err() { self.failed.store(true, Ordering::Release); }
-            result
+        fn output(&self, name: &str, args: &[&str], deadline: Option<Instant>) -> io::Result<String> {
+            use std::os::unix::process::CommandExt;
+            before_deadline(deadline)?;self.recheck()?;
+            let binary = std::env::split_paths(&std::env::var_os("PATH").ok_or_else(|| invalid("manager helper PATH unavailable"))?)
+                .map(|p| p.join(name)).find(|p| crate::config::executable(p).is_ok()).ok_or_else(|| invalid("protected manager helper unavailable"))?;
+            let address = format!("unix:path={}", self.path.display());
+            let mut command = std::process::Command::new(binary);
+            command.args(args).env("DBUS_SESSION_BUS_ADDRESS", &address).env_remove("SYSTEMD_BUS_ADDRESS")
+                .env_remove("SYSTEMD_HOST").env_remove("SYSTEMD_MACHINE")
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+            unsafe { command.pre_exec(drop_inherited_capabilities); }
+            let result=manager_command_output(&mut command,deadline);
+            self.recheck()?;before_deadline(deadline)?;result
         }
-        pub fn held_input(&self) -> io::Result<(PathBuf, File, fs::Metadata)> {
-            self.recheck()?; Ok((self.path.clone(), self.file.try_clone()?, self.file.metadata()?))
+        fn properties(&self, unit: &str, deadline: Option<Instant>) -> io::Result<std::collections::HashMap<String, String>> {
+            let text = self.output("systemctl", &["--user", "show", unit, "--all", "--no-pager",
+                "--property=LoadState,MainPID,ControlGroup,Type,UMask,Restart,PrivateUsers,AmbientCapabilities,NoNewPrivileges,KillMode,Transient,PartOf,BindsTo,DropInPaths"],deadline)?;
+            let mut properties = std::collections::HashMap::new();
+            for line in text.lines() {
+                let (key, value) = line.split_once('=').ok_or_else(|| invalid("malformed unit properties"))?;
+                if properties.insert(key.to_owned(), value.to_owned()).is_some() { return Err(invalid("duplicate unit property")); }
+            }
+            Ok(properties)
         }
-        pub fn failed(&self) -> bool { self.failed.load(Ordering::Acquire) }
-        pub fn recheck(&self) -> io::Result<()> {
-            if self.failed() { return Err(invalid("original FileWake profile was permanently invalidated")); }
-            let check = || {
-                let parent_path = self.path.parent().ok_or_else(|| invalid("FileWake parent missing"))?;
-                pairing::private_dir(parent_path, false)?;
-                if fs::canonicalize(&self.path)? != self.path || executable_stamp(&self.file.metadata()?) != self.stamp
-                    || executable_stamp(&fs::symlink_metadata(&self.path)?) != self.stamp
-                    || parent_object(&self.parent.metadata()?) != self.parent_object
-                    || parent_object(&fs::symlink_metadata(parent_path)?) != self.parent_object
-                    || file_wake_capability(&self.file)?.as_ref() != Some(&self.capability) {
-                    return Err(invalid("original FileWake executable/parent/grant changed"));
-                }
+        fn argv(&self, unit: &str, expected: &[String], legacy: Option<&[String]>, deadline: Option<Instant>) -> io::Result<()> {
+            // Address the original manager's UNIQUE bus owner, joined to the private peer PID.
+            let bus = self.path.parent().and_then(Path::parent).ok_or_else(|| invalid("manager runtime parent missing"))?.join("bus");
+            let socket = fs::symlink_metadata(&bus)?;
+            if !socket.file_type().is_socket() || socket.uid() != pairing::uid() { return Err(invalid("user bus socket is not owned")); }
+            let address = format!("--address=unix:path={}", bus.display());
+            let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
+                "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner", "s", "org.freedesktop.systemd1"],deadline)?;
+            let reply = native_json::parse(text.as_bytes(), REGISTRY)?;
+            if reply["type"] != "s" { return Err(invalid("manager unique bus owner type differs")); }
+            let owner = reply["data"][0].as_str().filter(|s|s.starts_with(':') && s.len() <= 255).ok_or_else(|| invalid("manager unique bus owner unavailable"))?;
+            let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
+                "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", owner],deadline)?;
+            let identity = native_json::parse(text.as_bytes(), REGISTRY)?;
+            if identity["type"] != "u" || identity["data"][0].as_u64() != Some(u64::from(self.process.pid)) { return Err(invalid("unit bus owner is not the original qualified manager")); }
+            let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
+                "call", owner, "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "GetUnit", "s", unit],deadline)?;
+            let reply = native_json::parse(text.as_bytes(), REGISTRY)?;
+            if reply["type"] != "o" { return Err(invalid("manager GetUnit type differs")); }
+            let path = reply["data"][0].as_str().ok_or_else(|| invalid("manager unit object unavailable"))?;
+            for hook in ["ExecCondition","ExecStartPre","ExecStartPost","ExecReload","ExecStop","ExecStopPost"] {
+                let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
+                    "get-property", owner, path, "org.freedesktop.systemd1.Service", hook],deadline)?;
+                let hook = native_json::parse(text.as_bytes(), REGISTRY)?;
+                empty_execution_hooks(&hook)?;
+            }
+            let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
+                "get-property", owner, path, "org.freedesktop.systemd1.Service", "ExecStart"],deadline)?;
+            let reply = native_json::parse(text.as_bytes(), REGISTRY)?;
+            if crate::backends::codex::exact_service_argv(&reply, expected).is_ok()
+                || legacy.is_some_and(|legacy|crate::backends::codex::exact_service_argv(&reply, legacy).is_ok()) {
                 Ok(())
-            };
-            sticky_result(&self.failed, check())
-        }
-        pub fn recheck_current(&self) -> io::Result<()> {
-            self.recheck()?;
-            let check = || {
-                if executable_stamp(&fs::metadata("/proc/self/exe")?) != self.stamp || !current_capabilities()?.file_wake() || !dumpable()? {
-                    return Err(invalid("FileWake current caps/NNP/dumpability/executable changed"));
-                }
-                Ok(())
-            };
-            sticky_result(&self.failed, check())
-        }
-        pub fn recheck_process(&self, process: &ProcessEvidence) -> io::Result<CapabilityState> {
-            self.recheck()?;
-            let check = || {
-                if herdr::process_evidence(process.pid)? != *process
-                    || executable_stamp(&fs::metadata(format!("/proc/{}/exe", process.pid))?) != self.stamp {
-                    return Err(invalid("FileWake target process/executable changed"));
-                }
-                let mut status = String::new();
-                File::open(format!("/proc/{}/status", process.pid))?.take(65_537).read_to_string(&mut status)?;
-                if status.len() > 65_536 { return Err(invalid("FileWake process status exceeds bound")); }
-                let state = capability_state(&status)?;
-                if !state.file_wake() || herdr::process_evidence(process.pid)? != *process {
-                    return Err(invalid("FileWake target caps/NNP/inspectability/epoch changed"));
-                }
-                Ok(state)
-            };
-            sticky_result(&self.failed,check())
+            } else { Err(invalid("manager direct ExecStart differs from original owned argv")) }
         }
     }
-    /// Closed caller role decides retention; drop roles do not inspect unqualified incoming privilege.
-    pub fn prepare_current_executable(retain: bool) -> io::Result<Option<FileWakePin>> {
+    fn empty_execution_hooks(property: &serde_json::Value) -> io::Result<()> {
+        if property["type"] != "a(sasbttttuii)" || property["data"].as_array().is_none_or(|commands| !commands.is_empty()) {
+            return Err(invalid("unit has unowned execution hooks"));
+        }
+        Ok(())
+    }
+    fn qualified_properties(properties: &std::collections::HashMap<String, String>, group: &str, pid: u32, retained: bool) -> io::Result<()> {
+        for (key, expected) in [("LoadState","loaded"),("Type","exec"),("UMask","0077"),("Restart","no"),("PrivateUsers","no"),
+            ("AmbientCapabilities","cap_wake_alarm"),("NoNewPrivileges","yes"),("PartOf",""),("BindsTo",""),("DropInPaths","")] {
+            if properties.get(key).map(String::as_str) != Some(expected) { return Err(invalid("unit service authority property differs")); }
+        }
+        if properties.get("MainPID").and_then(|p| p.parse::<u32>().ok()) != Some(pid)
+            || properties.get("ControlGroup").map(String::as_str) != Some(group)
+            || retained && (properties.get("KillMode").map(String::as_str) != Some("process") || properties.get("Transient").map(String::as_str) != Some("yes")) {
+            return Err(invalid("unit controller epoch/group/lifetime policy differs"));
+        }
+        Ok(())
+    }
+    fn direct_child(status: &str, controller: u32) -> bool {
+        let mut parents = status.lines().filter_map(|s| s.strip_prefix("PPid:"));
+        parents.next().and_then(|p|p.trim().parse::<u32>().ok()) == Some(controller) && parents.next().is_none()
+    }
+    /// Runtime identity only. Artifact hashes stay with the caller's existing held descriptors.
+    pub struct UnitWakePin {
+        process: ProcessEvidence, executable: File, stamp: ExecutableStamp,
+        unit: String, group: String, manager: UnitManager,
+        controller: ProcessEvidence, controller_executable: ExecutableStamp, argv: Vec<String>,
+        retained: bool, failed: AtomicBool,
+    }
+    impl UnitWakePin {
+        pub fn capture(process: ProcessEvidence, executable: &File, expected_unit: &str, deadline: Option<Instant>) -> io::Result<Self> {
+            before_deadline(deadline)?;
+            if herdr::process_evidence(process.pid)? != process { return Err(invalid("unit process differs from original evidence before observation")); }
+            let group = unit_cgroup(&bounded_proc(process.pid, "cgroup")?, expected_unit)?.to_owned();
+            let manager = UnitManager::capture(deadline)?;
+            let properties = manager.properties(expected_unit,deadline)?;
+            let pid = properties.get("MainPID").and_then(|s| s.parse::<u32>().ok()).filter(|p| *p > 0).ok_or_else(|| invalid("unit MainPID unavailable"))?;
+            let controller = herdr::process_evidence(pid)?;
+            let argv = process_arguments(&controller)?;
+            let retained = pid != process.pid || argv.iter().any(|s| s == "--physical-mvp");
+            if expected_unit != "goatr.service" && properties.get("Transient").map(String::as_str) != Some("yes") {
+                return Err(invalid("non-durable unit context requires a fresh manager-owned transient service"));
+            }
+            if pid != process.pid {
+                let status = bounded_proc(process.pid, "status")?;
+                if !direct_child(&status,pid) {
+                    return Err(invalid("inherited serving process is not the original full controller's direct child"));
+                }
+            }
+            manager.argv(expected_unit, &argv, None,deadline)?;
+            qualified_properties(&properties, &group, pid, retained)?;
+            let pin = Self { stamp: executable_stamp(&executable.metadata()?), executable: executable.try_clone()?, process,
+                unit: expected_unit.to_owned(), group, manager,
+                controller_executable: executable_stamp(&fs::metadata(format!("/proc/{pid}/exe"))?), controller, argv,
+                retained, failed: AtomicBool::new(false) };
+            pin.recheck(deadline)?;Ok(pin)
+        }
+        pub fn unit(&self) -> &str { &self.unit }
+        pub fn cgroup(&self) -> &str { &self.group }
+        pub fn manager(&self) -> &ProcessEvidence { &self.manager.process }
+        pub fn process(&self) -> &ProcessEvidence { &self.process }
+        pub fn failed(&self) -> bool { self.failed.load(Ordering::Acquire) }
+        pub fn observe<T>(&self, result: io::Result<T>) -> io::Result<T> { sticky_result(&self.failed, result) }
+        pub fn manager_output(&self, args: &[&str]) -> io::Result<String> {
+            sticky_result(&self.failed, self.manager.output("systemctl", args,None))
+        }
+        pub(crate) fn owned_serve_argv(&self, current: &[String], legacy: &[String]) -> io::Result<()> {
+            sticky_result(&self.failed, self.manager.argv("goatr.service", current, Some(legacy),None))
+        }
+        pub fn serving_controller(&self, deadline: Option<Instant>) -> io::Result<()> {
+            let result = (|| {
+                self.recheck(deadline)?;
+                if self.process != self.controller { return Err(invalid("serving retention requires the original manager MainPID controller")); }
+                qualified_properties(&self.manager.properties(&self.unit,deadline)?, &self.group, self.controller.pid, true)?;
+                before_deadline(deadline)
+            })();
+            sticky_result(&self.failed, result)
+        }
+        pub fn capture_child(&self, process: ProcessEvidence, executable: &File, deadline: Instant) -> io::Result<Self> {
+            let result = (|| {
+                self.serving_controller(Some(deadline))?;
+                let child = Self::capture(process, executable, &self.unit,Some(deadline))?;
+                if child.group != self.group || child.controller != self.controller || child.manager.process != self.manager.process {
+                    return Err(invalid("serving child differs from already qualified controller/manager/full path"));
+                }
+                self.recheck(Some(deadline))?;Ok(child)
+            })();
+            sticky_result(&self.failed, result)
+        }
+        pub fn recheck(&self, deadline: Option<Instant>) -> io::Result<CapabilityState> {
+            if self.failed() { return Err(invalid("original unit Wake profile was permanently invalidated")); }
+            let result = (|| {
+                before_deadline(deadline)?;
+                require_inspectable(self.process.pid)?;require_inspectable(self.controller.pid)?;
+                if herdr::process_evidence(self.process.pid)? != self.process || herdr::process_evidence(self.controller.pid)? != self.controller
+                    || executable_stamp(&self.executable.metadata()?) != self.stamp
+                    || executable_stamp(&fs::metadata(format!("/proc/{}/exe", self.process.pid))?) != self.stamp
+                    || executable_stamp(&fs::metadata(format!("/proc/{}/exe", self.controller.pid))?) != self.controller_executable
+                    || process_arguments(&self.controller)? != self.argv {
+                    return Err(invalid("original unit process/controller/executable changed"));
+                }
+                for process in [&self.process, &self.controller] {
+                    if unit_cgroup(&bounded_proc(process.pid, "cgroup")?, &self.unit)? != self.group
+                        || !capability_state(&bounded_proc(process.pid, "status")?)?.unit_wake() {
+                        return Err(invalid("original unit full path/caps/NNP/inspectability changed"));
+                    }
+                }
+                qualified_properties(&self.manager.properties(&self.unit,deadline)?, &self.group, self.controller.pid, self.retained)?;
+                self.manager.argv(&self.unit, &self.argv, None,deadline)?;
+                if herdr::process_evidence(self.process.pid)? != self.process || herdr::process_evidence(self.controller.pid)? != self.controller {
+                    return Err(invalid("original unit epoch changed across observation"));
+                }
+                let state = capability_state(&bounded_proc(self.process.pid, "status")?)?;
+                if !state.unit_wake() || unit_cgroup(&bounded_proc(self.process.pid, "cgroup")?, &self.unit)? != self.group
+                    || !capability_state(&bounded_proc(self.controller.pid, "status")?)?.unit_wake()
+                    || unit_cgroup(&bounded_proc(self.controller.pid, "cgroup")?, &self.unit)? != self.group
+                    || herdr::process_evidence(self.process.pid)? != self.process || herdr::process_evidence(self.controller.pid)? != self.controller {
+                    return Err(invalid("final original unit profile/epoch changed"));
+                }
+                require_inspectable(self.process.pid)?;require_inspectable(self.controller.pid)?;
+                before_deadline(deadline)?;
+                Ok(state)
+            })();
+            sticky_result(&self.failed, result)
+        }
+    }
+    /// Called synchronously before records, admin effects and worker construction.
+    pub fn prepare_current_executable(retain: bool, expected_unit: Option<&str>) -> io::Result<Option<UnitWakePin>> {
         if !retain {
             drop_inherited_capabilities()?;
             if !current_capabilities()?.zero() { return Err(invalid("drop role retained capabilities")); }
-            let pin = FileWakePin::current()?;
-            if let Some(pin) = &pin { pin.recheck()?; restore_dumpability()?; pin.recheck()?; }
-            return Ok(pin);
+            if expected_unit.is_some() { return Err(invalid("drop role cannot request unit authority")); }
+            return Ok(None);
         }
-        let pin = FileWakePin::current()?; let state = current_capabilities()?;
-        if let Some(pin) = &pin {
-            if !state.file_wake() { return Err(invalid("file-backed retain role is not exact FileWake/NNP0")); }
-            pin.recheck()?; restore_dumpability()?; pin.recheck_current()?;
-        } else if state.discarded_manager_inheritance() {
-            drop_inherited_capabilities()?;
-            if !current_capabilities()?.zero() { return Err(invalid("discarded manager inheritance did not become zero")); }
-        } else if !state.zero() { return Err(invalid("non-file-backed retained capability is forbidden")); }
-        Ok(pin)
+        match expected_unit {
+            Some(unit) => {
+                let process = herdr::process_evidence(std::process::id())?;
+                let executable = File::open("/proc/self/exe")?;
+                UnitWakePin::capture(process, &executable, unit,None).map(Some)
+            }
+            None => {
+                let state = current_capabilities()?;
+                if state.permitted != 0 || state.effective != 0 || state.ambient != 0 {
+                    return Err(invalid("active retained capability requires explicit qualified expected-unit context"));
+                }
+                // Inheritable-only manager residue is discarded, never treated as authority.
+                if !state.zero() { drop_inherited_capabilities()?; }
+                if !current_capabilities()?.zero() { return Err(invalid("ordinary role is not capability-free")); }
+                Ok(None)
+            }
+        }
     }
 
     /// Public epoch only, retained before the FIRST protected process proof. Never publication authority.
@@ -328,7 +507,7 @@ mod file_wake {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::{os::{fd::{AsRawFd,FromRawFd},unix::{fs::DirBuilderExt,net::UnixStream as TestChannel,process::CommandExt}},process::{Command,Stdio}};
+        use std::{os::{fd::{AsRawFd,FromRawFd},unix::{net::UnixStream as TestChannel,process::CommandExt}},process::{Command,Stdio}};
         struct FileWakeFixtureChild(std::process::Child);
         impl FileWakeFixtureChild {
             fn exit(&mut self)->std::process::ExitStatus {
@@ -352,68 +531,106 @@ mod file_wake {
             format!("Name:\tPRIVATE\nCapInh:\t{i:016x}\nCapPrm:\t{p:016x}\nCapEff:\t{e:016x}\nCapAmb:\t{a:016x}\nNoNewPrivs:\t{}\n",u8::from(n))
         }
         #[test]
-        fn exact_file_capability_decoder_requires_ep_revision_length_root_and_only_wake() {
-            for revision in [2u32,3] {
-                let mut bytes=vec![0; if revision==2{20}else{24}];bytes[..4].copy_from_slice(&((revision<<24)|1).to_le_bytes());bytes[12..16].copy_from_slice(&8u32.to_le_bytes());
-                validate_file_wake_capability(&bytes).unwrap();
-                for offset in [0,4,8,12,16] {
-                    let mut changed=bytes.clone();changed[offset]^=2;assert!(validate_file_wake_capability(&changed).is_err());
-                }
-                let mut no_effective=bytes.clone();no_effective[0]=0;assert!(validate_file_wake_capability(&no_effective).is_err());
-                if revision==3{let mut foreign=bytes.clone();foreign[20]=1;assert!(validate_file_wake_capability(&foreign).is_err());}
-                bytes.push(0);assert!(validate_file_wake_capability(&bytes).is_err());
+        fn manager_queries_share_the_original_deadline_and_reap_the_owned_helper() {
+            if let Some(mut channel)=fixture_endpoint("GOATR_MANAGER_DEADLINE_TEST_FD") {
+                assert!(current_capabilities().unwrap().zero());
+                channel.write_all(&std::process::id().to_be_bytes()).unwrap();
+                let mut hold=[0];let _=channel.read_exact(&mut hold);return;
             }
+            let start=Instant::now();let original=start+Duration::from_secs(20);
+            assert_eq!(command_deadline(Some(original),start).unwrap(),start+Duration::from_secs(5));
+            assert_eq!(command_deadline(Some(original),start+Duration::from_secs(18)).unwrap(),original);
+            for observed in [original,original+Duration::from_secs(1)] {
+                assert_eq!(command_deadline(Some(original),observed).unwrap_err().kind(),io::ErrorKind::TimedOut);
+            }
+            let mut absent=Command::new("/nonexistent-goatr-manager-deadline-helper");
+            assert_eq!(manager_command_output(&mut absent,Some(Instant::now())).unwrap_err().kind(),io::ErrorKind::TimedOut);
+            let test=concat!(module_path!(),"::manager_queries_share_the_original_deadline_and_reap_the_owned_helper");
+            let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
+            let (mut channel,endpoint)=TestChannel::pair().unwrap();
+            channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let fd=endpoint.as_raw_fd();assert!(fd>2);
+            let mut command=Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact",test,"--test-threads=1"]).env("GOATR_MANAGER_DEADLINE_TEST_FD",fd.to_string())
+                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+            unsafe{command.pre_exec(move||{drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
+            let deadline=Instant::now()+Duration::from_secs(3);
+            std::thread::scope(|scope| {
+                let worker=scope.spawn(move||manager_command_output(&mut command,Some(deadline)));
+                // Retain the parent endpoint until spawn; only fixed IPC, never libtest/stdout markers.
+                let mut bytes=[0;4];channel.read_exact(&mut bytes).unwrap();drop(endpoint);
+                let pid=u32::from_be_bytes(bytes);let original=ProcessStart::capture(pid).unwrap();
+                original.evidence(pid).unwrap();
+                assert_eq!(worker.join().unwrap().unwrap_err().kind(),io::ErrorKind::TimedOut);
+                assert_eq!(fs::symlink_metadata(format!("/proc/{pid}")).unwrap_err().kind(),io::ErrorKind::NotFound);
+                assert_eq!(unsafe{libc::waitpid(pid as i32,std::ptr::null_mut(),libc::WNOHANG)},-1);
+                assert_eq!(io::Error::last_os_error().raw_os_error(),Some(libc::ECHILD));
+                // A second command cannot acquire a fresh budget after the shared deadline.
+                assert_eq!(manager_command_output(&mut absent,Some(deadline)).unwrap_err().kind(),io::ErrorKind::TimedOut);
+            });
         }
         #[test]
-        fn capability_profile_rejects_partial_active_ambient_nnp_and_extra_inheritance() {
-            assert!(capability_state(&status(0,WAKE,WAKE,0,false)).unwrap().file_wake());
-            for (i,p,e,a,n) in [(WAKE,WAKE,WAKE,0,false),(0,WAKE,0,0,false),(0,0,WAKE,0,false),(0,WAKE,WAKE,WAKE,false),(0,WAKE|1,WAKE|1,0,false),(0,WAKE,WAKE,0,true)] {
-                assert!(!capability_state(&status(i,p,e,a,n)).unwrap().file_wake());
+        fn unit_profile_requires_all_four_exact_masks_and_nnp() {
+            assert!(capability_state(&status(WAKE,WAKE,WAKE,WAKE,true)).unwrap().unit_wake());
+            for (i,p,e,a,n) in [(0,WAKE,WAKE,WAKE,true),(WAKE,0,WAKE,WAKE,true),(WAKE,WAKE,0,WAKE,true),
+                (WAKE,WAKE,WAKE,0,true),(WAKE,WAKE,WAKE,WAKE,false),(WAKE|1,WAKE,WAKE,WAKE,true),(0,WAKE,WAKE,0,false)] {
+                assert!(!capability_state(&status(i,p,e,a,n)).unwrap().unit_wake());
             }
-            let inherited=capability_state(&status(WAKE,0,0,0,true)).unwrap();assert!(inherited.discarded_manager_inheritance());assert!(!inherited.zero());
-            for (i,p,e,a) in [(WAKE|1,0,0,0),(1,0,0,0),(WAKE,WAKE,0,0),(WAKE,0,0,WAKE)]{assert!(!capability_state(&status(i,p,e,a,false)).unwrap().discarded_manager_inheritance());}
             let valid=status(0,0,0,0,false);
-            for bad in [format!("{valid}CapEff:\t0000000000000000\n"),valid.replace("NoNewPrivs:\t0\n",""),valid.replace("NoNewPrivs:\t0","NoNewPrivs:\t2")] {assert!(capability_state(&bad).is_err());}
+            for bad in [format!("{valid}CapEff:\t0000000000000000\n"),valid.replace("NoNewPrivs:\t0\n",""),
+                valid.replace("NoNewPrivs:\t0","NoNewPrivs:\t2"),"x".repeat(65_537)] { assert!(capability_state(&bad).is_err()); }
         }
         #[test]
-        fn ungranted_owned_files_are_not_profile_proofs_and_observed_failure_never_rebases() {
-            let root=std::env::temp_dir().join(format!("goatr-file-profile-{}",Uuid::random().0));fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-            let path=root.join("owned");fs::write(&path,b"owned nonexecutable fixture").unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o500)).unwrap();
-            assert!(file_wake_capability(&File::open(&path).unwrap()).unwrap().is_none());assert!(FileWakePin::capture(&path).is_err());
-            let failed=AtomicBool::new(false);let held=File::open(&path).unwrap();let original=executable_stamp(&held.metadata().unwrap());
-            fs::set_permissions(&path,fs::Permissions::from_mode(0o700)).unwrap();
-            let result=if executable_stamp(&held.metadata().unwrap())==original{Ok(())}else{Err(invalid("owned stamp changed"))};
-            assert!(sticky_result(&failed,result).is_err());fs::set_permissions(&path,fs::Permissions::from_mode(0o500)).unwrap();
-            assert!(sticky_result(&failed,Ok(())).is_err());assert!(failed.load(Ordering::Acquire));
-            // Actual failure consumers, not a fabricated positive file-grant pin.
-            let bad_caps=capability_state(&status(0,WAKE,0,0,false)).unwrap();
-            for result in [validate_file_wake_capability(&[0;20]),if bad_caps.file_wake(){Ok(())}else{Err(invalid("partial active profile"))}] {
-                let failed=AtomicBool::new(false);assert!(sticky_result(&failed,result).is_err());assert!(sticky_result(&failed,Ok(())).is_err());
+        fn execution_hooks_require_typed_empty_commands_and_latch_invalid_observations() {
+            let empty=serde_json::json!({"type":"a(sasbttttuii)","data":[]});
+            empty_execution_hooks(&empty).unwrap();
+            for property in [
+                serde_json::json!({}),serde_json::json!({"type":"a(sasbttttuii)"}),serde_json::json!({"data":[]}),
+                serde_json::json!({"type":"as","data":[]}),serde_json::json!({"type":"a(sasbttttuii)","data":null}),
+                serde_json::json!({"type":"a(sasbttttuii)","data":{}}),
+                serde_json::json!({"type":"a(sasbttttuii)","data":[["/foreign/helper",["/foreign/helper"],false,0,0,0,0,123,0,0]]}),
+            ] {
+                let failed=AtomicBool::new(false);
+                assert!(sticky_result(&failed,empty_execution_hooks(&property)).is_err());
+                assert!(sticky_result(&failed,empty_execution_hooks(&empty)).is_err());
             }
-            fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
         }
         #[test]
-        fn only_actual_capability_absence_has_the_missing_grant_cause() {
-            let root=std::env::temp_dir().join(format!("goatr-absent-grant-{}",Uuid::random().0));fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-            let path=root.join("owned");fs::write(&path,b"owned absent xattr").unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o500)).unwrap();
-            let file=File::open(&path).unwrap();let error=required_file_capability(&file).unwrap_err();assert!(file_wake_grant_absent(&error));
-            assert!(!file_wake_grant_absent(&File::open(root.join("missing")).unwrap_err()));
-            assert!(!file_wake_grant_absent(&validate_file_wake_capability(&[0;20]).unwrap_err()));
-            fs::set_permissions(&path,fs::Permissions::from_mode(0o700)).unwrap();
-            let error=match FileWakePin::capture(&path){Err(error)=>error,Ok(_)=>panic!("unsafe mode admitted")};assert!(!file_wake_grant_absent(&error));
-            fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
+        fn canonical_full_cgroup_and_manager_join_cannot_be_rebased() {
+            let unit="goatr-owned.service"; let path="/user.slice/user-1000.slice/user@1000.service/app.slice/goatr-owned.service";
+            let text=format!("0::{path}\n"); assert_eq!(unit_cgroup(&text,unit).unwrap(),path);
+            for bad in [format!("{text}\n"),format!("{text}{text}"),text.replace("app.slice/","app.slice/../"),
+                text.replace("app.slice/","app.slice//"),text.replace("0::","1::"),text.replace(".service\n",".service/child\n")] {
+                assert!(unit_cgroup(&bad,unit).is_err());
+            }
+            let mut properties=std::collections::HashMap::new();
+            for (k,v) in [("LoadState","loaded"),("Type","exec"),("UMask","0077"),("Restart","no"),("PrivateUsers","no"),
+                ("AmbientCapabilities","cap_wake_alarm"),("NoNewPrivileges","yes"),("PartOf",""),("BindsTo",""),("DropInPaths",""),
+                ("MainPID","123"),("ControlGroup",path),("KillMode","process"),("Transient","yes")] { properties.insert(k.into(),v.into()); }
+            qualified_properties(&properties,path,123,true).unwrap();
+            let status=bounded_proc(std::process::id(),"status").unwrap();
+            let parent=status.lines().find_map(|line|line.strip_prefix("PPid:")).unwrap().trim().parse::<u32>().unwrap();
+            assert!(direct_child(&status,parent));assert!(!direct_child(&status,parent.saturating_add(1)));
+            assert!(!direct_child(&format!("{status}PPid:\t{parent}\n"),parent));
+            for (key,value) in [("MainPID","124"),("ControlGroup","/foreign/goatr-owned.service"),("KillMode","control-group"),("NoNewPrivileges","no"),
+                ("DropInPaths","/foreign/override.conf")] {
+                let mut bad=properties.clone();bad.insert(key.into(),value.into());
+                let failed=AtomicBool::new(false);assert!(sticky_result(&failed,qualified_properties(&bad,path,123,true)).is_err());
+                assert!(sticky_result(&failed,qualified_properties(&properties,path,123,true)).is_err());
+            }
         }
         #[test]
         fn owned_dumpability_restore_preserves_public_epoch_and_no_file_roles_do_not_toggle() {
             if let Some(mut channel)=fixture_endpoint("GOATR_DUMPABILITY_TEST_FD") {
-                drop_inherited_capabilities().unwrap();assert!(FileWakePin::current().unwrap().is_none());
+                drop_inherited_capabilities().unwrap();
                 assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);assert!(!dumpable().unwrap());
-                assert!(prepare_current_executable(true).unwrap().is_none());assert!(!dumpable().unwrap());
-                assert!(prepare_current_executable(false).unwrap().is_none());assert!(!dumpable().unwrap());assert!(current_capabilities().unwrap().zero());
+                assert!(prepare_current_executable(true,None).unwrap().is_none());assert!(!dumpable().unwrap());
+                assert!(prepare_current_executable(false,None).unwrap().is_none());assert!(!dumpable().unwrap());assert!(current_capabilities().unwrap().zero());
                 let failed=AtomicBool::new(false);
-                assert!(sticky_result(&failed,if dumpable().unwrap(){Ok(())}else{Err(invalid("owned process became nondumpable"))}).is_err());
+                assert!(sticky_result(&failed,require_inspectable(std::process::id())).is_err());
                 channel.write_all(b"0").unwrap();fixture_state(&mut channel,b'1');
-                restore_dumpability().unwrap();assert!(sticky_result(&failed,Ok(())).is_err());
+                assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,1,0,0,0)},0);
+                assert!(require_inspectable(std::process::id()).is_ok());assert!(sticky_result(&failed,Ok(())).is_err());
                 channel.write_all(b"1").unwrap();fixture_state(&mut channel,b'2');return;
             }
             let test=concat!(module_path!(),"::owned_dumpability_restore_preserves_public_epoch_and_no_file_roles_do_not_toggle");
@@ -433,8 +650,8 @@ mod file_wake {
     }
 }
 #[cfg(target_os = "linux")]
-pub use file_wake::{CapabilityState, FileWakePin, ProcessStart, capability_state, current_capabilities, dumpable,
-    file_wake_capability, file_wake_grant_absent, prepare_current_executable, restore_dumpability, validate_file_wake_capability};
+pub use unit_wake::{CapabilityState, UnitWakePin, ProcessStart, capability_state, current_capabilities,
+    prepare_current_executable, unit_cgroup};
 
 // Stock 0.162.1 app-server-client remote.rs uses this finite ceiling for both.
 pub const FRAME_BYTES: usize = 128 * 1024 * 1024;

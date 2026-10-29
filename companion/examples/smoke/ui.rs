@@ -1655,7 +1655,7 @@ pub(super) async fn background(args:&clap::ArgMatches,evidence:&Path,context:Con
                 let response=match request {
                     Control::LivePair{}=>{
                         let b=binary.to_owned();let r=root.to_owned();let s=socket.to_owned();
-                        let mut uri=tokio::task::spawn_blocking(move||terminal_pair(&b,Some(&r),Some(&s))).await.map_err(io::Error::other)??;
+                        let mut uri=tokio::task::spawn_blocking(move||terminal_pair(&b,Some(&r),Some(&s),None)).await.map_err(io::Error::other)??;
                         let value=json!({"uri":uri,"host":host,"runId":run});unsafe{uri.as_bytes_mut().fill(0)};value
                     },
                     Control::LiveInfo{}=>{
@@ -1889,7 +1889,7 @@ pub(super) async fn run(
     let request=match authenticated_control(&mut stream,&public).await {Ok(request)=>request,Err(_)=>continue};
     if super::camera::app_process(&l).await?!=Some(epoch.process){return Err(failure("authenticated stock-control original app epoch changed; no effect admitted"));}
     let response=match request {
-     Control::LivePair{}=>{let b=binary.to_owned();let r=root.to_owned();let s=socket.to_owned();let mut uri=tokio::task::spawn_blocking(move||terminal_pair(&b,Some(&r),Some(&s))).await.map_err(io::Error::other)??;let value=json!({"uri":uri,"host":host,"runId":run});unsafe{uri.as_bytes_mut().fill(0)};value},
+     Control::LivePair{}=>{let b=binary.to_owned();let r=root.to_owned();let s=socket.to_owned();let mut uri=tokio::task::spawn_blocking(move||terminal_pair(&b,Some(&r),Some(&s),None)).await.map_err(io::Error::other)??;let value=json!({"uri":uri,"host":host,"runId":run});unsafe{uri.as_bytes_mut().fill(0)};value},
      Control::LiveInfo{}=>{let inventory=phone.host().await?;let own=native.first().ok_or_else(||failure("no selected actual UI provider"))?;let actual=inventory.sessions.iter().find(|s|s.session_id==own.target.session_id).ok_or_else(||failure("actual UI server missing"))?;let row=inventory.servers.iter().find(|s|s.server_id==actual.server_id).ok_or_else(||failure("actual named UI server missing"))?;json!({"host":host,"runId":run,"deferRetentionCrossing":args.get_flag("defer-retention-crossing"),"serverId":actual.server_id,"serverName":row.name,"projectId":config.projects[0].id,"projectLabel":config.projects[0].label,"sessions":native.iter().map(|p|json!({"provider":p.provider,"target":p.target,"nativeId":p.native,"pane":p.pane,"terminal":p.terminal,"workspace":p.workspace})).collect::<Vec<_>>()})},
      Control::Observe{target,marker,receipt}=>{if marker.len()>128||!marker.starts_with("goatr-ui-")||receipt.method!=ActionMethod::PromptSubmit||receipt.target.as_ref()!=Some(&target)||!matches!(receipt.state,ReceiptState::Dispatched|ReceiptState::Succeeded){return Err(failure("actual UI prompt correlation/receipt mismatch"));}let p=native.iter().find(|p|p.target==target).ok_or_else(||failure("UI changed/foreign Target"))?;p.recheck_processes()?;let state=wait_history(phone,&target,&marker,true).await?;observed.push(json!({"scenario":"ui-native-prompt-history-tool","target":target,"action":receipt.action_id,"receipt":receipt,"nativeProof":p.evidence(),"recordIds":state.history.iter().map(|r|&r.id).collect::<Vec<_>>() }));json!({"verified":true})},
      Control::Older{target}=>{
@@ -2321,7 +2321,7 @@ pub(super) async fn development(
                             let binary = binary.to_owned();
                             let root = root.to_owned();
                             let socket = socket.to_owned();
-                            let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&binary, Some(&root), Some(&socket)))
+                            let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&binary, Some(&root), Some(&socket),None))
                                 .await
                                 .map_err(io::Error::other)??;
                             let value = json!({"uri":uri,"host":host,"runId":run});
@@ -2670,7 +2670,7 @@ pub(super) async fn feedback(
                         Control::LivePair {} if !issued && paired.is_none() => {
                             issued = true;
                             let b = context.binary.to_owned(); let r = context.root.to_owned(); let s = context.socket.to_owned();
-                            let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&b, Some(&r), Some(&s))).await.map_err(io::Error::other)??;
+                            let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&b, Some(&r), Some(&s),None)).await.map_err(io::Error::other)??;
                             let response = json!({"uri":uri});
                             unsafe { uri.as_bytes_mut().fill(0); }
                             response

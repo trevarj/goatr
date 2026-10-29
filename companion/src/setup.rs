@@ -379,28 +379,32 @@ struct UnitOwnership {
     cwd: PathBuf,
     content: String,
 }
+#[derive(Debug, PartialEq, Eq)]
+struct UnitPair { record_version: u32, unit_new: bool }
 fn validate_unit_ownership(
     planned: &UnitOwnership,
+    legacy: Option<&UnitOwnership>,
     unit: &ExpectedFile,
     record: &ExpectedFile,
-) -> io::Result<()> {
-    if let Some(bytes) = record.bytes() {
-        let old: UnitOwnership = serde_json::from_slice(bytes)
-            .map_err(|_| refused("invalid owned serve-unit record"))?;
-        if old != *planned {
-            return Err(refused(
-                "serve unit belongs to another setup/executable; no adoption or upgrade",
-            ));
+) -> io::Result<UnitPair> {
+    let Some(bytes) = record.bytes() else {
+        if unit.bytes().is_some() { return Err(refused("present identical unit without private ownership is foreign")); }
+        return Ok(UnitPair { record_version: 0, unit_new: false });
+    };
+    let old: UnitOwnership = serde_json::from_slice(bytes).map_err(|_| refused("invalid owned serve-unit record"))?;
+    if old == *planned {
+        if unit.bytes().is_some_and(|bytes| bytes != planned.content.as_bytes()) {
+            return Err(refused("owned record/unit bytes differ; no replacement"));
+        }
+        return Ok(UnitPair { record_version: planned.version, unit_new: unit.bytes().is_some() });
+    }
+    if legacy.is_some_and(|legacy| old == *legacy) && planned.version == 2 {
+        let bytes = unit.bytes().ok_or_else(|| refused("recognized migration requires the original owned unit"))?;
+        if bytes == planned.content.as_bytes() || legacy.is_some_and(|legacy| bytes == legacy.content.as_bytes()) {
+            return Ok(UnitPair { record_version: 1, unit_new: bytes == planned.content.as_bytes() });
         }
     }
-    if unit.bytes().is_some()
-        && (record.bytes().is_none() || unit.bytes() != Some(planned.content.as_bytes()))
-    {
-        return Err(refused(
-            "existing foreign/managed/intervening serve unit; no replacement",
-        ));
-    }
-    Ok(())
+    Err(refused("foreign/declarative/executable/config/cwd/version unit; no adoption or downgrade"))
 }
 fn unit_word(path: &Path, exec: bool) -> io::Result<String> {
     config::absolute(path)?;
@@ -426,9 +430,36 @@ fn unit_environment(name: &str, path: &Path) -> io::Result<String> {
         &word[1..word.len() - 1]
     ))
 }
+fn unit_home() -> PathBuf {
+    PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config").into_os_string()
+    }))
+}
+fn unit_environment_current() -> io::Result<String> {
+    let user_home = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| refused("HOME unavailable for durable serve unit"))?);
+    let state_root = crate::pairing::state_root()?;
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| refused("unchanged XDG_RUNTIME_DIR required for serve unit"))?);
+    private_dir(&runtime, false)?;
+    Ok(unit_environment("HOME", &user_home)? + &unit_environment("XDG_CONFIG_HOME", &unit_home())?
+        + &unit_environment("XDG_STATE_HOME", state_root.parent().ok_or_else(|| refused("state base unavailable"))?)?
+        + &unit_environment("XDG_RUNTIME_DIR", &runtime)?)
+}
+fn unit_content(binary: &Path, config: &Path, cwd: &Path, environment: &str, version: u32) -> io::Result<String> {
+    let (title, authority, context) = match version {
+        1 => ("basic setup v1", "", ""),
+        2 => ("unit Wake setup v2", "PrivateUsers=no\nAmbientCapabilities=CAP_WAKE_ALARM\nNoNewPrivileges=yes\n", " --expected-unit goatr.service"),
+        _ => return Err(refused("unrecognized owned unit version")),
+    };
+    Ok(format!("# Goatr owned {title}\n[Unit]\nDescription=Goatr foreground companion\n[Service]\nType=exec\nUMask=0077\nRestart=no\n{authority}{environment}WorkingDirectory={}\nExecStart={} serve --config {}{context}\n[Install]\nWantedBy=default.target\n",
+        unit_word(cwd, false)?, unit_word(binary, true)?, unit_word(config, true)?))
+}
 async fn manager(args: &[&str]) -> io::Result<String> {
     let mut command = tokio::process::Command::new("systemctl");
     command.arg("--user").args(args).kill_on_drop(true);
+    let runtime=PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| refused("user manager runtime unavailable"))?);
+    private_dir(&runtime,false)?;
+    command.env("DBUS_SESSION_BUS_ADDRESS",format!("unix:path={}",runtime.join("systemd/private").display()))
+        .env_remove("SYSTEMD_BUS_ADDRESS").env_remove("SYSTEMD_HOST").env_remove("SYSTEMD_MACHINE");
     #[cfg(target_os = "linux")]
     // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
     unsafe {
@@ -445,7 +476,7 @@ async fn manager(args: &[&str]) -> io::Result<String> {
     }
     String::from_utf8(output.stdout).map_err(io::Error::other)
 }
-fn manager_unit_source(shown: &str, unit: &Path, absent: bool) -> io::Result<bool> {
+fn manager_unit_source(shown: &str, unit: &Path, absent: bool, pending_owned_reload: bool) -> io::Result<bool> {
     let mut load = None;
     let mut fragment = None;
     let mut dropins = None;
@@ -465,7 +496,7 @@ fn manager_unit_source(shown: &str, unit: &Path, absent: bool) -> io::Result<boo
             return Err(refused("duplicate manager unit source property"));
         }
     }
-    if dropins != Some("") || reload != Some("no") {
+    if dropins != Some("") || !(reload == Some("no") || pending_owned_reload && reload == Some("yes")) {
         return Err(refused(
             "unowned serve-unit drop-ins or changed effective source; no start",
         ));
@@ -528,7 +559,7 @@ async fn owned_unit_source(unit: &Path, content: &str, absent: bool) -> io::Resu
         "--no-pager",
     ])
     .await?;
-    if manager_unit_source(&shown, unit, absent)? {
+    if manager_unit_source(&shown, unit, absent, false)? {
         expected_unit(unit, content)?;
         // Join current backing bytes too; the disk search above covers unreloaded additions.
         let text = manager(&["cat", "goatr.service", "--no-pager"]).await?;
@@ -536,12 +567,57 @@ async fn owned_unit_source(unit: &Path, content: &str, absent: bool) -> io::Resu
     }
     Ok(())
 }
+fn owned_argv(owner: &UnitOwnership) -> io::Result<Vec<String>> {
+    let mut argv = vec![owner.executable.to_str().ok_or_else(|| refused("owned executable not UTF-8"))?.to_owned(),
+        "serve".into(), "--config".into(), owner.config.to_str().ok_or_else(|| refused("owned config not UTF-8"))?.to_owned()];
+    if owner.version == 2 { argv.extend(["--expected-unit".into(), "goatr.service".into()]); }
+    Ok(argv)
+}
+async fn migration_source(unit: &Path, owner: &UnitOwnership, legacy: &UnitOwnership, pending: bool, absent: bool, profile: Option<&crate::codex_relay::UnitWakePin>) -> io::Result<()> {
+    if !pending { return owned_unit_source(unit, &owner.content, absent).await; }
+    let paths = manager(&["show", "--property=UnitPath", "--value"]).await?;
+    reject_disk_dropins(&paths, unit)?;
+    let shown = manager(&["show", "goatr.service", "--property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload", "--all", "--no-pager"]).await?;
+    let loaded = manager_unit_source(&shown, unit, absent, true)?;
+    expected_unit(unit, &owner.content)?;
+    if !loaded { return Ok(()); }
+    manager_unit_text(&manager(&["cat", "goatr.service", "--no-pager"]).await?, unit, &owner.content)?;
+    let profile=profile.ok_or_else(||refused("pending Wake source requires the original qualified setup manager"))?;
+    profile.recheck(None)?;
+    profile.owned_serve_argv(&owned_argv(owner)?,&owned_argv(legacy)?)?;
+    profile.recheck(None)?;
+    Ok(())
+}
+/// Durable Wake startup must retain the private record AND exact effective owned source.
+pub fn admit_owned_serve(pin: &crate::codex_relay::UnitWakePin, path: &Path) -> io::Result<()> {
+    pin.recheck(None)?;
+    let config = Config::load(path)?;
+    let record_path = path.parent().ok_or_else(|| refused("owned config parent missing"))?.join(".serve-unit.json");
+    let record = ExpectedFile::capture(&record_path)?;
+    let owner: UnitOwnership = serde_json::from_slice(record.bytes().ok_or_else(|| refused("owned Wake record absent"))?)
+        .map_err(|_| refused("invalid owned Wake record"))?;
+    if owner.version != 2 || owner.config != path || owner.cwd != config.runtime_dir
+        || owner.executable != fs::canonicalize(std::env::current_exe()?)? || pin.unit() != "goatr.service"
+        || owner.unit != unit_home().join("systemd/user/goatr.service")
+        || owner.content != unit_content(&owner.executable, path, &config.runtime_dir, &unit_environment_current()?, 2)?
+        || crate::codex_relay::process_arguments(pin.process())? != owned_argv(&owner)? {
+        return Err(refused("durable Wake process differs from private original ownership"));
+    }
+    let expected = ExpectedFile::capture(&owner.unit)?;
+    validate_unit_ownership(&owner, None, &expected, &record)?;
+    reject_disk_dropins(&pin.manager_output(&["--user", "show", "--property=UnitPath", "--value"])?, &owner.unit)?;
+    let shown = pin.manager_output(&["--user", "show", "goatr.service", "--property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload", "--all", "--no-pager"])?;
+    if !manager_unit_source(&shown, &owner.unit, false, false)? { return Err(refused("owned Wake fragment absent")); }
+    manager_unit_text(&pin.manager_output(&["--user", "cat", "goatr.service", "--no-pager"])?, &owner.unit, &owner.content)?;
+    expected.recheck(&owner.unit)?; record.recheck(&record_path)?; pin.recheck(None)?; Ok(())
+}
 async fn owned_serve_peer(
-    binary: &Path,
-    config: &Path,
-    cwd: &Path,
+    owner: &UnitOwnership,
     socket: &Path,
-) -> io::Result<()> {
+    profile: Option<&crate::codex_relay::UnitWakePin>,
+) -> io::Result<crate::herdr::ProcessEvidence> {
+    if owner.version == 2 { profile.ok_or_else(|| refused("qualified setup context required BEFORE inspecting Wake serve"))?.recheck(None)?; }
+    let binary = owner.executable.as_path(); let cwd = owner.cwd.as_path();
     let pid = manager(&["show", "goatr.service", "--property=MainPID", "--value"])
         .await?
         .trim()
@@ -556,16 +632,19 @@ async fn owned_serve_peer(
         ));
     }
     let args = crate::codex_relay::process_arguments(&process)?;
-    if args.len() != 4
-        || Path::new(&args[0]) != binary
-        || args[1] != "serve"
-        || args[2] != "--config"
-        || Path::new(&args[3]) != config
-    {
+    if args != owned_argv(owner)? {
         return Err(refused(
             "serve unit actual argv differs from owned executable/config",
         ));
     }
+    let executable = File::open(format!("/proc/{pid}/exe"))?;
+    let runtime = if owner.version == 2 {
+        Some(crate::codex_relay::UnitWakePin::capture(process.clone(), &executable, "goatr.service",None)?)
+    } else {
+        let mut status = String::new(); File::open(format!("/proc/{pid}/status"))?.take(65_537).read_to_string(&mut status)?;
+        if !crate::codex_relay::capability_state(&status)?.zero() { return Err(refused("original v1 serve is not zero-authority")); }
+        None
+    };
     admin::validate_socket_path(socket, false, true)?;
     let before = fs::symlink_metadata(socket)?;
     let stream = tokio::time::timeout(
@@ -588,7 +667,8 @@ async fn owned_serve_peer(
             "local admin socket changed during owned readiness proof",
         ));
     }
-    Ok(())
+    if let Some(pin) = runtime { pin.recheck(None)?; }
+    Ok(process)
 }
 async fn serve_unit(
     binary: &Path,
@@ -596,6 +676,7 @@ async fn serve_unit(
     config: &Config,
     lock: &SetupLock,
     config_changed: bool,
+    profile: Option<&crate::codex_relay::UnitWakePin>,
 ) -> io::Result<()> {
     if !binary.starts_with("/nix/store") {
         return Err(refused(
@@ -623,80 +704,87 @@ async fn serve_unit(
             "packaged executable/source lock provenance differs",
         ));
     }
-    let home = PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join(".config")
-            .into_os_string()
-    }));
-    let parent = home.join("systemd/user");
+    let parent = unit_home().join("systemd/user");
     trusted_parent(&parent)?;
     let unit = parent.join("goatr.service");
     let record = lock.path.join(".serve-unit.json");
-    let user_home = PathBuf::from(
-        std::env::var_os("HOME")
-            .ok_or_else(|| refused("HOME unavailable for durable serve unit"))?,
-    );
-    let state_root = crate::pairing::state_root()?;
-    let runtime = PathBuf::from(
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .ok_or_else(|| refused("unchanged XDG_RUNTIME_DIR required for serve unit"))?,
-    );
-    private_dir(&runtime, false)?;
-    let environment = unit_environment("HOME", &user_home)?
-        + &unit_environment("XDG_CONFIG_HOME", &home)?
-        + &unit_environment(
-            "XDG_STATE_HOME",
-            state_root
-                .parent()
-                .ok_or_else(|| refused("state base unavailable"))?,
-        )?
-        + &unit_environment("XDG_RUNTIME_DIR", &runtime)?;
-    let content = format!(
-        "# Goatr owned basic setup v1\n[Unit]\nDescription=Goatr foreground companion\n[Service]\nType=exec\nUMask=0077\nRestart=no\n{environment}WorkingDirectory={}\nExecStart={} serve --config {}\n[Install]\nWantedBy=default.target\n",
-        unit_word(&config.runtime_dir, false)?,
-        unit_word(binary, true)?,
-        unit_word(path, true)?
-    );
-    let planned = UnitOwnership {
-        version: 1,
-        unit: unit.clone(),
-        executable: binary.to_owned(),
-        config: path.to_owned(),
-        cwd: config.runtime_dir.clone(),
-        content,
-    };
+    let environment = unit_environment_current()?;
+    let content = unit_content(binary, path, &config.runtime_dir, &environment, 1)?;
+    let legacy = UnitOwnership { version: 1, unit: unit.clone(), executable: binary.to_owned(),
+        config: path.to_owned(), cwd: config.runtime_dir.clone(), content };
+    let planned = UnitOwnership { version: if profile.is_some() { 2 } else { 1 },
+        content: unit_content(binary, path, &config.runtime_dir, &environment, if profile.is_some() { 2 } else { 1 })?,
+        unit: unit.clone(), executable: binary.to_owned(), config: path.to_owned(), cwd: config.runtime_dir.clone() };
     let expected = ExpectedFile::capture(&unit)?;
     let ownership = ExpectedFile::capture(&record)?;
-    validate_unit_ownership(&planned, &expected, &ownership)?;
-    owned_unit_source(&unit, &planned.content, expected.bytes().is_none()).await?;
+    let pair = validate_unit_ownership(&planned, profile.map(|_| &legacy), &expected, &ownership)?;
+    let old_content = pair.record_version == 1 && !pair.unit_new;
+    let source = if old_content { &legacy } else { &planned };
+    let pending = pair.record_version != 0 && pair.unit_new && planned.version == 2;
+    migration_source(&unit, source, &legacy, pending, expected.bytes().is_none(), profile).await?;
     println!(
         "Optional independent serve unit: {}\n{}",
         unit.display(),
         planned.content
     );
     let socket = admin::default_socket()?;
+    let mut active_original = None;
     if fs::symlink_metadata(&socket).is_ok() {
         if expected.bytes().is_none() || ownership.bytes().is_none() {
             return Err(refused(
                 "a pre-existing companion/admin owner is not this unit; no second daemon or adoption",
             ));
         }
-        owned_serve_peer(binary, path, &config.runtime_dir, &socket).await?;
+        // Running argv/credentials belong to the original epoch, not newly installed bytes.
+        let pid = manager(&["show", "goatr.service", "--property=MainPID", "--value"]).await?.trim().parse::<u32>().map_err(|_| refused("active unit PID unavailable"))?;
+        let process = crate::herdr::process_evidence(pid)?;
+        let actual = crate::codex_relay::process_arguments(&process)?;
+        let running_owner = if actual == owned_argv(&legacy)? { &legacy } else { &planned };
+        active_original = Some((owned_serve_peer(running_owner, &socket, profile).await?, running_owner.version));
+    }
+    let active_state = manager(&["show", "goatr.service", "--property=ActiveState", "--value"]).await?;
+    if active_state.trim() == "active" && active_original.is_none() {
+        return Err(refused("active original serve has no proved protected admin peer; no staging/start/adoption"));
     }
     if !confirm("Install this exact owned serve unit (does not start or pair)?").await? {
         return Ok(());
     }
     ownership.recheck(&record)?;
     expected.recheck(&unit)?;
-    lock.publish(
-        &record,
-        &ownership,
-        &serde_json::to_vec(&planned).map_err(io::Error::other)?,
-    )?;
+    migration_source(&unit, source, &legacy, pending, expected.bytes().is_none(), profile).await?;
+    ownership.recheck(&record)?; expected.recheck(&unit)?;
+    if let Some(pin) = profile { pin.recheck(None)?; }
     let unit_lock = SetupLock::unit_parent(&parent)?;
-    unit_lock.publish(&unit, &expected, planned.content.as_bytes())?;
+    if pair.record_version == 1 && planned.version == 2 {
+        // Existing validated ownership: unit-first gives only old/old -> old/new -> new/new.
+        unit_lock.publish(&unit, &expected, planned.content.as_bytes())?;
+        ownership.recheck(&record)?;
+        let installed = ExpectedFile::capture(&unit)?;
+        migration_source(&unit, &planned, &legacy, true, false, profile).await?;
+        installed.recheck(&unit)?;
+        lock.publish(&record, &ownership, &serde_json::to_vec(&planned).map_err(io::Error::other)?)?;
+    } else {
+        // Initial install remains record-first; absent record/present identical unit is foreign.
+        lock.publish(&record, &ownership, &serde_json::to_vec(&planned).map_err(io::Error::other)?)?;
+        unit_lock.publish(&unit, &expected, planned.content.as_bytes())?;
+    }
+    let installed = ExpectedFile::capture(&unit)?;
+    let installed_record = ExpectedFile::capture(&record)?;
+    if planned.version == 2 {
+        migration_source(&unit, &planned, &legacy, true, pair.record_version == 0 || expected.bytes().is_none(), profile).await?;
+    }
+    installed.recheck(&unit)?; installed_record.recheck(&record)?;
+    if let Some(pin) = profile { pin.recheck(None)?; }
     manager(&["daemon-reload"]).await?;
+    installed.recheck(&unit)?; installed_record.recheck(&record)?;
     owned_unit_source(&unit, &planned.content, false).await?;
+    if let Some((process, version)) = &active_original
+        && active_staged(*version, planned.version, config_changed) {
+        let owner = if *version == 1 { &legacy } else { &planned };
+        if owned_serve_peer(owner, &socket, profile).await? != *process { return Err(refused("active staged original changed")); }
+        println!("STAGED: exact new owned configuration installed; original active process/argv/profile retained. No restart or new Wake readiness claimed.");
+        return Ok(());
+    }
     if !confirm(
         "Start only this owned serve unit now (separate consent; no provider/relay/TUI start)?",
     )
@@ -704,6 +792,7 @@ async fn serve_unit(
     {
         return Ok(());
     }
+    if planned.version == 2 { profile.ok_or_else(|| refused("qualified setup context required BEFORE Wake start"))?.recheck(None)?; }
     owned_unit_source(&unit, &planned.content, false).await?;
     let active = manager(&["show", "goatr.service", "--property=ActiveState", "--value"]).await?;
     if active.trim() != "active" {
@@ -720,7 +809,8 @@ async fn serve_unit(
         match admin::call(&socket, "devices.list", json!({})).await {
             Ok(value) => {
                 let _: admin::Devices = serde_json::from_value(value).map_err(io::Error::other)?;
-                owned_serve_peer(binary, path, &config.runtime_dir, &socket).await?;
+                let ready = owned_serve_peer(&planned, &socket, profile).await?;
+                if active_original.as_ref().is_some_and(|(original,_)| *original != ready) { return Err(refused("original active owned serve was replaced")); }
                 println!(
                     "This exact owned serve is responsive through protected devices.list; pairing has not been opened."
                 );
@@ -731,6 +821,9 @@ async fn serve_unit(
         }
     }
     Ok(())
+}
+fn active_staged(running_version: u32, installed_version: u32, config_changed: bool) -> bool {
+    running_version != installed_version || config_changed
 }
 fn expected_unit(path: &Path, content: &str) -> io::Result<()> {
     let source = ExpectedFile::capture(path)?;
@@ -749,7 +842,7 @@ fn foreground_instructions(binary: &Path, path: &Path) {
         quote(binary)
     );
 }
-pub async fn run(sub: &ArgMatches, path: &Path) -> io::Result<()> {
+pub async fn run(sub: &ArgMatches, path: &Path, profile: Option<&crate::codex_relay::UnitWakePin>) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(refused(
             "setup requires a local interactive terminal; no noninteractive blanket consent",
@@ -949,7 +1042,7 @@ pub async fn run(sub: &ArgMatches, path: &Path) -> io::Result<()> {
     }
     foreground_instructions(&binary, path);
     if sub.get_flag("serve-unit")
-        && let Err(e) = serve_unit(&binary, path, &c, &lock, !identical).await
+        && let Err(e) = serve_unit(&binary, path, &c, &lock, !identical, profile).await
     {
         eprintln!(
             "Serve unit unavailable/not healthy: {e}. Saved configuration remains usable with the absolute foreground instructions above."
@@ -963,6 +1056,41 @@ pub async fn run(sub: &ArgMatches, path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn owned_unit_crash_pairs_migrate_only_recognized_versions_and_keep_active_old_staged() {
+        let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(".goatr-unit-pairs-{}", Uuid::random().0));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let unit = root.join("goatr.service"); let record = root.join("record");
+        let make = |version| UnitOwnership { version, unit: unit.clone(), executable: root.join("goatr"),
+            config: root.join("config"), cwd: root.clone(),
+            content: unit_content(&root.join("goatr"), &root.join("config"), &root, "Environment=\"HOME=/owned\"\n", version).unwrap() };
+        let old = make(1); let new = make(2);
+        assert_eq!(owned_argv(&old).unwrap().len(),4);
+        assert_eq!(&owned_argv(&new).unwrap()[4..],["--expected-unit","goatr.service"]);
+        assert!(active_staged(1,2,false));assert!(active_staged(2,2,true));assert!(!active_staged(2,2,false));
+        let put = |path:&Path, bytes:Option<Vec<u8>>| {
+            if let Some(bytes)=bytes { fs::write(path,bytes).unwrap();fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap(); }
+            else if path.exists() { fs::remove_file(path).unwrap(); }
+        };
+        for (record_version, unit_version, allowed) in [
+            (0,0,true),(0,2,false),(1,1,true),(1,2,true),(2,2,true),(2,0,true),
+            (2,1,false),(1,0,false),(0,1,false),
+        ] {
+            let owner=match record_version {1=>Some(&old),2=>Some(&new),_=>None};
+            put(&record,owner.map(|owner|serde_json::to_vec(owner).unwrap()));
+            put(&unit,match unit_version {1=>Some(old.content.as_bytes().to_vec()),2=>Some(new.content.as_bytes().to_vec()),_=>None});
+            let held_unit=ExpectedFile::capture(&unit).unwrap();let held_record=ExpectedFile::capture(&record).unwrap();
+            let pair=validate_unit_ownership(&new,Some(&old),&held_unit,&held_record);
+            assert_eq!(pair.is_ok(),allowed,"record{record_version}/unit{unit_version}");
+            if let Ok(pair)=pair { assert_eq!(pair.record_version,record_version);assert_eq!(pair.unit_new,unit_version==2); }
+        }
+        let mut foreign=make(1);foreign.executable=root.join("other-goatr");
+        put(&record,Some(serde_json::to_vec(&foreign).unwrap()));put(&unit,Some(old.content.as_bytes().to_vec()));
+        assert!(validate_unit_ownership(&new,Some(&old),&ExpectedFile::capture(&unit).unwrap(),&ExpectedFile::capture(&record).unwrap()).is_err());
+        // A restored path cannot satisfy a previously held pre-publication identity.
+        let held=ExpectedFile::capture(&unit).unwrap();put(&unit,Some(new.content.as_bytes().to_vec()));assert!(held.recheck(&unit).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn disk_search_rejects_unreloaded_named_and_service_wide_dropins() {
         let root = std::env::temp_dir().join(format!("goatr-dropins-{}", Uuid::random().0));
@@ -987,7 +1115,14 @@ mod tests {
     fn effective_unit_rejects_loaded_and_pending_overrides_before_any_start() {
         let unit = Path::new("/owned/user/goatr.service");
         let clean = "LoadState=loaded\nFragmentPath=/owned/user/goatr.service\nDropInPaths=\nNeedDaemonReload=no\n";
-        assert!(manager_unit_source(clean, unit, false).unwrap());
+        assert!(manager_unit_source(clean, unit, false, false).unwrap());
+        let pending=clean.replace("NeedDaemonReload=no","NeedDaemonReload=yes");
+        assert!(manager_unit_source(&pending,unit,false,false).is_err());
+        assert!(manager_unit_source(&pending,unit,false,true).unwrap());
+        for bad in [pending.replace("DropInPaths=","DropInPaths=/foreign/override.conf"),
+            pending.replace("/owned/user/goatr.service","/foreign/goatr.service"),format!("{pending}NeedDaemonReload=no\n")] {
+            assert!(manager_unit_source(&bad,unit,false,true).is_err());
+        }
         for foreign in [
             clean.replace(
                 "DropInPaths=",
@@ -999,7 +1134,7 @@ mod tests {
             clean.replace("DropInPaths=\n", ""),
             format!("{clean}DropInPaths=\n"),
         ] {
-            assert!(manager_unit_source(&foreign, unit, false).is_err());
+            assert!(manager_unit_source(&foreign, unit, false, false).is_err());
         }
         let content = "[Service]\nExecStart=/owned/goatr serve\n";
         let clean = format!("# {}\n{content}", unit.display());
@@ -1033,11 +1168,11 @@ mod tests {
         lock.publish(&path, &ExpectedFile::Absent, planned.content.as_bytes())
             .unwrap();
         let file = ExpectedFile::capture(&path).unwrap();
-        assert!(validate_unit_ownership(&planned, &file, &ExpectedFile::Absent).is_err());
+        assert!(validate_unit_ownership(&planned, None, &file, &ExpectedFile::Absent).is_err());
         fs::write(&record, serde_json::to_vec(&planned).unwrap()).unwrap();
         fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
         let owned = ExpectedFile::capture(&record).unwrap();
-        validate_unit_ownership(&planned, &file, &owned).unwrap();
+        validate_unit_ownership(&planned, None, &file, &owned).unwrap();
         fs::write(&path, "foreign bytes").unwrap();
         assert!(file.recheck(&path).is_err());
         assert_eq!(fs::metadata(&units).unwrap().mode() & 0o777, 0o755);

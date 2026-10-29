@@ -5802,7 +5802,7 @@ async fn service_property(unit: &str, name: &str) -> SecurityResult<Value> {
     }
     native_json::parse(reply.as_bytes(), native_json::REGISTRY).map_err(policy)
 }
-fn exact_service_argv(property: &Value, expected: &[String]) -> SecurityResult<()> {
+pub(crate) fn exact_service_argv(property: &Value, expected: &[String]) -> SecurityResult<()> {
     if property["type"] != "a(sasbttttuii)" {
         return Err(ErrorCode::NotReady);
     }
@@ -7812,7 +7812,7 @@ mod tests {
         if let Some(mut channel)=file_wake_endpoint("GOATR_OWNER_DUMP_TEST_FD") {
             crate::codex_relay::drop_inherited_capabilities().unwrap();assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);
             channel.write_all(b"0").unwrap();file_wake_state(&mut channel,b'1');
-            crate::codex_relay::restore_dumpability().unwrap();channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
+            assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,1,0,0,0)},0);channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
         }
         let test=concat!(module_path!(),"::owner_first_service_permission_wait_keeps_original_public_epoch_and_never_adopts_pid");
         let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();

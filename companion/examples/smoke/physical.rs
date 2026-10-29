@@ -186,7 +186,7 @@ fn text(bytes: &[u8]) -> io::Result<&str> { std::str::from_utf8(bytes).map_err(|
 pub(super) enum ControllerPolicy<'a> {
     Zero,
     WakeDiagnostic {unit:&'a str},
-    FileWake {sha256:&'a str},
+    UnitWake {unit:&'a str},
 }
 pub(super) fn validate_controller_unit(unit:&str)->io::Result<()> {
     let id=unit.strip_prefix("goatr-host-wake-").and_then(|value|value.strip_suffix(".service"))
@@ -199,7 +199,7 @@ struct HostAuthority {
     caller:ProcessEvidence,
     manager:ProcessEvidence,
     facts:Value,
-    controller_file:Option<goatr::codex_relay::FileWakePin>,
+    controller_unit:Option<goatr::codex_relay::UnitWakePin>,
 }
 #[derive(Debug,PartialEq,Eq,Serialize)]
 struct HostCaps {
@@ -324,12 +324,12 @@ fn controller_environment(unsandboxed:bool,sandboxed:bool)->io::Result<()> {
 }
 fn controller_caps_admission(policy:ControllerPolicy<'_>,status:&[u8])->io::Result<()> {
     match policy {
-        ControllerPolicy::FileWake {..}=>{
-            let status=std::str::from_utf8(status).map_err(|_|failure("file capability status is malformed"))?;
-            if !goatr::codex_relay::capability_state(status)?.file_wake(){return Err(failure("file capability/NNP shape is invalid"));}
+        ControllerPolicy::UnitWake {..}|ControllerPolicy::WakeDiagnostic {..}=>{
+            let status=std::str::from_utf8(status).map_err(|_|failure("unit capability status is malformed"))?;
+            if !goatr::codex_relay::capability_state(status)?.unit_wake(){return Err(failure("unit capability/NNP shape is invalid"));}
             Ok(())
         }
-        ControllerPolicy::Zero|ControllerPolicy::WakeDiagnostic {..}=>{
+        ControllerPolicy::Zero=>{
             let caps=host_caps(status)?;let expected=if matches!(policy,ControllerPolicy::Zero){"0000000000000000"}else{"0000000800000000"};
             if [&caps.inheritable,&caps.permitted,&caps.effective,&caps.ambient].into_iter().any(|value|value.as_str()!=expected) {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied,"controller capability policy refused the actual mask shape"));
@@ -343,15 +343,7 @@ fn controller_cgroup_admission(expected:&str,bytes:&[u8],diagnostic:&mut HostDia
     let validate=||->io::Result<()> {
         validate_controller_unit(expected)?;
         let text=std::str::from_utf8(bytes).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"controller cgroup is malformed"))?;
-        if text.contains('\r'){return Err(io::Error::new(io::ErrorKind::InvalidData,"controller cgroup has a noncanonical line ending"));}
-        let mut lines=text.lines();
-        let path=lines.next().and_then(|line|line.strip_prefix("0::")).ok_or_else(||io::Error::new(io::ErrorKind::InvalidData,"controller cgroup is not a sole unified membership"))?;
-        if lines.next().is_some()||!path.starts_with('/')||path.len()>4096||path.contains(':')
-            ||path.chars().any(|character|character.is_control()||character.is_whitespace())
-            ||path.split('/').skip(1).any(|component|matches!(component,""|"."|".."))
-            ||path.rsplit('/').next()!=Some(expected) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied,"controller cgroup is not the exact expected unit leaf"));
-        }
+        goatr::codex_relay::unit_cgroup(text,expected)?;
         Ok(())
     };
     validate().map_err(|error|host_guard("wake_controller_cgroup",error,Some(&mut *diagnostic)))?;
@@ -368,9 +360,10 @@ fn controller_cgroup_read(unit:&str,path:&Path,diagnostic:&mut HostDiagnostic)->
 fn controller_admission(policy:ControllerPolicy<'_>,caller:&ProcessEvidence,mut diagnostic:Option<&mut HostDiagnostic>)->io::Result<()> {
     match policy {
         ControllerPolicy::Zero=>dev_continuity::zero_native_caps(caller),
-        ControllerPolicy::FileWake {..}=>{
-            if !goatr::codex_relay::current_capabilities()?.file_wake()||!goatr::codex_relay::dumpable()? {
-                return Err(failure("FileWake controller caps/NNP/dumpability changed"));
+        ControllerPolicy::UnitWake {unit}=>{
+            if !goatr::codex_relay::current_capabilities()?.unit_wake()
+                || goatr::codex_relay::unit_cgroup(&fs::read_to_string("/proc/self/cgroup")?,unit)?.is_empty() {
+                return Err(failure("unit Wake controller caps/NNP/full cgroup changed"));
             }
             Ok(())
         }
@@ -402,21 +395,19 @@ fn recheck_host_processes(caller:&ProcessEvidence,manager:&ProcessEvidence,mut d
     Ok(())
 }
 /// Qualification only: no manager command, creation/restart or capability/namespace changes.
-fn original_host_authority(policy:ControllerPolicy<'_>,mut diagnostic:Option<&mut HostDiagnostic>) -> io::Result<HostAuthority> {
+fn original_host_authority(policy:ControllerPolicy<'_>,mut diagnostic:Option<&mut HostDiagnostic>,admitted:Option<goatr::codex_relay::UnitWakePin>) -> io::Result<HostAuthority> {
     if let Some(diagnostic)=diagnostic.as_deref_mut() {
         *diagnostic=HostDiagnostic::default();
     }
     controller_environment(std::env::var_os("OMP_UNSANDBOXED").is_some(),std::env::var_os("AGENT_SANDBOXED").is_some())
         .map_err(|error|host_guard("controller_environment",error,diagnostic.as_deref_mut()))?;
-    let controller_file=match policy {
-        ControllerPolicy::FileWake {sha256}=>{
-            let mut pin=goatr::codex_relay::FileWakePin::current()?.ok_or_else(||prerequisite("controller_and_serve_file_capability_grant_authorization_missing"))?;
-            if !goatr::codex_relay::current_capabilities()?.file_wake(){return Err(failure("controller is not exact file EP Wake/NNP0"));}
-            pin.verify_sha256(sha256)?;
-            // ONCE, only after private file object/xattr/hash and actual capability admission.
-            goatr::codex_relay::restore_dumpability()?;pin.recheck_current()?;Some(pin)
+    let controller_unit=match policy {
+        ControllerPolicy::UnitWake {unit}|ControllerPolicy::WakeDiagnostic {unit}=>{
+            let pin=admitted.ok_or_else(||failure("pre-runtime qualified unit context missing"))?;
+            if pin.unit()!=unit||pin.process().pid!=std::process::id(){return Err(failure("admitted original unit controller differs"));}
+            pin.recheck(None)?;Some(pin)
         }
-        ControllerPolicy::Zero|ControllerPolicy::WakeDiagnostic {..}=>None,
+        ControllerPolicy::Zero=>{if admitted.is_some(){return Err(failure("zero mode cannot retain unit authority"));}None},
     };
     let caller=host_process_evidence(std::process::id(),false,"caller_evidence",diagnostic.as_deref_mut())?;
     controller_admission(policy,&caller,diagnostic.as_deref_mut()).map_err(|error| {
@@ -480,14 +471,16 @@ fn original_host_authority(policy:ControllerPolicy<'_>,mut diagnostic:Option<&mu
     controller_admission(policy,&caller,diagnostic.as_deref_mut()).map_err(|error| {
         if matches!(policy,ControllerPolicy::Zero){host_guard("final_caller_capabilities",error,diagnostic.as_deref_mut())}else{error}
     })?;
-    if let Some(pin)=&controller_file{pin.recheck_current()?;}
-    let controller_sha=match policy {ControllerPolicy::FileWake {sha256}=>Some(sha256),_=>None};
+    if let Some(pin)=&controller_unit {
+        if pin.manager()!=&manager||pin.process()!=&caller{return Err(failure("host authority is not the SAME original qualified unit manager/controller"));}
+        pin.recheck(None)?;
+    }
     let facts=json!({"uid":1000,"manager":manager,"managerExecutable":manager_exe,"socketDevice":before.dev(),"socketInode":before.ino(),"tools":tools,"caller":caller,"mutation":false,
-        "controllerFileWake":controller_file.is_some(),"controllerSha256":controller_sha});
-    Ok(HostAuthority {_socket:stream,executable:manager_file,caller,manager,facts,controller_file})
+        "controllerUnitWake":controller_unit.is_some(),"controllerUnit":controller_unit.as_ref().map(|pin|pin.unit()),"controllerCgroup":controller_unit.as_ref().map(|pin|pin.cgroup()),"NoNewPrivs":controller_unit.is_some()});
+    Ok(HostAuthority {_socket:stream,executable:manager_file,caller,manager,facts,controller_unit})
 }
 fn host_preflight_report(run:&Uuid,policy:ControllerPolicy<'_>,qualified:bool,diagnostic:&HostDiagnostic,error:Option<&io::Error>)->Value {
-    let expected_unit=match policy {ControllerPolicy::Zero|ControllerPolicy::FileWake {..}=>None,ControllerPolicy::WakeDiagnostic {unit}=>Some(unit)};
+    let expected_unit=match policy {ControllerPolicy::Zero|ControllerPolicy::UnitWake {..}=>None,ControllerPolicy::WakeDiagnostic {unit}=>Some(unit)};
     let wake=expected_unit.is_some();
     let controller_unit=if wake{diagnostic.controller_unit.as_deref()}else{None};
     let mut report=json!({"gate":if wake{"physical-host-wake-preflight"}else{"physical-host-preflight"},"runId":run,"status":if error.is_some(){"blocked"}else{"pass"},
@@ -508,21 +501,21 @@ fn host_terminal_report(output:&mut impl Write,report:&Value,passed:bool)->bool 
     // Returning false is FAILURE in the existing live/main result owner, not a second error report.
     writeln!(output,"{report}").is_ok()&&passed
 }
-pub(super) fn host_preflight(evidence:&Path,policy:ControllerPolicy<'_>)->io::Result<bool> {
-    if matches!(policy,ControllerPolicy::FileWake {..}){return Err(failure("FileWake is a full-physical profile, never a preflight alias"));}
+pub(super) fn host_preflight(evidence:&Path,policy:ControllerPolicy<'_>,admitted:Option<goatr::codex_relay::UnitWakePin>)->io::Result<bool> {
+    if matches!(policy,ControllerPolicy::UnitWake {..}){return Err(failure("full unit Wake is never a preflight alias"));}
     let run=Uuid::random();let mut diagnostic=HostDiagnostic::default();
     let qualification=if !io::stdin().is_terminal()||!io::stdout().is_terminal() {
-        let guard=match policy {ControllerPolicy::Zero|ControllerPolicy::FileWake {..}=>"human_tty",ControllerPolicy::WakeDiagnostic {..}=>"interactive_tty"};
+        let guard=match policy {ControllerPolicy::Zero|ControllerPolicy::UnitWake {..}=>"human_tty",ControllerPolicy::WakeDiagnostic {..}=>"interactive_tty"};
         Err(host_guard(guard,prerequisite("physical host preflight requires an actual interactive host TTY"),Some(&mut diagnostic)))
     }else{
-        original_host_authority(policy,Some(&mut diagnostic))
+        original_host_authority(policy,Some(&mut diagnostic),admitted)
     };
     let qualified=qualification.is_ok();
     // err() drops the successful authority/connected socket; preflight never retains a runtime owner.
     let error=qualification.err();
     let mut report=host_preflight_report(&run,policy,qualified,&diagnostic,error.as_ref());
     report["evidenceWritten"]=json!(true);
-    let filename=match policy {ControllerPolicy::Zero|ControllerPolicy::FileWake {..}=>"physical-host-preflight.json",ControllerPolicy::WakeDiagnostic {..}=>"physical-host-wake-preflight.json"};
+    let filename=match policy {ControllerPolicy::Zero|ControllerPolicy::UnitWake {..}=>"physical-host-preflight.json",ControllerPolicy::WakeDiagnostic {..}=>"physical-host-wake-preflight.json"};
     let stored=match write_json(&evidence.join(filename),&report) {
         Ok(())=>true,
         Err(error)=>{
@@ -1413,7 +1406,8 @@ impl Observer {
 }
 
 fn recheck_original_host(authority:&HostAuthority) -> io::Result<()> {
-    if let Some(pin)=&authority.controller_file{pin.recheck_current()?;}else{dev_continuity::zero_native_caps(&authority.caller)?;}
+    let observation=|| {
+    if let Some(pin)=&authority.controller_unit{pin.recheck(None)?;}else{dev_continuity::zero_native_caps(&authority.caller)?;}
     recheck_host_processes(&authority.caller,&authority.manager,None)?;
     let facts=&authority.facts;
     let current=fs::metadata(format!("/proc/{}/exe",authority.manager.pid))?;let original=authority.executable.metadata()?;
@@ -1421,7 +1415,10 @@ fn recheck_original_host(authority:&HostAuthority) -> io::Result<()> {
     if (current.dev(),current.ino())!=(original.dev(),original.ino())||socket.dev()!=unsigned(facts,"socketDevice")?||socket.ino()!=unsigned(facts,"socketInode")?||socket.uid()!=1000||socket.mode()&0o777!=0o700 {
         return Err(failure("physical original protected manager authority changed"));
     }
-    Ok(())
+        Ok(())
+    };
+    let result=observation();
+    if let Some(pin)=&authority.controller_unit{pin.observe(result)}else{result}
 }
 fn pin_process(process:&ProcessEvidence) -> io::Result<OwnedFd> {
     let raw=unsafe {libc::syscall(libc::SYS_pidfd_open,process.pid,0)} as i32;
@@ -1430,10 +1427,11 @@ fn pin_process(process:&ProcessEvidence) -> io::Result<OwnedFd> {
     if herdr::process_evidence(process.pid)?!=*process{return Err(failure("physical original child changed while retaining its pidfd"));}
     Ok(held)
 }
-fn companion_caps(process:&ProcessEvidence,pin:&goatr::codex_relay::FileWakePin) -> io::Result<Value> {
-    let state=pin.recheck_process(process)?;
+fn companion_caps(process:&ProcessEvidence,pin:&goatr::codex_relay::UnitWakePin,deadline:Option<Instant>) -> io::Result<Value> {
+    let state=pin.recheck(deadline)?;
+    pin.observe(if pin.process()==process{Ok(())}else{Err(failure("companion profile is not the original serving epoch"))})?;
     Ok(json!({"masks":{"CapInh":format!("{:016x}",state.inheritable),"CapPrm":format!("{:016x}",state.permitted),
-        "CapEff":format!("{:016x}",state.effective),"CapAmb":format!("{:016x}",state.ambient)},"NoNewPrivs":0,"actualFileWakeAlarmGrantQualified":true}))
+        "CapEff":format!("{:016x}",state.effective),"CapAmb":format!("{:016x}",state.ambient)},"NoNewPrivs":1,"actualOwnedUnitWakeQualified":true,"unit":pin.unit(),"cgroup":pin.cgroup()}))
 }
 fn native_desktop_join(client:&Client,original:&ProcessEvidence)->io::Result<()> {
     client.recheck()?;
@@ -1449,11 +1447,11 @@ struct StockRun {
     _relay:Arc<std::net::TcpListener>, roots:(Value,Value), inputs:Vec<(PathBuf,File,fs::Metadata)>,
     admin_peer:tokio::net::UnixStream, admin_identity:Value,
     _endpoint:iroh::Endpoint, phone:Phone,
-    serve_file:goatr::codex_relay::FileWakePin,
+    serve_unit:goatr::codex_relay::UnitWakePin,
 }
 impl StockRun {
-    async fn start(args:&clap::ArgMatches,evidence:&Path,run:Uuid,label:&str,deployment:Config,binary:PathBuf,template_sha:&str,expected_binary_sha:&str,serve_file:goatr::codex_relay::FileWakePin,original_inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<Self> {
-        serve_file.recheck()?;
+    async fn start(args:&clap::ArgMatches,evidence:&Path,run:Uuid,label:&str,deployment:Config,binary:PathBuf,template_sha:&str,expected_binary_sha:&str,controller:&goatr::codex_relay::UnitWakePin,original_inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<Self> {
+        controller.recheck(None)?;
         recheck_inputs(original_inputs)?;
         let template=args.get_one::<PathBuf>("config").ok_or_else(||failure("physical frozen configuration is required"))?;
         if binary_sha256(template)?!=template_sha{return Err(failure("physical frozen original deployment changed before native launch; no new configuration is adopted"));}
@@ -1536,22 +1534,34 @@ impl StockRun {
         native.recheck()?;desktop.recheck()?;recheck_inputs(&inputs)?;
         for client in [&native,&binary_peer]{native_desktop_join(client,&desktop.process)?;}
         recheck_inputs(original_inputs)?;recheck_inputs(&inputs)?;
-        let mut serve=start_serve_with_capture(&binary,&config_path,&root,&socket,Some(&relay),ServeLaunch {diagnostic_capture:false,herdr_report_capture:None,preserve_xdg_config_home:false,retain_process:true,hello_capture:false,grid_hold:None,project_read:None,startup_deadline:Some(deadline)})?;
-        recheck_inputs(&inputs)?;healthy(&mut serve,&socket).await?;recheck_inputs(&inputs)?;let companion_pidfd=pin_process(&serve.process)?;let caps=companion_caps(&serve.process,&serve_file)?;
-        let admin_peer=tokio::net::UnixStream::connect(&socket).await?;recheck_inputs(&inputs)?;let peer=admin_peer.peer_cred()?;
+        controller.recheck(Some(deadline))?;
+        let mut serve=start_serve_with_capture(&binary,&config_path,&root,&socket,Some(&relay),ServeLaunch {diagnostic_capture:false,herdr_report_capture:None,preserve_xdg_config_home:false,retain_process:true,hello_capture:false,grid_hold:None,project_read:None,startup_deadline:Some(deadline),unit_authority:Some(controller)})?;
+        // Capture the ORIGINAL child profile before any admin/readiness/pairing effect.
+        let held=original_inputs.iter().find(|(path,_,_)|path==&binary).ok_or_else(||failure("serving held artifact missing"))?;
+        let serve_unit=controller.capture_child(serve.process.clone(),&held.1,deadline)?;
+        startup_profile_deadline(controller,&serve_unit,deadline)?;
+        recheck_inputs(&inputs)?;
+        tokio::time::timeout_at(deadline.into(),healthy(&mut serve,&socket)).await.map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"original serving startup deadline"))??;
+        startup_profile_deadline(controller,&serve_unit,deadline)?;
+        recheck_inputs(&inputs)?;let companion_pidfd=pin_process(&serve.process)?;let caps=companion_caps(&serve.process,&serve_unit,Some(deadline))?;
+        let admin_peer=tokio::time::timeout_at(deadline.into(),tokio::net::UnixStream::connect(&socket)).await.map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"original admin startup deadline"))??;
+        startup_profile_deadline(controller,&serve_unit,deadline)?;recheck_inputs(&inputs)?;let peer=admin_peer.peer_cred()?;
         if peer.uid()!=uid()||peer.pid()!=Some(serve.process.pid as i32){return Err(failure("physical exact private admin peer is not the original companion"));}
         let admin_identity=identity(&socket)?;
         let executable=fs::metadata(format!("/proc/{}/exe",serve.process.pid))?;
         if (executable.dev(),executable.ino())!=(inputs[0].2.dev(),inputs[0].2.ino()){return Err(failure("physical original companion executable differs from the held frozen input"));}
-        recheck_inputs(&inputs)?;let endpoint=goatr::endpoint_builder(iroh::SecretKey::from_bytes(&random32()?)).bind().await.map_err(io::Error::other)?;recheck_inputs(&inputs)?;
-        let phone=pair(&binary,&root,&socket,&endpoint).await?;recheck_inputs(&inputs)?;recheck_inputs(original_inputs)?;
+        recheck_inputs(&inputs)?;let endpoint=tokio::time::timeout_at(deadline.into(),goatr::endpoint_builder(iroh::SecretKey::from_bytes(&random32()?)).bind()).await.map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"original endpoint startup deadline"))?.map_err(io::Error::other)?;
+        startup_profile_deadline(controller,&serve_unit,deadline)?;recheck_inputs(&inputs)?;
+        // Await the deadline-aware blocking owner itself: dropping its join handle would detach the CLI.
+        let phone=pair(&binary,&root,&socket,&endpoint,Some(deadline)).await?;
+        startup_profile_deadline(controller,&serve_unit,deadline)?;recheck_inputs(&inputs)?;recheck_inputs(original_inputs)?;
         write_json(&evidence.join("physical-originals.json"),&json!({"runId":run,"native":desktop.process,"publicSocket":native.evidence,"binarySocket":binary_peer.evidence,"companion":serve.process,"companionCaps":caps,"nativeInitial":{"version":initial.version,"protocol":initial.protocol,"panes":initial.panes.len(),"workspaces":initial.workspaces.len()},"nativeSnapshotIsNotPhoneOutput":true,"helperPairIsNotCameraPairingProof":true,"retained":true}))?;
-        serve_file.recheck()?;
-        Ok(Self {root,admin,config_path,config,binary,socket,native_socket,client_socket,name,desktop,serve,native,binary_peer,_native_pidfd:native_pidfd,_companion_pidfd:companion_pidfd,_relay:relay,roots,inputs,admin_peer,admin_identity,_endpoint:endpoint,phone,serve_file})
+        startup_profile_deadline(controller,&serve_unit,deadline)?;
+        Ok(Self {root,admin,config_path,config,binary,socket,native_socket,client_socket,name,desktop,serve,native,binary_peer,_native_pidfd:native_pidfd,_companion_pidfd:companion_pidfd,_relay:relay,roots,inputs,admin_peer,admin_identity,_endpoint:endpoint,phone,serve_unit})
     }
     fn recheck(&mut self) -> io::Result<()> {
         self.desktop.recheck()?;self.native.recheck()?;self.binary_peer.recheck()?;
-        dev_continuity::zero_native_caps(&self.desktop.process)?;companion_caps(&self.serve.process,&self.serve_file)?;
+        dev_continuity::zero_native_caps(&self.desktop.process)?;companion_caps(&self.serve.process,&self.serve_unit,None)?;
         recheck_inputs(&self.inputs)?;
         for (path,source) in [(&self.native_socket,&self.native.evidence),(&self.client_socket,&self.binary_peer.evidence)] {
             let socket=fs::symlink_metadata(path)?;
@@ -1592,6 +1602,11 @@ impl StockRun {
         }
         Ok(proof)
     }
+}
+fn startup_profile_deadline(controller:&goatr::codex_relay::UnitWakePin,serve:&goatr::codex_relay::UnitWakePin,deadline:Instant)->io::Result<()> {
+    controller.recheck(Some(deadline))?;serve.recheck(Some(deadline))?;
+    if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original absolute startup deadline expired after unit/profile proof"));}
+    Ok(())
 }
 
 fn argument_hash(arguments:&BTreeMap<String,String>) -> io::Result<String> {
@@ -1680,11 +1695,11 @@ fn retain_profile_observation<T>(result:io::Result<T>,profile_failed:bool,failed
         Err(error)=>Err(error),
     }
 }
-fn recheck_file_profiles(authority:&HostAuthority,stock:&StockRun,failed:&mut bool)->io::Result<()> {
+fn recheck_unit_profiles(authority:&HostAuthority,stock:&StockRun,failed:&mut bool)->io::Result<()> {
     if *failed{return Err(failure("original physical input/profile failure is permanent"));}
     let check=|| {
-        authority.controller_file.as_ref().ok_or_else(||failure("original controller profile absent"))?.recheck_current()?;
-        stock.serve_file.recheck_process(&stock.serve.process)?;Ok(())
+        authority.controller_unit.as_ref().ok_or_else(||failure("original controller profile absent"))?.recheck(None)?;
+        stock.serve_unit.recheck(None)?;Ok(())
     };
     let result=check();let profile_failed=result.is_err();retain_profile_observation(result,profile_failed,failed)
 }
@@ -1703,9 +1718,9 @@ impl Matrix {
     fn recheck(&mut self) -> io::Result<()> {
         recheck_retained_inputs(&self.inputs,&mut self.input_pin_failed)?;
         let result=recheck_original_host(&self.authority);
-        retain_profile_observation(result,self.authority.controller_file.as_ref().is_some_and(|pin|pin.failed()),&mut self.input_pin_failed)?;
+        retain_profile_observation(result,self.authority.controller_unit.as_ref().is_some_and(|pin|pin.failed()),&mut self.input_pin_failed)?;
         let result=self.stock.recheck();
-        retain_profile_observation(result,self.stock.serve_file.failed(),&mut self.input_pin_failed)?;
+        retain_profile_observation(result,self.stock.serve_unit.failed(),&mut self.input_pin_failed)?;
         Ok(())
     }
     async fn recheck_product(&mut self)->io::Result<()> {
@@ -2521,11 +2536,7 @@ fn blocker(error:&io::Error) -> &'static str {
         _=>"required_original_effect_or_identity_unproved",
     }
 }
-#[track_caller]
-fn file_wake_profile_error(error:io::Error)->io::Error {
-    if goatr::codex_relay::file_wake_grant_absent(&error){prerequisite("controller_and_serve_file_capability_grant_authorization_missing")}else{error}
-}
-pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()> {
+pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path,admitted:goatr::codex_relay::UnitWakePin) -> io::Result<()> {
     if !io::stdin().is_terminal()||!io::stdout().is_terminal(){return Err(failure("physical MVP requires the real local private human TTY; no synthetic camera/input acknowledgement"));}
     let run=Uuid::random();let label=format!("Goatr MVP {}",run.0);
     let (product_start,prepared_pin)=match (args.get_one::<PathBuf>("prepared-fresh-install"),args.get_one::<String>("expected-prepared-install-sha256")) {
@@ -2537,9 +2548,16 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     if args.get_one::<String>("expected-companion-lock-sha256").map(String::as_str)!=Some(transport::lock_sha256()){return Err(failure("physical source lock pin differs"));}
     let binary=canonical_file(args.get_one::<PathBuf>("goatr").ok_or_else(||failure("physical frozen Goatr path missing"))?)?;
     let expected_binary_sha=args.get_one::<String>("expected-goatr-sha256").ok_or_else(||failure("physical independent serving binary SHA-256 is missing"))?;
-    let mut serve_file=goatr::codex_relay::FileWakePin::capture(&binary).map_err(|error|file_wake_profile_error(error))?;
-    serve_file.verify_sha256(expected_binary_sha)?;
-    let authority=match original_host_authority(ControllerPolicy::FileWake {sha256:controller_sha},None) {
+    let serve_input=frozen_input(&binary,expected_binary_sha)?;
+    let controller_input=frozen_input(&std::env::current_exe()?,controller_sha)?;
+    admitted.observe((|| {
+        if complete_stamp(&fs::metadata("/proc/self/exe")?)!=complete_stamp(&controller_input.2) {
+            return Err(failure("held independently hashed controller is not the original executing object"));
+        }
+        Ok(())
+    })())?;
+    let unit=args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("explicit controller unit unavailable"))?;
+    let authority=match original_host_authority(ControllerPolicy::UnitWake {unit},None,Some(admitted)) {
         Ok(authority)=>authority,
         Err(error)=>{
             write_json(&evidence.join("physical-original-host-blocked.json"),&json!({"runId":run,"gate":"physical-mvp","status":"blocked","stage":"original-host-authority",
@@ -2557,9 +2575,9 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     let product_sha=args.get_one::<String>("expected-apk-sha256").ok_or_else(||failure("physical product APK hash is missing"))?;
     let test_sha=args.get_one::<String>("expected-test-apk-sha256").ok_or_else(||failure("physical test APK hash is missing"))?;
     let mut inputs=Vec::with_capacity(6);
-    inputs.push(serve_file.held_input()?);inputs.push(frozen_input(&apk,product_sha)?);inputs.push(frozen_input(&test_apk,test_sha)?);
+    inputs.push(serve_input);inputs.push(frozen_input(&apk,product_sha)?);inputs.push(frozen_input(&test_apk,test_sha)?);
     inputs.push((template.clone(),template_file,template_metadata));
-    inputs.push(authority.controller_file.as_ref().ok_or_else(||failure("physical controller file profile missing"))?.held_input()?);
+    inputs.push(controller_input);
     if let Some(pin)=prepared_pin{inputs.push(pin);}
     recheck_inputs(&inputs)?;let product=qualify_artifact(&apk,product_sha,&sdk,APP,false).await?;recheck_inputs(&inputs)?;
     let test=qualify_artifact(&test_apk,test_sha,&sdk,TEST,true).await?;recheck_inputs(&inputs)?;
@@ -2631,7 +2649,7 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
     require_product_epoch(&adb,&product_epoch,&product.sha256,&inputs,None).await?;
     connector_admission(&baseline,None)?;
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
-    let stock=StockRun::start(args,evidence,run.clone(),&label,deployment,binary,template_sha,expected_binary_sha,serve_file,&inputs).await?;recheck_inputs(&inputs)?;
+    let stock=StockRun::start(args,evidence,run.clone(),&label,deployment,binary,template_sha,expected_binary_sha,authority.controller_unit.as_ref().ok_or_else(||failure("original admitted controller pin missing"))?,&inputs).await?;recheck_inputs(&inputs)?;
     let host=stock.phone.hello.host_id.0.clone();if !hex64(&host){return Err(failure("physical new private companion host identity is invalid"));}
     connector_admission(&baseline,Some(&host))?;
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
@@ -3230,8 +3248,8 @@ impl Matrix {
                 passed=false;code="original_frozen_input_changed_finish_rejected";
                 if !was_failed{announced=false;}
             }
-            if !self.input_pin_failed&&recheck_file_profiles(&self.authority,&self.stock,&mut self.input_pin_failed).is_err() {
-                passed=false;code="original_file_wake_profile_changed_finish_rejected";if !was_failed{announced=false;}
+            if !self.input_pin_failed&&recheck_unit_profiles(&self.authority,&self.stock,&mut self.input_pin_failed).is_err() {
+                passed=false;code="original_unit_wake_profile_changed_finish_rejected";if !was_failed{announced=false;}
             }
             if self.observer.task.is_finished()||self.observer.instrumentation.task.is_finished() {
                 let lost=json!({"runId":self.run,"gate":"physical-mvp","status":"failed","stage":self.last_stage,"code":"original_observer_lost_or_unknown_before_authorized_finish",
@@ -3295,7 +3313,7 @@ impl Matrix {
                     if let Err(error)=self.recheck(){passed=false;code=blocker(&error);announced=false;continue;}
                     let outcome=self.observer.finished().await;
                     if recheck_retained_inputs(&self.inputs,&mut self.input_pin_failed).is_err(){passed=false;code="original_frozen_input_changed_during_finish";}
-                    if !self.input_pin_failed&&recheck_file_profiles(&self.authority,&self.stock,&mut self.input_pin_failed).is_err(){passed=false;code="original_file_wake_profile_changed_during_finish";}
+                    if !self.input_pin_failed&&recheck_unit_profiles(&self.authority,&self.stock,&mut self.input_pin_failed).is_err(){passed=false;code="original_unit_wake_profile_changed_during_finish";}
                     if require_product_epoch(&self.adb,&self.product_epoch,&self.product_sha,&self.inputs,Some(&mut self.input_pin_failed)).await.is_err(){passed=false;code="original_product_epoch_changed_during_finish";}
                     let mut acknowledged=false;let mut absent=false;let mut reverse_removed=false;
                     if let Ok(finished)=outcome {
@@ -3325,6 +3343,69 @@ impl Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Main runs this ONLY in a fresh reviewed Wake/NNP user unit, never the physical-device path.
+    #[test]
+    #[ignore = "requires explicit owned user unit, independent binary/config pins and fresh retained evidence"]
+    fn owned_unit_serving_preserves_direct_child_and_inherited_listener() {
+        assert_eq!(std::env::var("GOATR_TEST_UNIT_SERVING_PROOF").unwrap(),"1");
+        let required=|name:&str|std::env::var(name).unwrap_or_else(|_|panic!("missing explicit {name}"));
+        let unit=required("GOATR_UNIT_SERVING_PROOF_UNIT");validate_controller_unit(&unit).unwrap();
+        let binary=PathBuf::from(required("GOATR_UNIT_SERVING_PROOF_GOATR"));
+        let template=PathBuf::from(required("GOATR_UNIT_SERVING_PROOF_CONFIG"));
+        let workspace=PathBuf::from(required("GOATR_UNIT_SERVING_PROOF_WORKSPACE"));
+        let evidence=PathBuf::from(required("GOATR_UNIT_SERVING_PROOF_EVIDENCE"));
+        let binary_sha=required("GOATR_UNIT_SERVING_PROOF_GOATR_SHA256");
+        let config_sha=required("GOATR_UNIT_SERVING_PROOF_CONFIG_SHA256");
+        let controller_sha=required("GOATR_UNIT_SERVING_PROOF_CONTROLLER_SHA256");
+        let controller=goatr::codex_relay::prepare_current_executable(true,Some(&unit)).unwrap().expect("actual unit authority required");
+        controller.serving_controller(None).unwrap();
+        let controller_input=frozen_input(&std::env::current_exe().unwrap(),&controller_sha).unwrap();
+        assert_eq!(complete_stamp(&fs::metadata("/proc/self/exe").unwrap()),complete_stamp(&controller_input.2));
+        let serving_input=frozen_input(&binary,&binary_sha).unwrap();
+        let (deployment,template_file,template_stamp)=qualified_configuration(&template,&config_sha).unwrap();
+        let inputs=vec![serving_input,(template.clone(),template_file,template_stamp),controller_input];
+        private_dir(&workspace,false).unwrap();fresh_shared_evidence(&evidence).unwrap();
+        let args=Command::new("owned-unit-serving-proof")
+            .arg(Arg::new("config").long("config").value_parser(value_parser!(PathBuf)).required(true))
+            .arg(Arg::new("workspace-root").long("workspace-root").value_parser(value_parser!(PathBuf)).required(true))
+            .try_get_matches_from([std::ffi::OsStr::new("owned-unit-serving-proof"),std::ffi::OsStr::new("--config"),template.as_os_str(),
+                std::ffi::OsStr::new("--workspace-root"),workspace.as_os_str()]).unwrap();
+        let runtime=tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut stock=StockRun::start(&args,&evidence,Uuid::random(),"Owned unit serving proof",deployment,binary,
+                &config_sha,&binary_sha,&controller,&inputs).await.unwrap();
+            stock.recheck().unwrap();controller.recheck(None).unwrap();recheck_inputs(&inputs).unwrap();
+            assert_eq!(stock.serve_unit.cgroup(),controller.cgroup());
+            assert_eq!(stock.serve_unit.manager(),controller.manager());
+            assert_ne!(stock.serve.process.pid,controller.process().pid);
+            let argv=goatr::codex_relay::process_arguments(&stock.serve.process).unwrap();
+            assert!(argv.windows(2).any(|pair|pair[0]=="--expected-unit"&&pair[1]==unit));
+            assert!(argv.windows(2).any(|pair|pair[0]=="--owned-omp-relay-fd"));
+            let listener=fs::metadata(format!("/proc/self/fd/{}",stock._relay.as_raw_fd())).unwrap();
+            let original_fd=argv.windows(2).find(|pair|pair[0]=="--owned-omp-relay-fd").unwrap()[1].parse::<i32>().unwrap();
+            // Product closes the authenticated incoming FD and retains Relay's DUPLICATE before admin binds.
+            let retained=fs::read_dir(format!("/proc/{}/fd",stock.serve.process.pid)).unwrap().map(Result::unwrap).any(|entry| {
+                if entry.file_name().to_str().and_then(|name|name.parse::<i32>().ok())==Some(original_fd){return false;}
+                match fs::metadata(entry.path()) {
+                    Ok(m)=>(m.dev(),m.ino())==(listener.dev(),listener.ino()),
+                    Err(error) if error.kind()==io::ErrorKind::NotFound=>false,
+                    Err(error)=>panic!("original serving FD became uninspectable: {error}"),
+                }
+            });
+            assert!(retained,"original listener duplicate was not consumed by serving Relay");
+            match fs::metadata(format!("/proc/{}/fd/{original_fd}",stock.serve.process.pid)) {
+                Ok(m)=>assert_ne!((m.dev(),m.ino()),(listener.dev(),listener.ino())),
+                Err(error)=>assert_eq!(error.kind(),io::ErrorKind::NotFound),
+            }
+            stock.recheck().unwrap();controller.recheck(None).unwrap();
+            write_json(&evidence.join("owned-unit-serving-proof.json"),&json!({"status":"pass","controller":controller.process(),
+                "serving":stock.serve.process,"manager":controller.manager(),"unit":unit,"cgroup":controller.cgroup(),
+                "controllerCaps":companion_caps(controller.process(),&controller,None).unwrap(),"servingCaps":companion_caps(&stock.serve.process,&stock.serve_unit,None).unwrap(),
+                "native":stock.desktop.process,"inheritedListenerDevice":listener.dev(),"inheritedListenerInode":listener.ino(),
+                "authenticatedDuplicateConsumed":retained,"originalStartupDeadlinePreserved":true,"adminResponsive":true,
+                "noDeviceOrApk":true,"resourcesRetained":true,"root":stock.root,"adminSocket":stock.socket})).unwrap();
+        });
+    }
     fn prepared_fixture_package(package:&str,uid:u32,path:&str,sha:&str,pristine:bool)->Value {
         json!({"package":package,"uid":uid.to_string(),"versionCode":"1","versionName":"0.1.0","firstInstallTime":"2026-01-01 00:00:00",
             "dataDir":format!("/data/user/0/{package}"),"userState":format!("User 0: ceDataInode=123 installed=true hidden=false suspended=false distractionFlags=0 stopped={pristine} notLaunched={pristine} enabled=0 instant=false virtual=false"),
@@ -3565,7 +3646,7 @@ mod tests {
     fn serve_profile_failure_from_owned_process_stays_latched_after_inspectability_restore_and_refuses_finish() {
         if let Some(mut channel)=file_wake_endpoint("GOATR_PROFILE_LATCH_TEST_FD") {
             goatr::codex_relay::drop_inherited_capabilities().unwrap();assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);
-            channel.write_all(b"0").unwrap();file_wake_state(&mut channel,b'1');goatr::codex_relay::restore_dumpability().unwrap();
+            channel.write_all(b"0").unwrap();file_wake_state(&mut channel,b'1');assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,1,0,0,0)},0);
             channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
         }
         let test=concat!(module_path!(),"::serve_profile_failure_from_owned_process_stays_latched_after_inspectability_restore_and_refuses_finish");
@@ -3577,31 +3658,12 @@ mod tests {
         let mut child=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);file_wake_state(&mut channel,b'0');
         let original=goatr::codex_relay::ProcessStart::capture(child.0.id()).unwrap();let denied=original.evidence(child.0.id());
         assert_eq!(denied.as_ref().unwrap_err().kind(),io::ErrorKind::PermissionDenied);
-        // Failure-only consumer of the actual owned subject; no positive FileWake grant/pin is fabricated.
+        // Failure-only consumer of the actual owned subject; no positive unit authority is fabricated.
         let mut failed=false;assert!(retain_profile_observation(denied,true,&mut failed).is_err());assert!(finish_authorization(failed,"FINISH ORIGINAL").is_none());
         channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'1');let restored=original.evidence(child.0.id()).unwrap();
         assert!(retain_profile_observation(Ok(restored),false,&mut failed).is_err());assert!(finish_authorization(failed,"FINISH ORIGINAL").is_none());
         let mut unrelated=false;assert!(retain_profile_observation::<()>(Err(io::Error::from_raw_os_error(libc::EACCES)),false,&mut unrelated).is_err());assert!(!unrelated);
         channel.write_all(b"2").unwrap();assert!(child.exit().success());
-    }
-    #[test]
-    fn physical_missing_grant_mapping_uses_only_typed_actual_xattr_absence() {
-        let root=std::env::temp_dir().join(format!("goatr-physical-absent-{}",Uuid::random().0));fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-        let path=root.join("owned");fs::write(&path,b"owned private grant fixture").unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o500)).unwrap();
-        let error=match goatr::codex_relay::FileWakePin::capture(&path){Err(error)=>error,Ok(_)=>panic!("ungranted file admitted")};
-        if uid()==1000 {
-            assert!(goatr::codex_relay::file_wake_grant_absent(&error));let mapped=file_wake_profile_error(error);
-            assert_eq!(mapped.kind(),io::ErrorKind::NotConnected);assert_eq!(mapped.to_string(),"controller_and_serve_file_capability_grant_authorization_missing");
-        }else{
-            assert_eq!(error.kind(),io::ErrorKind::InvalidData);assert!(!goatr::codex_relay::file_wake_grant_absent(&error));
-            let mapped=file_wake_profile_error(error);assert_eq!(mapped.kind(),io::ErrorKind::InvalidData);assert!(!goatr::codex_relay::file_wake_grant_absent(&mapped));
-        }
-        let missing=File::open(root.join("missing")).unwrap_err();assert_eq!(file_wake_profile_error(missing).kind(),io::ErrorKind::NotFound);
-        let malformed=goatr::codex_relay::validate_file_wake_capability(&[0;20]).unwrap_err();let kind=malformed.kind();assert_eq!(file_wake_profile_error(malformed).kind(),kind);
-        fs::set_permissions(&path,fs::Permissions::from_mode(0o700)).unwrap();
-        let unsafe_mode=match goatr::codex_relay::FileWakePin::capture(&path){Err(error)=>error,Ok(_)=>panic!("unsafe file admitted")};
-        assert!(!goatr::codex_relay::file_wake_grant_absent(&unsafe_mode));let kind=unsafe_mode.kind();assert_eq!(file_wake_profile_error(unsafe_mode).kind(),kind);
-        fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
     }
     #[test]
     fn host_guard_captures_original_errno_kind_and_location_without_private_reason() {
@@ -3746,7 +3808,8 @@ mod tests {
         let generic:Value=serde_json::from_slice(&output).unwrap();assert_eq!(generic["gate"],"selected-smoke-mode");assert_eq!(generic["io_kind"],"invalid_input");
     }
     fn controller_status(mask:&str)->String {
-        ["CapInh","CapPrm","CapEff","CapAmb"].into_iter().map(|key|format!("{key}:\t{mask}\n")).collect()
+        let masks:String=["CapInh","CapPrm","CapEff","CapAmb"].into_iter().map(|key|format!("{key}:\t{mask}\n")).collect();
+        format!("{masks}NoNewPrivs:\t1\n")
     }
     #[test]
     fn controller_zero_and_wake_admission_require_distinct_exact_four_mask_shapes() {
@@ -3754,6 +3817,10 @@ mod tests {
         let zero_status=controller_status("0000000000000000");let wake_status=controller_status("0000000800000000");
         controller_caps_admission(ControllerPolicy::Zero,zero_status.as_bytes()).unwrap();controller_caps_admission(wake,wake_status.as_bytes()).unwrap();
         assert!(controller_caps_admission(ControllerPolicy::Zero,wake_status.as_bytes()).is_err());assert!(controller_caps_admission(wake,zero_status.as_bytes()).is_err());
+        for bad in [wake_status.replace("NoNewPrivs:\t1","NoNewPrivs:\t0"),wake_status.replace("NoNewPrivs:\t1\n",""),
+            format!("{wake_status}NoNewPrivs:\t1\n")] {
+            assert!(controller_caps_admission(wake,bad.as_bytes()).is_err());
+        }
         for key in ["CapInh","CapPrm","CapEff","CapAmb"] {
             let field=format!("{key}:\t0000000800000000\n");
             for mask in ["0000000000000000","0000000000000001","0000000800000001","0000000000080000","000000080000000A","10000000800000000"] {

@@ -1315,7 +1315,7 @@ pub async fn run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
                 io::Error::other("phone endpoint bind failed"),
             )
         })?;
-    let mut phone = pair(&binary, &root, &socket, &endpoint).await?;
+    let mut phone = pair(&binary, &root, &socket, &endpoint,None).await?;
     if let Some(budget) = serve.omp_capture_budget.clone() {
         phone.set_omp_capture(budget);
     }

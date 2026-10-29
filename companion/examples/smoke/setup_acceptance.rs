@@ -37,13 +37,15 @@ impl Terminal {
             .open(Path::new(
                 std::str::from_utf8(name.to_bytes()).map_err(io::Error::other)?,
             ))?;
-        let child = std::process::Command::new(binary)
-            .arg("setup")
-            .args(args)
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave))
-            .stderr(Stdio::null())
-            .spawn()?;
+        let mut command = std::process::Command::new(binary);
+        command.arg("setup").args(args)
+            .stdin(Stdio::from(slave.try_clone()?)).stdout(Stdio::from(slave)).stderr(Stdio::null());
+        #[cfg(target_os="linux")]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+        }
+        let child = command.spawn()?;
         let process = herdr::process_evidence(child.id())?;
         Ok(Self {
             child,
@@ -386,6 +388,11 @@ pub(super) async fn run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<
     if fs::read_link(format!("/proc/{pid}/exe"))? != binary {
         return Err(failure("actual unit did not exec the packaged binary"));
     }
+    let expected_argv=vec![binary.to_string_lossy().into_owned(),"serve".into(),"--config".into(),config_path.to_string_lossy().into_owned()];
+    if goatr::codex_relay::process_arguments(&process)?!=expected_argv
+        || !goatr::codex_relay::capability_state(&fs::read_to_string(format!("/proc/{pid}/status"))?)?.zero() {
+        return Err(failure("ordinary disposable setup must retain direct v1 argv and all four zero capability sets; Wake requires explicit qualified setup context"));
+    }
     let before = state_objects(&state)?;
     let mut identity_source = goatr::setup::ExpectedFile::capture(&state.join("identity.keys"))?;
     let marker_source = goatr::setup::ExpectedFile::capture(&state.join("identity.initialized"))?;
@@ -394,7 +401,7 @@ pub(super) async fn run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<
         .await
         .map_err(io::Error::other)?;
     let b = binary.clone();
-    let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&b, None, None))
+    let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&b, None, None,None))
         .await
         .map_err(io::Error::other)??;
     let invite =

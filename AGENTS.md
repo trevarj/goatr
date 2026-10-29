@@ -240,6 +240,18 @@ namespace check. Measure current objects; never borrow the one-off observer's
 namespace proof. Record actual capability sets and original unit/process ownership.
 Do not repeat this resolved authorization question.
 
+The current owned user-unit route uses `AmbientCapabilities=CAP_WAKE_ALARM`,
+`NoNewPrivileges=yes` and `PrivateUsers=no`; per-file capability admission is
+removed. Privileged `serve`/`setup` require explicit `--expected-unit`, while the
+full smoke requires `--expected-controller-unit` and independent artifact pins.
+Admission precedes runtime workers and joins the original manager, actual unit,
+process, executable and full cgroup; matching names or capability masks alone
+are not authority. Retained acceptance children require qualified
+`KillMode=process` and actual lifetime proof. Ordinary/helper/native/provider
+exec boundaries still drop all four capability sets. Nix/environment preparation
+stays outside the capability service; its direct executable is the pinned Rust
+binary. Do not turn this route into production-unit adoption or implicit restart.
+
 ### Strict native Close boundary
 
 Native session/shell Close and preserved empty-workspace retention are omitted
