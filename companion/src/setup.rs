@@ -427,13 +427,16 @@ fn unit_environment(name: &str, path: &Path) -> io::Result<String> {
     ))
 }
 async fn manager(args: &[&str]) -> io::Result<String> {
+    let mut command = tokio::process::Command::new("systemctl");
+    command.arg("--user").args(args).kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        command.pre_exec(crate::codex_relay::drop_inherited_capabilities);
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio::process::Command::new("systemctl")
-            .arg("--user")
-            .args(args)
-            .kill_on_drop(true)
-            .output(),
+        command.output(),
     )
     .await
     .map_err(|_| refused("user manager deadline"))??;

@@ -2537,16 +2537,22 @@ pub struct DiscoveredSlot {
     pub socket_path: PathBuf,
     pub session_dir: PathBuf,
 }
-/// Shell-free discovery, bounded child output, deadline, and no server start.
+/// Shell-free discovery with zero-capability children, bounded output/deadline, and no server start.
 pub async fn discover(config: &Config) -> io::Result<Vec<DiscoveredSlot>> {
     config::executable(&config.executables.herdr)?;
-    let mut child = tokio::process::Command::new(&config.executables.herdr)
+    let mut command = tokio::process::Command::new(&config.executables.herdr);
+    command
         .args(["session", "list", "--json"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        command.pre_exec(crate::codex_relay::drop_inherited_capabilities);
+    }
+    let mut child = command.spawn()?;
     let mut stdout = child
         .stdout
         .take()

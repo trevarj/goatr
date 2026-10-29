@@ -29,6 +29,8 @@ use std::{
     },
     time::Duration,
 };
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use tokio::{
     net::UnixStream,
     sync::{oneshot, watch},
@@ -5677,9 +5679,14 @@ pub fn exec_owner(record_path: &Path) -> io::Result<()> {
     if (inherited.dev(), inherited.ino()) != (expected.dev(), expected.ino()) {
         return Err(owner_exec_invalid());
     }
-    Err(std::process::Command::new(&record.wrapper)
-        .args(&record.argv)
-        .exec())
+    let mut command = std::process::Command::new(&record.wrapper);
+    command.args(&record.argv);
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        command.pre_exec(codex_relay::drop_inherited_capabilities);
+    }
+    Err(command.exec())
 }
 fn installed_command(name: &str) -> SecurityResult<std::path::PathBuf> {
     let path = std::env::var_os("PATH").ok_or(ErrorCode::NotReady)?;
@@ -5698,14 +5705,19 @@ fn installed_command(name: &str) -> SecurityResult<std::path::PathBuf> {
 async fn command_output(binary: &Path, args: &[String]) -> SecurityResult<(bool, String)> {
     use tokio::io::AsyncReadExt;
     config::executable(binary).map_err(policy)?;
-    let mut child = tokio::process::Command::new(binary)
+    let mut command = tokio::process::Command::new(binary);
+    command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(policy)?;
+        .kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        command.pre_exec(codex_relay::drop_inherited_capabilities);
+    }
+    let mut child = command.spawn().map_err(policy)?;
     let mut output = child.stdout.take().ok_or(ErrorCode::NotReady)?;
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut bytes = Vec::new();
@@ -6658,13 +6670,19 @@ impl Runtime {
                 }
                 return Err(policy(error));
             }
-            match std::process::Command::new(&systemd)
+            let mut command = std::process::Command::new(&systemd);
+            command
                 .args(&args)
                 .current_dir(&cwd)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
+                .stderr(std::process::Stdio::null());
+            #[cfg(target_os = "linux")]
+            // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+            unsafe {
+                command.pre_exec(codex_relay::drop_inherited_capabilities);
+            }
+            match command.spawn()
             {
                 Ok(child) => Ok((
                     Some(child),
@@ -7392,7 +7410,14 @@ impl Runtime {
             args.extend([binary.to_str().ok_or(ErrorCode::NotReady)?.into(),"codex-relay".into(),"--binding".into(),path.to_str().ok_or(ErrorCode::NotReady)?.into()]);
             let child=self.security.start_boundary(auth, action.clone(), (CreationStage::Relay,metadata.clone()), || { selection.validate(&self.topology, params).map_err(|code| crate::pairing::CreationAdmissionFailure::guarded(code, crate::pairing::CreationAdmissionGuard::Directory))?; let checked: crate::pairing::SecurityResult<()> = (||{if tokio::time::Instant::now()>=deadline{return Err(ErrorCode::Timeout)}self.topology.validate_provider_stage(action,params,&known)?;manifest.validate().map_err(policy)?;if std::fs::symlink_metadata(&manifest.listen_host).is_ok(){return Err(ErrorCode::NotReady)}Ok(())})(); checked.map_err(Into::into) }, ||{
                 codex_relay::private_write(&path,&manifest,false).map_err(policy)?;
-                match std::process::Command::new(&systemd).args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(){
+                let mut command=std::process::Command::new(&systemd);
+                command.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                #[cfg(target_os = "linux")]
+                // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+                unsafe {
+                    command.pre_exec(codex_relay::drop_inherited_capabilities);
+                }
+                match command.spawn(){
                     Ok(child)=>Ok((Some(child),stage(admitted,metadata,StageState::Dispatching,Some("Independent same-binary relay service admission started")))),Err(_)=>Ok((None,stage(admitted,metadata,StageState::Uncertain,None))),
                 }
             }).await?;
@@ -7755,6 +7780,32 @@ mod tests {
         channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();Some(channel)
     }
     fn file_wake_state(channel:&mut FileWakeChannel,expected:u8){let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,[expected]);}
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn helper_command_drops_child_capabilities_without_changing_parent() {
+        let parent_state = || {
+            codex_relay::capability_state(
+                &std::fs::read_to_string("/proc/thread-self/status").unwrap(),
+            ).unwrap()
+        };
+        let before = parent_state();
+        // The coordinator's explicit opt-in refuses a vacuous zero-capability proof.
+        if let Some(value) = std::env::var_os("GOATR_TEST_REQUIRE_AMBIENT_WAKE") {
+            assert_eq!(value, std::ffi::OsStr::new("1"));
+            let wake = 1u64 << 35;
+            assert_eq!(
+                (before.inheritable, before.permitted, before.effective, before.ambient),
+                (wake, wake, wake, wake),
+            );
+        }
+        // Exercise the real bounded helper boundary; cat reports its own kernel credentials.
+        let cat = installed_command("cat").unwrap();
+        let (success, status) = command_output(&cat, &["/proc/thread-self/status".into()])
+            .await.unwrap();
+        assert!(success);
+        assert!(codex_relay::capability_state(&status).unwrap().zero());
+        assert_eq!(parent_state(), before);
+    }
     #[test]
     fn owner_first_service_permission_wait_keeps_original_public_epoch_and_never_adopts_pid() {
         use std::process::{Command,Stdio};

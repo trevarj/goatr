@@ -470,6 +470,11 @@ struct OwnedRun {
 }
 impl OwnedRun {
     fn spawn(command: &mut std::process::Command, root: PathBuf, root_original: Value, admin_parent: PathBuf, admin_original: Value) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+        unsafe {
+            command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+        }
         let child = command.process_group(0).spawn()?;
         let original_process = goatr::herdr::process_evidence(child.id()).map_err(|error| error.kind());
         Ok(Self { child, original_process, root, root_original, admin_parent, admin_original })
@@ -686,6 +691,11 @@ async fn local(
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("state"))
         .kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        cmd.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    }
     commands.push(json!({"executable":binary,"command":command,"deviceId":id,"adminSocket":socket,"configHome":root.join("config"),"stateHome":root.join("state")}));
     let output = tokio::time::timeout(Duration::from_secs(15), cmd.output())
         .await
@@ -1112,12 +1122,16 @@ async fn run() -> io::Result<bool> {
     if !binary.starts_with("/nix/store") || binary.file_name().is_none_or(|s| s != "goatr") {
         return Err(failure("gate requires an actual packaged Nix goatr binary"));
     }
+    let mut command = tokio::process::Command::new(&binary);
+    command.arg("--version").kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    }
     let version = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::process::Command::new(&binary)
-            .arg("--version")
-            .kill_on_drop(true)
-            .output(),
+        command.output(),
     )
     .await
     .map_err(|_| failure("packaged version deadline exceeded"))??;

@@ -164,6 +164,11 @@ fn resolve_tool(name: &str) -> io::Result<PathBuf> {
 }
 async fn output(mut command: AsyncCommand, limit: usize, deadline: Duration) -> io::Result<Vec<u8>> {
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    }
     let mut child = command.spawn()?;
     let stdout = child.stdout.take().ok_or_else(|| failure("physical command has no output pipe"))?;
     let mut bytes = Vec::new();

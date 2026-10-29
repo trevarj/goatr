@@ -31,6 +31,12 @@ fn bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     Ok(b)
 }
 fn command(mut c: Process, limit: u64) -> io::Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        c.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    }
     let mut child = c.stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
     let mut bytes = Vec::new();
     child

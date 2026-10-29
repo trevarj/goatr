@@ -364,6 +364,11 @@ async fn capture(
     limit: usize,
 ) -> io::Result<std::process::Output> {
     c.kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        c.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    }
     let out = tokio::time::timeout(Duration::from_secs(timeout), c.output())
         .await
         .map_err(|_| failure("actual command deadline exceeded"))??;
@@ -526,6 +531,12 @@ async fn prepare(path: &Path, l: &Lease, evidence: &Path) -> io::Result<bool> {
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null());
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        c.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    }
     let mut child = c.spawn()?;
     let parent = herdr::process_evidence(child.id())?;
     write_json(
@@ -1421,6 +1432,11 @@ async fn retained_codex_startup_journal(
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .stdout(Stdio::piped());
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+    unsafe {
+        command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
+    }
     let mut child = command.spawn().map_err(|_| "journal_unavailable")?;
     let stdout = child.stdout.take().ok_or("journal_unavailable")?;
     let mut collected = Vec::new();
