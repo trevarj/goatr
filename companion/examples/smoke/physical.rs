@@ -808,9 +808,19 @@ fn admission_failure(site:&'static str,guard:&'static str,mut error:io::Error,su
     io::Error::new(error.kind(),AdmissionFailure {site,guard,summary})
 }
 fn admission_diagnostic(error:&io::Error)->Option<&AdmissionFailure> {error.get_ref()?.downcast_ref::<AdmissionFailure>()}
-fn retain_review_failure(error:io::Error,diagnostic:&mut Option<io::Error>)->&'static str {
+fn review_failure_projection(error:&io::Error)->Value {
+    let metadata=super::super::helper_error_metadata(error);
+    let mut projection=json!({"io_kind":metadata["io_kind"]});
+    for field in ["source_file","source_line"] {
+        if !metadata[field].is_null(){projection[field]=metadata[field].clone();}
+    }
+    if let Some(diagnostic)=admission_diagnostic(error){projection["admissionFailure"]=json!(diagnostic);}
+    projection
+}
+fn review_admission_failure(projection:&Value)->Option<&Value> {projection.get("admissionFailure")}
+fn retain_review_failure(error:io::Error,diagnostic:&mut Option<Value>)->&'static str {
     let code=blocker(&error);
-    if diagnostic.is_none()&&admission_diagnostic(&error).is_some(){*diagnostic=Some(error);}
+    if diagnostic.is_none(){*diagnostic=Some(review_failure_projection(&error));}
     code
 }
 fn first_open_admission_result(admission:io::Result<()>,publication:io::Result<()>,mut summary:Value)->io::Result<()> {
@@ -1686,6 +1696,52 @@ fn notification_human_fallback(api:u32,outcome:&Value)->io::Result<bool> {
     Ok(api==30&&string(outcome,"outcome")?=="blocked"&&string(outcome,"guard")?=="physical_notification_row_ambiguous"
         &&string(outcome,"stage")?=="selection"&&!boolean(outcome,"acknowledged")?)
 }
+fn closed_ui_token(outcome:&Value,key:&str)->Value {
+    outcome.get(key).and_then(Value::as_str).filter(|value|!value.is_empty()&&value.len()<=96
+        &&value.bytes().all(|byte|byte.is_ascii_lowercase()||byte.is_ascii_digit()||byte==b'_'))
+        .map_or_else(||json!("unavailable"),|value|json!(value))
+}
+struct UiOutcome<'a> { run:&'a Uuid, action:&'a str, argument_hash:&'a str, original:&'a Value, process:&'a Value, outcome:&'a Value, api:u32, command_succeeded:bool }
+fn ui_outcome_projection(input:&UiOutcome<'_>,pre_input_refusal:Option<bool>)->Value {
+    json!({"runId":input.run,"action":input.action,"argumentHash":input.argument_hash,"process":input.process,"outcome":closed_ui_token(input.outcome,"outcome"),"guard":closed_ui_token(input.outcome,"guard"),
+        "stage":closed_ui_token(input.outcome,"stage"),"qualifiedApi":input.api,"commandExit":if input.command_succeeded{"success"}else{"nonzero_or_signal"},
+        "preInputRefusal":pre_input_refusal,"acknowledged":input.outcome.get("acknowledged").and_then(Value::as_bool),"expectedScreenObserved":input.outcome.get("expectedScreenObserved").and_then(Value::as_bool),"acknowledgementIsNotNativeEffect":true})
+}
+fn publish_ui_outcome(evidence:&Path,input:&UiOutcome<'_>,projection:&Value)->io::Result<()> {
+    write_json(&evidence.join(format!("physical-ui-{}.outcome.json",input.run.0)),projection)
+}
+fn correlated_ui_outcome(original:&Value,process:&Value,outcome:&Value,run:&Uuid,action:&str)->io::Result<()> {
+    if original!=process||string(outcome,"runId")?!=run.0||string(outcome,"action")?!=action||outcome["runnerPid"]!=process["runnerPid"]||outcome["runnerStart"]!=process["runnerStart"] {
+        return Err(failure("physical owned UI original process/action correlation changed"));
+    }
+    Ok(())
+}
+fn ui_expectation_admission(expectation:UiExpectation,outcome:&Value)->io::Result<(bool,bool)> {
+    let result=string(outcome,"outcome")?;let guard=string(outcome,"guard")?;let _stage=string(outcome,"stage")?;
+    let acknowledged=boolean(outcome,"acknowledged")?;let observed=boolean(outcome,"expectedScreenObserved")?;
+    let ambiguous=match expectation {UiExpectation::NotificationTap{api}=>notification_human_fallback(api,outcome)?,_=>false};
+    let admitted=match expectation {
+        UiExpectation::Completed=>result=="completed"&&guard=="none"&&observed,
+        UiExpectation::StaleRefusal=>result=="blocked"&&guard=="ui_tag_missing"&&!acknowledged,
+        UiExpectation::NotificationTap{..}=>(result=="completed"&&guard=="none"&&acknowledged&&observed)||ambiguous,
+    };
+    Ok((admitted,ambiguous))
+}
+fn admit_published_ui_outcome(command_succeeded:bool,classification:io::Result<(bool,bool)>)->io::Result<bool> {
+    if !command_succeeded{return Err(failure("physical owned UI runner command failed after a correlated outcome"));}
+    let (admitted,ambiguous)=classification?;
+    if !admitted{return Err(failure("physical owned UI original action did not produce its exact expected completion/refusal; no retry"));}
+    Ok(ambiguous)
+}
+fn publish_and_admit_ui_outcome(evidence:&Path,expectation:UiExpectation,input:UiOutcome<'_>)->io::Result<(Value,bool)> {
+    correlated_ui_outcome(input.original,input.process,input.outcome,input.run,input.action)?;
+    let classification=ui_expectation_admission(expectation,input.outcome);
+    let pre_input_refusal=classification.as_ref().ok().map(|(_,ambiguous)|*ambiguous);
+    let projection=ui_outcome_projection(&input,pre_input_refusal);
+    publish_ui_outcome(evidence,&input,&projection)?;
+    let ambiguous=admit_published_ui_outcome(input.command_succeeded,classification)?;
+    Ok((projection,ambiguous))
+}
 fn background_noninteractive(snapshot:&Value)->bool {snapshot["foreground"]==false&&snapshot["ui"]["interactive"]==false&&snapshot["ui"]["measuredAt"].as_u64().is_some_and(|time|time>0)}
 fn retain_profile_observation<T>(result:io::Result<T>,profile_failed:bool,failed:&mut bool)->io::Result<T> {
     if profile_failed{*failed=true;}
@@ -1783,8 +1839,8 @@ impl Matrix {
                     outcome=Some(goatr::native_json::parse(json.as_bytes(),goatr::native_json::REGISTRY).map_err(|_|failure("physical owned UI outcome is invalid"))?);
                 }
             }
-            if !child.wait().await?.success(){return Err(failure("physical owned UI runner command failed"));}
-            Ok((owner.ok_or_else(||failure("physical owned UI process status is absent"))?,outcome.ok_or_else(||failure("physical owned UI final outcome is absent"))?))
+            let command_succeeded=child.wait().await?.success();
+            Ok((owner.ok_or_else(||failure("physical owned UI process status is absent"))?,outcome.ok_or_else(||failure("physical owned UI final outcome is absent"))?,command_succeeded))
         });
         let process=timeout(Duration::from_secs(25),async {
             loop {if let Some(value)=owner_receiver.borrow().clone(){return Ok::<_,io::Error>(value);}owner_receiver.changed().await.map_err(|_|failure("physical owned UI process status owner ended"))?;}
@@ -1806,21 +1862,9 @@ impl Matrix {
         self.adb.write_private(TEST,&format!("{staging}/product-epoch.json"),&bytes).await?;
         self.recheck()?;
         self.adb.shell(&["run-as",TEST,"mv","-T","-n",&staging,&release],1024).await?;
-        let (original,outcome)=timeout(Duration::from_secs(30),result).await.map_err(|_|failure("physical owned UI outcome expired; action is uncertain and is never replayed"))?
+        let (original,outcome,command_succeeded)=timeout(Duration::from_secs(30),result).await.map_err(|_|failure("physical owned UI outcome expired; action is uncertain and is never replayed"))?
             .map_err(|_|failure("physical owned UI status owner failed; no replay"))??;
-        if original!=process||string(&outcome,"runId")?!=run.0||string(&outcome,"action")?!=action||outcome["runnerPid"]!=process["runnerPid"]||outcome["runnerStart"]!=process["runnerStart"] {
-            return Err(failure("physical owned UI original process/action correlation changed"));
-        }
-        let ambiguous=match expectation {UiExpectation::NotificationTap{api}=>notification_human_fallback(api,&outcome)?,_=>false};
-        let admitted=match expectation {
-            UiExpectation::Completed=>string(&outcome,"outcome")?=="completed"&&string(&outcome,"guard")?=="none"&&boolean(&outcome,"expectedScreenObserved")?,
-            UiExpectation::StaleRefusal=>string(&outcome,"outcome")?=="blocked"&&string(&outcome,"guard")?=="ui_tag_missing"&&!boolean(&outcome,"acknowledged")?,
-            UiExpectation::NotificationTap{..}=>(string(&outcome,"outcome")?=="completed"&&string(&outcome,"guard")?=="none"&&boolean(&outcome,"acknowledged")?&&boolean(&outcome,"expectedScreenObserved")?)||ambiguous,
-        };
-        if !admitted{return Err(failure("physical owned UI original action did not produce its exact expected completion/refusal; no retry"));}
-        let projection=json!({"runId":run,"action":action,"argumentHash":expected_hash,"process":process,"outcome":outcome["outcome"],"guard":outcome["guard"],
-            "stage":string(&outcome,"stage")?,"qualifiedApi":self.api,"preInputRefusal":ambiguous,"acknowledged":boolean(&outcome,"acknowledged")?,"expectedScreenObserved":boolean(&outcome,"expectedScreenObserved")?,"acknowledgementIsNotNativeEffect":true});
-        write_json(&self.evidence.join(format!("physical-ui-{}.outcome.json",run.0)),&projection)?;
+        let (projection,ambiguous)=publish_and_admit_ui_outcome(&self.evidence,expectation,UiOutcome {run:&run,action,argument_hash:&expected_hash,original:&original,process:&process,outcome:&outcome,api:self.api,command_succeeded})?;
         self.recheck_product().await?;let after=self.observer.snapshot(None).await?;self.record(&format!("{stage}-ui-owner"),&json!({"ui":projection,"before":epoch["snapshot"],"after":after}))?;
         Ok((run,after,ambiguous))
     }
@@ -2579,6 +2623,10 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path,admitted:goatr::co
     inputs.push((template.clone(),template_file,template_metadata));
     inputs.push(controller_input);
     if let Some(pin)=prepared_pin{inputs.push(pin);}
+    recheck_inputs(&inputs)?;let (adb,device)=PhysicalAdb::qualify(args).await?;recheck_inputs(&inputs)?;let api=device.sdk;let abi=device.abi.clone();
+    adb.tunnels(None).await?;recheck_inputs(&inputs)?;
+    let user=adb.shell(&["am","get-current-user"],128).await?;recheck_inputs(&inputs)?;
+    if text(&user)?.trim()!="0"{return Err(failure("physical retained installation must be the exact primary Android user; no profile/user switching"));}
     recheck_inputs(&inputs)?;let product=qualify_artifact(&apk,product_sha,&sdk,APP,false).await?;recheck_inputs(&inputs)?;
     let test=qualify_artifact(&test_apk,test_sha,&sdk,TEST,true).await?;recheck_inputs(&inputs)?;
     if product.signer!=test.signer{return Err(failure("physical product/test artifacts do not have the same qualified signer"));}
@@ -2591,7 +2639,6 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path,admitted:goatr::co
     recheck_inputs(&inputs)?;let inventory=tokio::task::spawn_blocking(move||super::super::native_inventory::inspect(&inventory_inputs)).await.map_err(|_|failure("physical shared static inventory owner failed"))??;recheck_inputs(&inputs)?;
     if inventory["status"]!="pass"||inventory["count"]!=10||inventory["apkSha256"]!=product.sha256{return Err(failure("physical actual shared all-ten native inventory did not qualify this exact frozen APK"));}
     write_json(&evidence.join("physical-native-inventory.json"),&inventory)?;
-    recheck_inputs(&inputs)?;let (adb,device)=PhysicalAdb::qualify(args).await?;recheck_inputs(&inputs)?;let api=device.sdk;let abi=device.abi.clone();
     adb.tunnels(None).await?;recheck_inputs(&inputs)?;
     let user=adb.shell(&["am","get-current-user"],128).await?;recheck_inputs(&inputs)?;
     if text(&user)?.trim()!="0"{return Err(failure("physical retained installation must be the exact primary Android user; no profile/user switching"));}
@@ -3244,33 +3291,35 @@ impl Matrix {
         let mut announced=false;
         loop {
             let was_failed=self.input_pin_failed;
-            if recheck_retained_inputs(&self.inputs,&mut self.input_pin_failed).is_err() {
+            if let Err(error)=recheck_retained_inputs(&self.inputs,&mut self.input_pin_failed) {
+                let _=retain_review_failure(error,&mut diagnostic);
                 passed=false;code="original_frozen_input_changed_finish_rejected";
                 if !was_failed{announced=false;}
             }
-            if !self.input_pin_failed&&recheck_unit_profiles(&self.authority,&self.stock,&mut self.input_pin_failed).is_err() {
+            if !self.input_pin_failed&&let Err(error)=recheck_unit_profiles(&self.authority,&self.stock,&mut self.input_pin_failed) {
+                let _=retain_review_failure(error,&mut diagnostic);
                 passed=false;code="original_unit_wake_profile_changed_finish_rejected";if !was_failed{announced=false;}
             }
             if self.observer.task.is_finished()||self.observer.instrumentation.task.is_finished() {
                 let lost=json!({"runId":self.run,"gate":"physical-mvp","status":"failed","stage":self.last_stage,"code":"original_observer_lost_or_unknown_before_authorized_finish",
                     "originalPid":self.observer.epoch.pid,"originalStart":self.observer.epoch.start,"productApkSha256":self.product_sha,
-                    "effectFailureCode":code,"admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic),
+                    "effectFailureCode":code,"primaryFailure":diagnostic,"admissionFailure":diagnostic.as_ref().and_then(review_admission_failure),
                     "recreatedOrAdopted":false,"nativeResourcesAndFlagsNotReset":true,"runtimeAcceptanceClaim":false});
                 if let Err(error)=write_json(&self.evidence.join(format!("physical-observer-lost-{}.json",Uuid::random().0)),&lost) {
-                    let _=writeln!(io::stderr(),"{}",json!({"gate":"physical-mvp","status":"failed","code":"owner_lost_evidence_write_failed","io":blocker(&error),"admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic)}));
+                    let _=writeln!(io::stderr(),"{}",json!({"gate":"physical-mvp","status":"failed","code":"owner_lost_evidence_write_failed","io":blocker(&error),"primaryFailure":diagnostic,"admissionFailure":diagnostic.as_ref().and_then(review_admission_failure)}));
                 }
                 return Err(failure("physical original product observer was lost/unknown before cleanup authorization; permanent failure, no replacement"));
             }
             if !announced {
                 let state=json!({"runId":self.run,"gate":"physical-mvp","status":if passed{"effects_proved_owner_retained"}else{"blocked_owner_retained"},"stage":self.last_stage,"code":code,
                     "originalPid":self.observer.epoch.pid,"originalStart":self.observer.epoch.start,"productApkSha256":self.product_sha,
-                    "admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic),
+                    "primaryFailure":diagnostic,"admissionFailure":diagnostic.as_ref().and_then(review_admission_failure),
                     "native":self.stock.desktop.process,"companion":self.stock.serve.process,"ownedStart":self.owned_start,"serviceKeyRestored":self.service_key_restored,
                     "cleanupAuthorization":finish_authorization(self.input_pin_failed,&expected),
                     "warning":if self.input_pin_failed{"Original frozen input authority failed. This FINISH is rejected; retain this same observer/resources. Any cleanup requires separate explicit human ownership review, never automatic termination, restart or pin adoption."}else{"Review exact original PID/start/artifacts and retained flags/resources. This command authorizes ONE observer Finish; Android may kill that instrumented product PID. It does NOT StopDelivery, reset preferences, restore an uncertain flag, kill native work or erase receipts."},
                     "coldOrFgsSoleLivenessClaim":false,"ifControllerIsExternallyLostBeforeFinish":"owner retention becomes unknown, never acceptance"});
-                if let Err(error)=self.record("owner-retained-awaiting-explicit-review",&state){passed=false;code="retained_owner_evidence_write_failed";let _=writeln!(io::stderr(),"{}",json!({"gate":"physical-mvp","status":"blocked_owner_retained","io":blocker(&error),"admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic)}));}
-                if writeln!(io::stdout(),"{state}").is_err(){passed=false;code="retained_owner_console_unavailable";}
+                if let Err(error)=self.record("owner-retained-awaiting-explicit-review",&state){let io_code=blocker(&error);let _=retain_review_failure(error,&mut diagnostic);passed=false;code="retained_owner_evidence_write_failed";let _=writeln!(io::stderr(),"{}",json!({"gate":"physical-mvp","status":"blocked_owner_retained","io":io_code,"primaryFailure":diagnostic,"admissionFailure":diagnostic.as_ref().and_then(review_admission_failure)}));}
+                if let Err(error)=writeln!(io::stdout(),"{state}"){let _=retain_review_failure(error,&mut diagnostic);passed=false;code="retained_owner_console_unavailable";}
                 announced=true;
             }
             let mut poll=libc::pollfd{fd:libc::STDIN_FILENO,events:libc::POLLIN,revents:0};
@@ -3279,11 +3328,11 @@ impl Matrix {
                 let authorized=count>0&&std::str::from_utf8(&bytes[..count as usize]).is_ok_and(|value|value.trim()==expected);bytes.fill(0);
                 if authorized {
                     if finish_authorization(self.input_pin_failed,&expected).is_none(){announced=false;continue;}
-                    if let Err(error)=self.recheck_product().await{passed=false;code=blocker(&error);announced=false;continue;}
+                    if let Err(error)=self.recheck_product().await{let next=blocker(&error);let _=retain_review_failure(error,&mut diagnostic);passed=false;code=next;announced=false;continue;}
                     let action=Uuid::random();
                     let current=match self.observer.query(json!({"kind":"epoch","actionRunId":action}),"epoch").await {
                         Ok((current,_))=>current,
-                        Err(_)=>{passed=false;code="original_observer_cleanup_epoch_unproved";announced=false;continue;}
+                        Err(error)=>{let _=retain_review_failure(error,&mut diagnostic);passed=false;code="original_observer_cleanup_epoch_unproved";announced=false;continue;}
                     };
                     if string(&current,"apkSha256").ok()!=Some(self.product_sha.as_str()) {
                         passed=false;code="original_observer_cleanup_artifact_changed";announced=false;continue;
@@ -3307,27 +3356,38 @@ impl Matrix {
                         "explicitHumanAuthorization":true,"freshSignedEpoch":current,"acceptanceEffectsProvedBeforeFinish":passed,"cleanupOnly":true,
                         "nativeOrPreferenceCleanupAuthorized":false,"androidMayKillInstrumentedProductPid":true});
                     let finish_id=Uuid::random();
-                    if write_json(&self.evidence.join(format!("physical-observer-finish-{}.intent.json",finish_id.0)),&intent).is_err() {
+                    if let Err(error)=write_json(&self.evidence.join(format!("physical-observer-finish-{}.intent.json",finish_id.0)),&intent) {
+                        let _=retain_review_failure(error,&mut diagnostic);
                         passed=false;code="observer_finish_intent_not_durable";announced=false;continue;
                     }
-                    if let Err(error)=self.recheck(){passed=false;code=blocker(&error);announced=false;continue;}
-                    let outcome=self.observer.finished().await;
-                    if recheck_retained_inputs(&self.inputs,&mut self.input_pin_failed).is_err(){passed=false;code="original_frozen_input_changed_during_finish";}
-                    if !self.input_pin_failed&&recheck_unit_profiles(&self.authority,&self.stock,&mut self.input_pin_failed).is_err(){passed=false;code="original_unit_wake_profile_changed_during_finish";}
-                    if require_product_epoch(&self.adb,&self.product_epoch,&self.product_sha,&self.inputs,Some(&mut self.input_pin_failed)).await.is_err(){passed=false;code="original_product_epoch_changed_during_finish";}
+                    if let Err(error)=self.recheck(){let next=blocker(&error);let _=retain_review_failure(error,&mut diagnostic);passed=false;code=next;announced=false;continue;}
+                    let outcome=self.observer.finished().await.inspect_err(|error|{if diagnostic.is_none(){diagnostic=Some(review_failure_projection(error));}});
+                    if let Err(error)=recheck_retained_inputs(&self.inputs,&mut self.input_pin_failed){let _=retain_review_failure(error,&mut diagnostic);passed=false;code="original_frozen_input_changed_during_finish";}
+                    if !self.input_pin_failed&&let Err(error)=recheck_unit_profiles(&self.authority,&self.stock,&mut self.input_pin_failed){let _=retain_review_failure(error,&mut diagnostic);passed=false;code="original_unit_wake_profile_changed_during_finish";}
+                    if let Err(error)=require_product_epoch(&self.adb,&self.product_epoch,&self.product_sha,&self.inputs,Some(&mut self.input_pin_failed)).await{let _=retain_review_failure(error,&mut diagnostic);passed=false;code="original_product_epoch_changed_during_finish";}
                     let mut acknowledged=false;let mut absent=false;let mut reverse_removed=false;
                     if let Ok(finished)=outcome {
                         acknowledged=finished.pid==original.pid&&finished.start==original.start;
-                        if acknowledged {absent=wait_original_process_absent(&self.adb,&original).await.is_ok();}
-                        if acknowledged&&absent&&self.adb.tunnels(Some(self.control_port)).await.is_ok() {
-                            let mapping=format!("tcp:{}",self.control_port);
-                            reverse_removed=self.adb.invoke(&["reverse","--remove",&mapping],4096).await.is_ok()&&self.adb.tunnels(None).await.is_ok();
+                        if acknowledged {
+                            match wait_original_process_absent(&self.adb,&original).await {Ok(())=>absent=true,Err(error)=>{let _=retain_review_failure(error,&mut diagnostic);}}
+                        }
+                        if acknowledged&&absent {
+                            match self.adb.tunnels(Some(self.control_port)).await {
+                                Ok(())=>{
+                                    let mapping=format!("tcp:{}",self.control_port);
+                                    match self.adb.invoke(&["reverse","--remove",&mapping],4096).await {
+                                        Ok(_)=>match self.adb.tunnels(None).await {Ok(())=>reverse_removed=true,Err(error)=>{let _=retain_review_failure(error,&mut diagnostic);}},
+                                        Err(error)=>{let _=retain_review_failure(error,&mut diagnostic);},
+                                    }
+                                }
+                                Err(error)=>{let _=retain_review_failure(error,&mut diagnostic);}
+                            }
                         }
                     }
                     let complete=passed&&acknowledged&&absent&&reverse_removed;
                     let outcome=json!({"runId":self.run,"gate":"physical-mvp","status":if complete{"pass"}else{"failed"},"priorCode":code,
                         "originalPid":original.pid,"originalStart":original.start,"observerFinishAcknowledged":acknowledged,"finishedOriginalPidAbsent":absent,
-                        "onlyOwnedControlReverseRemoved":reverse_removed,"cleanupIsNotPreservationOrSocketFreeAcceptance":true,"coldOrFgsSoleLivenessClaim":false,
+                        "onlyOwnedControlReverseRemoved":reverse_removed,"primaryFailure":diagnostic,"admissionFailure":diagnostic.as_ref().and_then(review_admission_failure),"cleanupIsNotPreservationOrSocketFreeAcceptance":true,"coldOrFgsSoleLivenessClaim":false,
                         "nativeResourcesRetained":true,"native":self.stock.desktop.process,"companion":self.stock.serve.process,"root":self.stock.root,"admin":self.stock.admin,
                         "preferencesRawReset":false,"desktopOrProviderKilled":false,"uncertainReceiptsErased":false});
                     write_json(&self.evidence.join(format!("physical-observer-finish-{}.outcome.json",finish_id.0)),&outcome)?;
@@ -4283,6 +4343,28 @@ mod tests {
         }
     }
     #[test]
+    fn correlated_ui_outcomes_are_published_before_refusal_without_raw_observations() {
+        let root=std::env::temp_dir().join(format!("goatr-ui-outcome-{}",Uuid::random().0));fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let action="OpenSession";let hash="a".repeat(64);
+        let run=Uuid::random();let process=json!({"phase":"process","runId":run.0,"action":action,"runnerPid":71,"runnerStart":72});
+        let blocked=json!({"runId":run.0,"action":action,"runnerPid":71,"runnerStart":72,"outcome":"blocked","guard":"ui_tag_missing","stage":"selection","acknowledged":false,"expectedScreenObserved":false,
+            "observation":"UNKNOWN_PRIVATE_OBSERVATION_SENTINEL"});
+        assert!(publish_and_admit_ui_outcome(&root,UiExpectation::Completed,UiOutcome {run:&run,action,argument_hash:&hash,original:&process,process:&process,outcome:&blocked,api:30,command_succeeded:true}).is_err());
+        let stored=fs::read(root.join(format!("physical-ui-{}.outcome.json",run.0))).unwrap();assert!(!String::from_utf8(stored).unwrap().contains("UNKNOWN_PRIVATE_OBSERVATION_SENTINEL"));
+        assert_eq!(fs::read_dir(&root).unwrap().count(),1);
+        let mismatched_run=Uuid::random();let mismatched_process=json!({"phase":"process","runId":mismatched_run.0,"action":action,"runnerPid":71,"runnerStart":72});let mismatched=json!({"runId":Uuid::random().0,"action":action,"runnerPid":71,"runnerStart":72});
+        assert!(publish_and_admit_ui_outcome(&root,UiExpectation::Completed,UiOutcome {run:&mismatched_run,action,argument_hash:&hash,original:&mismatched_process,process:&mismatched_process,outcome:&mismatched,api:30,command_succeeded:true}).is_err());assert!(!root.join(format!("physical-ui-{}.outcome.json",mismatched_run.0)).exists());
+        let nonzero_run=Uuid::random();let nonzero_process=json!({"phase":"process","runId":nonzero_run.0,"action":action,"runnerPid":73,"runnerStart":74});let nonzero=json!({"runId":nonzero_run.0,"action":action,"runnerPid":73,"runnerStart":74,"outcome":"completed","guard":"none","stage":"outcome","acknowledged":true,"expectedScreenObserved":true});
+        assert!(publish_and_admit_ui_outcome(&root,UiExpectation::Completed,UiOutcome {run:&nonzero_run,action,argument_hash:&hash,original:&nonzero_process,process:&nonzero_process,outcome:&nonzero,api:30,command_succeeded:false}).is_err());assert_eq!(serde_json::from_slice::<Value>(&fs::read(root.join(format!("physical-ui-{}.outcome.json",nonzero_run.0))).unwrap()).unwrap()["commandExit"],"nonzero_or_signal");
+        let completed_run=Uuid::random();let completed_process=json!({"phase":"process","runId":completed_run.0,"action":action,"runnerPid":75,"runnerStart":76});let completed=json!({"runId":completed_run.0,"action":action,"runnerPid":75,"runnerStart":76,"outcome":"completed","guard":"none","stage":"outcome","acknowledged":true,"expectedScreenObserved":true});
+        assert!(!publish_and_admit_ui_outcome(&root,UiExpectation::Completed,UiOutcome {run:&completed_run,action,argument_hash:&hash,original:&completed_process,process:&completed_process,outcome:&completed,api:30,command_succeeded:true}).unwrap().1);
+        let notification_run=Uuid::random();let notification_process=json!({"phase":"process","runId":notification_run.0,"action":action,"runnerPid":77,"runnerStart":78});let notification=json!({"runId":notification_run.0,"action":action,"runnerPid":77,"runnerStart":78,"outcome":"blocked","guard":"physical_notification_row_ambiguous","stage":"selection","acknowledged":false,"expectedScreenObserved":false});
+        assert!(publish_and_admit_ui_outcome(&root,UiExpectation::NotificationTap {api:30},UiOutcome {run:&notification_run,action,argument_hash:&hash,original:&notification_process,process:&notification_process,outcome:&notification,api:30,command_succeeded:true}).unwrap().1);
+        let malformed_run=Uuid::random();let malformed_process=json!({"phase":"process","runId":malformed_run.0,"action":action,"runnerPid":79,"runnerStart":80});let malformed=json!({"runId":malformed_run.0,"action":action,"runnerPid":79,"runnerStart":80,"outcome":"blocked","guard":"physical_notification_row_ambiguous","stage":null,"acknowledged":false,"expectedScreenObserved":false});
+        assert!(publish_and_admit_ui_outcome(&root,UiExpectation::NotificationTap {api:30},UiOutcome {run:&malformed_run,action,argument_hash:&hash,original:&malformed_process,process:&malformed_process,outcome:&malformed,api:30,command_succeeded:true}).is_err());assert!(serde_json::from_slice::<Value>(&fs::read(root.join(format!("physical-ui-{}.outcome.json",malformed_run.0))).unwrap()).unwrap()["preInputRefusal"].is_null());
+        for id in [run,nonzero_run,completed_run,notification_run,malformed_run] {fs::remove_file(root.join(format!("physical-ui-{}.outcome.json",id.0))).unwrap();}fs::remove_dir(root).unwrap();
+    }
+    #[test]
     fn human_screen_off_attestation_cannot_replace_measured_background_noninteractive_facts() {
         let (_,_,mut value)=observed_shell();assert!(!background_noninteractive(&value));
         value["foreground"]=json!(false);assert!(background_noninteractive(&value));
@@ -4455,21 +4537,29 @@ mod tests {
     }
     #[test]
     fn retained_review_consumer_keeps_final_decode_diagnostic_after_success_and_never_replaces_the_primary() {
+        let mut ordinary=None;let ordinary_error=failure("UNKNOWN_ORDINARY_PRIVATE_DETAIL");retain_review_failure(ordinary_error,&mut ordinary);
+        let ordinary=ordinary.unwrap();assert_eq!(ordinary["io_kind"],"other");assert!(ordinary["source_file"].as_str().is_some_and(|file|file=="smoke/physical.rs"));assert!(ordinary["source_line"].as_u64().is_some());
+        assert!(ordinary["admissionFailure"].is_null());assert!(!ordinary.to_string().contains("UNKNOWN_ORDINARY_PRIVATE_DETAIL"));
+        let mut late_primary=None;let late_error=failure("UNKNOWN_LATE_FIRST_PRIVATE_DETAIL");retain_review_failure(late_error,&mut late_primary);
+        retain_review_failure(io::Error::new(io::ErrorKind::PermissionDenied,"UNKNOWN_LATE_REPLACEMENT_PRIVATE_DETAIL"),&mut late_primary);
+        let late_primary=late_primary.unwrap();assert_eq!(late_primary["io_kind"],"other");assert!(late_primary["source_file"].as_str().is_some_and(|file|file=="smoke/physical.rs"));assert!(!late_primary.to_string().contains("UNKNOWN_LATE_REPLACEMENT_PRIVATE_DETAIL"));
         let (empty,constructor,mut opened)=fresh_transition_facts();let (epoch,_,_)=observed_shell();
         let mut raw=json!(opened);raw["keyFiles"]["files"][0]["name"]=json!("UNKNOWN_FINAL_FILE_SECRET.gcm");
         let final_error=validate_retained_report(&json!({"kind":"retained","facts":raw}),&epoch,&"a".repeat(64)).unwrap_err();
         let mut diagnostic=None;
         let code=retain_review_failure(final_error,&mut diagnostic);
-        let owner_loss=json!({"effectFailureCode":code,"admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic)});
+        let owner_loss=json!({"effectFailureCode":code,"primaryFailure":diagnostic,"admissionFailure":diagnostic.as_ref().and_then(review_admission_failure)});
         assert_eq!(owner_loss["effectFailureCode"],"key_files");
         assert_eq!(owner_loss["admissionFailure"]["site"],"retained_decode");assert_eq!(owner_loss["admissionFailure"]["guard"],"key_files");
         assert_eq!(owner_loss["admissionFailure"]["summary"]["keyFiles"],2);assert!(!owner_loss.to_string().contains("UNKNOWN_FINAL_FILE_SECRET"));
         opened.database["quiescence"]["locale"]=json!(1);let admission=empty.first_open_admission(&constructor,&opened,10001);
         let primary=empty.admitted_first_open(&constructor,&opened,10001,&admission).unwrap_err();
         let mut earliest=None;assert_eq!(retain_review_failure(primary,&mut earliest),"locale");
-        retain_review_failure(diagnostic.take().unwrap(),&mut earliest);
-        let retained=json!(earliest.as_ref().and_then(admission_diagnostic));
-        assert_eq!(retained["site"],"first_open_quiescence");assert_eq!(retained["guard"],"locale");assert!(retained["summary"].is_null());
+        let later=io::Error::new(io::ErrorKind::PermissionDenied,"UNKNOWN_LATER_PRIVATE_DETAIL");retain_review_failure(later,&mut earliest);
+        let retained=earliest.unwrap();
+        assert_eq!(retained["io_kind"],"other");assert_eq!(retained["admissionFailure"]["site"],"first_open_quiescence");assert_eq!(retained["admissionFailure"]["guard"],"locale");assert!(retained["admissionFailure"]["summary"].is_null());
+        assert!(retained["source_file"].is_null());assert!(retained["source_line"].is_null());
+        assert!(!retained.to_string().contains("UNKNOWN_LATER_PRIVATE_DETAIL"));
     }
     #[test]
     fn pre_private_database_existence_schema_global_and_orphan_changes_are_not_startup_exceptions() {
