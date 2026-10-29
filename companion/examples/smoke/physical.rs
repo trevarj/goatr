@@ -796,6 +796,58 @@ struct RetainedFacts {
     aliases:Vec<String>, alias_sha256:String, service_requested:bool, service_requested_present:bool, run_label_collision:bool, connector:Value,
     database:Value, orphans:Value, key_files:Value,
 }
+#[derive(Debug,Serialize)]
+struct AdmissionFailure { site:&'static str, guard:&'static str, summary:Option<Value> }
+impl std::fmt::Display for AdmissionFailure {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {write!(f,"{}: {}",self.site,self.guard)}
+}
+impl std::error::Error for AdmissionFailure {}
+fn admission_failure(site:&'static str,guard:&'static str,mut error:io::Error,summary:Option<Value>)->io::Error {
+    if let Some(closed)=error.get_mut().and_then(|error|error.downcast_mut::<AdmissionFailure>()) {
+        if summary.is_some(){closed.summary=summary;}
+        return error;
+    }
+    io::Error::new(error.kind(),AdmissionFailure {site,guard,summary})
+}
+fn admission_diagnostic(error:&io::Error)->Option<&AdmissionFailure> {error.get_ref()?.downcast_ref::<AdmissionFailure>()}
+fn retain_review_failure(error:io::Error,diagnostic:&mut Option<io::Error>)->&'static str {
+    let code=blocker(&error);
+    if diagnostic.is_none()&&admission_diagnostic(&error).is_some(){*diagnostic=Some(error);}
+    code
+}
+fn first_open_admission_result(admission:io::Result<()>,publication:io::Result<()>,mut summary:Value)->io::Result<()> {
+    if let Err(error)=publication {
+        summary["publicationFailure"]=json!({"site":"first_open_publication","guard":"admission_summary"});
+        return Err(admission_failure("first_open_publication","admission_summary",admission.err().unwrap_or(error),Some(summary)));
+    }
+    admission
+}
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+struct RetainedDecodeSummary {
+    schema_is_one:bool, database_exists:Option<bool>, hosts:Option<usize>, preferences:Option<usize>,
+    aliases:Option<usize>, orphans:Option<usize>, key_files:Option<usize>, service_requested:Option<bool>, service_requested_present:Option<bool>,
+}
+fn retained_decode_summary(value:&Value)->RetainedDecodeSummary {
+    // ponytail: capture only scalars before validation; allocate diagnostic JSON only on rejection.
+    RetainedDecodeSummary {schema_is_one:value["schema"]==1,database_exists:value["databaseExists"].as_bool(),
+        hosts:value["hosts"].as_array().map(Vec::len),preferences:value["preferences"].as_array().map(Vec::len),
+        aliases:value["aliases"].as_array().map(Vec::len),orphans:value["orphans"].as_array().map(Vec::len),
+        key_files:value["keyFiles"]["files"].as_array().map(Vec::len),
+        service_requested:value["serviceRequested"].as_bool(),service_requested_present:value["serviceRequestedPresent"].as_bool()}
+}
+#[derive(Serialize)]
+struct FirstOpenAdmission {
+    transition:[(&'static str,bool);12], quiescence:[(&'static str,bool);18], key_material:[(&'static str,bool);5],
+}
+impl FirstOpenAdmission {
+    fn require(site:&'static str,checks:&[(&'static str,bool)])->io::Result<()> {
+        if let Some((guard,_))=checks.iter().find(|(_,passed)|!*passed) {
+            return Err(admission_failure(site,guard,failure("physical first-open admission rejected"),None));
+        }
+        Ok(())
+    }
+}
 fn digest_text(text:&str) -> String {
     use sha2::{Digest,Sha256};
     hex(&Sha256::digest(text.as_bytes()))
@@ -823,59 +875,77 @@ impl RetainedFacts {
         }
         Ok(())
     }
-    fn admitted_first_open(&self,constructor:&Self,opened:&Self,uid:u32)->io::Result<()> {
-        self.constructor_ready(constructor,uid)?;
+    fn first_open_admission(&self,constructor:&Self,opened:&Self,uid:u32)->FirstOpenAdmission {
+        let files=opened.key_files["files"].as_array();
+        let endpoint=files.and_then(|files|files.iter().find(|file|file["name"]=="goatr.installation.endpoint.gcm"));
+        let marker=files.and_then(|files|files.iter().find(|file|file["name"]=="goatr.installation.endpoint.gcm.initialized"));
+        FirstOpenAdmission {
+            transition:[("database_exists",opened.database_exists),("hosts_empty",opened.hosts.is_empty()),
+                ("orphans_empty",opened.orphans.as_array().is_some_and(Vec::is_empty)),("preferences_empty",opened.preferences.is_empty()),
+                ("service_not_requested",!opened.service_requested),("service_key_absent",!opened.service_requested_present),
+                ("run_label_absent",!opened.run_label_collision),("connector_unchanged",opened.connector==self.connector),
+                ("directory_unchanged",opened.key_files["directory"]==constructor.key_files["directory"]),
+                ("one_alias",opened.aliases.len()==1),("endpoint_alias",opened.aliases.first().map(String::as_str)==Some("goatr.installation.endpoint")),
+                ("alias_fingerprint",opened.alias_sha256==digest_text("goatr.installation.endpoint"))],
+            quiescence:DB8_QUIESCENCE.map(|name|(name,opened.database["quiescence"][name].as_u64()==Some(0))),
+            key_material:[("two_files",files.is_some_and(|files|files.len()==2)),("endpoint_file",endpoint.is_some()),("endpoint_marker",marker.is_some()),
+                ("owned_uid",files.is_some_and(|files|files.iter().all(|file|file["uid"].as_u64()==Some(u64::from(uid))))),
+                ("marker_gai1",marker.is_some_and(|file|file["sha256"]==digest_text("GAI1")))],
+        }
+    }
+    fn admitted_first_open(&self,constructor:&Self,opened:&Self,uid:u32,admission:&FirstOpenAdmission)->io::Result<()> {
+        self.constructor_ready(constructor,uid).map_err(|error|admission_failure("first_open_validation","constructor",error,None))?;
         // The raw reader admits only android_metadata globally; every other row has a validated host/orphan group.
-        if !opened.database_exists||!opened.hosts.is_empty()||!opened.orphans.as_array().is_some_and(Vec::is_empty)||!opened.preferences.is_empty()
-            ||opened.service_requested||opened.service_requested_present||opened.run_label_collision||opened.connector!=self.connector
-            ||opened.key_files["directory"]!=constructor.key_files["directory"]||opened.aliases.len()!=1
-            ||opened.aliases.first().map(String::as_str)!=Some("goatr.installation.endpoint")
-            ||opened.alias_sha256!=digest_text("goatr.installation.endpoint")
-            ||DB8_QUIESCENCE.iter().any(|name|opened.database["quiescence"][*name].as_u64()!=Some(0)) {
-            return Err(failure("physical first open is not the exact empty DB8/locale plus installation endpoint transition"));
-        }
-        validate_database(&opened.database,true)?;validate_key_files(&opened.key_files)?;
-        let files=key_file_index(&opened.key_files)?;
-        if files.len()!=2||!files.contains_key("goatr.installation.endpoint.gcm")||!files.contains_key("goatr.installation.endpoint.gcm.initialized")
-            ||files.values().any(|file|file["uid"].as_u64()!=Some(u64::from(uid)))
-            ||files["goatr.installation.endpoint.gcm.initialized"]["sha256"]!=digest_text("GAI1") {
-            return Err(failure("physical first open contains missing, foreign or unrelated endpoint material"));
-        }
-        Ok(())
+        FirstOpenAdmission::require("first_open_transition",&admission.transition)?;
+        FirstOpenAdmission::require("first_open_quiescence",&admission.quiescence)?;
+        validate_database(&opened.database,true).map_err(|error|admission_failure("first_open_validation","database",error,None))?;
+        validate_key_files(&opened.key_files).map_err(|error|admission_failure("first_open_validation","key_files",error,None))?;
+        FirstOpenAdmission::require("first_open_key_material",&admission.key_material)
     }
     fn decode(value:&Value) -> io::Result<Self> {
+        let mut guard="schema";
+        let result=(|| {
         let facts=Self::deserialize(value).map_err(|_| failure("physical raw retained baseline has an unknown schema"))?;
+        guard="bounds";
         if facts.schema!=1 || facts.hosts.len()>129 || facts.preferences.len()>8192 || facts.aliases.len()>1026 || !hex64(&facts.alias_sha256) { return Err(failure("physical retained baseline is unbounded")); }
+        guard="hosts";
         let mut hosts=BTreeSet::new();
         for host in &facts.hosts {
             if !hex64(&host.host)||host.device.as_ref().is_some_and(|device|uuid_text(device).is_err())||!hex64(&host.metadata_sha256)||!hex64(&host.rows_sha256)||!hosts.insert(host.host.as_str())||!matches!(host.mode.as_str(),"Persistent"|"Ntfy")||host.registration_sha256.as_ref().is_some_and(|hash|!hex64(hash))||host.key_aliases.len()>8||host.key_aliases.iter().any(|alias|!facts.aliases.contains(alias)) { return Err(failure("physical retained host baseline is invalid")); }
         }
+        guard="preferences";
         for preference in &facts.preferences { if !hex64(&preference.key_sha256)||!hex64(&preference.value_sha256)||preference.file.len()>128 { return Err(failure("physical retained preference baseline is invalid")); } }
-        validate_database(&facts.database,facts.database_exists)?;
-        validate_key_files(&facts.key_files)?;
-        let files=key_file_index(&facts.key_files)?;
+        guard="database";validate_database(&facts.database,facts.database_exists)?;
+        guard="key_files";validate_key_files(&facts.key_files)?;
+        let files=key_file_index(&facts.key_files)?;guard="file_wrapping_alias";
         for name in files.keys() {
             let alias=goatr_key_alias(name).ok_or_else(||failure("physical encrypted key namespace is invalid"))?;
             if !facts.aliases.iter().any(|present|present==alias){return Err(failure("physical encrypted file has no original wrapping alias"));}
         }
+        guard="alias_material_pair";
         for alias in &facts.aliases {
             if goatr_key_alias(&format!("{alias}.gcm")).is_some()
                 &&(!files.contains_key(format!("{alias}.gcm").as_str())||!files.contains_key(format!("{alias}.gcm.initialized").as_str())) {
                 return Err(failure("physical original wrapping alias has missing encrypted material"));
             }
         }
+        guard="orphans";
         let mut orphans=BTreeSet::new();
         for row in facts.orphans.as_array().filter(|rows|rows.len()<=256).ok_or_else(||failure("physical orphan-row index is unbounded"))? {
             object(row,&["host","rowsSha256","rowCount"])?;let host=string(row,"host")?;
             if !hex64(host)||hosts.contains(host)||!orphans.insert(host)||!hex64(string(row,"rowsSha256")?){return Err(failure("physical orphan logical rows are invalid or hidden by a host"));}
             unsigned(row,"rowCount")?;
         }
+        guard="service_request";
         let service=facts.service_fact();
         if service.is_some()!=facts.service_requested_present||service.is_some_and(|fact|fact.kind!="boolean"||fact.value_sha256!=digest_text(if facts.service_requested{"true"}else{"false"}))
             ||service.is_none()&&facts.service_requested {return Err(failure("physical service request boolean/type/presence facts disagree"));}
-        validate_connector(&facts.connector)?;
+        guard="connector";validate_connector(&facts.connector)?;
+        guard="connector_wrapping_alias";
         if ["registrations","tokens","keys"].iter().any(|table|!facts.connector[*table].as_array().unwrap().is_empty())&&!facts.aliases.iter().any(|alias|alias=="UnifiedPush") {return Err(failure("physical retained connector material has no original wrapping alias; never generate a replacement"));}
         Ok(facts)
+        })();
+        result.map_err(|error|admission_failure("retained_decode",guard,error,None))
     }
     fn service_fact(&self) -> Option<&PreferenceFact> {
         let key=digest_text("service_requested");
@@ -1242,6 +1312,12 @@ fn validate_report(value:&Value,epoch:&ProductEpoch,host:&str) -> io::Result<()>
     }
     Ok(())
 }
+fn validate_retained_report(value:&Value,epoch:&ProductEpoch,host:&str)->io::Result<()> {
+    let summary=retained_decode_summary(&value["facts"]);
+    let result=if value["kind"]!="retained"{Err(failure("physical retained query/result kind mismatch"))}
+        else{validate_report(value,epoch,host)};
+    result.map_err(|error|admission_failure("retained_report","envelope_or_kind",error,Some(json!(summary))))
+}
 
 struct Query { fields:Value, expected:&'static str, answer:oneshot::Sender<io::Result<(Value,Value)>> }
 struct Observer { epoch:ProductEpoch, sender:mpsc::Sender<Query>, task:JoinHandle<io::Result<()>>, instrumentation:ProductInstrumentation }
@@ -1293,7 +1369,13 @@ impl Observer {
                 let (mut stream,peer)=timeout(Duration::from_secs(20),listener.accept()).await.map_err(|_|failure("physical long observer stopped reporting"))??;
                 if !peer.ip().is_loopback(){return Err(failure("physical control peer is not loopback"));}
                 let (report,witness)=authenticated_report(&mut stream,&original,&run,sequence).await?;
-                validate_report(&report,&original,&host)?;
+                if pending.as_ref().is_some_and(|query|query.expected=="retained") {
+                    if let Err(error)=validate_retained_report(&report,&original,&host) {
+                        // Preserve the closed rejection before the same original owner ends; never send its raw reply.
+                        if let Some(query)=pending.take(){let _=query.answer.send(Err(error));}
+                        return Err(failure("physical retained report was rejected"));
+                    }
+                }else{validate_report(&report,&original,&host)?;}
                 let kind=string(&report,"kind")?;
                 if let Some(query)=pending.take() {
                     if kind!=query.expected{return Err(failure("physical observer query/result kind mismatch"));}
@@ -2425,6 +2507,7 @@ fn finish_authorization(input_pin_failed:bool,expected:&str)->Option<&str> {
     (!input_pin_failed).then_some(expected)
 }
 fn blocker(error:&io::Error) -> &'static str {
+    if let Some(diagnostic)=admission_diagnostic(error){return diagnostic.guard;}
     match error.kind() {
         io::ErrorKind::NotFound=>"required_original_input_unavailable",
         io::ErrorKind::PermissionDenied=>"original_authority_unavailable",
@@ -2566,10 +2649,18 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path) -> io::Result<()>
         // endpointOwned is claimed before key creation; callback follows durable keys and bind.
         let initial=matrix.wait_snapshot("product-normal-first-open-complete",None,Duration::from_secs(45),|snapshot|snapshot["foreground"]==true&&snapshot["keeper"]["endpointOwned"]==true&&snapshot["keeper"]["networkCallback"]==true).await?;
         matrix.baseline_ui=Some(initial["ui"].clone());matrix.baseline_network=Some(initial["network"].clone());
-        let first_open=matrix.observer.retained().await?;
-        matrix.fresh_baseline.admitted_first_open(&ready,&first_open,product_record.uid)?;
-        if matrix.first_open.is_some(){return Err(failure("physical first-open reference cannot be refreshed"));}
-        matrix.record("first-open-reference",&json!({"originalFreshBaseline":matrix.fresh_baseline,"firstOpen":first_open,"beforeCameraPairing":true,"measuredStartup":initial["keeper"]}))?;
+        matrix.last_stage="first-open-retained-read";
+        let first_open=matrix.observer.retained().await.map_err(|error|admission_failure("first_open_retained","read",error,None))?;
+        let admission=matrix.fresh_baseline.first_open_admission(&ready,&first_open,product_record.uid);
+        let summary=json!({"beforeValidation":true,"admission":admission});
+        matrix.last_stage="first-open-admission";
+        let publication=matrix.record("first-open-admission",&summary);
+        let admitted=matrix.fresh_baseline.admitted_first_open(&ready,&first_open,product_record.uid,&admission);
+        first_open_admission_result(admitted,publication,summary)?;
+        if matrix.first_open.is_some(){return Err(admission_failure("first_open_publication","reference_already_set",failure("physical first-open reference cannot be refreshed"),None));}
+        matrix.last_stage="first-open-reference-publication";
+        matrix.record("first-open-reference",&json!({"originalFreshBaseline":matrix.fresh_baseline,"firstOpen":first_open,"beforeCameraPairing":true,"measuredStartup":initial["keeper"]}))
+            .map_err(|error|admission_failure("first_open_publication","reference",error,None))?;
         matrix.first_open=Some(first_open);
         matrix.camera_pairing().await?;
         matrix.retained_keeper_baseline=Some(matrix.observer.keeper().await?);
@@ -3124,7 +3215,8 @@ async fn wait_original_process_absent(adb:&PhysicalAdb,epoch:&ProductEpoch) -> i
 }
 impl Matrix {
     async fn review_and_finish(mut self,result:io::Result<()>) -> io::Result<()> {
-        let mut passed=result.is_ok();let mut code=result.as_ref().err().map(blocker).unwrap_or("matrix_effects_proved_pending_owned_finish");
+        let mut passed=result.is_ok();let mut diagnostic=None;
+        let mut code=match result {Ok(())=>"matrix_effects_proved_pending_owned_finish",Err(error)=>retain_review_failure(error,&mut diagnostic)};
         let expected=format!("FINISH {} {} {}",self.run.0,self.observer.epoch.pid,self.observer.epoch.start);
         let mut announced=false;
         loop {
@@ -3139,20 +3231,22 @@ impl Matrix {
             if self.observer.task.is_finished()||self.observer.instrumentation.task.is_finished() {
                 let lost=json!({"runId":self.run,"gate":"physical-mvp","status":"failed","stage":self.last_stage,"code":"original_observer_lost_or_unknown_before_authorized_finish",
                     "originalPid":self.observer.epoch.pid,"originalStart":self.observer.epoch.start,"productApkSha256":self.product_sha,
+                    "effectFailureCode":code,"admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic),
                     "recreatedOrAdopted":false,"nativeResourcesAndFlagsNotReset":true,"runtimeAcceptanceClaim":false});
                 if let Err(error)=write_json(&self.evidence.join(format!("physical-observer-lost-{}.json",Uuid::random().0)),&lost) {
-                    let _=writeln!(io::stderr(),"{}",json!({"gate":"physical-mvp","status":"failed","code":"owner_lost_evidence_write_failed","io":blocker(&error)}));
+                    let _=writeln!(io::stderr(),"{}",json!({"gate":"physical-mvp","status":"failed","code":"owner_lost_evidence_write_failed","io":blocker(&error),"admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic)}));
                 }
                 return Err(failure("physical original product observer was lost/unknown before cleanup authorization; permanent failure, no replacement"));
             }
             if !announced {
                 let state=json!({"runId":self.run,"gate":"physical-mvp","status":if passed{"effects_proved_owner_retained"}else{"blocked_owner_retained"},"stage":self.last_stage,"code":code,
                     "originalPid":self.observer.epoch.pid,"originalStart":self.observer.epoch.start,"productApkSha256":self.product_sha,
+                    "admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic),
                     "native":self.stock.desktop.process,"companion":self.stock.serve.process,"ownedStart":self.owned_start,"serviceKeyRestored":self.service_key_restored,
                     "cleanupAuthorization":finish_authorization(self.input_pin_failed,&expected),
                     "warning":if self.input_pin_failed{"Original frozen input authority failed. This FINISH is rejected; retain this same observer/resources. Any cleanup requires separate explicit human ownership review, never automatic termination, restart or pin adoption."}else{"Review exact original PID/start/artifacts and retained flags/resources. This command authorizes ONE observer Finish; Android may kill that instrumented product PID. It does NOT StopDelivery, reset preferences, restore an uncertain flag, kill native work or erase receipts."},
                     "coldOrFgsSoleLivenessClaim":false,"ifControllerIsExternallyLostBeforeFinish":"owner retention becomes unknown, never acceptance"});
-                if let Err(error)=self.record("owner-retained-awaiting-explicit-review",&state){passed=false;code="retained_owner_evidence_write_failed";let _=writeln!(io::stderr(),"{}",json!({"gate":"physical-mvp","status":"blocked_owner_retained","io":blocker(&error)}));}
+                if let Err(error)=self.record("owner-retained-awaiting-explicit-review",&state){passed=false;code="retained_owner_evidence_write_failed";let _=writeln!(io::stderr(),"{}",json!({"gate":"physical-mvp","status":"blocked_owner_retained","io":blocker(&error),"admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic)}));}
                 if writeln!(io::stdout(),"{state}").is_err(){passed=false;code="retained_owner_console_unavailable";}
                 announced=true;
             }
@@ -3183,7 +3277,7 @@ impl Matrix {
                             }
                             Ok::<(),io::Error>(())
                         }.await;
-                        if let Err(error)=final_check {passed=false;code=blocker(&error);announced=false;continue;}
+                        if let Err(error)=final_check {passed=false;code=retain_review_failure(error,&mut diagnostic);announced=false;continue;}
                     }
                     let original=self.observer.epoch.clone();
                     let intent=json!({"runId":self.run,"originalPid":original.pid,"originalStart":original.start,"productApkSha256":self.product_sha,
@@ -4151,12 +4245,27 @@ mod tests {
     }
     #[test]
     fn first_open_consumer_pins_only_exact_empty_db_locale_and_endpoint_before_private_creation() {
-        let (empty,constructor,opened)=fresh_transition_facts();empty.admitted_first_open(&constructor,&opened,10001).unwrap();
+        let (empty,constructor,opened)=fresh_transition_facts();
+        let admission=empty.first_open_admission(&constructor,&opened,10001);
+        empty.admitted_first_open(&constructor,&opened,10001,&admission).unwrap();
+        assert!(admission.transition.iter().chain(&admission.quiescence).chain(&admission.key_material).all(|(_,passed)|*passed));
         for name in DB8_QUIESCENCE {
             let mut changed=opened.clone();changed.database["quiescence"][name]=json!(1);
-            assert!(empty.admitted_first_open(&constructor,&changed,10001).is_err(),"{name}");
+            let admission=empty.first_open_admission(&constructor,&changed,10001);
+            let error=empty.admitted_first_open(&constructor,&changed,10001,&admission).unwrap_err();
+            let diagnostic=admission_diagnostic(&error).unwrap();
+            assert_eq!((diagnostic.site,diagnostic.guard),("first_open_quiescence",name));assert_eq!(blocker(&error),name);
         }
-        for family in ["missing-db","host","orphan","preference","request","connector","directory","alias","file","marker","uid","schema"] {
+        for (family,site,guard) in [
+            ("missing-db","first_open_transition","database_exists"),("host","first_open_transition","hosts_empty"),
+            ("orphan","first_open_transition","orphans_empty"),("preference","first_open_transition","preferences_empty"),
+            ("request","first_open_transition","service_key_absent"),("service-true","first_open_transition","service_not_requested"),
+            ("label","first_open_transition","run_label_absent"),("connector","first_open_transition","connector_unchanged"),
+            ("directory","first_open_transition","directory_unchanged"),("alias","first_open_transition","one_alias"),
+            ("alias-name","first_open_transition","endpoint_alias"),("alias-hash","first_open_transition","alias_fingerprint"),
+            ("file","first_open_key_material","two_files"),("marker","first_open_key_material","marker_gai1"),
+            ("uid","first_open_key_material","owned_uid"),("schema","first_open_validation","database"),
+        ] {
             let mut changed=opened.clone();
             match family {
                 "missing-db"=>changed.database_exists=false,
@@ -4164,16 +4273,23 @@ mod tests {
                 "orphan"=>changed.orphans=json!([{"host":"b".repeat(64),"rowsSha256":"c".repeat(64),"rowCount":1}]),
                 "preference"=>changed.preferences.push(PreferenceFact {file:"unexpected".to_owned(),key_sha256:"1".repeat(64),kind:"boolean".to_owned(),value_sha256:digest_text("false")}),
                 "request"=>changed.service_requested_present=true,
+                "service-true"=>changed.service_requested=true,
+                "label"=>changed.run_label_collision=true,
                 "connector"=>changed.connector=empty_connector(true),
                 "directory"=>changed.key_files["directory"]["inode"]=json!(99),
                 "alias"=>changed.aliases.push("foreign".to_owned()),
+                "alias-name"=>changed.aliases[0]="foreign".to_owned(),
+                "alias-hash"=>changed.alias_sha256="0".repeat(64),
                 "file"=>changed.key_files["files"].as_array_mut().unwrap().clear(),
                 "marker"=>changed.key_files["files"][1]["sha256"]=json!("0".repeat(64)),
                 "uid"=>changed.key_files["files"][0]["uid"]=json!(10002),
                 "schema"=>changed.database["schemaSha256"]=Value::Null,
                 _=>unreachable!(),
             }
-            assert!(empty.admitted_first_open(&constructor,&changed,10001).is_err(),"{family}");
+            let admission=empty.first_open_admission(&constructor,&changed,10001);
+            let error=empty.admitted_first_open(&constructor,&changed,10001,&admission).unwrap_err();
+            let diagnostic=admission_diagnostic(&error).unwrap();
+            assert_eq!((diagnostic.site,diagnostic.guard),(site,guard),"{family}");assert_eq!(blocker(&error),guard);
         }
         let private="a".repeat(64);let created=with_private(&opened,&private);
         opened.preserved_with_private_host(&created,&private,false,false).unwrap();
@@ -4192,6 +4308,96 @@ mod tests {
             assert!(opened.preserved_with_private_host(&changed,&private,false,false).is_err(),"{family}");
         }
         assert!(!empty.database_exists);assert!(constructor.aliases.is_empty());
+    }
+    #[test]
+    fn retained_and_first_open_diagnostics_reject_at_the_real_boundary_without_exporting_foreign_material() {
+        let (empty,constructor,opened)=fresh_transition_facts();let (epoch,_,_)=observed_shell();
+        let valid=json!({"kind":"retained","facts":opened});validate_retained_report(&valid,&epoch,&"a".repeat(64)).unwrap();
+        let foreign="UNKNOWN_PREFERENCE_FILE_SECRET";let foreign_alias="UNKNOWN_ALIAS_SECRET";let foreign_file="UNKNOWN_KEY_FILE_SECRET.gcm";
+        let foreign_hash="9".repeat(64);let mut raw=valid["facts"].clone();
+        raw["preferences"]=json!([{"file":foreign,"keySha256":foreign_hash,"type":"string","valueSha256":foreign_hash}]);
+        raw["aliases"].as_array_mut().unwrap().push(json!(foreign_alias));
+        for guard in ["schema","preferences","key_files"] {
+            let mut changed=raw.clone();
+            match guard {
+                "schema"=>changed["UNKNOWN_FIELD_SECRET"]=json!(foreign),
+                "preferences"=>changed["preferences"][0]["valueSha256"]=json!(foreign),
+                "key_files"=>changed["keyFiles"]["files"][0]["name"]=json!(foreign_file),
+                _=>unreachable!(),
+            }
+            let error=validate_retained_report(&json!({"kind":"retained","facts":changed}),&epoch,&"a".repeat(64)).unwrap_err();
+            let diagnostic=admission_diagnostic(&error).unwrap();
+            assert_eq!((diagnostic.site,diagnostic.guard),("retained_decode",guard));assert_eq!(blocker(&error),guard);
+            let projection=json!(diagnostic);
+            assert_eq!(projection["summary"],json!({"schemaIsOne":true,"databaseExists":true,"hosts":0,"preferences":1,"aliases":2,
+                "orphans":0,"keyFiles":2,"serviceRequested":false,"serviceRequestedPresent":false}));
+            let exported=projection.to_string();let message=error.to_string();
+            for secret in [foreign,foreign_alias,foreign_file,foreign_hash.as_str(),"UNKNOWN_FIELD_SECRET"] {
+                assert!(!exported.contains(secret));assert!(!message.contains(secret));
+            }
+        }
+        let unadmitted=RetainedFacts::decode(&raw).unwrap();let admission=empty.first_open_admission(&constructor,&unadmitted,10001);
+        let projection=json!(admission);assert_eq!(projection["transition"][3],json!(["preferences_empty",false]));
+        let error=empty.admitted_first_open(&constructor,&unadmitted,10001,&admission).unwrap_err();
+        let diagnostic=admission_diagnostic(&error).unwrap();assert_eq!((diagnostic.site,diagnostic.guard),("first_open_transition","preferences_empty"));
+        let exported=projection.to_string();let failure_export=json!(diagnostic).to_string();
+        for secret in [foreign,foreign_alias,foreign_hash.as_str()] {assert!(!exported.contains(secret));assert!(!failure_export.contains(secret));}
+    }
+    #[test]
+    fn first_open_rejection_survives_real_summary_publication_failure_without_admitting_the_reference() {
+        let root=fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("goatr-first-open-publication-{}",Uuid::random().0));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        for (rejected,publication_failed) in [(false,false),(true,false),(false,true),(true,true)] {
+            let (empty,constructor,mut opened)=fresh_transition_facts();
+            if rejected{opened.database["quiescence"]["locale"]=json!(1);}
+            let admission=empty.first_open_admission(&constructor,&opened,10001);
+            let summary=json!({"beforeValidation":true,"admission":admission});
+            let path=root.join(format!("UNKNOWN_PUBLICATION_PATH_SECRET-{rejected}-{publication_failed}.json"));
+            if publication_failed {
+                let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();
+                file.write_all(b"UNKNOWN_PREEXISTING_CONTENT_SECRET").unwrap();
+            }
+            let publication=write_json(&path,&summary);assert_eq!(publication.is_err(),publication_failed);
+            let admitted=empty.admitted_first_open(&constructor,&opened,10001,&admission);
+            let result=first_open_admission_result(admitted,publication,summary);
+            if rejected||publication_failed {
+                let error=result.unwrap_err();let diagnostic=admission_diagnostic(&error).unwrap();
+                let expected=if rejected{("first_open_quiescence","locale")}else{("first_open_publication","admission_summary")};
+                assert_eq!((diagnostic.site,diagnostic.guard),expected);
+                if publication_failed {
+                    let summary=diagnostic.summary.as_ref().unwrap();
+                    assert_eq!(summary["publicationFailure"],json!({"site":"first_open_publication","guard":"admission_summary"}));
+                    assert_eq!(summary["admission"]["quiescence"][17],json!(["locale",!rejected]));
+                }else{assert!(diagnostic.summary.is_none());}
+                let exported=json!(diagnostic).to_string();let message=error.to_string();
+                for secret in ["UNKNOWN_PUBLICATION_PATH_SECRET","UNKNOWN_PREEXISTING_CONTENT_SECRET"] {assert!(!exported.contains(secret));assert!(!message.contains(secret));}
+            }else{result.unwrap();}
+            if publication_failed{assert_eq!(fs::read(&path).unwrap(),b"UNKNOWN_PREEXISTING_CONTENT_SECRET");}
+            else {
+                let receipt:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                assert_eq!(receipt["beforeValidation"],true);assert_eq!(receipt["admission"],json!(admission));
+            }
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn retained_review_consumer_keeps_final_decode_diagnostic_after_success_and_never_replaces_the_primary() {
+        let (empty,constructor,mut opened)=fresh_transition_facts();let (epoch,_,_)=observed_shell();
+        let mut raw=json!(opened);raw["keyFiles"]["files"][0]["name"]=json!("UNKNOWN_FINAL_FILE_SECRET.gcm");
+        let final_error=validate_retained_report(&json!({"kind":"retained","facts":raw}),&epoch,&"a".repeat(64)).unwrap_err();
+        let mut diagnostic=None;
+        let code=retain_review_failure(final_error,&mut diagnostic);
+        let owner_loss=json!({"effectFailureCode":code,"admissionFailure":diagnostic.as_ref().and_then(admission_diagnostic)});
+        assert_eq!(owner_loss["effectFailureCode"],"key_files");
+        assert_eq!(owner_loss["admissionFailure"]["site"],"retained_decode");assert_eq!(owner_loss["admissionFailure"]["guard"],"key_files");
+        assert_eq!(owner_loss["admissionFailure"]["summary"]["keyFiles"],2);assert!(!owner_loss.to_string().contains("UNKNOWN_FINAL_FILE_SECRET"));
+        opened.database["quiescence"]["locale"]=json!(1);let admission=empty.first_open_admission(&constructor,&opened,10001);
+        let primary=empty.admitted_first_open(&constructor,&opened,10001,&admission).unwrap_err();
+        let mut earliest=None;assert_eq!(retain_review_failure(primary,&mut earliest),"locale");
+        retain_review_failure(diagnostic.take().unwrap(),&mut earliest);
+        let retained=json!(earliest.as_ref().and_then(admission_diagnostic));
+        assert_eq!(retained["site"],"first_open_quiescence");assert_eq!(retained["guard"],"locale");assert!(retained["summary"].is_null());
     }
     #[test]
     fn pre_private_database_existence_schema_global_and_orphan_changes_are_not_startup_exceptions() {
