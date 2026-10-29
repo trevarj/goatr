@@ -265,6 +265,12 @@ add workspace/group fallback, guessed atomic fencing, signals or a no-op Close.
 The owner is AFK: do not ask further questions; choose the recommended safe,
 conservative option and continue. Existing authorization boundaries remain in
 force. Record genuinely unreachable prerequisites while finishing reachable work.
+The owner additionally requires unattended companion launch, connected-device
+control and pairing through the genuine private code/Paste/preview/Confirm flow.
+QR/camera acceptance and manual terminal/device acknowledgment barriers are
+deferred or superseded for this run, never marked passed. Use actual measured
+effects and original-object-reviewed automated observer Finish; no fake `yes`,
+secret logging, input replay, native changes or secure-keyguard bypass.
 
 
 ## Verification and handoff discipline
@@ -278,8 +284,9 @@ Before a full physical-MVP attempt or launcher handoff, exercise all
 source-derived runtime socket paths with owned host-only bind checks and run
 the repeatable host preflight. Wrapper syntax and refusal tests are not
 functional proof. Perform these checks autonomously before consuming fresh
-phone state; keep private pairing output and real human actions outside
-transcript-recorded tools.
+phone state. Keep pairing codes in bounded private transport, never argv,
+environment, transcripts, screenshots or evidence; export only closed sanitized
+action/effect facts. Automation does not waive ownership or measured effects.
 
 Before tuning, inspect the selected compiler/profile and host/cgroup memory
 pressure. Keep the existing Cargo target/incremental cache; do not clean, move
