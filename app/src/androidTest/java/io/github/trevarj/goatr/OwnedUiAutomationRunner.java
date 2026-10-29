@@ -528,7 +528,7 @@ public final class OwnedUiAutomationRunner extends Instrumentation {
         if(request==null||request.physical==null)return null;
         try {
             PhysicalSelectors selected=request.physical;
-            File directory=releaseDirectory(getContext().getCacheDir(),request.runId);
+            File directory=releaseDirectory(getContext().getCacheDir().getCanonicalFile(),request.runId);
             File file=new File(directory,"product-epoch.json");
             requireCondition(directory.getCanonicalFile().equals(directory)&&file.getCanonicalFile().equals(file)&&file.length()>=2&&file.length()<=131072,"physical_epoch_proof");
             android.system.StructStat stat=Os.lstat(file.getPath());
