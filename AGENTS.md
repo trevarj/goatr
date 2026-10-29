@@ -262,6 +262,13 @@ may be handed over for feedback with known failures disclosed; full clean builds
 and exhaustive acceptance belong to a later checkpoint. Keep identity,
 permission, privacy and no-replay protections intact. See `docs/STATUS.md`.
 
+Before a full physical-MVP attempt or launcher handoff, exercise all
+source-derived runtime socket paths with owned host-only bind checks and run
+the repeatable host preflight. Wrapper syntax and refusal tests are not
+functional proof. Perform these checks autonomously before consuming fresh
+phone state; keep private pairing output and real human actions outside
+transcript-recorded tools.
+
 Before tuning, inspect the selected compiler/profile and host/cgroup memory
 pressure. Keep the existing Cargo target/incremental cache; do not clean, move
 or recreate it during iteration. Companion dev/test builds use limited debug
