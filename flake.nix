@@ -56,6 +56,7 @@
           tools = [
             readGit
             pkgs.gnumake
+            pkgs.darkhttpd
             pkgs.nixfmt
             pkgs.cargo-ndk
             pkgs.cargo-audit

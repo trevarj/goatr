@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-.PHONY: format format-check smoke rust-check audit check build native android-bindings
+.PHONY: format format-check smoke rust-check audit check build native android-bindings studio
 
 format:
 	nixfmt flake.nix
@@ -37,3 +37,7 @@ native:
 # Run inside the Android Nix shell: Gradle never fetches or builds Rust.
 android-bindings:
 	bash ./gradlew :iroh-jvm:test :iroh-android:assembleDebug --dependency-verification strict --stacktrace
+
+# Local design review only; never serve the repository root.
+studio:
+	darkhttpd studio --addr 127.0.0.1 --port 4173

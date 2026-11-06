@@ -1,0 +1,108 @@
+Google Material Icons — static studio artwork
+Copyright 2014 Google Inc.
+
+Licensed under the Apache License, Version 2.0.
+Canonical license: https://www.apache.org/licenses/LICENSE-2.0
+Local complete license text (relative to this notice): ../reference/heeler/LICENSE
+Pinned upstream license: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/LICENSE
+Upstream repository: https://github.com/google/material-design-icons
+Frozen revision: 49d4db35df873165d6bd6ba09b063c7dafbac2f4
+
+Only the sixteen filled Material Icons listed below are included, as a fixed
+path-data table in studio/wireframes.js. There is no icon font, sprite, runtime
+fetch or external styling dependency. Existing repository attribution is retained
+in app/src/main/assets/material-icons-notice.txt and the root NOTICE.
+
+Modifications for this studio:
+- Reused seven local 24x24 Android VectorDrawable pathData strings unchanged.
+- Imported nine additional official 24x24 filled icons from the same revision.
+- Omitted upstream invisible canvas paths/rectangles and wrapper groups.
+- Converted bar_chart's three visible rectangles to equivalent closed subpaths:
+  (x=4,y=9,w=4,h=11), (x=16,y=13,w=4,h=7), (x=10,y=4,w=4,h=16).
+- Preserved push_pin's even-odd fill rule. Applied scene-local size, color,
+  translation and, for disclosure/directional variants, rotation at draw time.
+- Status indicators remain geometric circles, not imported icon artwork.
+
+Reused local artwork (source of the pathData in wireframes.js):
+
+add
+  Local: app/src/main/res/drawable/ic_material_add.xml
+  Local file SHA-256: 59bf4e6cceb0823be6bf7316f19ede23d82b081ea2d0c386bccb33ed808cabd9
+  Pinned upstream identity: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/content/add/materialicons/24px.svg
+
+arrow_back
+  Local: app/src/main/res/drawable/ic_material_arrow_back.xml
+  Local file SHA-256: b0149f7545324c805017f89e59cc582bda670fada57b69f88b37e0a9ca6e3308
+  Pinned upstream identity: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/navigation/arrow_back/materialicons/24px.svg
+
+filter_list
+  Local: app/src/main/res/drawable/ic_material_filter_list.xml
+  Local file SHA-256: 2a5d355e246ac0c33b5ab0071b0e58ddbbd92ede79b4c5910841a18911c91b54
+  Pinned upstream identity: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/content/filter_list/materialicons/24px.svg
+
+menu
+  Local: app/src/main/res/drawable/ic_material_menu.xml
+  Local file SHA-256: 98193208cd987874901ebfc9160eecc916bfae9a1472176d6444a92b724c6daf
+  Pinned upstream identity: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/navigation/menu/materialicons/24px.svg
+
+expand_more
+  Local: app/src/main/res/drawable/ic_material_expand_more.xml
+  Local file SHA-256: 4430e3116c7d8def8471f04791cfd33605c04c805baf493b54af1b07c1abdf5f
+  Pinned upstream identity: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/navigation/expand_more/materialicons/24px.svg
+
+terminal
+  Local: app/src/main/res/drawable/ic_material_terminal.xml
+  Local file SHA-256: 70515018f4dd23601da7fbf3392087d78f1c1ac78862a0f035cde002b75b030d
+  Pinned upstream identity: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/action/terminal/materialicons/24px.svg
+
+settings
+  Local: app/src/main/res/drawable/ic_material_settings.xml
+  Local file SHA-256: 225bba95fcac6512f3ce8d792d3a5424c2723593728a6d1279d34ed8f3ab1e8d
+  Pinned upstream identity: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/action/settings/materialicons/24px.svg
+
+New official artwork (SHA-256 is for the original upstream SVG bytes):
+
+dns
+  Source: src/action/dns/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/action/dns/materialicons/24px.svg
+  SHA-256: af6ac146ec9d8c9ceb67cefaa149b914eb6d7861a07de31db17c6f50117bfac5
+
+pan_tool
+  Source: src/action/pan_tool/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/action/pan_tool/materialicons/24px.svg
+  SHA-256: 392e846f0a873b6adbd84f78d5757db3b309aed4a44584713bdf3c799e144383
+
+warning
+  Source: src/alert/warning/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/alert/warning/materialicons/24px.svg
+  SHA-256: a9706960208156a1de89bbfca8abeffa8771ba9332fcb9605e277bfd8b4eb3b8
+
+call_split
+  Source: src/communication/call_split/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/communication/call_split/materialicons/24px.svg
+  SHA-256: 964fe8696578e14575e1312ff3c9f6d1a97403a11b2a81a660694ce56bcf3ce6
+
+push_pin
+  Source: src/content/push_pin/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/content/push_pin/materialicons/24px.svg
+  SHA-256: 93e72d0395250e7a75c702dc0df010e6756dded05ffcebe72bb9715788518a8f
+
+bar_chart
+  Source: src/editor/bar_chart/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/editor/bar_chart/materialicons/24px.svg
+  SHA-256: 5abe3390a29d11d9a3e2e212224d5196272a9072ae8bb76c963bf18fee4d5fe1
+
+keyboard
+  Source: src/hardware/keyboard/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/hardware/keyboard/materialicons/24px.svg
+  SHA-256: 22ad5a5d2fb0c78566cd6fa022544c5cdb6c8d71fefaef82dcd9c7918b57802b
+
+auto_awesome
+  Source: src/image/auto_awesome/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/image/auto_awesome/materialicons/24px.svg
+  SHA-256: 232622cbc42585d6c299ecc505e73f7d53cff9c76ef0d09432539b1f3fe5702e
+
+arrow_upward
+  Source: src/navigation/arrow_upward/materialicons/24px.svg
+  Pinned URL: https://raw.githubusercontent.com/google/material-design-icons/49d4db35df873165d6bd6ba09b063c7dafbac2f4/src/navigation/arrow_upward/materialicons/24px.svg
+  SHA-256: 473799e3e3c53c8f7417f80fe797cf6c2a55886cc415f8a7972b8e55abd82ec1

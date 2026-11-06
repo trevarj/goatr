@@ -1,0 +1,28 @@
+Heeler public reference images
+
+Source: https://github.com/ZingerLittleBee/Heeler
+Revision: 17e890481ae5a80e142395ab17974cee8655c6a4
+Asset base: https://raw.githubusercontent.com/ZingerLittleBee/Heeler/17e890481ae5a80e142395ab17974cee8655c6a4/docs/images/
+
+The 19 selected images are retained byte-for-byte, without re-encoding.
+Their original bytes are PNG (the source reader may display a WebP preview).
+Measured encoded dimensions and SHA-256 are recorded in studio/catalog.json.
+README.md establishes 12 iPhone images; docs/ipad-screenshots.md establishes
+7 iPad images. Raster sizes are not proof of logical iOS point dimensions.
+
+The pinned root LICENSE is Apache License 2.0 and is retained unmodified here.
+The public source tree contains no docs/images-specific license or NOTICE.
+Heeler names and screenshot branding identify the public reference only;
+this review retains Goatr identity and does not claim trademark rights.
+No public source checkout, private evidence, credentials or donor code is
+served. These screenshots establish reference intent, not observed runtime
+acceptance or proof of features introduced after their unknown capture date.
+
+Pixelmatch 8.0.0 is separately vendored under its ISC LICENSE.
+Revision: bddb61314b2db3ad7e6f1ec57b38bf2dbae81184
+Unmodified index.js SHA-256: 5b8583627704b4e1fe4fea472c283c8ca03d10ae4c94e5e029ea3b271a998ee6
+Unmodified LICENSE SHA-256: cfec0482fb785fe27e3b368a2d9e84bf7a61b275e83ec582bf288e98cd530bb0
+
+Run from checkout root: nix develop path:. -c make studio
+Only studio/ is served, at http://127.0.0.1:4173 (loopback).
+Do not expose the repository root or deploy this private review publicly.
