@@ -48,8 +48,21 @@ internal fun CompactRow(
         BoxWithConstraints(Modifier.fillMaxWidth().padding(12.dp)) {
             val stacked = maxWidth < 320.dp || LocalDensity.current.fontScale >= 1.3f
             val labels: @Composable () -> Unit = {
-                UiText(title, style = MaterialTheme.typography.titleMedium, minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                UiText(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                UiText(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    minLines = 1,
+                    maxLines = if (stacked) 3 else 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                UiText(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    minLines = 1,
+                    maxLines = if (stacked) 2 else 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             if (stacked) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {

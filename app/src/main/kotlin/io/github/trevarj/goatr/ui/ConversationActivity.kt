@@ -41,10 +41,11 @@ internal fun ToolActivitySummary(count: Int, expanded: Boolean, onToggle: ()->Un
 /** A single scrollable control rail reserves Stop outside its horizontal viewport. */
 @Composable
 internal fun ConversationControlRail(stopEnabled: Boolean, stopDisabledReason: String, onStop: ()->Unit, onMore: ()->Unit, controls: @Composable RowScope.()->Unit) {
-    Surface(color=MaterialTheme.colorScheme.surfaceVariant,modifier=Modifier.fillMaxWidth().testTag("composer_overflow")) {
+    val composerColors=LocalComposerColors.current
+    Surface(color=composerColors.surface,modifier=Modifier.fillMaxWidth().testTag("composer_overflow")) {
         Row(Modifier.fillMaxWidth().padding(horizontal=4.dp),verticalAlignment=Alignment.CenterVertically) {
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically,content=controls)
-            TextButton(onClick=onMore,modifier=Modifier.heightIn(min=48.dp).testTag("conversation_more"),contentPadding=PaddingValues(horizontal=8.dp)) {
+            TextButton(onClick=onMore,modifier=Modifier.heightIn(min=48.dp).testTag("conversation_more"),contentPadding=PaddingValues(horizontal=8.dp),colors=ButtonDefaults.textButtonColors(contentColor=composerColors.content)) {
                 GoatrIcon(MaterialGlyph.Menu,null)
                 Spacer(Modifier.width(4.dp))
                 UiText("More",style=MaterialTheme.typography.labelMedium)
@@ -62,7 +63,7 @@ internal fun ConversationControl(glyph: MaterialGlyph,label: String,tag: String,
 
 @Composable
 internal fun ConversationControl(@DrawableRes icon: Int,label: String,tag: String,enabled: Boolean=true,disabledReason: String?=null,onClick: ()->Unit) {
-    IconButton(onClick=onClick,enabled=enabled,colors=IconButtonDefaults.iconButtonColors(contentColor=if(icon==MaterialGlyph.Stop.drawable) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant),modifier=Modifier.size(48.dp).testTag(tag).semantics {contentDescription=if(enabled || disabledReason==null) label else "$label. $disabledReason"}) {
+    IconButton(onClick=onClick,enabled=enabled,colors=IconButtonDefaults.iconButtonColors(contentColor=if(icon==MaterialGlyph.Stop.drawable) MaterialTheme.colorScheme.error else LocalComposerColors.current.content),modifier=Modifier.size(48.dp).testTag(tag).semantics {contentDescription=if(enabled || disabledReason==null) label else "$label. $disabledReason"}) {
         Icon(painterResource(icon),null,Modifier.size(20.dp))
     }
 }

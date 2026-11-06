@@ -20,11 +20,12 @@ import androidx.compose.ui.text.font.FontStyle
 
 @Composable
 internal fun StatusPill(label: String, emphasis: StatusEmphasis = StatusEmphasis.Neutral, modifier: Modifier = Modifier) {
+    val statusColors=LocalStatusColors.current
     val colors = when (emphasis) {
-        StatusEmphasis.Positive -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-        StatusEmphasis.Attention -> MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
-        StatusEmphasis.Muted -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-        StatusEmphasis.Neutral -> MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
+        StatusEmphasis.Positive -> statusColors.positiveContainer to statusColors.positiveContent
+        StatusEmphasis.Attention -> statusColors.attentionContainer to statusColors.attentionContent
+        StatusEmphasis.Muted -> statusColors.mutedContainer to statusColors.mutedContent
+        StatusEmphasis.Neutral -> statusColors.neutralContainer to statusColors.neutralContent
     }
     Surface(modifier = modifier.heightIn(min = 24.dp),color = colors.first,contentColor = colors.second,shape = MaterialTheme.shapes.small) {
         UiText(label,modifier = Modifier.padding(horizontal = 8.dp,vertical = 3.dp),style = MaterialTheme.typography.labelMedium,maxLines = 1,overflow = TextOverflow.Ellipsis)

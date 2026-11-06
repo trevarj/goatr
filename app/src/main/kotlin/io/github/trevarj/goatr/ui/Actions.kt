@@ -2,10 +2,13 @@
 package io.github.trevarj.goatr
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.material3.Text as UiText
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -87,14 +90,18 @@ internal fun PrimaryActionFab(
 /** The chat send action has a fixed footprint while the adjacent draft grows. */
 @Composable
 internal fun ComposerSendFab(enabled: Boolean, onClick: () -> Unit) {
+    val composerColors=LocalComposerColors.current
     if (enabled) {
         FloatingActionButton(
             onClick = onClick,
             modifier = Modifier.size(56.dp).testTag("prompt_send"),
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
+            containerColor = Color.Transparent,
+            contentColor = composerColors.sendContent,
+            elevation = FloatingActionButtonDefaults.elevation(defaultElevation=0.dp,pressedElevation=0.dp,focusedElevation=0.dp,hoveredElevation=0.dp),
         ) {
-            GoatrIcon(MaterialGlyph.Send, "Send message")
+            Surface(Modifier.size(38.dp).testTag("composer_send_visual"),shape=CircleShape,color=composerColors.send,contentColor=composerColors.sendContent) {
+                Box(contentAlignment=Alignment.Center) {GoatrIcon(MaterialGlyph.Back,"Send message",Modifier.rotate(90f))}
+            }
         }
     } else {
         Surface(
@@ -104,10 +111,14 @@ internal fun ComposerSendFab(enabled: Boolean, onClick: () -> Unit) {
                 contentDescription = "Send message unavailable"
             },
             shape = MaterialTheme.shapes.large,
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color.Transparent,
+            contentColor = composerColors.mutedContent,
         ) {
-            Box(contentAlignment = Alignment.Center) { GoatrIcon(MaterialGlyph.Send, null) }
+            Box(contentAlignment=Alignment.Center) {
+                Surface(Modifier.size(38.dp).testTag("composer_send_visual"),shape=CircleShape,color=composerColors.control,contentColor=composerColors.mutedContent) {
+                    Box(contentAlignment=Alignment.Center) {GoatrIcon(MaterialGlyph.Back,null,Modifier.rotate(90f))}
+                }
+            }
         }
     }
 }

@@ -175,7 +175,19 @@ mod unit_wake {
         if now>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original manager command deadline"));}
         Ok(deadline)
     }
-    fn manager_command_output(command: &mut std::process::Command, original: Option<Instant>) -> io::Result<String> {
+    fn service_unit(unit:&str) -> bool {
+        !unit.is_empty() && !unit.starts_with('-') && unit.len()<=255 && unit.ends_with(".service") && !unit.contains("..")
+            && unit.bytes().all(|byte|byte.is_ascii_alphanumeric()||b"_.-".contains(&byte))
+    }
+    enum ManagerCommandOutcome { Output(String), TargetRejected }
+    fn inventory_query_result(failed:&AtomicBool,result:io::Result<ManagerCommandOutcome>)->io::Result<UnitInventoryProperties> {
+        match result {
+            Ok(ManagerCommandOutcome::TargetRejected)=>Ok(UnitInventoryProperties::TargetRejected),
+            Ok(ManagerCommandOutcome::Output(output))=>sticky_result(failed,Ok(UnitInventoryProperties::Properties(output))),
+            Err(error)=>sticky_result(failed,Err(error)),
+        }
+    }
+    fn manager_command_outcome(command: &mut std::process::Command, original: Option<Instant>) -> io::Result<ManagerCommandOutcome> {
         let deadline=command_deadline(original,Instant::now())?;
         before_deadline(Some(deadline))?;
         let mut child=command.spawn()?;
@@ -188,7 +200,7 @@ mod unit_wake {
                 before_deadline(Some(deadline))?;
                 match pipe.read(&mut buffer) {
                     Ok(0)=>if let Some(status)=child.try_wait()? {
-                        if !status.success(){return Err(invalid("manager helper refused"));}
+                        if !status.success(){return Ok(ManagerCommandOutcome::TargetRejected);}
                         break;
                     },
                     Ok(n)=>{bytes.extend_from_slice(&buffer[..n]);if bytes.len()>65_536{return Err(invalid("manager reply exceeds bound"));}},
@@ -198,15 +210,28 @@ mod unit_wake {
                 std::thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())));
             }
             let text=String::from_utf8(bytes).map_err(io::Error::other)?;
-            before_deadline(Some(deadline))?;Ok(text)
+            before_deadline(Some(deadline))?;Ok(ManagerCommandOutcome::Output(text))
         })();
         if result.is_err(){let _=child.kill();child.wait()?;}
         result
+    }
+    fn manager_command_output(command: &mut std::process::Command, original: Option<Instant>) -> io::Result<String> {
+        match manager_command_outcome(command,original)? {
+            ManagerCommandOutcome::Output(output)=>Ok(output),
+            ManagerCommandOutcome::TargetRejected=>Err(invalid("manager helper refused")),
+        }
     }
     fn sticky_result<T>(failed: &AtomicBool, result: io::Result<T>) -> io::Result<T> {
         if failed.load(Ordering::Acquire) { return Err(invalid("original unit Wake profile was permanently invalidated")); }
         if result.is_err() { failed.store(true, Ordering::Release); }
         result
+    }
+    fn sticky_family_result<T>(first:&AtomicBool,second:&AtomicBool,result:io::Result<T>)->io::Result<T> {
+        if first.load(Ordering::Acquire)||second.load(Ordering::Acquire) {
+            first.store(true,Ordering::Release);second.store(true,Ordering::Release);
+            return Err(invalid("original unit Wake family was permanently invalidated"));
+        }
+        if result.is_err(){first.store(true,Ordering::Release);second.store(true,Ordering::Release);}result
     }
     /// The private socket's original peer, not a unit name or environment marker.
     struct UnitManager {
@@ -217,6 +242,12 @@ mod unit_wake {
         executable: ExecutableStamp,
     }
     impl UnitManager {
+        fn try_clone(&self) -> io::Result<Self> {
+            Ok(Self {
+                socket: self.socket.try_clone()?, path: self.path.clone(), object: self.object,
+                process: self.process.clone(), executable: self.executable,
+            })
+        }
         fn capture(deadline: Option<Instant>) -> io::Result<Self> {
             before_deadline(deadline)?;
             let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| invalid("user runtime unavailable"))?);
@@ -280,6 +311,20 @@ mod unit_wake {
             let result=manager_command_output(&mut command,deadline);
             self.recheck()?;before_deadline(deadline)?;result
         }
+        fn inventory_output(&self, unit:&str, deadline:Instant) -> io::Result<ManagerCommandOutcome> {
+            use std::os::unix::process::CommandExt;
+            before_deadline(Some(deadline))?;self.recheck()?;
+            let binary=std::env::split_paths(&std::env::var_os("PATH").ok_or_else(||invalid("manager helper PATH unavailable"))?)
+                .map(|path|path.join("systemctl")).find(|path|crate::config::executable(path).is_ok()).ok_or_else(||invalid("protected manager helper unavailable"))?;
+            let address=format!("unix:path={}",self.path.display());
+            let mut command=std::process::Command::new(binary);
+            command.args(["--user","show",unit,"--no-pager","--property=Id","--property=ControlGroup","--property=ExecMainPID","--property=InvocationID","--property=KillMode","--property=ExecStart","--property=Environment","--property=WorkingDirectory"])
+                .env("DBUS_SESSION_BUS_ADDRESS",&address).env_remove("SYSTEMD_BUS_ADDRESS").env_remove("SYSTEMD_HOST").env_remove("SYSTEMD_MACHINE")
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+            unsafe {command.pre_exec(drop_inherited_capabilities);}
+            let result=manager_command_outcome(&mut command,Some(deadline));
+            self.recheck()?;before_deadline(Some(deadline))?;result
+        }
         fn properties(&self, unit: &str, deadline: Option<Instant>) -> io::Result<std::collections::HashMap<String, String>> {
             let text = self.output("systemctl", &["--user", "show", unit, "--all", "--no-pager",
                 "--property=LoadState,MainPID,ControlGroup,Type,UMask,Restart,PrivateUsers,AmbientCapabilities,NoNewPrivileges,KillMode,Transient,PartOf,BindsTo,DropInPaths"],deadline)?;
@@ -310,20 +355,23 @@ mod unit_wake {
             let reply = native_json::parse(text.as_bytes(), REGISTRY)?;
             if reply["type"] != "o" { return Err(invalid("manager GetUnit type differs")); }
             let path = reply["data"][0].as_str().ok_or_else(|| invalid("manager unit object unavailable"))?;
-            for hook in ["ExecCondition","ExecStartPre","ExecStartPost","ExecReload","ExecStop","ExecStopPost"] {
-                let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
-                    "get-property", owner, path, "org.freedesktop.systemd1.Service", hook],deadline)?;
-                let hook = native_json::parse(text.as_bytes(), REGISTRY)?;
-                empty_execution_hooks(&hook)?;
-            }
             let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
-                "get-property", owner, path, "org.freedesktop.systemd1.Service", "ExecStart"],deadline)?;
-            let reply = native_json::parse(text.as_bytes(), REGISTRY)?;
-            if crate::backends::codex::exact_service_argv(&reply, expected).is_ok()
-                || legacy.is_some_and(|legacy|crate::backends::codex::exact_service_argv(&reply, legacy).is_ok()) {
-                Ok(())
-            } else { Err(invalid("manager direct ExecStart differs from original owned argv")) }
+                "get-property", owner, path, "org.freedesktop.systemd1.Service", "ExecCondition", "ExecStartPre", "ExecStartPost", "ExecReload", "ExecStop", "ExecStopPost", "ExecStart"],deadline)?;
+            service_property_batch(&text,expected,legacy)
         }
+    }
+    /// One owner-qualified manager reply preserves all hook and argv checks under one deadline.
+    fn service_property_batch(text:&str,expected:&[String],legacy:Option<&[String]>)->io::Result<()> {
+        if text.contains('\r') {return Err(invalid("manager service property batch contains carriage return"));}
+        let records=text.strip_suffix('\n').unwrap_or(text);
+        if records.is_empty()||records.ends_with('\n') {return Err(invalid("manager service property batch record count differs"));}
+        let records=records.split('\n').collect::<Vec<_>>();
+        if records.len()!=7||records.iter().any(|record|record.is_empty()||record.trim()!=*record) {return Err(invalid("manager service property batch record count differs"));}
+        for record in &records[..6] {empty_execution_hooks(&native_json::parse(record.as_bytes(),REGISTRY)?)?;}
+        let reply=native_json::parse(records[6].as_bytes(),REGISTRY)?;
+        if crate::backends::codex::exact_service_argv(&reply,expected).is_ok()
+            ||legacy.is_some_and(|legacy|crate::backends::codex::exact_service_argv(&reply,legacy).is_ok()){Ok(())
+        }else{Err(invalid("manager direct ExecStart differs from original owned argv"))}
     }
     fn empty_execution_hooks(property: &serde_json::Value) -> io::Result<()> {
         if property["type"] != "a(sasbttttuii)" || property["data"].as_array().is_none_or(|commands| !commands.is_empty()) {
@@ -347,13 +395,22 @@ mod unit_wake {
         let mut parents = status.lines().filter_map(|s| s.strip_prefix("PPid:"));
         parents.next().and_then(|p|p.trim().parse::<u32>().ok()) == Some(controller) && parents.next().is_none()
     }
+    fn retained_distinct_child(parent:&ProcessEvidence,controller:&ProcessEvidence,child:&ProcessEvidence,retained:bool)->bool {
+        retained&&child!=parent&&child!=controller&&child.pid!=parent.pid&&child.pid!=controller.pid
+    }
     /// Runtime identity only. Artifact hashes stay with the caller's existing held descriptors.
     pub struct UnitWakePin {
         process: ProcessEvidence, executable: File, stamp: ExecutableStamp,
         unit: String, group: String, manager: UnitManager,
-        controller: ProcessEvidence, controller_executable: ExecutableStamp, argv: Vec<String>,
+        controller: ProcessEvidence, controller_file: File, controller_executable: ExecutableStamp, argv: Vec<String>,
         retained: bool, failed: AtomicBool,
     }
+    #[derive(Clone, PartialEq)]
+    struct UnitFamilyIdentity {
+        unit:String, group:String, manager_path:PathBuf, manager_object:(u64,u64,u32,u32), manager_process:ProcessEvidence,
+        manager_executable:ExecutableStamp, controller:ProcessEvidence, controller_executable:ExecutableStamp, argv:Vec<String>,
+    }
+    pub enum UnitInventoryProperties { Properties(String), TargetRejected }
     impl UnitWakePin {
         pub fn capture(process: ProcessEvidence, executable: &File, expected_unit: &str, deadline: Option<Instant>) -> io::Result<Self> {
             before_deadline(deadline)?;
@@ -378,7 +435,7 @@ mod unit_wake {
             qualified_properties(&properties, &group, pid, retained)?;
             let pin = Self { stamp: executable_stamp(&executable.metadata()?), executable: executable.try_clone()?, process,
                 unit: expected_unit.to_owned(), group, manager,
-                controller_executable: executable_stamp(&fs::metadata(format!("/proc/{pid}/exe"))?), controller, argv,
+                controller_file: executable.try_clone()?, controller_executable: executable_stamp(&fs::metadata(format!("/proc/{pid}/exe"))?), controller, argv,
                 retained, failed: AtomicBool::new(false) };
             pin.recheck(deadline)?;Ok(pin)
         }
@@ -390,6 +447,11 @@ mod unit_wake {
         pub fn observe<T>(&self, result: io::Result<T>) -> io::Result<T> { sticky_result(&self.failed, result) }
         pub fn manager_output(&self, args: &[&str]) -> io::Result<String> {
             sticky_result(&self.failed, self.manager.output("systemctl", args,None))
+        }
+        pub fn inventory_unit_properties(&self, unit:&str, deadline:Instant) -> io::Result<UnitInventoryProperties> {
+            if !service_unit(unit) {return Err(invalid("inventory unit is not an exact service unit"));}
+            if self.failed(){return Err(invalid("original unit Wake profile was permanently invalidated"));}
+            inventory_query_result(&self.failed,self.manager.inventory_output(unit,deadline))
         }
         pub(crate) fn owned_serve_argv(&self, current: &[String], legacy: &[String]) -> io::Result<()> {
             sticky_result(&self.failed, self.manager.argv("goatr.service", current, Some(legacy),None))
@@ -405,14 +467,59 @@ mod unit_wake {
         }
         pub fn capture_child(&self, process: ProcessEvidence, executable: &File, deadline: Instant) -> io::Result<Self> {
             let result = (|| {
-                self.serving_controller(Some(deadline))?;
-                let child = Self::capture(process, executable, &self.unit,Some(deadline))?;
-                if child.group != self.group || child.controller != self.controller || child.manager.process != self.manager.process {
-                    return Err(invalid("serving child differs from already qualified controller/manager/full path"));
-                }
-                self.recheck(Some(deadline))?;Ok(child)
+                before_deadline(Some(deadline))?;
+                if herdr::process_evidence(process.pid)? != process || !retained_distinct_child(&self.process,&self.controller,&process,true) { return Err(invalid("serving child differs from original evidence before family observation")); }
+                let child = Self {
+                    stamp: executable_stamp(&executable.metadata()?), executable: executable.try_clone()?, process,
+                    unit: self.unit.clone(), group: self.group.clone(), manager: self.manager.try_clone()?,
+                    controller: self.controller.clone(), controller_file: self.controller_file.try_clone()?,
+                    controller_executable: self.controller_executable, argv: self.argv.clone(), retained: true,
+                    failed: AtomicBool::new(false),
+                };
+                self.recheck_family(&child,Some(deadline))?;Ok(child)
             })();
-            sticky_result(&self.failed, result)
+            match result { Ok(child) => Ok(child), Err(error) => { self.failed.store(true,Ordering::Release); Err(error) } }
+        }
+        fn same_family(&self, child:&Self) -> bool {
+            self.family_identity()==child.family_identity()
+        }
+        fn family_identity(&self)->UnitFamilyIdentity {
+            UnitFamilyIdentity {unit:self.unit.clone(),group:self.group.clone(),manager_path:self.manager.path.clone(),manager_object:self.manager.object,
+                manager_process:self.manager.process.clone(),manager_executable:self.manager.executable,controller:self.controller.clone(),
+                controller_executable:self.controller_executable,argv:self.argv.clone()}
+        }
+        fn recheck_controller(&self) -> io::Result<()> {
+            require_inspectable(self.controller.pid)?;
+            if herdr::process_evidence(self.controller.pid)?!=self.controller
+                || executable_stamp(&self.controller_file.metadata()?)!=self.controller_executable
+                || executable_stamp(&fs::metadata(format!("/proc/{}/exe",self.controller.pid))?)!=self.controller_executable
+                || process_arguments(&self.controller)?!=self.argv { return Err(invalid("original unit controller/executable/argv changed")); }
+            Ok(())
+        }
+        fn recheck_member(&self) -> io::Result<CapabilityState> {
+            require_inspectable(self.process.pid)?;
+            if herdr::process_evidence(self.process.pid)?!=self.process
+                || executable_stamp(&self.executable.metadata()?)!=self.stamp
+                || executable_stamp(&fs::metadata(format!("/proc/{}/exe",self.process.pid))?)!=self.stamp { return Err(invalid("original unit member/executable changed")); }
+            let status=bounded_proc(self.process.pid,"status")?;let state=capability_state(&status)?;
+            if !state.unit_wake()||unit_cgroup(&bounded_proc(self.process.pid,"cgroup")?,&self.unit)?!=self.group
+                || self.process.pid!=self.controller.pid&&!direct_child(&status,self.controller.pid) { return Err(invalid("original unit member parent/cgroup/caps/NNP changed")); }
+            Ok(state)
+        }
+        pub fn recheck_family(&self, child:&Self, deadline:Option<Instant>) -> io::Result<CapabilityState> {
+            if self.failed()||child.failed() { return sticky_family_result(&self.failed,&child.failed,Err(invalid("original unit Wake family was permanently invalidated"))); }
+            let result=(||{
+                before_deadline(deadline)?;
+                if !self.same_family(child)||!retained_distinct_child(&self.process,&self.controller,&child.process,child.retained) { return Err(invalid("original unit Wake family manager/controller/group differs")); }
+                if self.process!=self.controller { return Err(invalid("serving retention requires the original manager MainPID controller")); }
+                self.manager.recheck()?;self.recheck_controller()?;self.recheck_member()?;let child_state=child.recheck_member()?;
+                qualified_properties(&self.manager.properties(&self.unit,deadline)?,&self.group,self.controller.pid,true)?;
+                self.manager.argv(&self.unit,&self.argv,None,deadline)?;
+                self.manager.recheck()?;self.recheck_controller()?;self.recheck_member()?;let child_state_after=child.recheck_member()?;
+                if child_state_after!=child_state { return Err(invalid("original unit member capability state changed across family observation")); }
+                before_deadline(deadline)?;Ok(child_state_after)
+            })();
+            sticky_family_result(&self.failed,&child.failed,result)
         }
         pub fn recheck(&self, deadline: Option<Instant>) -> io::Result<CapabilityState> {
             if self.failed() { return Err(invalid("original unit Wake profile was permanently invalidated")); }
@@ -570,6 +677,19 @@ mod unit_wake {
             });
         }
         #[test]
+        fn inventory_target_rejection_is_closed_without_changing_legacy_manager_refusal() {
+            let mut rejected=Command::new(std::env::current_exe().unwrap());rejected.arg("--goatr-inventory-invalid-manager-command").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+            assert!(matches!(manager_command_outcome(&mut rejected,None).unwrap(),ManagerCommandOutcome::TargetRejected));
+            let mut legacy=Command::new(std::env::current_exe().unwrap());legacy.arg("--goatr-inventory-invalid-manager-command").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+            assert!(manager_command_output(&mut legacy,None).is_err());
+            let failed=AtomicBool::new(false);assert!(matches!(inventory_query_result(&failed,Ok(ManagerCommandOutcome::TargetRejected)).unwrap(),UnitInventoryProperties::TargetRejected));assert!(!failed.load(Ordering::Acquire));assert!(inventory_query_result(&failed,Err(invalid("manager failure"))).is_err());assert!(failed.load(Ordering::Acquire));
+        }
+        #[test]
+        fn inventory_target_unit_grammar_refuses_option_like_names() {
+            for unit in ["","--property=Id","--owned.service","owned.socket","../owned.service","owned service","owned.service=extra"] {assert!(!service_unit(unit),"{unit}");}
+            assert!(service_unit("owned.service"));
+        }
+        #[test]
         fn unit_profile_requires_all_four_exact_masks_and_nnp() {
             assert!(capability_state(&status(WAKE,WAKE,WAKE,WAKE,true)).unwrap().unit_wake());
             for (i,p,e,a,n) in [(0,WAKE,WAKE,WAKE,true),(WAKE,0,WAKE,WAKE,true),(WAKE,WAKE,0,WAKE,true),
@@ -594,6 +714,39 @@ mod unit_wake {
                 assert!(sticky_result(&failed,empty_execution_hooks(&property)).is_err());
                 assert!(sticky_result(&failed,empty_execution_hooks(&empty)).is_err());
             }
+        }
+        #[test]
+        fn unit_family_requires_distinct_retained_child_and_latches_both_guards() {
+            let process=herdr::process_evidence(std::process::id()).unwrap();let base=UnitFamilyIdentity {
+                unit:"owned.service".to_owned(),group:"/user.slice/owned.service".to_owned(),manager_path:PathBuf::from("/run/user/1000/systemd/private"),
+                manager_object:(1,2,3,4),manager_process:process.clone(),manager_executable:(1,2,3,4,5,6,7,8,9,10,11),
+                controller:process,controller_executable:(1,2,3,4,5,6,7,8,9,10,11),argv:vec!["/owned/goatr".to_owned(),"serve".to_owned()],
+            };
+            let mut changed_child=base.clone();changed_child.group.push_str("/child");assert!(base!=changed_child);
+            let mut changed_manager=base.clone();changed_manager.manager_process.pid=changed_manager.manager_process.pid.saturating_add(1);assert!(base!=changed_manager);
+            let parent=base.controller.clone();let mut child=parent.clone();child.pid=child.pid.saturating_add(1);
+            let parent_retained=false;let child_retained=true;assert!(!parent_retained&&retained_distinct_child(&parent,&parent,&child,child_retained));
+            assert!(!retained_distinct_child(&parent,&parent,&parent,true));assert!(!retained_distinct_child(&parent,&parent,&child,false));
+            let first=AtomicBool::new(false);let second=AtomicBool::new(false);let refused:io::Result<()> = Err(invalid("family mismatch"));assert!(sticky_family_result(&first,&second,refused).is_err());assert!(first.load(Ordering::Acquire)&&second.load(Ordering::Acquire));assert!(sticky_family_result(&first,&second,Ok(())).is_err());
+        }
+        #[test]
+        fn unit_service_property_batch_requires_exact_ordered_strict_records() {
+            let expected=vec!["/owned/goatr".to_owned(),"serve".to_owned()];
+            let empty=serde_json::json!({"type":"a(sasbttttuii)","data":[]});
+            let records=|argv:&[String]|{let mut records=(0..6).map(|_|serde_json::to_string(&empty).unwrap()).collect::<Vec<_>>();records.push(serde_json::to_string(&serde_json::json!({"type":"a(sasbttttuii)","data":[[argv[0],argv,false,0,0,0,0,12,0,0]]})).unwrap());records};
+            let valid=records(&expected).join("\n");
+            service_property_batch(&(valid.clone()+"\n"),&expected,None).unwrap();
+            let legacy=vec!["/owned/legacy".to_owned(),"serve".to_owned()];
+            service_property_batch(&records(&legacy).join("\n"),&expected,Some(&legacy)).unwrap();
+            let missing=valid.lines().take(6).collect::<Vec<_>>().join("\n");
+            let extra=format!("{valid}\n{}",serde_json::to_string(&empty).unwrap());
+            let blank=valid.replacen('\n',"\n\n",1);
+            let mut reordered=records(&expected);let exec=reordered.remove(6);reordered.insert(0,exec);
+            let hook=serde_json::json!({"type":"a(sasbttttuii)","data":[["/owned/hook",["/owned/hook"],false,0,0,0,0,12,0,0]]});
+            let mut nonempty=records(&expected);nonempty[0]=serde_json::to_string(&hook).unwrap();
+            let invalid=vec!["/owned/foreign".to_owned(),"serve".to_owned()];
+            let mut duplicate=records(&expected);duplicate[0]="{\"type\":\"a(sasbttttuii)\",\"type\":\"a(sasbttttuii)\",\"data\":[]}".to_owned();
+            for bad in [missing,extra,blank,reordered.join("\n"),nonempty.join("\n"),format!("{valid}\r"),records(&invalid).join("\n"),duplicate.join("\n")] {assert!(service_property_batch(&bad,&expected,None).is_err());}
         }
         #[test]
         fn canonical_full_cgroup_and_manager_join_cannot_be_rebased() {
@@ -650,10 +803,10 @@ mod unit_wake {
     }
 }
 #[cfg(target_os = "linux")]
-pub use unit_wake::{CapabilityState, UnitWakePin, ProcessStart, capability_state, current_capabilities,
+pub use unit_wake::{CapabilityState, UnitInventoryProperties, UnitWakePin, ProcessStart, capability_state, current_capabilities,
     prepare_current_executable, unit_cgroup};
 
-// Stock 0.162.1 app-server-client remote.rs uses this finite ceiling for both.
+// Stock 0.165.0 app-server-client remote.rs uses this finite ceiling for both.
 pub const FRAME_BYTES: usize = 128 * 1024 * 1024;
 pub const QUEUE_FRAMES: usize = 32;
 pub const QUEUE_BYTES: usize = 2 * FRAME_BYTES;
@@ -661,8 +814,8 @@ pub const CORRELATIONS: usize = 64;
 // Stock serde_json starts with128 and rejects the container that exhausts it.
 const BRIDGE_JSON_DEPTH: usize = 128;
 // Verified publisher sign-blob distribution, not independently reproduced source compilation.
-pub const NATIVE_SHA256: &str = "628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1";
-pub const NATIVE_BYTES: u64 = 294_415_048;
+pub const NATIVE_SHA256: &str = "c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5";
+pub const NATIVE_BYTES: u64 = 309_732_776;
 type ExecutableStamp = (u64, u64, u64, i64, i64, i64, i64, u32, u32, u32, u64);
 struct DistributionProof {
     // A verified file-content fact, never cached process or namespace authority.

@@ -114,7 +114,7 @@ coverage or distribution/compliance approval.
 
 Native Codex protocol projections and deterministic contract tests are independently
 implemented from the public Apache-2.0 source/schema baseline
-8e68a98ef03cdde76d2e6800791ebdf1b3b95b24. No Codex implementation body, native
+360319d8dee62d87e2d59fc0c21805d79519cfed. No Codex implementation body, native
 binary or AgentWire code is copied. Relevant upstream attribution:
 
 OpenAI Codex
@@ -212,3 +212,45 @@ VectorDrawable resources named app/src/main/res/drawable/ic_material_*.xml.
 Attribution is shipped in app/src/main/assets/material-icons-notice.txt; the
 complete Apache-2.0 text is shipped in android-third-party-notices.txt.
 Pinned source paths are recorded in docs/REFERENCES.md.
+
+Orca mobile composer presentation adaptation (retained 2026-11-04)
+
+The grouped composer layout, neutral palette and radius tokens in
+app/src/main/kotlin/io/github/trevarj/goatr/GoatrScreens.kt, GoatrTheme.kt,
+ConversationContent.kt, ui/ConversationActivity.kt, ui/Actions.kt and
+ui/StatusIndicators.kt adapt only public presentation tokens from
+https://github.com/stablyai/orca.git at revision
+de45fbc3592bf256735c650faa6af00487a497dc:
+- mobile/src/session/mobile-native-chat-composer-styles.ts
+  SHA256 a4859fdb5301f67e1a1934ee6ba758faf5f6270e90b3be28213a5985d212077a
+- mobile/src/theme/mobile-theme.ts
+  SHA256 4a07514575f2283db43f13f5dca01a40e1fb3593f464fe5fcfb0ad93ca6984a5
+
+The retained public mobile raster measurement selects #212121 for Goatr's dark
+composer panel; #1d1d1d remains the upstream source token recorded above.
+
+No Orca provider, native, session or protocol implementation is copied.
+Orca LICENSE SHA256:
+ff1b611f80580d49f4b97e93a97b24eb050b0671b26b8afe16341fab699112f3
+
+MIT License
+
+Copyright (c) 2026 Lovecast Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -1298,8 +1298,20 @@ async fn run() -> io::Result<bool> {
     Ok(transport_observation == "pass")
 }
 fn early_live_argument(argument:&std::ffi::OsStr)->bool {
-    argument.to_str().is_some_and(|argument|["--physical-mvp","--expected-controller-unit","--expected-controller-sha256","--prepared-fresh-install","--expected-prepared-install-sha256","--physical-host-preflight","--physical-host-wake-preflight","--background"].iter()
+    argument.to_str().is_some_and(|argument|["--physical-mvp","--physical-pairing-checkpoint","--physical-owned-retirement","--retirement-target-manifest","--expected-retirement-manifest-sha256","--physical-owned-process-inventory","--physical-owned-process-stop","--owned-process-stop-approval","--expected-owned-process-stop-approval-sha256","--owned-process-source-manifest","--expected-owned-process-source-manifest-sha256","--owned-app-retirement-gate","--expected-owned-app-retirement-gate-sha256","--physical-pairing-shell-checkpoint","--physical-pairing-shell-interaction-checkpoint","--expected-controller-unit","--expected-controller-sha256","--prepared-fresh-install","--expected-prepared-install-sha256","--physical-host-preflight","--physical-host-wake-preflight","--background"].iter()
         .any(|selector|argument==*selector||argument.strip_prefix(*selector).is_some_and(|suffix|suffix.starts_with('='))))
+}
+#[cfg(test)]
+mod early_live_argument_tests {
+    use super::*;
+    #[test]
+    fn retained_pairing_selector_enters_closed_synchronous_live_admission() {
+        for argument in ["--physical-pairing-checkpoint","--physical-pairing-checkpoint=true","--physical-pairing-checkpoint=malformed","--physical-owned-retirement","--physical-owned-retirement=true","--physical-owned-retirement=malformed","--retirement-target-manifest","--retirement-target-manifest=malformed","--expected-retirement-manifest-sha256","--expected-retirement-manifest-sha256=malformed","--physical-owned-process-inventory","--physical-owned-process-inventory=true","--physical-owned-process-inventory=malformed","--physical-owned-process-stop","--physical-owned-process-stop=true","--physical-owned-process-stop=malformed","--owned-process-stop-approval","--owned-process-stop-approval=malformed","--expected-owned-process-stop-approval-sha256","--expected-owned-process-stop-approval-sha256=malformed","--owned-process-source-manifest","--owned-process-source-manifest=malformed","--expected-owned-process-source-manifest-sha256","--expected-owned-process-source-manifest-sha256=malformed","--owned-app-retirement-gate","--owned-app-retirement-gate=malformed","--expected-owned-app-retirement-gate-sha256","--expected-owned-app-retirement-gate-sha256=malformed","--physical-pairing-shell-checkpoint","--physical-pairing-shell-checkpoint=true","--physical-pairing-shell-checkpoint=malformed","--physical-pairing-shell-interaction-checkpoint","--physical-pairing-shell-interaction-checkpoint=true","--physical-pairing-shell-interaction-checkpoint=malformed"] {
+            assert!(early_live_argument(std::ffi::OsStr::new(argument)));
+        }
+        assert!(!early_live_argument(std::ffi::OsStr::new("--physical-pairing")));assert!(!early_live_argument(std::ffi::OsStr::new("--physical-pairing-shell")));
+        for argument in ["--owned-process-retirement-phase","--owned-process-retirement-phase=inventory","--owned-process-retirement-sources=/private/sources","--expected-owned-process-retirement-sources-sha256=malformed","--completed-owned-retirement=/private/completed","--expected-completed-owned-retirement-sha256=malformed"] {assert!(!early_live_argument(std::ffi::OsStr::new(argument)),"{argument}");}
+    }
 }
 fn mode_exit(result:io::Result<bool>,output:&mut impl io::Write)->std::process::ExitCode {
     match result {

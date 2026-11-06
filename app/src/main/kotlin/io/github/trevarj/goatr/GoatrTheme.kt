@@ -18,31 +18,52 @@ import androidx.compose.ui.unit.sp
 
 enum class Appearance { System, Light, Dark }
 
-// Warm neutral surfaces, teal actions and compact type that follows system font scaling.
+internal data class UserMessageColors(val container:Color,val content:Color)
+internal val LocalUserMessageColors=staticCompositionLocalOf {UserMessageColors(Color(0xFFE8E8E8),Color(0xFF3E3E3E))}
+internal data class ComposerColors(val surface:Color,val control:Color,val content:Color,val mutedContent:Color,val send:Color,val sendContent:Color,val hairline:Color)
+internal val LocalComposerColors=staticCompositionLocalOf {ComposerColors(Color(0xFFE8E8E8),Color(0xFFF5F5F5),Color(0xFF3E3E3E),Color(0xFF5F6368),Color(0xFF202124),Color.White,Color(0xFF747474).copy(alpha=.25f))}
+internal data class StatusColors(val positiveContainer:Color,val positiveContent:Color,val attentionContainer:Color,val attentionContent:Color,val neutralContainer:Color,val neutralContent:Color,val mutedContainer:Color,val mutedContent:Color)
+internal val LocalStatusColors=staticCompositionLocalOf {StatusColors(Color(0xFFDCFCE7),Color(0xFF14532D),Color(0xFFFEF3C7),Color(0xFF78350F),Color(0xFFE8E8E8),Color(0xFF3E3E3E),Color(0xFFF2F2F2),Color(0xFF5F6368))}
+
+// Neutral surfaces keep provider and status meaning in their labeled components instead of hue.
 private val LightPalette = lightColorScheme(
-    primary=Color(0xFF006A60),onPrimary=Color.White,
-    primaryContainer=Color(0xFFB8F2E6),onPrimaryContainer=Color(0xFF00201C),
-    secondary=Color(0xFF38665F),onSecondary=Color.White,
-    secondaryContainer=Color(0xFFC1EDE4),onSecondaryContainer=Color(0xFF00201C),
-    tertiary=Color(0xFF4E6179),onTertiary=Color.White,
-    tertiaryContainer=Color(0xFFD6E3FF),onTertiaryContainer=Color(0xFF071C33),
-    background=Color(0xFFFAF9F5),onBackground=Color(0xFF1B1C19),
-    surface=Color(0xFFFAF9F5),onSurface=Color(0xFF1B1C19),
-    surfaceVariant=Color(0xFFE1E5DE),onSurfaceVariant=Color(0xFF404943),
-    outline=Color(0xFF707973),error=Color(0xFFBA1A1A),
+    primary=Color(0xFF202124),onPrimary=Color.White,
+    primaryContainer=Color(0xFFE4E4E4),onPrimaryContainer=Color(0xFF1B1B1B),inversePrimary=Color(0xFFE8E8E8),
+    secondary=Color(0xFF5F6368),onSecondary=Color.White,
+    secondaryContainer=Color(0xFFE7E7E7),onSecondaryContainer=Color(0xFF1F1F1F),
+    tertiary=Color(0xFF1E40AF),onTertiary=Color.White,
+    tertiaryContainer=Color(0xFFDBEAFE),onTertiaryContainer=Color(0xFF172554),
+    background=Color(0xFFFAF9F5),onBackground=Color(0xFF1B1B1B),
+    surface=Color(0xFFFAF9F5),onSurface=Color(0xFF1B1B1B),
+    surfaceVariant=Color(0xFFE8E8E8),onSurfaceVariant=Color(0xFF3E3E3E),surfaceTint=Color(0xFFFAF9F5),
+    inverseSurface=Color(0xFF303030),inverseOnSurface=Color(0xFFF5F5F5),
+    error=Color(0xFFBA1A1A),onError=Color.White,errorContainer=Color(0xFFFFDAD6),onErrorContainer=Color(0xFF410002),
+    outline=Color(0xFF747474),outlineVariant=Color(0xFFC4C4C4),scrim=Color.Black,
+    surfaceBright=Color(0xFFFAF9F5),surfaceDim=Color(0xFFE0E0DC),surfaceContainerLowest=Color.White,
+    surfaceContainerLow=Color(0xFFF5F4F0),surfaceContainer=Color(0xFFF0EFEB),surfaceContainerHigh=Color(0xFFEBEAE6),surfaceContainerHighest=Color(0xFFE5E4E0),
 )
 private val DarkPalette = darkColorScheme(
-    primary=Color(0xFF92D5C7),onPrimary=Color(0xFF003730),
-    primaryContainer=Color(0xFF005047),onPrimaryContainer=Color(0xFFB8F2E6),
-    secondary=Color(0xFFA5D1C8),onSecondary=Color(0xFF0B3731),
-    secondaryContainer=Color(0xFF204E47),onSecondaryContainer=Color(0xFFC1EDE4),
-    tertiary=Color(0xFFB6C8E5),onTertiary=Color(0xFF203248),
-    tertiaryContainer=Color(0xFF364960),onTertiaryContainer=Color(0xFFD6E3FF),
-    background=Color(0xFF111111),onBackground=Color(0xFFE3E3DD),
-    surface=Color(0xFF1A1A1A),onSurface=Color(0xFFE3E3DD),
-    surfaceVariant=Color(0xFF242424),onSurfaceVariant=Color(0xFFC0C9C1),
-    outline=Color(0xFF8A938C),error=Color(0xFFFFB4AB),
+    primary=Color(0xFFF5F5F5),onPrimary=Color(0xFF111111),
+    primaryContainer=Color(0xFF2A2A2A),onPrimaryContainer=Color(0xFFF5F5F5),inversePrimary=Color(0xFF202124),
+    secondary=Color(0xFFA1A1A1),onSecondary=Color(0xFF111111),
+    secondaryContainer=Color(0xFF242424),onSecondaryContainer=Color(0xFFE0E0E0),
+    tertiary=Color(0xFF8AB4F8),onTertiary=Color(0xFF0B1F3A),
+    tertiaryContainer=Color(0xFF1E3A5F),onTertiaryContainer=Color(0xFFD8E2FF),
+    background=Color(0xFF111111),onBackground=Color(0xFFE0E0E0),
+    surface=Color(0xFF1A1A1A),onSurface=Color(0xFFE0E0E0),
+    surfaceVariant=Color(0xFF242424),onSurfaceVariant=Color(0xFFE0E0E0),surfaceTint=Color(0xFF1A1A1A),
+    inverseSurface=Color(0xFFE0E0E0),inverseOnSurface=Color(0xFF1A1A1A),
+    error=Color(0xFFFFB4AB),onError=Color(0xFF690005),errorContainer=Color(0xFF93000A),onErrorContainer=Color(0xFFFFDAD6),
+    outline=Color(0xFF2A2A2A),outlineVariant=Color(0xFF2A2A2A),scrim=Color.Black,
+    surfaceBright=Color(0xFF242424),surfaceDim=Color(0xFF111111),surfaceContainerLowest=Color(0xFF111111),
+    surfaceContainerLow=Color(0xFF1A1A1A),surfaceContainer=Color(0xFF1E1E1E),surfaceContainerHigh=Color(0xFF242424),surfaceContainerHighest=Color(0xFF2A2A2A),
 )
+private val LightUserMessageColors=UserMessageColors(LightPalette.surfaceVariant,LightPalette.onSurfaceVariant)
+private val DarkUserMessageColors=UserMessageColors(Color(0xFF323232),DarkPalette.onSurface)
+private val LightComposerColors=ComposerColors(LightPalette.surfaceVariant,LightPalette.surface,LightPalette.onSurfaceVariant,LightPalette.secondary,LightPalette.primary,LightPalette.onPrimary,LightPalette.outline.copy(alpha=.25f))
+private val DarkComposerColors=ComposerColors(Color(0xFF212121),Color(0xFF2A2A2A),Color(0xFFE0E0E0),Color(0xFFA1A1A1),Color(0xFFF5F5F5),Color(0xFF111111),Color.White.copy(alpha=.08f))
+private val LightStatusColors=StatusColors(Color(0xFFDCFCE7),Color(0xFF14532D),Color(0xFFFEF3C7),Color(0xFF78350F),LightPalette.secondaryContainer,LightPalette.onSecondaryContainer,Color(0xFFF2F2F2),LightPalette.secondary)
+private val DarkStatusColors=StatusColors(Color(0xFF143D22),Color(0xFFD7F8D7),Color(0xFF4D3300),Color(0xFFFFE2A8),DarkPalette.surfaceVariant,DarkPalette.onSurfaceVariant,DarkPalette.surface,DarkPalette.secondary)
 
 private val GoatrTypography=Typography().let {base->
     Typography(
@@ -62,9 +83,13 @@ private val GoatrShapes=Shapes(small=RoundedCornerShape(8.dp),medium=RoundedCorn
 @Composable
 fun GoatrTheme(appearance: Appearance=Appearance.System,content: @Composable ()->Unit) {
     val dark=when(appearance) {Appearance.System->isSystemInDarkTheme();Appearance.Light->false;Appearance.Dark->true}
-    MaterialTheme(colorScheme=if(dark) DarkPalette else LightPalette,
-        typography=GoatrTypography,
-        shapes=GoatrShapes,content=content)
+    CompositionLocalProvider(LocalUserMessageColors provides if(dark) DarkUserMessageColors else LightUserMessageColors,
+        LocalComposerColors provides if(dark) DarkComposerColors else LightComposerColors,
+        LocalStatusColors provides if(dark) DarkStatusColors else LightStatusColors) {
+        MaterialTheme(colorScheme=if(dark) DarkPalette else LightPalette,
+            typography=GoatrTypography,
+            shapes=GoatrShapes,content=content)
+    }
 }
 
 /** Synthetic component fixture retained for the existing Compose contrast and reachability checks. */

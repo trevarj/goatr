@@ -96,7 +96,9 @@ private fun CameraPreview(callbacks: ScannerCallbacks,onValue: (String)->Unit,on
     var status by remember {mutableStateOf("Starting camera")}
     Column {
         UiText(status,modifier=Modifier.testTag("camera_status"))
-        AndroidView(factory={previewView},modifier=Modifier.fillMaxWidth().height(220.dp).testTag("pair_camera"))
+        Box(modifier=Modifier.fillMaxWidth().height(220.dp).testTag("pair_camera")) {
+            AndroidView(factory={previewView},modifier=Modifier.fillMaxSize())
+        }
     }
     DisposableEffect(previewView,owner,callbacks) {
         val disposed=AtomicBoolean(false)

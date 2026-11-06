@@ -38,7 +38,7 @@ use tokio::{
 };
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
-pub const SOURCE_REVISION: &str = "092d3acd6bec3e3a14bdc7e7a2810ab628ab759d";
+pub const SOURCE_REVISION: &str = "360319d8dee62d87e2d59fc0c21805d79519cfed";
 fn invalid() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -3886,7 +3886,7 @@ impl Runtime {
             .ok()
             .flatten()
             .or_else(|| self.creation_unavailable_observed(manager_detail));
-        Backend{provider:Provider::Codex,version:"Stock Codex0.162.1 native contracts".into(),availability:if ready{Availability::Ready}else if self.topology.config.creation_codex_owner().is_err(){Availability::SetupRequired}else if reason.is_some(){Availability::Unavailable}else{Availability::SetupRequired},reason:Some(reason.unwrap_or(if ready{"Bound launch thread; desktop selection unknown; stock loaded/resume checks are not atomic"}else{"Shared mode required: independent owned app-server, publisher provenance and exact TUI/Herdr/kernel/socket association proof"}).into())}
+        Backend{provider:Provider::Codex,version:"Stock Codex0.165.0 native contracts".into(),availability:if ready{Availability::Ready}else if self.topology.config.creation_codex_owner().is_err(){Availability::SetupRequired}else if reason.is_some(){Availability::Unavailable}else{Availability::SetupRequired},reason:Some(reason.unwrap_or(if ready{"Bound launch thread; desktop selection unknown; stock loaded/resume checks are not atomic"}else{"Shared mode required: independent owned app-server, publisher provenance and exact TUI/Herdr/kernel/socket association proof"}).into())}
     }
     fn connection(&self, target: &Target) -> SecurityResult<Arc<Connection>> {
         let c = self
@@ -6760,6 +6760,9 @@ impl Runtime {
         // Owner startup shares the original absolute creation budget: the verified wrapper may
         // take longer than ten seconds before its publisher process is observable.
         let deadline = job_deadline;
+        let owner_pending = reporter
+            .as_ref()
+            .and_then(|reporter| reporter.observe_owner_pending(action, deadline));
         let mut native = None;
         let mut pending_service: Option<crate::codex_relay::ProcessStart> = None;
         loop {
@@ -6770,6 +6773,9 @@ impl Runtime {
                 return Err(ErrorCode::Timeout);
             }
             {
+                if let Some(observation) = &owner_pending {
+                    observation.stage(herdr::CodexOwnerPendingPhase::Authorization);
+                }
                 let _guard = match self.security.native_guard(auth).await {
                     Ok(guard) => guard,
                     Err(code) => {
@@ -6790,6 +6796,9 @@ impl Runtime {
                 return Err(code);
             }
             if record.service.is_none() {
+                if let Some(observation) = &owner_pending {
+                    observation.stage(herdr::CodexOwnerPendingPhase::ServiceMetadata);
+                }
                 let properties = match unit_properties(&owner.unit).await {
                     Ok(properties) => properties,
                     Err(code) => {
@@ -6813,11 +6822,17 @@ impl Runtime {
                         return Err(code);
                     }
                 };
+                if let Some(observation) = &owner_pending {
+                    observation.stage(herdr::CodexOwnerPendingPhase::ServiceMetadata);
+                }
                 record.service = match first_owner_service_evidence(&mut pending_service,pid) {
                     Ok(Some(service)) => Some(service),
                     Ok(None) => {
                         // Type=exec may expose the ORIGINAL launcher before its post-exec dumpability boundary.
                         // No new unit/action or deadline: retry only this first read-only proof.
+                        if let Some(observation) = &owner_pending {
+                            observation.stage(herdr::CodexOwnerPendingPhase::ServiceMetadata);
+                        }
                         tokio::time::sleep_until((tokio::time::Instant::now()+Duration::from_millis(20)).min(deadline)).await;
                         continue;
                     }
@@ -6833,6 +6848,9 @@ impl Runtime {
                         return Err(policy(error));
                     }
                 };
+            }
+            if let Some(observation) = &owner_pending {
+                observation.stage(herdr::CodexOwnerPendingPhase::ServiceProof);
             }
             let (service, properties) = match self.prove_service(&owner, &record).await {
                 Ok(service) => service,
@@ -6860,9 +6878,15 @@ impl Runtime {
                     return Err(ErrorCode::Timeout);
                 }
                 // Distribution hashing is a pure proof; cancellation leaves no effect to replay.
+                if let Some(observation) = &owner_pending {
+                    observation.stage(herdr::CodexOwnerPendingPhase::NativeProcess);
+                }
                 let proof = tokio::task::spawn_blocking(move || {
                     owned_native_process(&proof_properties, &proof_service, &proof_argv)
                 });
+                if let Some(observation) = &owner_pending {
+                    observation.stage(herdr::CodexOwnerPendingPhase::NativeProcess);
+                }
                 let proof = match tokio::time::timeout_at(deadline, proof).await {
                     Ok(proof) => proof,
                     Err(_) => {
@@ -6890,6 +6914,9 @@ impl Runtime {
                 match proof {
                     Ok(process) => native = Some(process),
                     Err(ErrorCode::NotReady) if tokio::time::Instant::now() < deadline => {
+                        if let Some(observation) = &owner_pending {
+                            observation.stage(herdr::CodexOwnerPendingPhase::NativeProcess);
+                        }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
@@ -6902,6 +6929,9 @@ impl Runtime {
                 }
             }
             let process = native.as_ref().ok_or(ErrorCode::NotReady)?;
+            if let Some(observation) = &owner_pending {
+                observation.stage(herdr::CodexOwnerPendingPhase::NativeProcess);
+            }
             let current_process = match herdr::process_evidence(process.pid) {
                 Ok(current) => current,
                 Err(error) => {
@@ -6928,12 +6958,18 @@ impl Runtime {
                 return Err(ErrorCode::StaleSession);
             }
             if record.epoch.is_none() {
+                if let Some(observation) = &owner_pending {
+                    observation.stage(herdr::CodexOwnerPendingPhase::SocketEpoch);
+                }
                 match OwnerEpoch::new(process, &owner.socket_host, &owner.socket_agent) {
                     Ok(epoch) => record.epoch = Some(epoch),
                     Err(error)
                         if error.kind() == io::ErrorKind::NotFound
                             && tokio::time::Instant::now() < deadline =>
                     {
+                        if let Some(observation) = &owner_pending {
+                            observation.stage(herdr::CodexOwnerPendingPhase::SocketEpoch);
+                        }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
@@ -6959,6 +6995,9 @@ impl Runtime {
                     return Err(code);
                 }
             };
+            if let Some(observation) = &owner_pending {
+                observation.stage(herdr::CodexOwnerPendingPhase::OwnerRecordProof);
+            }
             if let Err(code) = self.prove_owner_record(&owner, &record, epoch).await {
                 if let Some(reporter) = &reporter {
                     reporter.prebinding("creation", "owner_record_proof", code, "none");
@@ -6972,6 +7011,9 @@ impl Runtime {
                 return Err(ErrorCode::Timeout);
             }
             {
+                if let Some(observation) = &owner_pending {
+                    observation.stage(herdr::CodexOwnerPendingPhase::Authorization);
+                }
                 let _guard = match self.security.native_guard(auth).await {
                     Ok(guard) => guard,
                     Err(code) => {
@@ -6996,6 +7038,9 @@ impl Runtime {
                     reporter.prebinding("creation", "owner_wait", ErrorCode::Timeout, "none");
                 }
                 return Err(ErrorCode::Timeout);
+            }
+            if let Some(observation) = &owner_pending {
+                observation.disarm();
             }
             if let Some(reporter) = &reporter {
                 reporter.owner_progress(action, "owner_native_initialize_entered");

@@ -217,27 +217,49 @@ private fun rememberTerminalMotion():Boolean {
 }
 
 @Composable
-internal fun TerminalGridCanvas(grid:TerminalGrid,appearance:TerminalAppearance,modifier:Modifier=Modifier,motionEnabled:Boolean=rememberTerminalMotion()){
+internal fun TerminalGridCanvas(grid:TerminalGrid,appearance:TerminalAppearance,modifier:Modifier=Modifier,displayScale:TerminalDisplayScaleState?=null,motionEnabled:Boolean=rememberTerminalMotion()){
     val dark=when(appearance){TerminalAppearance.Light->false;TerminalAppearance.Dark->true;TerminalAppearance.FollowApp->MaterialTheme.colorScheme.surface.toArgb().let {android.graphics.Color.red(it)+android.graphics.Color.green(it)+android.graphics.Color.blue(it)<384}}
     val defaultBackground=if(dark)Color(0xff111111)else Color(0xfff7f7f2)
     val defaultForeground=if(dark)Color(0xffe3e5de)else Color(0xff1b1c19)
     val paint=remember {Paint(Paint.ANTI_ALIAS_FLAG)}
     val underlinePath=remember {android.graphics.Path()}
     val faces=remember {arrayOf(Typeface.create(Typeface.MONOSPACE,Typeface.NORMAL),Typeface.create(Typeface.MONOSPACE,Typeface.BOLD),Typeface.create(Typeface.MONOSPACE,Typeface.ITALIC),Typeface.create(Typeface.MONOSPACE,Typeface.BOLD_ITALIC))}
-    var zoom by remember {mutableFloatStateOf(1f)}
+    var zoom by remember(displayScale) {mutableFloatStateOf(displayScale?.value ?: TERMINAL_DISPLAY_SCALE_DEFAULT)}
     var pan by remember {mutableStateOf(Offset.Zero)}
     var canvasSize by remember {mutableStateOf(IntSize.Zero)}
     val density=LocalDensity.current.density
     val baseTextPixels=with(LocalDensity.current){14.sp.toPx()}
-    val localActions=remember(density) {listOf(
-        CustomAccessibilityAction("Zoom in locally"){zoom=(zoom*1.25f).coerceIn(.5f,4f);true},
-        CustomAccessibilityAction("Zoom out locally"){zoom=(zoom/1.25f).coerceIn(.5f,4f);true},
+    LaunchedEffect(displayScale?.value) {
+        displayScale?.value?.let {selected->if(zoom!=selected)zoom=selected}
+    }
+    LaunchedEffect(zoom,displayScale) {
+        if(displayScale!=null&&zoom==displayScale.value) {
+            delay(300)
+            displayScale.persist()
+        }
+    }
+    DisposableEffect(displayScale) {
+        onDispose {displayScale?.persist()}
+    }
+    LaunchedEffect(displayScale?.resetEpoch) {
+        if(displayScale!=null) {
+            zoom=displayScale.value
+            pan=Offset.Zero
+        }
+    }
+    fun updateZoom(next:Float) {
+        zoom=next.coerceIn(TERMINAL_DISPLAY_SCALE_MIN,TERMINAL_DISPLAY_SCALE_MAX)
+        displayScale?.set(zoom)
+    }
+    val localActions=listOf(
+        CustomAccessibilityAction("Zoom in locally"){updateZoom(zoom*1.25f);true},
+        CustomAccessibilityAction("Zoom out locally"){updateZoom(zoom/1.25f);true},
         CustomAccessibilityAction("Move view left"){pan+=Offset((canvasSize.width*.75f).coerceAtLeast(24*density),0f);true},
         CustomAccessibilityAction("Move view right"){pan-=Offset((canvasSize.width*.75f).coerceAtLeast(24*density),0f);true},
         CustomAccessibilityAction("Move view up"){pan+=Offset(0f,(canvasSize.height*.75f).coerceAtLeast(24*density));true},
         CustomAccessibilityAction("Move view down"){pan-=Offset(0f,(canvasSize.height*.75f).coerceAtLeast(24*density));true},
-        CustomAccessibilityAction("Reset local view"){zoom=1f;pan=Offset.Zero;true}
-    )}
+        CustomAccessibilityAction("Reset local view"){if(displayScale==null)zoom=TERMINAL_DISPLAY_SCALE_DEFAULT else displayScale.reset();pan=Offset.Zero;true}
+    )
 
     val metrics=remember(zoom,baseTextPixels){
         paint.textSize=baseTextPixels*zoom;paint.typeface=faces[0]
@@ -254,7 +276,7 @@ internal fun TerminalGridCanvas(grid:TerminalGrid,appearance:TerminalAppearance,
         if(grid.begin.alternateScreen)UiText("Alternate screen")
         if(grid.begin.graphicsOmitted)UiText("Terminal graphics omitted")
         if(grid.begin.popupBlocked)UiText("Desktop attention required · a native popup pauses terminal input")
-        Canvas(Modifier.fillMaxSize().testTag("terminal_grid").semantics {contentDescription="Local terminal view. Pan and zoom do not change native geometry.";stateDescription="${(zoom*100).toInt()} percent zoom, ${if(pan==Offset.Zero)"view origin" else "local pan active"}";customActions=localActions}.onSizeChanged {canvasSize=it}.pointerInput(Unit){detectTransformGestures {_,delta,scale,_->zoom=(zoom*scale).coerceIn(.5f,4f);pan+=delta}}){
+        Canvas(Modifier.fillMaxSize().testTag("terminal_grid").semantics {contentDescription="Local terminal view. Pan and zoom do not change native geometry.";stateDescription="${(zoom*100).toInt()} percent zoom, ${if(pan==Offset.Zero)"view origin" else "local pan active"}";customActions=localActions}.onSizeChanged {canvasSize=it}.pointerInput(Unit){detectTransformGestures {_,delta,scale,_->updateZoom(zoom*scale);pan+=delta}}){
             drawRect(defaultBackground)
             paint.textSize=metrics.textSize
             val width=metrics.width;val height=metrics.height

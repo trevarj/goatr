@@ -17,15 +17,34 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.v2.AndroidComposeTestRule as createOwnedComposeRule
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.rules.TestRule
+import org.junit.runners.model.Statement
 
 /** Actual production hierarchy/create/partial-receipt presentation with finite projection data.
  * These display fixtures are not native bindings, Herdr parity or stock-provider conformance. */
 class NativeInventoryTest {
-    @get:Rule val ui=createComposeRule()
+    private val sdkOwnedFixture=(InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner)?.isSdkOwnedFixtureRequested()==true
+    private val noLaunchRule=TestRule {base,_->base}
+    private val ui=if(sdkOwnedFixture) createOwnedComposeRule(noLaunchRule) {_ ->
+        (InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner)?.sdkOwnedFixtureActivity()
+            ?: error("owned_sdk_fixture_unavailable")
+    } else createComposeRule()
+    @get:Rule val stagedUi:TestRule=RuleChain.outerRule(TestRule { base,description->
+        if(description.testClass==NativeInventoryTest::class.java && description.methodName=="directoryRowKeepsStatusAndDetailsContainedAtCompactTwoHundredPercent") object:Statement() {
+            override fun evaluate() {
+                if(sdkOwnedFixture) checkNotNull(InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner).prepareSdkOwnedFixture()
+                base.evaluate()
+            }
+        } else base
+    }).around(ui)
+
     @Test fun leadingBrandKeepsContextStatusAndControlsReachableWithoutRefreshLayoutShift() {
         val host="523c7996bad77424e96786cf7a7205115337a5b4565cd25506a0f297b191a5ea"
         val hello=HelloResult(EndpointId(host),Uuid.random(),Uuid.random(),ProtocolVersion(),Provider.entries.map {Backend(it,"component geometry",Availability.SetupRequired,"No native binding")})
@@ -165,13 +184,12 @@ class NativeInventoryTest {
         val originalRow="session_${host}_${originalTarget.sessionId.value}_${originalTarget.generation.value}"
         ui.onNodeWithTag(originalRow).assertDoesNotExist()
         ui.onNodeWithTag("${originalGroup.key.tag}_agents").assertHasClickAction().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button))
+        ui.onNodeWithTag("${originalGroup.key.tag}_menu").performClick()
         ui.onNodeWithTag("${originalGroup.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details collapsed"))
-        ui.onNodeWithTag("${originalGroup.key.tag}_agents").performScrollTo().performClick()
-        ui.onNodeWithTag("${originalGroup.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details collapsed"))
-        ui.onNodeWithTag("${originalGroup.key.tag}_details").performScrollTo().performClick()
-        ui.onNodeWithTag("${originalGroup.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details expanded"))
+        ui.onNodeWithTag("${originalGroup.key.tag}_agents_menu_item").performClick()
+        ui.onNodeWithTag("${originalGroup.key.tag}_menu").performClick()
+        ui.onNodeWithTag("${originalGroup.key.tag}_details").performClick()
         ui.onNodeWithTag(originalRow).assertExists()
-        ui.onNodeWithContentDescription("Hide workspace details").assertExists()
         assertEquals(0,openCount)
         val placement=ui.onNodeWithTag(originalRow).fetchSemanticsNode().boundsInRoot
         repeat(3) {
@@ -202,9 +220,10 @@ class NativeInventoryTest {
             ui.runOnIdle {liveHello=hello;ready=true}
         }
         ui.onNodeWithTag(originalRow).assertExists()
-        ui.onNodeWithContentDescription("Hide workspace details").assertExists()
         ui.onNodeWithTag("${originalGroup.key.tag}_agents").assert(SemanticsMatcher.expectValue(SemanticsProperties.Role,SemanticsRole.Button))
+        ui.onNodeWithTag("${originalGroup.key.tag}_menu").performClick()
         ui.onNodeWithTag("${originalGroup.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details expanded"))
+        ui.onNodeWithTag("${originalGroup.key.tag}_details").performClick()
         assertEquals(0,openCount)
         ui.onNodeWithTag(originalRow).performScrollTo().performClick()
         assertEquals(originalTarget,opened)
@@ -230,17 +249,15 @@ class NativeInventoryTest {
             val group=projectSessionDirectory(host,current,true,current.sessions).workspaces.single()
             val row="session_${host}_${originalTarget.sessionId.value}_${originalTarget.generation.value}"
             ui.onNodeWithTag(row).assertDoesNotExist()
-            ui.onNodeWithContentDescription("Hide workspace details").assertDoesNotExist()
-            ui.onNodeWithContentDescription("Show workspace details").assertExists()
+            ui.onNodeWithTag("${group.key.tag}_menu").performClick()
             ui.onNodeWithTag("${group.key.tag}_details").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"Workspace details collapsed"))
+            ui.onNodeWithTag("${group.key.tag}_details").performClick()
             assertEquals(1,openCount)
             if(replacement!="workspace") {
                 ui.onNodeWithTag("${group.key.tag}_agents").performScrollTo().performClick()
-                ui.onNodeWithTag("${group.key.tag}_details").performScrollTo().performClick()
             }
         }
         ui.runOnIdle {ready=false;current=current.copy(hierarchy=current.hierarchy.map {it.copy(freshness=NativeFreshness.Unavailable,reason=NativeUnavailableReason.SourceUnavailable,workspaces=emptyList(),tabs=emptyList(),panes=emptyList())})}
-        ui.onNodeWithContentDescription("Show workspace details").assertDoesNotExist()
         ui.onNodeWithText("Agents").assertExists()
         ui.onNodeWithText("Last observed agents").assertDoesNotExist()
         ui.runOnIdle {current=current.copy(sessions=emptyList())}
@@ -295,12 +312,27 @@ class NativeInventoryTest {
         var shown by mutableStateOf(original)
         var opened: Target?=null
         var openCount=0
+        val host="workspace-geometry-host"
+        val workspaceInventory=inventory()
+        val directory=projectSessionDirectory(host,workspaceInventory,true,workspaceInventory.sessions)
+        val group=directory.workspaces.single()
+        val workspaceTag=group.key.tag
+        var workspacePhase by mutableStateOf(false)
+        var workspaceStale by mutableStateOf(false)
+        var workspaceOpened:Target?=null
+        var workspaceOpenCount=0
         ui.setContent {
             val density=LocalDensity.current
             GoatrTheme {CompositionLocalProvider(LocalDensity provides Density(density.density,2f)) {
-                Column(Modifier.width(320.dp).testTag("responsive_container")) {
-                    DirectoryAgentRow(shown,"Desktop","Workspace",SessionListPreferences(),false,"responsive_row",{opened=it;openCount++})
-                    androidx.compose.material3.Text("Next agent",modifier=Modifier.testTag("below_responsive"))
+                if(workspacePhase) {
+                    LazyColumn(Modifier.width(320.dp).testTag("workspace_directory_container")) {
+                        workspaceDirectoryItems(directory,host,"Desktop",SessionListPreferences(),workspaceStale,false,{}, {target->workspaceOpened=target;workspaceOpenCount++}, {fail("This fixture has no ShellTarget")})
+                    }
+                } else {
+                    Column(Modifier.width(320.dp).testTag("responsive_container")) {
+                        DirectoryAgentRow(shown,"Desktop","Workspace",SessionListPreferences(),false,"responsive_row",{opened=it;openCount++})
+                        androidx.compose.material3.Text("Next agent",modifier=Modifier.testTag("below_responsive"))
+                    }
                 }
             }}
         }
@@ -320,14 +352,28 @@ class NativeInventoryTest {
             }
             assertTrue(rowBounds.left>=container.left && rowBounds.right<=container.right)
             assertTrue(rowBounds.top>=container.top && rowBounds.bottom<=container.bottom)
-            assertTrue(provider.right<=title.left)
-            assertEquals(provider.center.y,title.center.y,1f)
+            assertTrue("Adaptive provider label remains above the wrapped title",provider.bottom<=title.top)
             assertTrue(title.bottom<=subtitle.top && subtitle.bottom<=status.top)
             assertTrue(provider.bottom<=status.top && status.right<=details.left)
             assertEquals(rowBounds,ui.onNodeWithTag("responsive_row").fetchSemanticsNode().boundsInRoot)
             assertEquals(belowBounds,ui.onNodeWithTag("below_responsive").fetchSemanticsNode().boundsInRoot)
             assertEquals(0,openCount)
         }
+        // Exercise the reference title at 200% without changing global device font settings.
+        val originalTitleLayouts=mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+        ui.onNodeWithTag("responsive_row_title",useUnmergedTree=true)
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) {get->assertTrue(get(originalTitleLayouts))}
+        assertTrue("Original enlarged title must wrap within its bounded row",originalTitleLayouts.single().lineCount in 2..3)
+        ui.runOnIdle {shown=original.copy(title="OrcaPublicStudy")}
+        val titleLayouts=mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+        ui.onNodeWithTag("responsive_row_title",useUnmergedTree=true)
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) {get->assertTrue(get(titleLayouts))}
+        val titleLayout=titleLayouts.single()
+        assertTrue("Short public title line count remains bounded",titleLayout.lineCount in 1..3)
+        assertEquals("OrcaPublicStudy",titleLayout.layoutInput.text.text)
+        assertFalse("Reference title must remain readable at 200%: lines=${titleLayout.lineCount} overflowWidth=${titleLayout.didOverflowWidth} overflowHeight=${titleLayout.didOverflowHeight} size=${titleLayout.size.width}x${titleLayout.size.height} paragraph=${titleLayout.multiParagraph.width}x${titleLayout.multiParagraph.height} maxLines=${titleLayout.layoutInput.maxLines} softWrap=${titleLayout.layoutInput.softWrap} fontScale=${titleLayout.layoutInput.density.fontScale} constraints=${titleLayout.layoutInput.constraints.maxWidth}x${titleLayout.layoutInput.constraints.maxHeight} lastVisibleEnd=${titleLayout.getLineEnd(titleLayout.lineCount-1,visibleEnd=true)}",titleLayout.hasVisualOverflow)
+        ui.onNodeWithTag("responsive_row_details").assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp)
+        ui.runOnIdle {shown=original.copy(connectivity=SessionConnectivity.Offline)}
         ui.onNodeWithTag("responsive_row_details").performClick()
         ui.onNodeWithTag("responsive_row_dialog").assertExists()
         ui.onNode(hasText(original.title) and hasAnyAncestor(hasTestTag("responsive_row_dialog")),useUnmergedTree=true).assertExists()
@@ -340,6 +386,27 @@ class NativeInventoryTest {
         ui.onNodeWithTag("responsive_row_open").assertIsDisplayed().performClick()
         assertEquals(Target(original.sessionId,original.generation),opened)
         assertEquals(1,openCount)
+
+        ui.runOnIdle {workspacePhase=true}
+        val container=ui.onNodeWithTag("workspace_directory_container").fetchSemanticsNode().boundsInRoot
+        val menu=ui.onNodeWithTag("${workspaceTag}_menu").assertIsDisplayed().assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp).fetchSemanticsNode().boundsInRoot
+        assertTrue(menu.left>=container.left && menu.right<=container.right)
+        ui.onNodeWithTag("${workspaceTag}_menu").performClick()
+        ui.onNodeWithText("Show agents and shells").performClick()
+        ui.onNodeWithTag("${workspaceTag}_menu").performClick()
+        ui.onNodeWithText("Show workspace details").performClick()
+        val title=ui.onNodeWithTag("${workspaceTag}_title",useUnmergedTree=true).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val rail=ui.onNodeWithTag("${workspaceTag}_rail",useUnmergedTree=true).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val childTag="session_${host}_${group.agents.single().sessionId.value}_${group.agents.single().generation.value}"
+        val child=ui.onNodeWithTag(childTag).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertTrue(rail.left>=title.left && rail.right<=child.left)
+        assertTrue(child.left>title.left && child.right<=container.right)
+        assertTrue(child.top>=rail.top && child.bottom<=rail.bottom)
+        ui.onNodeWithTag(childTag).performClick()
+        assertEquals(Target(group.agents.single().sessionId,group.agents.single().generation),workspaceOpened)
+        assertEquals(1,workspaceOpenCount)
+        ui.runOnIdle {workspaceStale=true}
+        assertEquals(1,workspaceOpenCount)
     }
 
     private fun inventory(): HostSnapshotResult {

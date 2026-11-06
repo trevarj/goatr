@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -636,6 +638,7 @@ internal fun ShellTerminalsScreen(host:String,store:StoreView,view:ConnectionVie
     val ready=view.inventoryReady[host]==true && host in view.hello
     val hostName=store.hosts.firstOrNull {it.hostId==host}?.name ?: "Desktop"
     val terminalAppearance=rememberTerminalAppearanceState()
+    val terminalDisplayScale=rememberTerminalDisplayScaleState()
     var choosingWorkspace by remember(host){mutableStateOf(false)}
     LaunchedEffect(ready,model.foreground){if(!ready||!model.foreground)choosingWorkspace=false}
     LazyColumn(Modifier.fillMaxSize().testTag("shell_terminals"),verticalArrangement=Arrangement.spacedBy(16.dp),contentPadding=PaddingValues(bottom=24.dp)) {
@@ -650,6 +653,7 @@ internal fun ShellTerminalsScreen(host:String,store:StoreView,view:ConnectionVie
                     IconButton(onClick={model.sessions(host)},enabled=!model.busy,modifier=Modifier.size(48.dp).testTag("shell_back_sessions")) {GoatrIcon(MaterialGlyph.Chat,"Sessions")}
                 }
                 TerminalAppearancePicker(terminalAppearance)
+                TerminalDisplayScaleControl(terminalDisplayScale)
             }
         }
         val rows=inventory?.shells.orEmpty()
@@ -686,7 +690,7 @@ internal fun ShellTerminalsScreen(host:String,store:StoreView,view:ConnectionVie
             ShellCreatedAction(host,action,inventory,ready,host in view.hello,model)
         }
     }
-    model.shell?.takeIf {it.selection.host==host}?.let {snapshot->ShellViewer(snapshot,hostName,inventory,ready,model,terminalAppearance.value,connectionLabel(snapshot.selection.host,view,model.connectingHosts[snapshot.selection.host]==true),compactConnectionLabel(snapshot.selection.host,view,model.connectingHosts[snapshot.selection.host]==true))}
+    model.shell?.takeIf {it.selection.host==host}?.let {snapshot->ShellViewer(snapshot,hostName,inventory,ready,model,terminalAppearance.value,terminalDisplayScale,connectionLabel(snapshot.selection.host,view,model.connectingHosts[snapshot.selection.host]==true),compactConnectionLabel(snapshot.selection.host,view,model.connectingHosts[snapshot.selection.host]==true))}
     if(model.clearShellDraftHost==host) AlertDialog(
         onDismissRequest=model::cancelClearShellDrafts,title={UiText("Clear local terminal drafts?")},
         text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){UiText(hostName);UiText("Remove all local terminal text, cursor positions, key characters and modes for this desktop, including offline and older terminal generations. Pending inputs and receipts are retained; no terminal operation is sent.")}},
@@ -719,7 +723,7 @@ private fun ShellCreatedAction(host:String,action:LocalAction,inventory:HostSnap
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSnapshotResult?,directoryReady:Boolean,model:GoatrViewModel,terminalAppearance:TerminalAppearance,connectionStatus:String,compactConnectionStatus:String) {
+private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSnapshotResult?,directoryReady:Boolean,model:GoatrViewModel,terminalAppearance:TerminalAppearance,terminalDisplayScale:TerminalDisplayScaleState,connectionStatus:String,compactConnectionStatus:String) {
     val keyboard=LocalSoftwareKeyboardController.current
     LaunchedEffect(snapshot.selection,snapshot.ticket) {keyboard?.hide()}
     val scope=ShellControlScope(snapshot.selection,snapshot.source,snapshot.ticket)
@@ -730,7 +734,7 @@ private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSna
     var details by remember(scope){mutableStateOf(false)}
     Dialog(onDismissRequest=model::closeShell,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
         // This dialog has its own inset tree. Consume safe drawing/IME once, not again in the dock.
-        Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("shell_viewer")) {
+        Surface(Modifier.fillMaxSize().safeDrawingPadding().semantics {testTagsAsResourceId=true}.testTag("shell_viewer")) {
             Scaffold(contentWindowInsets=WindowInsets(0,0,0,0),topBar={
                 Column {
                     GoatrTitleBar(snapshot.summary.title.value,connectionStatus,snapshot.loading,compactStatus=compactConnectionStatus,titleModifier=Modifier.testTag("shell_scope_${snapshot.selection.host}_${snapshot.selection.target.shellId.value}_${snapshot.selection.target.generation.value}"),navigationIcon={
@@ -750,7 +754,7 @@ private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSna
                         !snapshot.controlBegun->UiText("Begin control explicitly to open the native frontend. Merely opening this panel sends nothing.",modifier=Modifier.padding(12.dp))
                         snapshot.error->UiText("Control lease is unavailable. Release it before a fresh explicit Begin; no native action is replayed.",color=MaterialTheme.colorScheme.error,modifier=Modifier.padding(12.dp))
                         snapshot.grid==null->UiText("Waiting for current source and a complete native grid · no input is enabled",style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(12.dp))
-                        else->TerminalGridCanvas(snapshot.grid,terminalAppearance,Modifier.fillMaxSize())
+                        else->TerminalGridCanvas(snapshot.grid,terminalAppearance,Modifier.fillMaxSize(),terminalDisplayScale)
                     }
                 })
             }
@@ -775,7 +779,7 @@ private fun ShellViewer(snapshot:ShellSnapshot,hostName:String,inventory:HostSna
     if(beginConfirm)AlertDialog(onDismissRequest={beginConfirm=false},title={UiText("Begin native control?")},
         text={UiText(NATIVE_CONTROL_DISCLOSURE)},
         confirmButton={TextButton(onClick={beginConfirm=false;model.beginShellControl(scope)},enabled=model.shellControlAllowed(scope),modifier=Modifier.heightIn(min=48.dp).testTag("shell_begin_confirm")){UiText("Begin control")}},
-        dismissButton={TextButton(onClick={beginConfirm=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn),modifier=Modifier.testTag("shell_begin_scope_${snapshot.selection.host}_${snapshot.selection.target.shellId.value}_${snapshot.selection.target.generation.value}"))
+        dismissButton={TextButton(onClick={beginConfirm=false},modifier=Modifier.heightIn(min=48.dp)){UiText("Cancel")}},properties=DialogProperties(securePolicy=SecureFlagPolicy.SecureOn),modifier=Modifier.semantics {testTagsAsResourceId=true}.testTag("shell_begin_scope_${snapshot.selection.host}_${snapshot.selection.target.shellId.value}_${snapshot.selection.target.generation.value}"))
     if(resizeConfirm)AlertDialog(onDismissRequest={resizeConfirm=false},title={UiText("Resize native frontend?")},
         text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){
             UiText(NATIVE_CONTROL_DISCLOSURE)

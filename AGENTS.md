@@ -170,6 +170,10 @@ Compose helpers under `app/src/main/kotlin/io/github/trevarj/goatr/ui/` declare
 `package io.github.trevarj.goatr`. Resolve imports from package declarations;
 the directory does not define a `.ui` package.
 
+Compose merges decorative descendants into clickable controls. Query child-only
+test tags with `useUnmergedTree=true`; keep action, enabled-state and touch-target
+assertions on the merged parent.
+
 Kotlin `when` branch bodies end without commas. Check newly written branches
 for `-> { ... },` before handoff; that is invalid Kotlin syntax.
 

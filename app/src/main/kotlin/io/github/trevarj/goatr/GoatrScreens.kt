@@ -9,6 +9,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,11 +26,13 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.material3.Text as UiText
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -45,6 +49,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.time.Instant
@@ -85,7 +90,8 @@ fun GoatrApp(model: GoatrViewModel,privateWindow: (Boolean)->Unit) {
     val hasSecret=reducer?.pending?.any {it.presentation is PresentationCodexUrl || (it.presentation as? PresentationCodexQuestions)?.questions?.any {q->q.isSecret}==true}==true
     // Inline catalogue names retain the picker’s screenshot/recents privacy after dismissal.
     val inlineSkillsPrivate=selected?.let {key->model.suggestedSkills(key,model.composers[key].orEmpty())?.catalogue!=null}==true
-    SideEffect {privateWindow(model.sessionControls!=null || model.composerUploads.values.any {it.isNotEmpty()} || model.attentionInbox!=null || model.artifacts!=null || model.terminalCreation!=null || model.agentSessionCreation!=null || model.attachmentVisible || model.attachmentRecovery!=null || model.shell!=null || model.screen==Screen.Pairing && model.preview==null || model.screen==Screen.Conversation && (hasSecret || model.terminal!=null || model.worktrees!=null || model.changes!=null || inlineSkillsPrivate))}
+    val privateWindowRequired=model.sessionControls!=null || model.composerUploads.values.any {it.isNotEmpty()} || model.attentionInbox!=null || model.artifacts!=null || model.terminalCreation!=null || model.agentSessionCreation!=null || model.attachmentVisible || model.attachmentRecovery!=null || model.shell!=null || model.screen==Screen.Pairing && model.preview==null || model.screen==Screen.Conversation && (hasSecret || model.terminal!=null || model.worktrees!=null || model.changes!=null || inlineSkillsPrivate)
+    SideEffect {privateWindow(privateWindowRequired)}
     DisposableEffect(Unit) {onDispose {privateWindow(false)}}
     val backScreen=model.screen
     val backHost=model.host
@@ -416,9 +422,38 @@ fun SessionBrowser(
     directory.workspaces.forEach {group->
         val shells=group.shells.filter {it.title.value.contains(query,ignoreCase=true)}
         if(group.agents.isNotEmpty() || shells.isNotEmpty()) {
-            GoatrSection(group.workspace.label?.value ?: "Workspace ${group.workspace.number.value}","${group.serverName} · ${group.agents.size} agents · ${shells.size} shells")
-            agents(group.agents)
-            shells.forEach {shell->DirectoryShellRow(shell,!ready,"shell_${host}_${shell.target.shellId.value}_${shell.target.generation.value}",onOpenShell)}
+            var expanded by rememberSaveable("${group.key.lazyKey}_browser_expanded") {mutableStateOf(true)}
+            var detailsExpanded by rememberSaveable("${group.key.lazyKey}_browser_details") {mutableStateOf(false)}
+            val tag="${group.key.tag}_browser"
+            val title=group.workspace.label?.value ?: "Workspace ${group.workspace.number.value}"
+            Surface(Modifier.fillMaxWidth(),shape=MaterialTheme.shapes.medium,color=MaterialTheme.colorScheme.surface,border=BorderStroke(androidx.compose.ui.unit.Dp.Hairline,MaterialTheme.colorScheme.outlineVariant)) {
+                Column {
+                    WorkspaceDirectoryHeader(
+                        tag=tag,
+                        title=title,
+                        context="${group.serverName}",
+                        count="${group.agents.size} agents · ${shells.size} shells${if(!ready) " · Stale" else ""}",
+                        expanded=expanded,
+                        detailsExpanded=detailsExpanded,
+                        stale=!ready,
+                        onToggleExpanded={expanded=!expanded},
+                        onToggleDetails={detailsExpanded=!detailsExpanded},
+                    )
+                    if(detailsExpanded) Column(Modifier.padding(horizontal=12.dp,vertical=8.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                        UiText("Server: ${group.serverName}",style=MaterialTheme.typography.bodySmall)
+                        UiText("Workspace number: ${group.workspace.number.value} · Native status: ${group.workspace.agentStatus}",style=MaterialTheme.typography.bodySmall)
+                    }
+                    if(expanded) Box(Modifier.padding(start=48.dp,end=8.dp,bottom=8.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(start=8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                            agents(group.agents)
+                            shells.forEach {shell->DirectoryShellRow(shell,!ready,"shell_${host}_${shell.target.shellId.value}_${shell.target.generation.value}",onOpenShell)}
+                        }
+                        Box(Modifier.matchParentSize()) {
+                            Box(Modifier.fillMaxHeight().width(1.dp).background(MaterialTheme.colorScheme.outlineVariant).testTag("${tag}_rail"))
+                        }
+                    }
+                }
+            }
         }
     }
     agents(directory.standalone)
@@ -1128,8 +1163,9 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
     var requestMemory by remember(key,source,request?.requestKey) {mutableStateOf<FormMemory?>(null)}
     LaunchedEffect(key,source,request?.requestKey) {request?.let {requestMemory=model.formMemory(key,source,it.requestKey)}}
     model.terminal?.takeIf {it.key==key && it.source==source}?.let {terminal->
+        val terminalDisplayScale=rememberTerminalDisplayScaleState()
         Dialog(onDismissRequest=model::closeTerminal,properties=DialogProperties(usePlatformDefaultWidth=false,securePolicy=SecureFlagPolicy.SecureOn)) {
-            Surface(Modifier.fillMaxSize().safeDrawingPadding().testTag("terminal_dialog"),color=MaterialTheme.colorScheme.surface) {
+            Surface(Modifier.fillMaxSize().safeDrawingPadding().semantics {testTagsAsResourceId=true}.testTag("terminal_dialog"),color=MaterialTheme.colorScheme.surface) {
                 Column(Modifier.fillMaxSize().padding(16.dp).testTag("terminal_target_${key.target.sessionId.value}_${key.target.generation.value}"),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                     GoatrTitleBar("Read-only agent terminal",connectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),terminal.loading,compactStatus=compactConnectionLabel(terminal.key.host,connection,model.connectingHosts[terminal.key.host]==true),actions={
                         IconButton(onClick=model::closeTerminal,modifier=Modifier.size(48.dp).testTag("terminal_close")) {GoatrIcon(MaterialGlyph.Close,"Close terminal viewer")}
@@ -1144,11 +1180,12 @@ private fun ConversationScreen(key: ConversationKey,store: StoreView,connection:
                     }
                     UiText("${summary?.provider?.let(::providerLabel) ?: "Agent"} · ${summary?.title.orEmpty()}",style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
                     UiText("Live grid · pan and pinch locally",style=MaterialTheme.typography.labelMedium)
+                    TerminalDisplayScaleControl(terminalDisplayScale)
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         when {
                             terminal.error -> UiText("Live terminal is unavailable",modifier=Modifier.testTag("terminal_error"))
                             terminal.grid==null -> UiText("Waiting for a complete terminal grid",modifier=Modifier.testTag("terminal_loading"))
-                            else -> TerminalGridCanvas(terminal.grid,TerminalAppearance.FollowApp,Modifier.fillMaxSize())
+                            else -> TerminalGridCanvas(terminal.grid,TerminalAppearance.FollowApp,Modifier.fillMaxSize(),terminalDisplayScale)
                         }
                     }
                 }
@@ -1711,35 +1748,52 @@ internal fun ConversationRequestPanel(requestKey:Uuid,onClose:()->Unit,memory:Fo
 @Composable
 fun ConversationFrame(chrome: @Composable ()->Unit,history: @Composable ()->Unit,
     editor: @Composable ()->Unit,actions: @Composable ()->Unit,requestOpen:Boolean=false) {
+    val composerColors=LocalComposerColors.current
     androidx.compose.ui.layout.Layout(content={
-        Surface(color=MaterialTheme.colorScheme.surfaceVariant,shape=RoundedCornerShape(topStart=24.dp,topEnd=24.dp),modifier=Modifier.fillMaxWidth().testTag("composer_region")) {
+        Surface(color=composerColors.surface,shape=RoundedCornerShape(24.dp),border=BorderStroke(Dp.Hairline,composerColors.hairline),modifier=Modifier.fillMaxSize().testTag("composer_envelope")) {Spacer(Modifier.fillMaxSize())}
+        Surface(color=Color.Transparent,shape=RoundedCornerShape(topStart=24.dp,topEnd=24.dp),modifier=Modifier.fillMaxWidth().testTag("composer_region")) {
             Column(Modifier.padding(top=2.dp),verticalArrangement=Arrangement.spacedBy(2.dp)) {editor()}
         }
-        Surface(color=MaterialTheme.colorScheme.surfaceVariant,shape=RoundedCornerShape(bottomStart=24.dp,bottomEnd=24.dp),modifier=Modifier.fillMaxWidth()) {Column(Modifier.fillMaxWidth()) {actions()}}
+        Surface(color=Color.Transparent,shape=RoundedCornerShape(bottomStart=24.dp,bottomEnd=24.dp),modifier=Modifier.fillMaxWidth()) {Column(Modifier.fillMaxWidth()) {actions()}}
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).testTag("conversation_notices")) {chrome()}
-        Box(Modifier.fillMaxWidth()) {history()}
+        Box(Modifier.fillMaxWidth().testTag("conversation_history_region")) {history()}
     },modifier=Modifier.fillMaxSize().testTag("conversation_frame")) {children,constraints->
         val width=constraints.maxWidth
         val height=constraints.maxHeight
+        val horizontalInset=10.dp.roundToPx().coerceAtMost(width/2)
+        val composerWidth=(width-horizontalInset*2).coerceAtLeast(0)
         fun bounded(maximum:Int)=constraints.copy(minWidth=width,maxWidth=width,minHeight=0,maxHeight=maximum.coerceAtLeast(0))
+        fun composerBounded(maximum:Int)=constraints.copy(minWidth=composerWidth,maxWidth=composerWidth,minHeight=0,maxHeight=maximum.coerceAtLeast(0))
         // Measure the real fixed rail first. The remaining viewport, not a font/height pin,
         // bounds the actual text field before any transcript or optional notice is allocated.
-        val rail=children[0].measure(bounded(height))
-        val remaining=(height-rail.height).coerceAtLeast(0)
+        val rail=children[1].measure(composerBounded(height))
+        val unpaddedRemaining=(height-rail.height).coerceAtLeast(0)
+        val draftMinimum=(56.dp+6.dp).roundToPx().coerceAtMost(unpaddedRemaining)
+        // Decorative spacing yields first when the viewport is too short for real touch targets.
+        val bottomInset=8.dp.roundToPx().coerceAtMost((unpaddedRemaining-draftMinimum).coerceAtLeast(0))
+        val composerHeight=(height-bottomInset).coerceAtLeast(0)
+        val remaining=(composerHeight-rail.height).coerceAtLeast(0)
         val draftFloor=(56.dp+6.dp).roundToPx().coerceAtMost(remaining)
         val readerFloor=(if(requestOpen)96.dp else 48.dp).roundToPx().coerceAtMost((remaining-draftFloor).coerceAtLeast(0))
         val noticeFloor=(if(requestOpen)0.dp else 48.dp).roundToPx().coerceAtMost((remaining-draftFloor-readerFloor).coerceAtLeast(0))
-        val draft=children[1].measure(bounded(remaining-readerFloor-noticeFloor))
+        val draft=children[2].measure(composerBounded(remaining-readerFloor-noticeFloor))
         val upper=(remaining-draft.height).coerceAtLeast(0)
+        // Reserve the outer top inset from the reader before measuring it, so it never
+        // overlays the transcript or turns into internal composer padding.
+        val topInset=6.dp.roundToPx().coerceAtMost((upper-readerFloor).coerceAtLeast(0))
+        val readerUpper=(upper-topInset).coerceAtLeast(0)
+        val envelopeHeight=rail.height+draft.height
+        val envelope=children[0].measure(composerBounded(envelopeHeight).copy(minHeight=envelopeHeight))
         val noticeLimit=if(requestOpen)0 else (if(height<420.dp.roundToPx())64.dp else 96.dp).roundToPx()
-        val notices=children[2].measure(bounded(noticeLimit.coerceAtMost((upper-readerFloor).coerceAtLeast(0))))
-        val readerHeight=(upper-notices.height).coerceAtLeast(0)
-        val transcript=children[3].measure(bounded(readerHeight).copy(minHeight=readerHeight))
+        val notices=children[3].measure(bounded(noticeLimit.coerceAtMost((readerUpper-readerFloor).coerceAtLeast(0))))
+        val readerHeight=(readerUpper-notices.height).coerceAtLeast(0)
+        val transcript=children[4].measure(bounded(readerHeight).copy(minHeight=readerHeight))
         layout(width,height) {
             notices.placeRelative(0,0)
             transcript.placeRelative(0,notices.height)
-            rail.placeRelative(0,upper)
-            draft.placeRelative(0,upper+rail.height)
+            envelope.placeRelative(horizontalInset,upper)
+            rail.placeRelative(horizontalInset,upper)
+            draft.placeRelative(horizontalInset,upper+rail.height)
         }
     }
 }
@@ -1756,7 +1810,7 @@ fun ComposerEditor(text: String,onText: (String)->Unit,expiry: String?,notice: S
     notice?.let {UiText(it,style=MaterialTheme.typography.bodySmall)}
     TextField(value=editing,onValueChange={value->val changed=value.text!=editing.text;editing=value;if(changed)onText(value.text);onCursor?.invoke(value.selection.start,value.selection.end)},label={UiText("Message")},
         minLines=1,maxLines=6,textStyle=MaterialTheme.typography.bodyLarge,
-        colors=TextFieldDefaults.colors(focusedContainerColor=MaterialTheme.colorScheme.surface,unfocusedContainerColor=MaterialTheme.colorScheme.surface,focusedIndicatorColor=androidx.compose.ui.graphics.Color.Transparent,unfocusedIndicatorColor=androidx.compose.ui.graphics.Color.Transparent),
+        colors=TextFieldDefaults.colors(focusedContainerColor=LocalComposerColors.current.surface,unfocusedContainerColor=LocalComposerColors.current.surface,focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent),
         shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth().focusRequester(focus).testTag("composer").semantics {contentDescription="Message to this exact session"})
     expiry?.let {UiText(it,style=MaterialTheme.typography.bodySmall,modifier=Modifier.testTag("send_deadline"))}
 }
@@ -2011,7 +2065,7 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
     var confirmUnpair by remember(host) {mutableStateOf(false)}
     var discard by remember(host) {mutableStateOf<RecoveryDraft?>(null)}
     val hostName=store.hosts.firstOrNull {it.hostId==host}?.name ?: "this desktop"
-    LazyColumn(modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(16.dp),contentPadding=PaddingValues(bottom=16.dp)) {
+    LazyColumn(modifier.fillMaxWidth().testTag("host_settings_list"),verticalArrangement=Arrangement.spacedBy(16.dp),contentPadding=PaddingValues(bottom=16.dp)) {
         item(key="trust_$host") {
             GroupedSurface {
                 GoatrSection("Trust and identity",hostName)
@@ -2127,7 +2181,7 @@ private fun HostSettingsScreen(host: String,store: StoreView,connection: Connect
         }
         item {ActionPaging(model)}
     }
-    if(confirmForget) AlertDialog(onDismissRequest={confirmForget=false},title={UiText("Forget $hostName locally?")},text={UiText("Delete actual local host keys and all private host state. Server authority remains until confirmed online self-unpair or desktop revoke. Desktop sessions keep running.")},confirmButton={Action("Confirm local Forget","forget_confirm") {confirmForget=false;model.forget(host)}},dismissButton={Action("Keep pairing","forget_cancel") {confirmForget=false}})
+    if(confirmForget) AlertDialog(onDismissRequest={confirmForget=false},title={UiText("Forget $hostName locally?")},text={UiText("Delete actual local host keys and all private host state. Server authority remains until confirmed online self-unpair or desktop revoke. Desktop sessions keep running.")},confirmButton={Action("Confirm local Forget","forget_confirm") {confirmForget=false;model.forget(host)}},dismissButton={Action("Keep pairing","forget_cancel") {confirmForget=false}},modifier=Modifier.semantics {testTagsAsResourceId=true})
     if(confirmUnpair) AlertDialog(onDismissRequest={confirmUnpair=false},title={UiText("Self-unpair from $hostName?")},text={UiText("Requires authoritative online confirmation. If the response fails, server authority is unknown; local Forget remains explicit, never automatic re-pair.")},confirmButton={Action("Confirm self-unpair","unpair_confirm") {confirmUnpair=false;model.unpair(host)}},dismissButton={Action("Keep pairing","unpair_cancel") {confirmUnpair=false}})
     discard?.let {draft->AlertDialog(onDismissRequest={discard=null},title={UiText("Discard inspected recovery for $hostName?")},text={UiText("Action ${draft.action.actionId.value}. This neither cancels desktop work nor sends any action.")},confirmButton={Action("Confirm discard","discard_confirm") {discard=null;model.discard(host,draft.action.actionId)}},dismissButton={Action("Keep copy","discard_cancel") {discard=null}})}
 }

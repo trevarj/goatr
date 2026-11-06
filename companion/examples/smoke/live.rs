@@ -9,12 +9,11 @@ use goatr::{
     herdr::{self, Client, ProcessEvidence, Snapshot},
     pairing::{self, PairInvite, hex, private_dir, private_file, random32, uid},
     protocol::*,
-    storage::{CreationStageRecord, ServerEvidence},
+    storage::ServerEvidence,
     transport,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use rusqlite::{Connection, OpenFlags};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -46,6 +45,7 @@ mod physical;
 const APP: &str = "io.github.trevarj.goatr.debug";
 const NTFY_APK_SHA256:&str="b4baa6f668bd57ad5df3b4e0e769165dcf25c5ee19fdb04f78077ee819616f2a";
 const NTFY_SIGNER_SHA256:&str="76e94d8e04706c5b99064c23210d8ca9910608abae8f3e972b41e388391646e0";
+const OWNED_STOCK_CHECKPOINT_PAIR_LABEL:&str="Goatr owned stock checkpoint";
 #[derive(Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct Lease {
@@ -1042,22 +1042,11 @@ struct ServeLaunch<'a> {
 struct Companion {
     child: Child,
     process: ProcessEvidence,
-    state_root: PathBuf,
-    binary: PathBuf,
     guard_drain: Option<GuardDrain>,
     omp_capture_budget: Option<herdr_report_capture::Budget>,
-    codex_cleanup_signal: CleanupSignal,
-    codex_cleanup_active: bool,
-    codex_startup_journal: Option<CodexStartupJournalContext>,
-    codex_startup_journal_admission: Option<CodexStartupJournalAdmission>,
     retain_process: bool,
 }
 const COMPANION_CLEANUP_BUDGET: Duration = Duration::from_secs(15);
-#[derive(Clone, Copy, Default)]
-struct CleanupSignal {
-    attempted: bool,
-    sent: bool,
-}
 enum GuardDrain {
     Codex {
         worker: std::thread::JoinHandle<()>,
@@ -1065,7 +1054,7 @@ enum GuardDrain {
     },
     Other(std::thread::JoinHandle<()>),
 }
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct CodexDrainSummary {
     matching_prefix: u8,
     accepted: u8,
@@ -1076,28 +1065,11 @@ struct CodexDrainSummary {
     output_failed: bool,
     termination: CodexDrainTermination,
     read_error: Option<(&'static str, Option<i32>)>,
-    journal_availability: &'static str,
-    journal_reason: Option<&'static str>,
-    journal_accepted: bool,
-}
-#[derive(Clone, Copy)]
-struct CodexStartupJournalPins {
-    state_root: (u64, u64),
-    database: (u64, u64),
-}
-struct CodexStartupJournalAdmission {
-    action: Uuid,
-    pins: Result<CodexStartupJournalPins, &'static str>,
-}
-#[derive(Clone)]
-struct CodexStartupJournalContext {
-    receipt: Receipt,
-    settlement_cutoff: u64,
-    owner: CodexOwner,
-    server: Uuid,
-    source: ServerEvidence,
-    state_root: (u64, u64),
-    database: (u64, u64),
+    owner_progress_mask: u8,
+    owner_progress_guard: Option<&'static str>,
+    pending_at_observation: bool,
+    first_nonprogress_phase: Option<Arc<str>>,
+    first_nonprogress_guard: Option<Arc<str>>,
 }
 #[derive(Clone, Copy, Default)]
 enum CodexDrainTermination {
@@ -1105,507 +1077,124 @@ enum CodexDrainTermination {
     Reading,
     Eof,
     ReadError,
-    ThreadPanic,
-}
-impl CodexDrainTermination {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Reading => "reading",
-            Self::Eof => "eof",
-            Self::ReadError => "read_error",
-            Self::ThreadPanic => "thread_panic",
-        }
-    }
 }
 #[derive(Default)]
 struct CodexDrainProgress(Mutex<CodexDrainSummary>);
 impl CodexDrainProgress {
     fn update(&self, update: impl FnOnce(&mut CodexDrainSummary)) {
-        // Only finite field updates occur under this lock, never pipe or stdout I/O.
         let mut summary = self.0.lock().unwrap_or_else(|error| error.into_inner());
         update(&mut summary);
     }
     fn snapshot(&self) -> CodexDrainSummary {
-        // Recover the retained observations after poison rather than inventing zero counts.
-        *self.0.lock().unwrap_or_else(|error| error.into_inner())
+        self.0.lock().unwrap_or_else(|error| error.into_inner()).clone()
     }
-    fn journal_unavailable(&self, reason: &'static str) {
+    fn accepted_guard(&self, value: &Value) {
+        let Some(phase)=value["phase"].as_str() else { return; };
+        let Some(guard)=value["guard"].as_str() else { return; };
         self.update(|summary| {
-            summary.journal_availability = "unavailable";
-            summary.journal_reason = Some(reason);
-            summary.journal_accepted = false;
+            if phase == "owner_progress" {
+                match (summary.owner_progress_mask, guard) {
+                    (0, "owner_start_settled") => summary.owner_progress_mask = 1,
+                    (1, "owner_child_status_returned") => summary.owner_progress_mask = 3,
+                    (3, "owner_native_initialize_entered") => {
+                        summary.owner_progress_mask = 7;
+                        summary.owner_progress_guard = Some("owner_native_initialize_entered");
+                    }
+                    (3, "owner_pending_authorization")
+                    | (3, "owner_pending_service_metadata")
+                    | (3, "owner_pending_service_proof")
+                    | (3, "owner_pending_native_process")
+                    | (3, "owner_pending_socket_epoch")
+                    | (3, "owner_pending_owner_record_proof") => {
+                        summary.owner_progress_mask = 7;
+                        summary.owner_progress_guard = Some(match guard {
+                            "owner_pending_authorization" => "owner_pending_authorization",
+                            "owner_pending_service_metadata" => "owner_pending_service_metadata",
+                            "owner_pending_service_proof" => "owner_pending_service_proof",
+                            "owner_pending_native_process" => "owner_pending_native_process",
+                            "owner_pending_socket_epoch" => "owner_pending_socket_epoch",
+                            "owner_pending_owner_record_proof" => "owner_pending_owner_record_proof",
+                            _ => unreachable!(),
+                        });
+                        summary.pending_at_observation = true;
+                    }
+                    _ => {}
+                }
+            } else if summary.first_nonprogress_phase.is_none() {
+                summary.first_nonprogress_phase = Some(Arc::from(phase));
+                summary.first_nonprogress_guard = Some(Arc::from(guard));
+            }
         });
     }
-    fn emit_startup_journal_after_drain(&self, report: Value) {
-        let summary = self.snapshot();
-        if summary.accepted >= 8 {
-            self.journal_unavailable("capture_capacity");
-            return;
-        }
-        if summary.output_failed {
-            self.journal_unavailable("journal_unavailable");
-            return;
-        }
-        if writeln!(std::io::stdout().lock(), "{report}").is_ok() {
-            self.update(|summary| {
-                summary.accepted += 1;
-                summary.journal_availability = "available";
-                summary.journal_reason = Some("none");
-                summary.journal_accepted = true;
-            });
-        } else {
-            self.update(|summary| {
-                summary.journal_availability = "unavailable";
-                summary.journal_reason = Some("journal_unavailable");
-                summary.journal_accepted = false;
-                summary.output_failed = true;
-                summary.completed = false;
-            });
-        }
-    }
 }
-impl CodexDrainSummary {
-    fn emit(
-        &self,
-        cleanup_context: &'static str,
-        signal: CleanupSignal,
-        cleanup_result: &'static str,
-    ) {
-        println!(
-            "{}",
-            json!({
-                "gate":"owned-codex-invalidation-capture",
-                "phase":"capture_drain",
-                "matchingPrefix":self.matching_prefix,
-                "accepted":self.accepted,
-                "rejected":self.rejected,
-                "oversized":self.oversized,
-                "eof":self.eof,
-                "completed":self.completed,
-                "outputFailure":self.output_failed,
-                "termination":self.termination.as_str(),
-                "readError":self.read_error.map(|(kind, errno)| json!({"io":kind,"errno":errno})),
-                "journalAvailability":self.journal_availability,
-                "journalReason":self.journal_reason,
-                "journalAccepted":self.journal_accepted,
-                "cleanupResult":cleanup_result,
-                "status":if self.completed { "completed" } else { "capture_incomplete" },
-                "cleanupContext":cleanup_context,
-                "supervisorSigtermAttempted":signal.attempted,
-                "supervisorSigtermSent":signal.sent,
-            }),
-        );
-    }
-}
-struct CodexRelayJournalJoin {
-    unit: String,
-    manifest_path: PathBuf,
-    boot: Uuid,
-}
-
-fn retained_codex_relay_join(
-    state_root: &Path,
-    context: &CodexStartupJournalContext,
-    deadline: Instant,
-) -> Result<CodexRelayJournalJoin, &'static str> {
-    if Instant::now() >= deadline {
-        return Err("cleanup_exhausted");
-    }
-    let database = state_root.join("state.sqlite3");
-    if private_dir(state_root, false).is_err() || private_file(&database).is_err() {
-        return Err("state_unavailable");
-    }
-    let root = fs::symlink_metadata(state_root).map_err(|_| "state_unavailable")?;
-    let current = fs::symlink_metadata(&database).map_err(|_| "state_unavailable")?;
-    if (root.dev(), root.ino()) != context.state_root
-        || (current.dev(), current.ino()) != context.database
-    {
-        return Err("state_unavailable");
-    }
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(&database)
-    {
-        Ok(file) => file,
-        Err(_) => return Err("state_unavailable"),
-    };
-    let before = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return Err("state_unavailable"),
-    };
-    if private_file(&database).is_err()
-        || !before.is_file()
-        || before.nlink() != 1
-        || before.len() > 64 * 1024 * 1024
-        || (before.dev(), before.ino()) != context.database
-    {
-        return Err("state_unavailable");
-    }
-    let database_read = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    );
-    let Ok(database_read) = database_read else {
-        return Err("state_unavailable");
-    };
-    if database_read.busy_timeout(Duration::ZERO).is_err() {
-        return Err("state_unavailable");
-    }
-    if Instant::now() >= deadline {
-        return Err("cleanup_exhausted");
-    }
-    let mut query = match database_read.prepare(
-        "SELECT receipt, stages FROM receipts JOIN creation USING (peer, action) WHERE action=?1",
-    ) {
-        Ok(query) => query,
-        Err(_) => return Err("state_unavailable"),
-    };
-    let mut rows = match query.query([&context.receipt.action_id.0]) {
-        Ok(rows) => rows,
-        Err(_) => return Err("state_unavailable"),
-    };
-    let first: (String, String) = match rows.next() {
-        Ok(Some(row)) => match (row.get(0), row.get(1)) {
-            (Ok(receipt), Ok(stages)) => (receipt, stages),
-            _ => return Err("state_unavailable"),
-        },
-        _ => return Err("state_unjoined"),
-    };
-    if !matches!(rows.next(), Ok(None)) {
-        return Err("state_unjoined");
-    }
-    let after = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return Err("state_unavailable"),
-    };
-    let root_after = fs::symlink_metadata(state_root).map_err(|_| "state_unavailable")?;
-    let current_after = fs::symlink_metadata(&database).map_err(|_| "state_unavailable")?;
-    if private_file(&database).is_err()
-        || (root_after.dev(), root_after.ino()) != context.state_root
-        || (current_after.dev(), current_after.ino()) != context.database
-        || before.dev() != after.dev()
-        || before.ino() != after.ino()
-        || before.mtime() != after.mtime()
-        || before.mtime_nsec() != after.mtime_nsec()
-        || before.ctime() != after.ctime()
-        || before.ctime_nsec() != after.ctime_nsec()
-        || before.len() != after.len()
-    {
-        return Err("state_unavailable");
-    }
-    let Ok(receipt) = serde_json::from_str::<Receipt>(&first.0) else {
-        return Err("state_unjoined");
-    };
-    let Ok(stages) = serde_json::from_str::<Vec<CreationStageRecord>>(&first.1) else {
-        return Err("state_unjoined");
-    };
-    let Some(creation) = receipt.creation.as_ref() else {
-        return Err("state_unjoined");
-    };
-    let Some(binding) = creation.resources.binding_id.as_ref() else {
-        return Err("state_unjoined");
-    };
-    let unit = format!("goatr-codex-relay-{}.service", binding.0);
-    let relay: Vec<_> = stages
-        .iter()
-        .filter(|stage| {
-            stage.stage == CreationStage::Relay
-                && stage.intent.unit_name.as_deref() == Some(&unit)
-                && stage.intent.socket_path.is_some()
-        })
-        .collect();
-    if receipt != context.receipt
-        || receipt.method != ActionMethod::SessionCreate
-        || receipt.boot_id != context.receipt.boot_id
-        || creation.provider != Provider::Codex
-        || creation.server_id != context.server
-        || relay.len() != 1
-        || context.owner.bindings_dir.as_os_str().is_empty()
-    {
-        return Err("state_unjoined");
-    }
-    let manifest_path = goatr::codex_relay::manifest_path(&context.owner.bindings_dir, binding);
-    let Ok(manifest) = goatr::codex_relay::private_read::<goatr::codex_relay::Manifest>(&manifest_path) else {
-        return Err("manifest_unavailable");
-    };
-    if Instant::now() >= deadline {
-        return Err("cleanup_exhausted");
-    }
-    if manifest.binding_id != *binding
-        || manifest.owner_id != context.owner.id
-        || manifest.upstream_host != context.owner.socket_host
-        || manifest.upstream_agent != context.owner.socket_agent
-        || manifest.herdr.server_id != context.server
-        || manifest.herdr.evidence != context.source
-        || manifest.owner_epoch.linux_boot_id != context.source.linux_boot_id
-        || manifest.herdr.workspace_id != *creation.resources.workspace_id.as_ref().ok_or("state_unjoined")?
-        || manifest.herdr.pane_id != *creation.resources.pane_id.as_ref().ok_or("state_unjoined")?
-        || manifest.herdr.terminal_id != *creation.resources.terminal_id.as_ref().ok_or("state_unjoined")?
-        || manifest.expected_thread_id != *creation.resources.native_id.as_ref().ok_or("state_unjoined")?
-        || relay[0].intent.socket_path.as_deref() != manifest.listen_host.to_str()
-    {
-        return Err("manifest_unavailable");
-    }
-    Ok(CodexRelayJournalJoin {
-        unit,
-        manifest_path,
-        boot: manifest.owner_epoch.linux_boot_id,
-    })
-}
-
-fn journalctl_path() -> Result<PathBuf, &'static str> {
-    for parent in std::env::split_paths(&std::env::var_os("PATH").ok_or("journal_unavailable")?) {
-        let candidate = parent.join("journalctl");
-        if goatr::config::executable(&candidate).is_ok() {
-            return Ok(candidate);
-        }
-    }
-    Err("journal_unavailable")
-}
-
-fn journal_hex32(value: &str) -> Option<String> {
-    let value = value.replace('-', "");
-    (value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| value.to_ascii_lowercase())
-}
-
-async fn stop_journal_reader(child: &mut tokio::process::Child, deadline: Instant) {
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), child.wait()).await;
-}
-
-async fn retained_codex_startup_journal(
-    state_root: &Path,
-    binary: &Path,
-    context: &CodexStartupJournalContext,
-    deadline: Instant,
-) -> Result<Value, &'static str> {
-    use tokio::io::AsyncReadExt;
-
-    if Instant::now() >= deadline {
-        return Err("cleanup_exhausted");
-    }
-    let state_root = state_root.to_owned();
-    let join_context = context.clone();
-    let join = match tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        tokio::task::spawn_blocking(move || retained_codex_relay_join(&state_root, &join_context, deadline)),
-    )
-    .await
-    {
-        Ok(Ok(Ok(join))) => join,
-        Ok(Ok(Err(reason))) => return Err(reason),
-        Ok(Err(_)) => return Err("state_unavailable"),
-        Err(_) => return Err("cleanup_exhausted"),
-    };
-    let journalctl = journalctl_path()?;
-    if Instant::now() >= deadline {
-        return Err("cleanup_exhausted");
-    }
-    let started = context.receipt.created_at.0;
-    let boot = journal_hex32(&join.boot.0).ok_or("journal_invalid")?;
-    let expected_command = format!(
-        "{} codex-relay --binding {}",
-        binary.display(),
-        join.manifest_path.display()
-    );
-    let mut command = tokio::process::Command::new(journalctl);
-    command
-        .kill_on_drop(true)
-        .arg("--user")
-        .arg("--user-unit")
-        .arg(&join.unit)
-        .arg(format!("--boot={boot}"))
-        .arg("-n")
-        .arg("100")
-        .arg(format!("--since=@{}.{:03}", started / 1_000, started % 1_000))
-        .arg(format!(
-            "--until=@{}.{:03}",
-            context.settlement_cutoff / 1_000,
-            context.settlement_cutoff % 1_000
-        ))
-        .arg("--output=json")
-        .arg("--no-pager")
-        .arg(format!("_UID={}", uid()))
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .stdout(Stdio::piped());
-    #[cfg(target_os = "linux")]
-    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
-    unsafe {
-        command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
-    }
-    let mut child = command.spawn().map_err(|_| "journal_unavailable")?;
-    let stdout = child.stdout.take().ok_or("journal_unavailable")?;
-    let mut collected = Vec::new();
-    match tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        stdout.take(1_048_577).read_to_end(&mut collected),
-    )
-    .await
-    {
-        Ok(Ok(_)) => {}
-        Ok(Err(_)) => {
-            stop_journal_reader(&mut child, deadline).await;
-            return Err("journal_unavailable");
-        }
-        Err(_) => {
-            stop_journal_reader(&mut child, deadline).await;
-            return Err("cleanup_exhausted");
-        }
-    }
-    if collected.len() > 1_048_576 {
-        stop_journal_reader(&mut child, deadline).await;
-        return Err("journal_oversized");
-    }
-    let status = match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), child.wait()).await {
-        Ok(Ok(status)) => status,
-        _ => {
-            stop_journal_reader(&mut child, deadline).await;
-            return Err("cleanup_exhausted");
-        }
-    };
-    if !status.success() {
-        return Err("journal_unavailable");
-    }
-    let mut matching = Vec::new();
-    let mut service_pid = None;
-    let mut invocation = None;
-    let mut records = 0u16;
-    for line in collected.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
-        records = records.saturating_add(1);
-        if records > 100 {
-            return Err("journal_oversized");
-        }
-        let value: Value = serde_json::from_slice(line).map_err(|_| "journal_invalid")?;
-        if value["_SYSTEMD_USER_UNIT"].as_str() != Some(&join.unit)
-            || value["_BOOT_ID"].as_str().and_then(journal_hex32).as_deref() != Some(&boot)
-            || value["_UID"].as_str() != Some(&uid().to_string())
-        {
-            continue;
-        }
-        let Some(executable) = value["_EXE"].as_str() else {
-            continue;
-        };
-        let Some(command) = value["_CMDLINE"].as_str() else {
-            continue;
-        };
-        if executable != binary.to_string_lossy() || command != expected_command {
-            return Err("journal_invalid");
-        }
-        let pid = value["_PID"]
-            .as_str()
-            .filter(|value| {
-                value.parse::<u32>().is_ok_and(|pid| pid > 0)
-                    && value.parse::<u32>().ok().is_some_and(|pid| pid.to_string() == *value)
-            })
-            .ok_or("journal_invalid")?;
-        let invocation_raw = value["_SYSTEMD_INVOCATION_ID"]
-            .as_str()
-            .ok_or("journal_invalid")?;
-        let current_invocation = journal_hex32(invocation_raw)
-            .filter(|canonical| canonical == invocation_raw)
-            .ok_or("journal_invalid")?;
-        if service_pid.replace(pid.to_owned()).is_some_and(|prior| prior != pid)
-            || invocation
-                .replace(current_invocation.clone())
-                .is_some_and(|prior| prior != current_invocation)
-        {
-            return Err("journal_ambiguous");
-        }
-        let timestamp = value["__REALTIME_TIMESTAMP"]
-            .as_str()
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(|value| value / 1_000)
-            .ok_or("journal_invalid")?;
-        if timestamp < started || timestamp > context.settlement_cutoff {
-            return Err("journal_late");
-        }
-        if let Some(message) = value["MESSAGE"].as_str()
-            && let Some(report) = parse_codex_guard_line(message.as_bytes())
-            && report["phase"].as_str() == Some("relay_startup")
-        {
-            matching.push(report);
-        }
-    }
-    if service_pid.is_none() || invocation.is_none() || matching.len() != 1 {
-        return Err("journal_unavailable");
-    }
-    Ok(matching.remove(0))
+fn codex_drain_is_pristine(summary: &CodexDrainSummary, worker_finished: bool) -> bool {
+    summary.matching_prefix == 0
+        && summary.accepted == 0
+        && summary.rejected == 0
+        && summary.oversized == 0
+        && !summary.output_failed
+        && !summary.eof
+        && !summary.completed
+        && summary.read_error.is_none()
+        && matches!(summary.termination, CodexDrainTermination::Reading)
+        && !worker_finished
 }
 impl Companion {
-    fn pin_codex_startup_journal(&mut self, action: &Uuid) {
-        if self.codex_startup_journal_admission.is_some() {
-            return;
-        }
-        // Diagnostic admission is tied to the first original action, even if pinning fails.
-        let pins = (|| -> io::Result<CodexStartupJournalPins> {
-            private_dir(&self.state_root, false)?;
-            let database = self.state_root.join("state.sqlite3");
-            private_file(&database)?;
-            let root = fs::symlink_metadata(&self.state_root)?;
-            let database = fs::symlink_metadata(database)?;
-            Ok(CodexStartupJournalPins {
-                state_root: (root.dev(), root.ino()),
-                database: (database.dev(), database.ino()),
-            })
-        })()
-        .map_err(|_| "state_unavailable");
-        self.codex_startup_journal_admission = Some(CodexStartupJournalAdmission {
-            action: action.clone(),
-            pins,
-        });
-    }
-    fn retain_codex_startup_journal(
-        &mut self,
-        receipt: &Receipt,
-        config: &Config,
-        server: &Uuid,
-        source: ServerEvidence,
-        settlement_cutoff: u64,
-    ) {
-        if self.codex_startup_journal.is_none() && config.codex_owners.len() == 1 {
-            let Some(admission) = self.codex_startup_journal_admission.as_ref() else {
-                return;
-            };
-            if admission.action != receipt.action_id {
-                return;
-            }
-            let Ok(pins) = admission.pins else {
-                return;
-            };
-            self.codex_startup_journal = Some(CodexStartupJournalContext {
-                receipt: receipt.clone(),
-                settlement_cutoff,
-                owner: config.codex_owners[0].clone(),
-                server: server.clone(),
-                source,
-                state_root: pins.state_root,
-                database: pins.database,
-            });
-        }
-    }
     fn recheck(&self) -> io::Result<()> {
         if herdr::process_evidence(self.process.pid)? != self.process {
             return Err(failure("owned companion process epoch changed"));
         }
         Ok(())
     }
+    fn codex_drain_snapshot(&self) -> io::Result<CodexDrainSummary> {
+        match self.guard_drain.as_ref() {
+            Some(GuardDrain::Codex { progress, .. }) => Ok(progress.snapshot()),
+            _ => Err(failure("owned Codex diagnostic capture unavailable")),
+        }
+    }
+    fn codex_drain_pristine(&self) -> io::Result<()> {
+        let (summary, worker_finished) = match self.guard_drain.as_ref() {
+            Some(GuardDrain::Codex { worker, progress }) => (progress.snapshot(), worker.is_finished()),
+            _ => return Err(failure("owned Codex diagnostic capture unavailable")),
+        };
+        if !codex_drain_is_pristine(&summary, worker_finished) {
+            return Err(failure("Codex diagnostic readiness emitted a guard; no create submitted"));
+        }
+        Ok(())
+    }
+    async fn codex_creation_guard_by(&self, deadline: Instant) -> io::Result<CodexDrainSummary> {
+        loop {
+            let summary = self.codex_drain_snapshot()?;
+            if summary.matching_prefix > 8
+                || summary.accepted > 8
+                || summary.rejected != 0
+                || summary.oversized != 0
+                || summary.output_failed
+                || summary.eof
+                || summary.completed
+                || summary.read_error.is_some()
+                || !matches!(summary.termination, CodexDrainTermination::Reading)
+            {
+                return Err(failure("Codex diagnostic guard capture malformed or unavailable"));
+            }
+            if summary.first_nonprogress_phase.as_deref() == Some("creation") {
+                return Ok(summary);
+            }
+            if Instant::now() >= deadline {
+                return Err(failure("Codex diagnostic creation guard unavailable before deadline"));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
     async fn stop_process_until(&mut self, deadline: Instant) -> io::Result<()> {
         if self.retain_process {
             return Err(grid_failure("cleanup_not_authorized"));
         }
-        self.codex_cleanup_signal = CleanupSignal::default();
         if self.child.try_wait()?.is_some() {
             return Ok(());
         }
         self.recheck()?;
-        self.codex_cleanup_signal.attempted = true;
-        self.codex_cleanup_signal.sent =
-            unsafe { libc::kill(self.process.pid as i32, libc::SIGTERM) } == 0;
+        let _ = unsafe { libc::kill(self.process.pid as i32, libc::SIGTERM) };
         while self.child.try_wait()?.is_none() {
             if Instant::now() > deadline {
                 return Err(failure(
@@ -1620,116 +1209,8 @@ impl Companion {
         let stopped = self
             .stop_process_until(Instant::now() + COMPANION_CLEANUP_BUDGET)
             .await;
-        self.codex_cleanup_signal = CleanupSignal::default();
         stopped?;
         self.finish_guard_drain();
-        Ok(())
-    }
-    async fn stop_codex_diagnostic(
-        &mut self,
-        cleanup_context: &'static str,
-    ) -> io::Result<()> {
-        if self.retain_process{return Err(grid_failure("cleanup_not_authorized"));}
-        let deadline = Instant::now() + COMPANION_CLEANUP_BUDGET;
-        self.codex_cleanup_active = true;
-        let stopped = self.stop_process_until(deadline).await;
-        let Some(drain) = self.guard_drain.take() else {
-            return Err(failure("owned Codex diagnostic stderr drain unavailable"));
-        };
-        let GuardDrain::Codex {
-            worker: drain,
-            progress,
-        } = drain else {
-            return Err(failure("owned Codex diagnostic stderr drain changed"));
-        };
-        if self.codex_startup_journal.is_some() {
-            progress.update(|summary| {
-                summary.journal_availability = "pending";
-                summary.journal_reason = None;
-                summary.journal_accepted = false;
-            });
-        } else {
-            let reason = self.codex_startup_journal_admission.as_ref()
-                .and_then(|admission| admission.pins.as_ref().err().copied())
-                .unwrap_or("not_retained");
-            progress.journal_unavailable(reason);
-        }
-        let cleanup_context = if self.codex_cleanup_signal.attempted {
-            cleanup_context
-        } else {
-            "not_sent"
-        };
-        if let Err(error) = stopped {
-            if drain.is_finished() && drain.join().is_err() {
-                progress.update(|summary| {
-                    summary.termination = CodexDrainTermination::ThreadPanic;
-                    summary.completed = false;
-                });
-            }
-            progress.update(|summary| {
-                summary.journal_availability = "unavailable";
-                summary.journal_reason = Some("stop_failure");
-                summary.journal_accepted = false;
-                summary.completed = false;
-            });
-            progress.snapshot().emit(
-                cleanup_context,
-                self.codex_cleanup_signal,
-                "stop_failure",
-            );
-            return Err(error);
-        }
-        while !drain.is_finished() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        if !drain.is_finished() {
-            progress.update(|summary| {
-                summary.journal_availability = "unavailable";
-                summary.journal_reason = Some("drain_deadline");
-                summary.journal_accepted = false;
-                summary.completed = false;
-            });
-            progress.snapshot().emit(
-                cleanup_context,
-                self.codex_cleanup_signal,
-                "drain_deadline",
-            );
-            return Err(failure("owned Codex diagnostic stderr drain incomplete"));
-        }
-        if drain.join().is_err() {
-            progress.update(|summary| {
-                summary.termination = CodexDrainTermination::ThreadPanic;
-                summary.completed = false;
-            });
-            progress.update(|summary| {
-                summary.journal_availability = "unavailable";
-                summary.journal_reason = Some("join_failure");
-                summary.journal_accepted = false;
-                summary.completed = false;
-            });
-            progress
-                .snapshot()
-                .emit(cleanup_context, self.codex_cleanup_signal, "joined");
-            return Err(failure("owned Codex diagnostic stderr drain panicked"));
-        }
-        if let Some(context) = self.codex_startup_journal.take() {
-            match retained_codex_startup_journal(
-                &self.state_root,
-                &self.binary,
-                &context,
-                deadline,
-            )
-            .await
-            {
-                Ok(report) => progress.emit_startup_journal_after_drain(report),
-                Err(reason) => progress.journal_unavailable(reason),
-            }
-        }
-        let summary = progress.snapshot();
-        summary.emit(cleanup_context, self.codex_cleanup_signal, "joined");
-        if !summary.completed {
-            return Err(failure("owned Codex diagnostic stderr drain incomplete"));
-        }
         Ok(())
     }
     async fn finish_retained_omp_capture(&self) -> bool {
@@ -1790,7 +1271,6 @@ impl Drop for Companion {
         }
         if !self.retain_process
             && status.is_ok_and(|s| s.is_none())
-            && !self.codex_cleanup_active
             && self.recheck().is_ok()
         {
             unsafe { libc::kill(self.process.pid as i32, libc::SIGTERM) };
@@ -2528,7 +2008,6 @@ struct Phone {
     history_command: Option<HistoryCommandTrace>,
     omp_capture_budget: Option<herdr_report_capture::Budget>,
     phone_close_reported: bool,
-    codex_close_capture: bool,
     grid: Option<GridWitness>,
 }
 fn closed_connection_reason(reason: Option<iroh::endpoint::ConnectionError>) -> &'static str {
@@ -2643,11 +2122,8 @@ impl Phone {
             })?
             .map_err(|error| {
                 // Sample the original connection before error projection or cleanup.
-                let close = self.codex_close_capture.then(|| {
-                    closed_connection_reason(self.connection.close_reason())
-                });
                 self.report_frame_read_close();
-                request_failure_with_close(method, phase, "frame_read", error, close)
+                request_failure(method, phase, "frame_read", error)
             })?;
             match decode_payload(&bytes, Some(method)).map_err(|error| {
                 request_failure(method, phase, "payload_decode", io::Error::other(error))
@@ -3027,14 +2503,13 @@ async fn connect(
         history_command: None,
         omp_capture_budget: None,
         phone_close_reported: false,
-        codex_close_capture: false,
         grid: None,
     };
     if let Some(i) = invite {
         p.rpc(
             RequestBody::PairConfirm(PairConfirmParams {
                 token: i.token,
-                device_name: Label::new("Goatr owned stock checkpoint")
+                device_name: Label::new(OWNED_STOCK_CHECKPOINT_PAIR_LABEL)
                     .map_err(io::Error::other)?,
             }),
             "pair_confirm",
@@ -3045,7 +2520,7 @@ async fn connect(
         .rpc(
             RequestBody::Hello(HelloParams {
                 app_version: env!("CARGO_PKG_VERSION").into(),
-                device_name: Label::new("Goatr owned stock checkpoint")
+                device_name: Label::new(OWNED_STOCK_CHECKPOINT_PAIR_LABEL)
                     .map_err(io::Error::other)?,
             }),
             "hello",
@@ -5881,7 +5356,7 @@ async fn proof(
     let original=Client::connect(socket).await?.qualify_executable(&config.executables.herdr)?;
     proof_selected(config,socket,s,None,&original).await
 }
-async fn created_codex_proof(
+pub(super) async fn created_codex_proof(
     config: &Config,
     socket: &Path,
     s: &SessionSummary,
@@ -7375,6 +6850,32 @@ fn owned_herdr_report_binary(capture: bool, workspace: &Path) -> io::Result<Opti
     Ok(Some(canonical))
 }
 
+fn codex_single_creation_diagnostic_environment(args: &clap::ArgMatches) -> io::Result<()> {
+    if !args.get_flag("codex-invalidation-diagnostic") {
+        return Ok(());
+    }
+    if [
+        "GOATR_OWNED_CODEX_DIAGNOSTIC",
+        "GOATR_OWNED_OMP_CREATION_CAPTURE",
+        "GOATR_OWNED_OMP_OFFLINE_CAPTURE",
+        "GOATR_OWNED_OMP_BACKEND_CAPTURE",
+        "GOATR_OWNED_HELLO_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
+        "GOATR_OWNED_OMP_PRODUCER_BUN",
+        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256",
+        "GOATR_OWNED_HERDR_REPORT_BIN",
+        "GOATR_OWNED_HERDR_REPORT_SHA256",
+        "GOATR_OWNED_GRID_OPEN_CAPTURE",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+    {
+        return Err(failure("Codex single-creation diagnostic rejects inherited diagnostic/private capture environment"));
+    }
+    Ok(())
+}
 fn require_shared_backends(args: &clap::ArgMatches) -> io::Result<()> {
     let mut count=0;
     let mut omp=0;
@@ -7388,6 +6889,18 @@ fn require_shared_backends(args: &clap::ArgMatches) -> io::Result<()> {
         return Err(failure("shared-agent-only requires exactly one OMP and one Codex backend"));
     }
     Ok(())
+}
+fn retained_pairing_provider_create(args:&clap::ArgMatches)->io::Result<Option<Provider>> {
+    let selected=args.get_many::<String>("backend").into_iter().flatten().map(String::as_str).collect::<Vec<_>>();
+    if args.get_flag("physical-owned-retirement") || args.get_flag("physical-pairing-shell-checkpoint") || args.get_flag("physical-pairing-shell-interaction-checkpoint") {
+        return if selected.is_empty()&&!args.get_flag("consent-owned-providers") {Ok(None)} else {Err(failure("retained pairing shell checkpoint rejects provider backend and consent"))};
+    }
+    match (selected.as_slice(),args.get_flag("consent-owned-providers")) {
+        ([],false)=>Ok(None),
+        (["omp"],true)=>Ok(Some(Provider::Omp)),
+        (["codex"],true)=>Ok(Some(Provider::Codex)),
+        _=>Err(failure("retained pairing creation requires exactly one --backend omp|codex with --consent-owned-providers")),
+    }
 }
 fn project_read_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     if !args.get_flag("project-read-only"){return Ok(());}
@@ -7445,15 +6958,61 @@ fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     Ok(())
 }
 fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
-    if !args.get_flag("physical-mvp") {
-        if args.get_one::<String>("expected-config-sha256").is_some(){return Err(failure("independent seed config pin is physical-mvp only"));}
-        if args.get_one::<String>("expected-controller-sha256").is_some(){return Err(failure("controller hash is physical-mvp only"));}
+    let full=args.get_flag("physical-mvp");let pairing=args.get_flag("physical-pairing-checkpoint");let retirement=args.get_flag("physical-owned-retirement");
+    let process_inventory=args.get_flag("physical-owned-process-inventory");let process_stop=args.get_flag("physical-owned-process-stop");
+    if !process_inventory&&!process_stop&&matches!((args.get_one::<String>("expected-goatr-sha256"),args.get_one::<String>("expected-companion-lock-sha256")),(None,Some(_))) {return Err(failure("frozen development companion lock requires its exact binary hash"));}
+    if !full&&!pairing&&!retirement&&!process_inventory&&!process_stop {
+        if args.get_one::<String>("expected-config-sha256").is_some(){return Err(failure("independent seed config pin is physical-only"));}
+        if args.get_one::<String>("expected-controller-sha256").is_some(){return Err(failure("controller hash is physical-only"));}
         if args.get_one::<PathBuf>("prepared-fresh-install").is_some()||args.get_one::<String>("expected-prepared-install-sha256").is_some(){return Err(failure("prepared install inputs are physical-mvp only"));}
         return Ok(());
     }
-    physical::validate_controller_unit(args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("explicit full controller unit missing"))?)?;
+    physical::validate_controller_unit(args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("explicit physical controller unit missing"))?)?;
     if args.get_one::<String>("expected-controller-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))) {
         return Err(prerequisite("independent_controller_unit_pin_unavailable"));
+    }
+    if process_inventory||process_stop {
+        let allowed=if process_inventory {vec!["physical-owned-process-inventory","owned-process-source-manifest","expected-owned-process-source-manifest-sha256",
+            "owned-app-retirement-gate","expected-owned-app-retirement-gate-sha256","expected-controller-unit","expected-controller-sha256",
+            "expected-companion-lock-sha256","evidence-dir"]}else {vec!["physical-owned-process-stop","owned-process-stop-approval","expected-owned-process-stop-approval-sha256",
+            "owned-process-source-manifest","expected-owned-process-source-manifest-sha256","owned-app-retirement-gate","expected-owned-app-retirement-gate-sha256",
+            "expected-controller-unit","expected-controller-sha256","expected-companion-lock-sha256","evidence-dir"]};
+        let command=feedback_arguments(arguments_base());
+        if command.get_arguments().any(|argument|args.value_source(argument.get_id().as_str())==Some(clap::parser::ValueSource::CommandLine)
+            &&!allowed.contains(&argument.get_id().as_str())) {
+            return Err(failure("owned process inventory/stop accepts only its closed approval/source/completion/unit/lock/evidence inputs"));
+        }
+        if args.get_one::<String>("expected-owned-process-source-manifest-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)))
+            ||args.get_one::<String>("expected-owned-app-retirement-gate-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)))
+            ||process_stop&&args.get_one::<String>("expected-owned-process-stop-approval-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)))
+            ||args.get_one::<String>("expected-companion-lock-sha256").map(String::as_str)!=Some(transport::lock_sha256()) {
+            return Err(failure("owned process inventory requires its exact inventory/source/completion/lock pins"));
+        }
+        if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE",
+            "GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+            "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
+            "GOATR_OWNED_OMP_PRODUCER_BUN","GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN",
+            "GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"].iter().any(|name|std::env::var_os(name).is_some()) {
+            return Err(failure("owned process inventory rejects inherited native/provider/private capture"));
+        }
+        return Ok(());
+    }
+    if args.get_one::<String>("expected-config-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))) {
+        return Err(prerequisite("independent_seed_config_pin_unavailable"));
+    }
+    if pairing||retirement {
+        if retirement && (args.get_many::<String>("backend").into_iter().flatten().next().is_some() || args.get_flag("consent-owned-providers")) {return Err(failure("owned retirement rejects provider backend and consent"));}
+        retained_pairing_provider_create(args)?;
+        physical::validate_retained_subject_pin_arguments(args)?;
+        if args.value_source("api")==Some(clap::parser::ValueSource::CommandLine) {return Err(failure("retained pairing discovers the selected physical API/ABI; explicit --api is forbidden"));}
+        if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE",
+            "GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+            "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
+            "GOATR_OWNED_OMP_PRODUCER_BUN","GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN",
+            "GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"].iter().any(|name|std::env::var_os(name).is_some()) {
+            return Err(failure("retained pairing refuses inherited private/provider/Hello/grid capture"));
+        }
+        return Ok(());
     }
     match (args.get_one::<PathBuf>("prepared-fresh-install"),args.get_one::<String>("expected-prepared-install-sha256")) {
         (None,None)=>{},
@@ -7463,9 +7022,6 @@ fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
     require_shared_backends(args).map_err(|_|failure("physical-mvp requires exactly one OMP and one Codex backend"))?;
     if args.value_source("api")==Some(clap::parser::ValueSource::CommandLine) {
         return Err(failure("physical-mvp discovers the selected physical API/ABI; explicit --api is forbidden"));
-    }
-    if args.get_one::<String>("expected-config-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))) {
-        return Err(prerequisite("independent_seed_config_pin_unavailable"));
     }
     if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE",
         "GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
@@ -7513,14 +7069,16 @@ fn arguments_base() -> Command {
             .requires_all(["physical-mvp","expected-prepared-install-sha256"]).help("Explicit sealed0400 owned fresh-install creator record; skips ONLY the already-owned PRODUCT install, never baseline/runtime"))
         .arg(Arg::new("expected-prepared-install-sha256").long("expected-prepared-install-sha256")
             .requires_all(["physical-mvp","prepared-fresh-install"]).help("Independent lowercase64 creator-record pin, not measured candidate authority"))
-        .arg(Arg::new("expected-controller-sha256").long("expected-controller-sha256").requires("physical-mvp")
+        .arg(Arg::new("expected-controller-sha256").long("expected-controller-sha256")
             .help("Independent lowercase SHA256 pin of the held controller executable; never measured self-authorization"))
         .arg(Arg::new("physical-host-wake-preflight").long("physical-host-wake-preflight").action(ArgAction::SetTrue)
             .requires_all(["expected-controller-unit","evidence-dir"]).conflicts_with("physical-host-preflight")
             .help("Explicit real-host TTY diagnostic ONLY: exact four-set Wake capability shape plus expected actual controller unit, never full-matrix/runtime authority"))
         .arg(Arg::new("expected-controller-unit").long("expected-controller-unit").requires("controller-unit-mode")
             .help("Explicit expected fresh goatr-host-wake-<canonical-lower-UUID>.service; joined to the original manager, MainPID and full cgroup"))
-        .group(ArgGroup::new("controller-unit-mode").args(["physical-mvp","physical-host-wake-preflight"]))
+        .group(ArgGroup::new("controller-unit-mode").args(["physical-mvp","physical-pairing-checkpoint","physical-owned-retirement","physical-owned-process-inventory","physical-owned-process-stop","physical-host-wake-preflight"]))
+        .group(ArgGroup::new("owned-process-mode").args(["physical-owned-process-inventory","physical-owned-process-stop"]))
+        .group(ArgGroup::new("retained-subject-mode").args(["physical-pairing-checkpoint","physical-owned-retirement"]))
         .arg(Arg::new("physical-host-preflight").long("physical-host-preflight").action(ArgAction::SetTrue)
             .requires("evidence-dir")
             .help("Human real-host TTY only: qualify the unchanged original-host guard and record closed permission diagnostics; evidence only, no native/provider/ADB/product effect or full-MVP claim"))
@@ -7532,8 +7090,38 @@ fn arguments_base() -> Command {
                 "grid","grid-lease","ui","camera","ime","setup","prepare-emulator","emulator-owner","paging-proof",
                 "codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral",
                 "development-continuity","development-owner-feedback","development-android-only",
-                "keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs"])
+                "keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs","physical-pairing-checkpoint"])
             .help("Stock BOTH-provider physical MVP: explicit genuine PRODUCT absence OR pinned owned-prepared fresh install; same-signer TEST update and full camera/baseline/observer chain, no arbitrary installed-app adoption"))
+        .arg(Arg::new("physical-pairing-checkpoint").long("physical-pairing-checkpoint").action(ArgAction::SetTrue)
+            .requires_all(["goatr","config","workspace-root","evidence-dir","apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-current-test-apk-sha256","expected-product-uid","expected-product-first-install-time","expected-product-data-dir","expected-test-uid","expected-test-first-install-time","expected-test-data-dir","expected-goatr-sha256","expected-companion-lock-sha256","expected-config-sha256","serial","expected-controller-unit","expected-controller-sha256"])
+            .conflicts_with_all(["physical-mvp","physical-host-preflight","physical-host-wake-preflight","background","admission-only","shared-agent-only","terminal-only","project-read-only","grid","grid-lease","ui","camera","ime","setup","prepare-emulator","emulator-owner","paging-proof","codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral","development-continuity","development-owner-feedback","development-android-only","keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256","prepared-fresh-install","expected-prepared-install-sha256"])
+            .help("One retained installed-subject private Paste/Preview/Confirm pairing checkpoint: PRODUCT is qualified only, TEST may receive one same-signer in-place update, and all stock resources remain retained"))
+        .arg(Arg::new("physical-owned-retirement").long("physical-owned-retirement").action(ArgAction::SetTrue)
+            .requires_all(["goatr","config","workspace-root","evidence-dir","apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-current-test-apk-sha256","expected-product-uid","expected-product-first-install-time","expected-product-data-dir","expected-test-uid","expected-test-first-install-time","expected-test-data-dir","expected-goatr-sha256","expected-companion-lock-sha256","expected-config-sha256","serial","expected-controller-unit","expected-controller-sha256","retirement-target-manifest","expected-retirement-manifest-sha256"])
+            .conflicts_with_all(["physical-mvp","physical-pairing-checkpoint","physical-pairing-shell-checkpoint","physical-pairing-shell-interaction-checkpoint","physical-host-preflight","physical-host-wake-preflight","background","admission-only","shared-agent-only","terminal-only","project-read-only","grid","grid-lease","ui","camera","ime","setup","prepare-emulator","emulator-owner","paging-proof","codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral","development-continuity","development-owner-feedback","development-android-only","keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256","prepared-fresh-install","expected-prepared-install-sha256","backend","consent-owned-providers"])
+            .help("Remove only root-reviewed locally owned old host rows through the installed product Forget UI; target names remain private to authenticated control"))
+        .arg(Arg::new("retirement-target-manifest").long("retirement-target-manifest").value_parser(value_parser!(PathBuf)).requires("physical-owned-retirement"))
+        .arg(Arg::new("expected-retirement-manifest-sha256").long("expected-retirement-manifest-sha256").value_parser(value_parser!(String)).requires("physical-owned-retirement"))
+        .arg(Arg::new("physical-owned-process-inventory").long("physical-owned-process-inventory").action(ArgAction::SetTrue)
+            .requires_all(["owned-process-source-manifest","expected-owned-process-source-manifest-sha256","owned-app-retirement-gate","expected-owned-app-retirement-gate-sha256","expected-controller-unit","expected-controller-sha256","expected-companion-lock-sha256","evidence-dir"])
+            .conflicts_with_all(["physical-mvp","physical-pairing-checkpoint","physical-owned-retirement","physical-pairing-shell-checkpoint","physical-pairing-shell-interaction-checkpoint","physical-host-preflight","physical-host-wake-preflight","background","admission-only","shared-agent-only","terminal-only","project-read-only","grid","grid-lease","ui","camera","ime","setup","prepare-emulator","emulator-owner","paging-proof","codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral","development-continuity","development-owner-feedback","development-android-only","keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256","prepared-fresh-install","expected-prepared-install-sha256","backend","consent-owned-providers","goatr","config","workspace-root","serial","apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-current-test-apk-sha256","expected-product-uid","expected-product-first-install-time","expected-product-data-dir","expected-test-uid","expected-test-first-install-time","expected-test-data-dir","expected-goatr-sha256","expected-config-sha256","retirement-target-manifest","expected-retirement-manifest-sha256"])
+            .help("Read-only root-reviewed old-process inventory only; no stop, pidfd, native or device path"))
+        .arg(Arg::new("physical-owned-process-stop").long("physical-owned-process-stop").action(ArgAction::SetTrue)
+            .requires_all(["owned-process-stop-approval","expected-owned-process-stop-approval-sha256","owned-process-source-manifest","expected-owned-process-source-manifest-sha256","owned-app-retirement-gate","expected-owned-app-retirement-gate-sha256","expected-controller-unit","expected-controller-sha256","expected-companion-lock-sha256","evidence-dir"])
+            .conflicts_with_all(["physical-mvp","physical-pairing-checkpoint","physical-owned-retirement","physical-owned-process-inventory","physical-pairing-shell-checkpoint","physical-pairing-shell-interaction-checkpoint","physical-host-preflight","physical-host-wake-preflight","background","admission-only","shared-agent-only","terminal-only","project-read-only","grid","grid-lease","ui","camera","ime","setup","prepare-emulator","emulator-owner","paging-proof","codex-invalidation-diagnostic","omp-creation-diagnostic","physical-hello-capture","physical-relay-ephemeral","development-continuity","development-owner-feedback","development-android-only","keep-foreground-for-feedback","defer-retention-crossing","admin-socket","disposable-uid","automate-native-inputs","expected-ntfy-apk-sha256","expected-ntfy-signer-sha256","prepared-fresh-install","expected-prepared-install-sha256","backend","consent-owned-providers","goatr","config","workspace-root","serial","apk","test-apk","expected-apk-sha256","expected-test-apk-sha256","expected-current-test-apk-sha256","expected-product-uid","expected-product-first-install-time","expected-product-data-dir","expected-test-uid","expected-test-first-install-time","expected-test-data-dir","expected-goatr-sha256","expected-config-sha256","retirement-target-manifest","expected-retirement-manifest-sha256"])
+            .help("Root-reviewed pidfd-only stop of an exact wholly proved inventory subset; no systemd, cgroup, native, or device fallback"))
+        .arg(Arg::new("owned-process-stop-approval").long("owned-process-stop-approval").value_parser(value_parser!(PathBuf)).requires("physical-owned-process-stop"))
+        .arg(Arg::new("expected-owned-process-stop-approval-sha256").long("expected-owned-process-stop-approval-sha256").requires("physical-owned-process-stop"))
+        .arg(Arg::new("owned-process-source-manifest").long("owned-process-source-manifest").value_parser(value_parser!(PathBuf)).requires("owned-process-mode"))
+        .arg(Arg::new("expected-owned-process-source-manifest-sha256").long("expected-owned-process-source-manifest-sha256").requires("owned-process-mode"))
+        .arg(Arg::new("owned-app-retirement-gate").long("owned-app-retirement-gate").value_parser(value_parser!(PathBuf)).requires("owned-process-mode"))
+        .arg(Arg::new("expected-owned-app-retirement-gate-sha256").long("expected-owned-app-retirement-gate-sha256").requires("owned-process-mode"))
+        .arg(Arg::new("physical-pairing-shell-checkpoint").long("physical-pairing-shell-checkpoint").action(ArgAction::SetTrue)
+            .requires("physical-pairing-checkpoint").conflicts_with_all(["backend","consent-owned-providers"])
+            .help("Extend the retained pairing checkpoint with one fresh stock ordinary-shell Begin, one Enter, Release, and viewer-only close; no provider creation"))
+        .arg(Arg::new("physical-pairing-shell-interaction-checkpoint").long("physical-pairing-shell-interaction-checkpoint").action(ArgAction::SetTrue)
+            .requires("physical-pairing-shell-checkpoint").conflicts_with_all(["backend","consent-owned-providers"])
+            .help("Extend the retained ordinary-shell checkpoint with one owned Draft/Live input sequence and measured history controls; no provider creation"))
         .arg(Arg::new("background").long("background").value_parser(["persistent","ntfy"])
             .requires_all([
                 "backend",
@@ -7582,7 +7170,7 @@ fn arguments_base() -> Command {
             .help("Independent exact APK pin for official F-Droid https://f-droid.org/repo/io.heckel.ntfy_63.apk (1.25.2/code63); not the upstream GitHub fdroid-release build"))
         .arg(Arg::new("expected-ntfy-signer-sha256").long("expected-ntfy-signer-sha256").requires("notification-artifact-mode")
             .help("Independent exact official F-Droid APK-signer pin; physical-mvp/background ntfy only, never persistent"))
-        .arg(Arg::new("expected-config-sha256").long("expected-config-sha256").requires_all(["physical-mvp","config"]).help("Independent caller SHA-256 of the canonical0600 neutral seed; lowercase64, physical-only, never measured by the runner to authorize its candidate"))
+        .arg(Arg::new("expected-config-sha256").long("expected-config-sha256").requires("config").help("Independent caller SHA-256 of the canonical0600 neutral seed; lowercase64, physical-only, never measured by the runner to authorize its candidate"))
         .arg(Arg::new("terminal-only").long("terminal-only").action(ArgAction::SetTrue)
             .requires_all([
                 "goatr",
@@ -7758,9 +7346,11 @@ fn arguments_base() -> Command {
                     "project-read-only",
                     "background",
                     "physical-mvp",
+                    "physical-pairing-checkpoint",
+                    "physical-owned-retirement",
                 ]),
         )
-        .group(ArgGroup::new("android-artifact-mode").args(["development-continuity","background","physical-mvp"]))
+        .group(ArgGroup::new("android-artifact-mode").args(["development-continuity","background","physical-mvp","physical-pairing-checkpoint","physical-owned-retirement"]))
         .group(ArgGroup::new("notification-artifact-mode").args(["background","physical-mvp"]))
         .arg(Arg::new("grid").long("grid").action(ArgAction::SetTrue)
             .requires_all([
@@ -7824,7 +7414,6 @@ fn arguments_base() -> Command {
                 .requires_all([
                     "backend",
                     "consent-owned-providers",
-                    "automate-native-inputs",
                     "goatr",
                     "expected-goatr-sha256",
                     "expected-companion-lock-sha256",
@@ -7836,11 +7425,12 @@ fn arguments_base() -> Command {
                     "setup",
                     "prepare-emulator",
                     "paging-proof",
+                    "automate-native-inputs",
                     "development-continuity",
                     "defer-retention-crossing",
                     "keep-foreground-for-feedback",
                 ])
-                .help("Fresh Codex pre-input invalidation diagnostic only; not Android or paging acceptance"),
+                .help("Fresh Codex one-action status-only creation diagnostic; retains resources and performs no native input, proof, cleanup, or Android flow"),
         )
         .arg(
             Arg::new("omp-creation-diagnostic")
@@ -7968,8 +7558,6 @@ fn arguments_base() -> Command {
             Arg::new("expected-companion-lock-sha256")
                 .long("expected-companion-lock-sha256")
                 .value_parser(value_parser!(String))
-                .requires("frozen-development-package")
-                .requires("expected-goatr-sha256")
                 .help("Required frozen source lock SHA-256 for the development companion"),
         )
         .arg(
@@ -7986,6 +7574,20 @@ fn arguments_base() -> Command {
                 .requires("android-artifact-mode")
                 .help("Required frozen SHA-256 for the selected development/background debug test APK"),
         )
+        .arg(Arg::new("expected-current-test-apk-sha256").long("expected-current-test-apk-sha256").value_parser(value_parser!(String))
+            .requires("retained-subject-mode").help("Independent SHA-256 pin for the presently installed retained TEST APK before its one permitted update"))
+        .arg(Arg::new("expected-product-uid").long("expected-product-uid").value_parser(value_parser!(String))
+            .requires("retained-subject-mode").help("Independent retained PRODUCT UID pin"))
+        .arg(Arg::new("expected-product-first-install-time").long("expected-product-first-install-time").value_parser(value_parser!(String))
+            .requires("retained-subject-mode").help("Independent retained PRODUCT first-install epoch pin"))
+        .arg(Arg::new("expected-product-data-dir").long("expected-product-data-dir").value_parser(value_parser!(String))
+            .requires("retained-subject-mode").help("Independent retained PRODUCT data-directory pin"))
+        .arg(Arg::new("expected-test-uid").long("expected-test-uid").value_parser(value_parser!(String))
+            .requires("retained-subject-mode").help("Independent retained TEST UID pin"))
+        .arg(Arg::new("expected-test-first-install-time").long("expected-test-first-install-time").value_parser(value_parser!(String))
+            .requires("retained-subject-mode").help("Independent retained TEST first-install epoch pin"))
+        .arg(Arg::new("expected-test-data-dir").long("expected-test-data-dir").value_parser(value_parser!(String))
+            .requires("retained-subject-mode").help("Independent retained TEST data-directory pin"))
         .about("Actual owned packaged OMP/Codex/provider/UI checkpoint; never fixture fallback")
         .arg(
             Arg::new("backend")
@@ -8078,6 +7680,7 @@ fn packaged(args: &clap::ArgMatches) -> io::Result<PathBuf> {
         || args.get_flag("grid")
         || args.get_one::<String>("background").is_some()
         || args.get_flag("physical-mvp")
+        || args.get_flag("physical-pairing-checkpoint") || args.get_flag("physical-owned-retirement")
     {
         return dev_continuity::frozen_package(args);
     }
@@ -8170,7 +7773,18 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
     }
     let guard = fields.next()?.strip_prefix("guard=")?;
     if phase == "owner_progress" {
-        if !matches!(guard, "owner_start_settled" | "owner_child_status_returned" | "owner_native_initialize_entered")
+        if !matches!(
+            guard,
+            "owner_start_settled"
+                | "owner_child_status_returned"
+                | "owner_native_initialize_entered"
+                | "owner_pending_authorization"
+                | "owner_pending_service_metadata"
+                | "owner_pending_service_proof"
+                | "owner_pending_native_process"
+                | "owner_pending_socket_epoch"
+                | "owner_pending_owner_record_proof"
+        )
             || fields.next()? != "code=none"
             || fields.next()? != "io=none"
             || fields.next()? != "errno=0"
@@ -8876,6 +8490,7 @@ fn drain_codex_guard(mut stderr: ChildStderr, progress: &CodexDrainProgress) {
                     {
                         if writeln!(std::io::stdout().lock(), "{value}").is_ok() {
                             progress.update(|summary| summary.accepted += 1);
+                            progress.accepted_guard(&value);
                         } else {
                             progress.update(|summary| {
                                 summary.rejected = summary.rejected.saturating_add(1);
@@ -9626,14 +9241,8 @@ fn start_serve_with_capture(
     Ok(Companion {
         child,
         process,
-        state_root: root.join("state").join("goatr"),
-        binary: binary.to_owned(),
         guard_drain,
         omp_capture_budget: omp_budget,
-        codex_cleanup_signal: CleanupSignal::default(),
-        codex_cleanup_active: false,
-        codex_startup_journal: None,
-        codex_startup_journal_admission: None,
         retain_process,
     })
 }
@@ -9950,7 +9559,7 @@ async fn create_feedback(
     run: &Uuid,
 ) -> io::Result<(NativeProof, Receipt, FeedbackPresentation)> {
     let (session, receipt, presentation) =
-        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None, None)
+        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None)
             .await?;
     let session = session.ok_or_else(|| non_succeeded_creation_error(provider, &receipt))?;
     let p = proof(config, socket, &session, None).await?;
@@ -9960,6 +9569,95 @@ async fn create_feedback(
         presentation.expect("feedback creation records a presentation observation"),
     ))
 }
+fn codex_single_creation_record(receipt: &Receipt, drain: Option<CodexDrainSummary>) -> Value {
+    let (stage, stage_state, resources) = receipt.creation.as_deref().map_or(
+        ("none".to_owned(), "none".to_owned(), json!({
+            "workspace":false,"pane":false,"terminal":false,"native":false,
+            "binding":false,"session":false,"generation":false,"ownerStarted":false,"relayStarted":false
+        })),
+        |creation| (
+            format!("{:?}", creation.stage),
+            format!("{:?}", creation.stage_state),
+            json!({
+                "workspace":creation.resources.workspace_id.is_some(),
+                "pane":creation.resources.pane_id.is_some(),
+                "terminal":creation.resources.terminal_id.is_some(),
+                "native":creation.resources.native_id.is_some(),
+                "binding":creation.resources.binding_id.is_some(),
+                "session":creation.resources.session_id.is_some(),
+                "generation":creation.resources.generation.is_some(),
+                "ownerStarted":creation.resources.owner_started == Some(true),
+                "relayStarted":creation.resources.relay_started == Some(true),
+            }),
+        ),
+    );
+    json!({
+        "outcome":if receipt.state == ReceiptState::Succeeded { "unexpected_succeeded" } else { "captured_failed_or_uncertain" },
+        "state":format!("{:?}", receipt.state),
+        "stage":stage,
+        "stageState":stage_state,
+        "code":receipt.error.as_ref().map_or("none".to_owned(), |error| format!("{:?}", error.code)),
+        "resources":resources,
+        "ownerProgressMask":drain.as_ref().map(|summary| summary.owner_progress_mask),
+        "ownerProgressGuard":drain.as_ref().and_then(|summary| summary.owner_progress_guard),
+        "pendingAtObservation":drain.as_ref().map(|summary| summary.pending_at_observation),
+        "firstNonprogressPhase":drain.as_ref().and_then(|summary| summary.first_nonprogress_phase.as_deref()),
+        "firstNonprogressGuard":drain.as_ref().and_then(|summary| summary.first_nonprogress_guard.as_deref()),
+    })
+}
+async fn create_codex_single_creation_diagnostic(
+    phone: &mut Phone,
+    config: &Config,
+    server: &Uuid,
+    serve: &Companion,
+    deadline: Instant,
+) -> io::Result<Receipt> {
+    serve.codex_drain_pristine()?;
+    if Instant::now() >= deadline {
+        return Err(failure("Codex diagnostic deadline expired before one creation"));
+    }
+    let id = Uuid::random();
+    let params = SessionCreateParams {
+        directory_ref: None,
+        placement: None,
+        boot_id: phone.hello.boot_id.clone(),
+        server_id: server.clone(),
+        project_id: config.projects[0].id.clone(),
+        provider: Provider::Codex,
+        name: Label::new(format!("owned-Codex-{}", &id.0[..8])).map_err(io::Error::other)?,
+    };
+    let initial = tokio::time::timeout_at(
+        deadline.into(),
+        phone.request_at(id.clone(), RequestBody::SessionCreate(params), "create_initial"),
+    )
+    .await
+    .map_err(|_| failure("Codex single creation response exceeded deadline"))?
+    .map_err(|_| failure("Codex single creation request unavailable"))?
+    .map_err(|_| failure("Codex single creation request rejected"))?;
+    let initial = receipt_result(initial)?;
+    let receipt = if matches!(initial.state, ReceiptState::Reserved | ReceiptState::Dispatching) {
+        tokio::time::timeout_at(deadline.into(), phone.settled_by(&id, deadline))
+            .await
+            .map_err(|_| failure("Codex single creation settlement exceeded deadline"))?
+            .map_err(|_| failure("Codex single creation settlement unavailable"))?
+    } else {
+        initial
+    };
+    let creation = receipt.creation.as_deref().ok_or_else(|| {
+        failure("Codex single creation terminal receipt lacked creation facts")
+    })?;
+    if receipt.action_id != id
+        || receipt.method != ActionMethod::SessionCreate
+        || receipt.boot_id != phone.hello.boot_id
+        || creation.provider != Provider::Codex
+        || creation.server_id != *server
+        || creation.project_id != config.projects[0].id
+    {
+        return Err(failure("Codex single creation receipt identity mismatch"));
+    }
+    Ok(receipt)
+}
+
 async fn create_omp_creation_diagnostic(
     phone: &mut Phone,
     config: &Config,
@@ -10036,7 +9734,7 @@ async fn create_session(
     run: &Uuid,
 ) -> io::Result<(SessionSummary, Receipt)> {
     let (session, receipt, _) = create_session_presented(
-        phone, config, socket, provider, server, evidence, run, false, None, None,
+        phone, config, socket, provider, server, evidence, run, false, None,
     )
     .await?;
     session
@@ -10054,7 +9752,7 @@ async fn create_session_feedback(
     run: &Uuid,
 ) -> io::Result<(SessionSummary, Receipt, FeedbackPresentation)> {
     let (session, receipt, presentation) =
-        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None, None)
+        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None)
             .await?;
     let session = session.ok_or_else(|| non_succeeded_creation_error(provider, &receipt))?;
     Ok((
@@ -10096,7 +9794,6 @@ async fn create_session_presented(
     evidence: &Path,
     run: &Uuid,
     feedback_presentation: bool,
-    mut startup_journal: Option<&mut Companion>,
     admitted: Option<&AdmittedSource>,
 ) -> io::Result<(Option<SessionSummary>, Receipt, Option<FeedbackPresentation>)> {
     if let Some(admitted)=admitted {
@@ -10181,9 +9878,6 @@ async fn create_session_presented(
             "original owned server/provider creation prerequisites did not become available; no create submitted",
         ));
     }
-    if let Some(companion) = startup_journal.as_mut() {
-        companion.pin_codex_startup_journal(&id);
-    }
     if let Some(admitted)=admitted {admitted.recheck()?;}
     let r = receipt_result(
         phone
@@ -10205,13 +9899,6 @@ async fn create_session_presented(
     } else {
         r
     };
-    // Freeze the causal window before any fallible capture or filesystem work.
-    let settlement_cutoff = startup_journal.as_ref().map(|_| pairing::now_ms());
-    if let Some(companion) = startup_journal
-        && let Some(cutoff) = settlement_cutoff
-    {
-        companion.retain_codex_startup_journal(&receipt, config, server, before_source, cutoff);
-    }
     let (_, after) = surface(socket).await?;
     let focus_changed = focus(&before) != focus(&after);
     // Preserve the original short-circuit: a focus change never triggers a
@@ -10435,12 +10122,21 @@ fn shared_summary_matches(summary: &SessionSummary,original: &NativeProof) -> bo
         && summary.native_id==original.native && summary.workspace_id==original.workspace
         && summary.pane_id==original.pane && summary.terminal_id==original.terminal
 }
-fn shared_user_record<'a>(records: &'a [HistoryRecord],marker: &str) -> io::Result<Option<&'a HistoryRecord>> {
+pub(super) fn shared_user_record<'a>(records: &'a [HistoryRecord],marker: &str) -> io::Result<Option<&'a HistoryRecord>> {
     let mut matching=records.iter().filter(|record|record.role==Role::User && record.complete
         && matches!(&record.text,Some(Content::Text(text)) if text.text.0.contains(marker)));
     let first=matching.next();
     if matching.next().is_some() {
         return Err(failure("shared-agent original prompt appeared more than once; no replay"));
+    }
+    Ok(first)
+}
+pub(super) fn shared_assistant_record<'a>(records: &'a [HistoryRecord],marker: &str) -> io::Result<Option<&'a HistoryRecord>> {
+    let mut matching=records.iter().filter(|record|record.role==Role::Assistant && record.complete
+        && matches!(&record.text,Some(Content::Text(text)) if text.text.0.contains(marker)));
+    let first=matching.next();
+    if matching.next().is_some() {
+        return Err(failure("shared-agent assistant reply appeared more than once; no replay"));
     }
     Ok(first)
 }
@@ -10625,7 +10321,7 @@ async fn shared_agent_flow(mut phone: Phone,selected: &[Provider],context: Share
         for provider in selected.iter().copied() {
             active=Some(provider);
             let (session,receipt,_)=create_session_presented(&mut phone,inputs.config,inputs.socket,provider,
-                &context.source.identity.0,inputs.evidence,inputs.run,false,None,Some(context.source)).await?;
+                &context.source.identity.0,inputs.evidence,inputs.run,false,Some(context.source)).await?;
             write_json(&inputs.evidence.join(format!("shared-create-{}-{provider:?}.json",inputs.run.0)),
                 &json!({"runId":inputs.run,"provider":provider,"receipt":receipt}))?;
             let session=session.ok_or_else(||non_succeeded_creation_error(provider,&receipt))?;
@@ -13071,8 +12767,9 @@ async fn checkpoint_held(
     terminal_mode_environment(args)?;
     project_read_mode_environment(args)?;
     background_mode_environment(args)?;
+    codex_single_creation_diagnostic_environment(args)?;
     if args.get_one::<String>("background").is_some(){ui::background_preflight(args).await?;}
-    let retain_process=finite_admission||terminal_only||args.get_flag("omp-creation-diagnostic");
+    let retain_process=finite_admission||terminal_only||args.get_flag("omp-creation-diagnostic")||args.get_flag("codex-invalidation-diagnostic");
     if args.get_flag("grid") != grid_hold.is_some()
         || args.get_flag("grid") != qualified_config.is_some()
     {
@@ -13435,7 +13132,7 @@ async fn checkpoint_held(
             &socket,
             listener.as_deref(),
             ServeLaunch {
-                diagnostic_capture: false,
+                diagnostic_capture: args.get_flag("codex-invalidation-diagnostic"),
                 herdr_report_capture: None,
                 preserve_xdg_config_home: false,
                 retain_process,
@@ -13538,7 +13235,6 @@ async fn checkpoint_held(
             companion:&serve,endpoint:&endpoint,source:&server,
         }).await;
     }
-    phone.codex_close_capture = args.get_flag("codex-invalidation-diagnostic");
     if let Some(budget) = serve.omp_capture_budget.clone() {
         phone.set_omp_capture(budget);
     }
@@ -13623,176 +13319,35 @@ async fn checkpoint_held(
             return Ok(succeeded);
         }
         if p == Provider::Codex && args.get_flag("codex-invalidation-diagnostic") {
-            // Preserve the original helper result while the selected capture reaches EOF.
-            let result: io::Result<()> = async {
-        let (session, receipt, _) = create_session_presented(
-            &mut phone,
-            &config,
-            &herdr_socket,
-            p,
-            &server,
-            evidence,
-            &run,
-            false,
-            Some(&mut serve),
-            None,
-        )
-        .await?;
-        let session = session.ok_or_else(|| non_succeeded_creation_error(p, &receipt))?;
-        let proof = proof(&config, &herdr_socket, &session, None).await?;
-                write_json(
-                    &evidence.join(format!("native-{}-{p:?}.json", run.0)),
-                    &json!({"runId":run,"proof":proof.evidence(),"creationReceipt":receipt,"noFocus":true}),
-                )?;
-                let inputs = NativeInputs {
-                    enabled: args.get_flag("automate-native-inputs"),
-                    paging_proof: args.get_flag("paging-proof"),
-                    config: &config,
-                    socket: &herdr_socket,
-                    herdr: &desktop.process,
-                    evidence,
-                    run: &run,
-                    mcp: native_mcp.as_ref(),
-                    plan: RefCell::new(None),
-                    mcp_dialogs: RefCell::new(HashMap::new()),
-                };
-            // Exercise the existing original binding guard before any native input,
-            // model request, history generation, or Android workflow.
-            let _ = inputs.current(&mut phone, &proof).await?;
-            let mut witness = paging_proof::Witness::connect(&proof, &inputs).await?;
-            witness.admit(&proof, false).await?;
-            let initial = phone.start_generation(&proof.target).await?;
-            if initial.state.summary.native_id != proof.native
-                || initial.state.summary.connectivity != SessionConnectivity::Ready
-                || initial.state.summary.status != SessionStatus::Idle
-                || !initial.pending_requests.is_empty()
-            {
-                return Err(generation_idle_failure(0, false, false, false));
-            }
-            let marker = format!("goatr-history-{}-Codex-0", &inputs.run.0[..8]);
-            let command = format!("printf '%s\\n' '{marker}'");
-            let command_started = Instant::now();
-            let command_deadline = history_command_deadline(
-                inputs.paging_proof,
-                Provider::Codex,
-                command_started + Duration::from_secs(30),
-                command_started,
-            );
-            phone.history_command = Some(HistoryCommandTrace::default());
-            let completion = tokio::time::timeout_at(command_deadline.into(), async {
-                inputs
-                    .send(
-                        &mut phone,
-                        &proof,
-                        NativeInput::Prompt(&format!("!{command}")),
-                        None,
-                        "native_history_command",
-                    )
-                    .await?;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                let ((snapshot, id), (native, turn)) = tokio::try_join!(
-                    async {
-                        tokio::time::timeout_at(
-                            deadline,
-                            inputs.shell_completed(&mut phone, &proof, &command, &marker),
-                        )
-                        .await
-                        .map_err(|_| failure("Goatr completion deadline; no replay"))?
-                    },
-                    witness.completed(&proof, &command, &marker, deadline)
-                )?;
-                if id != native
-                    || snapshot
-                        .history
-                        .iter()
-                        .find(|record| record.id == id)
-                        .and_then(|record| record.turn_id.as_ref())
-                        != Some(&turn)
-                {
-                    return Err(failure(
-                        "independent native and adapter completion IDs differ",
-                    ));
-                }
-                Ok::<_, io::Error>((snapshot, id, turn))
-            })
-            .await;
-            let (snapshot, id, turn) = match completion {
-                Ok(result) => result?,
-                Err(_) => {
-                    return Err(phone
-                        .history_command
-                        .as_ref()
-                        .expect("command trace")
-                        .deadline());
-                }
-            };
-            phone.history_command = None;
-            if target(&snapshot.state.summary) != proof.target
-                || snapshot.state.summary.native_id != proof.native
-                || snapshot.state.summary.connectivity != SessionConnectivity::Ready
-                || snapshot.state.summary.status != SessionStatus::Idle
-                || !snapshot.pending_requests.is_empty()
-                || snapshot
-                    .history
-                    .iter()
-                    .find(|record| record.id == id)
-                    .and_then(|record| record.turn_id.as_ref())
-                    != Some(&turn)
-            {
-                return Err(failure(
-                    "native diagnostic command changed original identity or completion boundary",
-                ));
-            }
-            drop(witness);
-            proof.recheck_processes()?;
-            desktop.recheck()?;
-            serve.recheck()?;
-            Ok(())
-            }
-            .await;
-            phone.connection.close(
-                0u32.into(),
-                b"Codex invalidation diagnostic complete",
-            );
-            let cleanup = serve
-                .stop_codex_diagnostic(if result.is_err() {
-                    "after_helper_failure"
-                } else {
-                    "after_helper_success"
-                })
-                .await;
-            return match result {
-                Ok(()) => {
-                    cleanup?;
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let receipt = create_codex_single_creation_diagnostic(
+                &mut phone,
+                &config,
+                &server,
+                &serve,
+                deadline,
+            )
+            .await?;
+            match receipt.state {
+                ReceiptState::Failed | ReceiptState::Uncertain => {
+                    let drain = serve.codex_creation_guard_by(deadline).await?;
                     write_json(
-                        &evidence.join(format!("codex-invalidation-diagnostic-{}.json", run.0)),
-                        &json!({
-                            "runId":run,
-                            "gate":"codex-invalidation-diagnostic",
-                            "status":"pass",
-                            "provider":"codex",
-                            "diagnosticOnly":true,
-                            "scope":"one original Codex create/proof/current guard and one witnessed native history command",
-                            "strictPaging":false,
-                            "paging":false,
-                            "strictBoundary":false,
-                            "android":false,
-                            "nativeInput":true,
-                            "nativeCommands":1,
-                            "independentCompletion":true,
-                            "originalIdentityRetained":true,
-                            "modelCalls":false,
-                            "foregroundAcceptance":false,
-                            "resourcesRetained":true,
-                        }),
+                        &evidence.join(format!("codex-single-creation-diagnostic-{}.json", run.0)),
+                        &codex_single_creation_record(&receipt, Some(drain)),
                     )?;
-                    Ok(true)
+                    return Ok(false);
                 }
-                Err(error) => {
-                    let _ = cleanup;
-                    Err(error)
+                ReceiptState::Succeeded => {
+                    write_json(
+                        &evidence.join(format!("codex-single-creation-diagnostic-{}.json", run.0)),
+                        &codex_single_creation_record(&receipt, None),
+                    )?;
+                    return Ok(false);
                 }
-            };
+                ReceiptState::Reserved | ReceiptState::Dispatching | ReceiptState::Dispatched => {
+                    return Err(failure("Codex single creation had no terminal receipt; resources retained"));
+                }
+            }
         }
         let (proof, receipt) = create(
             &mut phone,
@@ -14295,7 +13850,7 @@ pub(super) fn admit_arguments() -> io::Result<LiveAdmission> {
         .map_err(|error|io::Error::new(io::ErrorKind::InvalidInput,error.to_string()))?;
     let diagnostic = physical_host_preflight_selection(&args)?;
     physical_mode_environment(&args)?;
-    let expected = if args.get_flag("physical-mvp") || matches!(diagnostic,Some(physical::ControllerPolicy::WakeDiagnostic {..})) {
+    let expected = if args.get_flag("physical-mvp") || args.get_flag("physical-pairing-checkpoint") || args.get_flag("physical-owned-retirement") || args.get_flag("physical-owned-process-inventory") || args.get_flag("physical-owned-process-stop") || matches!(diagnostic,Some(physical::ControllerPolicy::WakeDiagnostic {..})) {
         args.get_one::<String>("expected-controller-unit").map(String::as_str)
     } else { None };
     let unit = goatr::codex_relay::prepare_current_executable(true,expected)?;
@@ -14318,9 +13873,34 @@ pub(super) async fn run(admitted: Option<LiveAdmission>) -> io::Result<bool> {
         physical::run(&args,&evidence,unit.ok_or_else(||failure("full mode lost its synchronous admitted unit context"))?).await?;
         return Ok(true);
     }
+    if args.get_flag("physical-pairing-checkpoint") {
+        let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required retained pairing evidence"))?;
+        fresh_shared_evidence(&evidence)?;
+        physical::pairing_checkpoint(&args,&evidence,unit.ok_or_else(||failure("retained pairing lost its synchronous admitted unit context"))?).await?;
+        return Ok(true);
+    }
+    if args.get_flag("physical-owned-retirement") {
+        let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required owned retirement evidence"))?;
+        fresh_shared_evidence(&evidence)?;
+        physical::owned_retirement(&args,&evidence,unit.ok_or_else(||failure("owned retirement lost its synchronous admitted unit context"))?).await?;
+        return Ok(true);
+    }
+    if args.get_flag("physical-owned-process-inventory") {
+        let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required owned process inventory evidence"))?;
+        fresh_shared_evidence(&evidence)?;
+        physical::owned_process_inventory(&args,&evidence,unit.ok_or_else(||failure("owned process inventory lost its synchronous admitted unit context"))?)?;
+        return Ok(true);
+    }
+    if args.get_flag("physical-owned-process-stop") {
+        let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required owned process stop evidence"))?;
+        fresh_shared_evidence(&evidence)?;
+        physical::owned_process_stop(&args,&evidence,unit.ok_or_else(||failure("owned process stop lost its synchronous admitted unit context"))?)?;
+        return Ok(true);
+    }
     terminal_mode_environment(&args)?;
     project_read_mode_environment(&args)?;
     background_mode_environment(&args)?;
+    codex_single_creation_diagnostic_environment(&args)?;
     // Reject an invalid ephemeral selector before even creating its evidence directory.
     physical_relay_request(&args)?;
     let evidence = std::path::absolute(
@@ -14590,6 +14170,20 @@ mod tests {
         args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
         args
     }
+    fn retained_pairing_args()->Vec<String> {
+        let mut args=vec!["smoke".into(),"--physical-pairing-checkpoint".into(),
+            "--goatr=/private/frozen-goatr".into(),"--config=/private/config.toml".into(),"--workspace-root=/private/workspace".into(),
+            "--evidence-dir=/private/fresh".into(),"--serial=owned-physical-serial".into(),
+            "--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
+        for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
+        args.push(format!("--expected-current-test-apk-sha256={}","2".repeat(64)));
+        args.extend(["--expected-product-uid=10528","--expected-product-first-install-time=2026-10-27 04:39:23","--expected-product-data-dir=/data/user/0/io.github.trevarj.goatr.debug","--expected-test-uid=10101","--expected-test-first-install-time=2026-10-27 04:39:23","--expected-test-data-dir=/data/user/0/io.github.trevarj.goatr.debug.test"].into_iter().map(str::to_owned));
+        args.push(format!("--expected-config-sha256={}","3".repeat(64)));
+        args.push(format!("--expected-controller-unit=goatr-host-wake-{}.service",Uuid::random().0));args.push(format!("--expected-controller-sha256={}","4".repeat(64)));
+        args
+    }
+    fn owned_process_inventory_args()->Vec<String> {vec!["smoke".to_owned(),"--physical-owned-process-inventory".to_owned(),"--owned-process-source-manifest=/private/sources.json".to_owned(),format!("--expected-owned-process-source-manifest-sha256={}","1".repeat(64)),"--owned-app-retirement-gate=/private/gate.json".to_owned(),format!("--expected-owned-app-retirement-gate-sha256={}","2".repeat(64)),format!("--expected-controller-unit=goatr-host-wake-{}.service",Uuid::random().0),format!("--expected-controller-sha256={}","3".repeat(64)),format!("--expected-companion-lock-sha256={}",transport::lock_sha256()),"--evidence-dir=/private/fresh".to_owned()]}
+    fn owned_process_stop_args()->Vec<String> {vec!["smoke".to_owned(),"--physical-owned-process-stop".to_owned(),"--owned-process-stop-approval=/private/approval.json".to_owned(),format!("--expected-owned-process-stop-approval-sha256={}","0".repeat(64)),"--owned-process-source-manifest=/private/sources.json".to_owned(),format!("--expected-owned-process-source-manifest-sha256={}","1".repeat(64)),"--owned-app-retirement-gate=/private/gate.json".to_owned(),format!("--expected-owned-app-retirement-gate-sha256={}","2".repeat(64)),format!("--expected-controller-unit=goatr-host-wake-{}.service",Uuid::random().0),format!("--expected-controller-sha256={}","3".repeat(64)),format!("--expected-companion-lock-sha256={}",transport::lock_sha256()),"--evidence-dir=/private/fresh".to_owned()]}
     fn host_preflight_args(wake:bool)->Vec<String> {
         let mut args=vec!["smoke".to_owned(),"--evidence-dir=/private/fresh".to_owned()];
         if wake {
@@ -14700,6 +14294,95 @@ mod tests {
             invalid.extend(providers.into_iter().map(str::to_owned));
             let parsed=feedback_arguments(arguments_base()).try_get_matches_from(invalid).unwrap();assert!(require_shared_backends(&parsed).is_err());
         }
+    }
+    #[test]
+    fn retained_pairing_owned_retirement_requires_subject_and_manifest_pins_and_refuses_provider_inputs() {
+        let mut args=retained_pairing_args();args[1]="--physical-owned-retirement".to_owned();args.push("--retirement-target-manifest=/private/retirement.json".to_owned());args.push(format!("--expected-retirement-manifest-sha256={}","5".repeat(64)));
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();physical_mode_environment(&parsed).unwrap();assert!(parsed.get_flag("physical-owned-retirement"));
+        for required in ["--retirement-target-manifest=","--expected-retirement-manifest-sha256=","--expected-current-test-apk-sha256="] {let reduced=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");}
+        for rejected in ["--backend=omp","--consent-owned-providers","--physical-mvp","--physical-pairing-checkpoint","--physical-pairing-shell-checkpoint","--physical-pairing-shell-interaction-checkpoint","--physical-host-preflight","--physical-host-wake-preflight","--background=persistent","--admission-only","--shared-agent-only","--terminal-only","--project-read-only","--grid","--grid-lease=/private/lease","--ui","--camera","--ime","--setup","--prepare-emulator","--emulator-owner=/private/owner","--paging-proof","--codex-invalidation-diagnostic","--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral","--development-continuity","--development-owner-feedback","--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing","--admin-socket=/private/admin.sock","--disposable-uid=12345","--automate-native-inputs","--expected-ntfy-apk-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--expected-ntfy-signer-sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","--prepared-fresh-install=/private/install","--expected-prepared-install-sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"] {let mut mixed=args.clone();mixed.push(rejected.to_owned());assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).is_err(),"{rejected}");}
+    }
+    #[test]
+    fn owned_process_inventory_cli_is_inventory_only_and_refuses_every_effect_surface() {
+        let args=owned_process_inventory_args();let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();physical_mode_environment(&parsed).unwrap();assert!(parsed.get_flag("physical-owned-process-inventory"));
+        for required in ["--physical-owned-process-inventory","--owned-process-source-manifest=","--expected-owned-process-source-manifest-sha256=","--owned-app-retirement-gate=","--expected-owned-app-retirement-gate-sha256=","--expected-controller-unit=","--expected-controller-sha256=","--expected-companion-lock-sha256=","--evidence-dir="] {let reduced=args.iter().filter(|argument|!argument.starts_with(required)).cloned().collect::<Vec<_>>();assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");}
+        for rejected in ["--physical-mvp","--physical-pairing-checkpoint","--physical-owned-retirement","--physical-host-preflight","--physical-host-wake-preflight","--background=persistent","--terminal-only","--project-read-only","--backend=omp","--consent-owned-providers","--goatr=/private/goatr","--config=/private/config","--workspace-root=/private/workspace","--serial=device","--apk=/private/app","--test-apk=/private/test","--admin-socket=/private/admin","--automate-native-inputs"] {let mut mixed=args.clone();mixed.push(rejected.to_owned());assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()),"{rejected}");}
+        for unknown in ["--owned-process-retirement-phase=inventory","--owned-process-retirement-sources=/private/sources","--expected-owned-process-retirement-sources-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--completed-owned-retirement=/private/completed","--expected-completed-owned-retirement-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--owned-process-retirement-approve=/private/review","--owned-process-retirement-pid=7"] {let mut mixed=args.clone();mixed.push(unknown.to_owned());assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).is_err(),"{unknown}");}
+    }
+    #[test]
+    fn owned_process_stop_cli_requires_reviewed_pins_and_refuses_inventory_and_effect_inputs() {
+        let args=owned_process_stop_args();let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();physical_mode_environment(&parsed).unwrap();assert!(parsed.get_flag("physical-owned-process-stop"));
+        for required in ["--physical-owned-process-stop","--owned-process-stop-approval=","--expected-owned-process-stop-approval-sha256=","--owned-process-source-manifest=","--expected-owned-process-source-manifest-sha256=","--owned-app-retirement-gate=","--expected-owned-app-retirement-gate-sha256=","--expected-controller-unit=","--expected-controller-sha256=","--expected-companion-lock-sha256=","--evidence-dir="] {let reduced=args.iter().filter(|argument|!argument.starts_with(required)).cloned().collect::<Vec<_>>();assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");}
+        for rejected in ["--physical-owned-process-inventory","--physical-mvp","--physical-pairing-checkpoint","--physical-owned-retirement","--backend=omp","--consent-owned-providers","--goatr=/private/goatr","--config=/private/config","--serial=device","--admin-socket=/private/admin","--automate-native-inputs","--signal=TERM","--pid=7"] {let mut mixed=args.clone();mixed.push(rejected.to_owned());assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()),"{rejected}");}
+        for unselected in ["--owned-process-source-manifest=/private/sources.json","--expected-owned-process-source-manifest-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--owned-app-retirement-gate=/private/gate.json","--expected-owned-app-retirement-gate-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] {assert!(feedback_arguments(arguments_base()).try_get_matches_from(["smoke",unselected]).is_err(),"{unselected}");}
+    }
+
+    #[test]
+    fn retained_pairing_checkpoint_requires_current_subject_pins_and_rejects_other_runtime_modes() {
+        let args=retained_pairing_args();let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+        physical_mode_environment(&parsed).unwrap();assert!(parsed.get_flag("physical-pairing-checkpoint"));assert!(!parsed.get_flag("physical-mvp"));
+        for required in ["--goatr=","--config=","--workspace-root=","--evidence-dir=","--serial=","--apk=","--test-apk=",
+            "--expected-goatr-sha256=","--expected-companion-lock-sha256=","--expected-apk-sha256=","--expected-test-apk-sha256=","--expected-current-test-apk-sha256=",
+            "--expected-product-uid=","--expected-product-first-install-time=","--expected-product-data-dir=","--expected-test-uid=","--expected-test-first-install-time=","--expected-test-data-dir=",
+            "--expected-config-sha256=","--expected-controller-unit=","--expected-controller-sha256="] {
+            let reduced=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");
+        }
+        assert_eq!(retained_pairing_provider_create(&parsed).unwrap(),None);
+        let mut shell=args.clone();shell.push("--physical-pairing-shell-checkpoint".to_owned());
+        let shell=feedback_arguments(arguments_base()).try_get_matches_from(shell).unwrap();physical_mode_environment(&shell).unwrap();assert_eq!(retained_pairing_provider_create(&shell).unwrap(),None);
+        for rejected in [vec!["--backend=omp"],vec!["--backend=codex"],vec!["--consent-owned-providers"]] {
+            let mut mixed=args.clone();mixed.push("--physical-pairing-shell-checkpoint".to_owned());mixed.extend(rejected.into_iter().map(str::to_owned));
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()));
+        }
+        for (backend,expected) in [("omp",Provider::Omp),("codex",Provider::Codex)] {
+            let mut optional=args.clone();optional.extend([format!("--backend={backend}"),"--consent-owned-providers".to_owned()]);
+            let optional=feedback_arguments(arguments_base()).try_get_matches_from(optional).unwrap();physical_mode_environment(&optional).unwrap();assert_eq!(retained_pairing_provider_create(&optional).unwrap(),Some(expected));
+        }
+        for rejected in [vec!["--backend=omp"],vec!["--backend=codex"],vec!["--consent-owned-providers"],vec!["--backend=omp","--backend=omp","--consent-owned-providers"],vec!["--backend=codex","--backend=codex","--consent-owned-providers"],vec!["--backend=omp","--backend=codex","--consent-owned-providers"]] {
+            let mut mixed=args.clone();mixed.extend(rejected.into_iter().map(str::to_owned));assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()));
+        }
+        for conflict in ["--physical-mvp","--background=persistent","--prepare-emulator","--emulator-owner=/private/owner.json",
+            "--development-continuity","--physical-host-preflight","--physical-host-wake-preflight","--automate-native-inputs",
+            "--expected-ntfy-apk-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--expected-ntfy-signer-sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] {
+            let mut mixed=args.clone();mixed.push(conflict.to_owned());assert!(feedback_arguments(arguments_base()).try_get_matches_from(mixed).is_err(),"{conflict}");
+        }
+        for invalid in [String::new(),"A".repeat(64),"a".repeat(63),"g".repeat(64)] {
+            let mut changed=args.iter().filter(|arg|!arg.starts_with("--expected-controller-sha256=")).cloned().collect::<Vec<_>>();
+            changed.push(format!("--expected-controller-sha256={invalid}"));
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(changed).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()));
+        }
+        for (pin,value) in [("--expected-current-test-apk-sha256=","g".repeat(64)),("--expected-product-uid=","9".to_owned()),("--expected-product-first-install-time=",String::new()),("--expected-product-data-dir=","/private/product".to_owned()),("--expected-test-uid=","0".to_owned()),("--expected-test-first-install-time=",String::new()),("--expected-test-data-dir=","/private/test".to_owned())] {
+            let mut changed=args.iter().filter(|arg|!arg.starts_with(pin)).cloned().collect::<Vec<_>>();changed.push(format!("{pin}{value}"));
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(changed).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()),"{pin}");
+        }
+    }
+    #[test]
+    fn retained_pairing_shell_interaction_checkpoint_requires_shell_parent_and_refuses_provider_inputs() {
+        let args=retained_pairing_args();
+        let mut valid=args.clone();valid.push("--physical-pairing-shell-checkpoint".to_owned());valid.push("--physical-pairing-shell-interaction-checkpoint".to_owned());
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(valid).unwrap();
+        assert!(parsed.get_flag("physical-pairing-checkpoint"));assert!(parsed.get_flag("physical-pairing-shell-checkpoint"));assert!(parsed.get_flag("physical-pairing-shell-interaction-checkpoint"));
+        assert_eq!(retained_pairing_provider_create(&parsed).unwrap(),None);
+        for rejected in [vec!["--backend=omp"],vec!["--backend=codex"],vec!["--consent-owned-providers"],vec!["--backend=omp","--consent-owned-providers"]] {
+            let mut invalid=args.clone();invalid.push("--physical-pairing-shell-checkpoint".to_owned());invalid.push("--physical-pairing-shell-interaction-checkpoint".to_owned());invalid.extend(rejected.into_iter().map(str::to_owned));
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(invalid).is_err());
+        }
+        assert!(feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--physical-pairing-shell-interaction-checkpoint"]).is_err());
+    }
+    #[test]
+    fn retained_pairing_shell_checkpoint_requires_parent_and_refuses_provider_inputs() {
+        let args=retained_pairing_args();
+        let mut shell=args.clone();shell.push("--physical-pairing-shell-checkpoint".to_owned());
+        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(shell).unwrap();
+        assert!(parsed.get_flag("physical-pairing-checkpoint"));assert!(parsed.get_flag("physical-pairing-shell-checkpoint"));
+        assert_eq!(retained_pairing_provider_create(&parsed).unwrap(),None);
+        for rejected in [vec!["--backend=omp"],vec!["--backend=codex"],vec!["--consent-owned-providers"],vec!["--backend=omp","--consent-owned-providers"]] {
+            let mut invalid=args.clone();invalid.push("--physical-pairing-shell-checkpoint".to_owned());invalid.extend(rejected.into_iter().map(str::to_owned));
+            assert!(feedback_arguments(arguments_base()).try_get_matches_from(invalid).is_err());
+        }
+        let orphan=feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--physical-pairing-shell-checkpoint"]);
+        assert!(orphan.is_err());
     }
     #[test]
     fn prepared_install_cli_is_an_explicit_physical_only_pair_not_an_adoption_default() {
@@ -14999,7 +14682,7 @@ mod tests {
         let mut api=args.clone();api.extend(["--api","35"]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(api).is_err());
         for flag in ["--expected-goatr-sha256","--expected-companion-lock-sha256"] {
             let mut incomplete=args.clone();incomplete.extend([flag,"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(incomplete).is_err());
+            if flag=="--expected-goatr-sha256" {assert!(feedback_arguments(arguments_base()).try_get_matches_from(incomplete).is_err());}else{let parsed=feedback_arguments(arguments_base()).try_get_matches_from(incomplete).unwrap();assert!(terminal_mode_environment(&parsed).is_err());}
         }
         let mut frozen=args;frozen.extend(["--expected-goatr-sha256","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--expected-companion-lock-sha256","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
@@ -15392,9 +15075,25 @@ mod tests {
         let mut assistant=user.clone();
         assistant.id=Id("assistant".into());
         assistant.role=Role::Assistant;
-        assert!(shared_user_record(&[user.clone(),assistant],"owned-marker").unwrap().is_some());
+        assert!(shared_user_record(&[user.clone(),assistant.clone()],"owned-marker").unwrap().is_some());
+        assert!(shared_assistant_record(&[user.clone(),assistant.clone()],"owned-marker").unwrap().is_some());
         let mut duplicate=user.clone();duplicate.id=Id("duplicate".into());
-        assert!(shared_user_record(&[user,duplicate],"owned-marker").is_err());
+        assert!(shared_user_record(&[user.clone(),duplicate],"owned-marker").is_err());
+        let mut duplicate_assistant=assistant.clone();duplicate_assistant.id=Id("assistant-duplicate".into());
+        assert!(shared_assistant_record(&[user,assistant,duplicate_assistant],"owned-marker").is_err());
+    }
+    #[test]
+    fn retained_pairing_marker_history_requires_one_complete_user_and_assistant() {
+        let user:HistoryRecord=serde_json::from_value(json!({"id":"pairing-user","order":1,
+            "role":"user","kind":"message","text":{"kind":"text","text":"pairing-marker"},
+            "source":"live","complete":true,"sourceTruncated":false})).unwrap();
+        let mut assistant=user.clone();assistant.id=Id("pairing-assistant".into());assistant.role=Role::Assistant;
+        assert!(shared_user_record(&[user.clone(),assistant.clone()],"pairing-marker").unwrap().is_some());
+        assert!(shared_assistant_record(&[user.clone(),assistant.clone()],"pairing-marker").unwrap().is_some());
+        let mut incomplete=assistant.clone();incomplete.complete=false;
+        assert!(shared_assistant_record(&[user.clone(),incomplete],"pairing-marker").unwrap().is_none());
+        let mut duplicate=assistant.clone();duplicate.id=Id("pairing-assistant-duplicate".into());
+        assert!(shared_assistant_record(&[user,assistant,duplicate],"pairing-marker").is_err());
     }
     #[test]
     fn finite_admission_cli_requires_explicit_inputs_and_rejects_effectful_modes() {
@@ -15596,6 +15295,23 @@ mod tests {
             );
             assert!(parse_codex_guard_line(line.as_bytes()).is_some());
         }
+        for guard in [
+            "owner_pending_authorization",
+            "owner_pending_service_metadata",
+            "owner_pending_service_proof",
+            "owner_pending_native_process",
+            "owner_pending_socket_epoch",
+            "owner_pending_owner_record_proof",
+        ] {
+            let line = format!(
+                "goatr_codex_first_guard phase=owner_progress guard={guard} code=none io=none errno=0"
+            );
+            assert!(parse_codex_guard_line(line.as_bytes()).is_some());
+        }
+        assert!(parse_codex_guard_line(
+            b"goatr_codex_first_guard phase=owner_progress guard=owner_pending_unknown code=none io=none errno=0"
+        )
+        .is_none());
         assert!(parse_codex_guard_line(
             b"goatr_codex_first_guard phase=connection guard=original_presence_state_terminal_tui_write_flush_pending code=StaleSession io=timed_out errno=0 private=value"
         )
@@ -15608,6 +15324,86 @@ mod tests {
             b"goatr_codex_first_guard phase=connection guard=unknown code=StaleSession io=none errno=0"
         )
         .is_none());
+    }
+
+    #[test]
+    fn codex_single_creation_diagnostic_cli_needs_no_native_input_and_refuses_it() {
+        let args = [
+            "smoke",
+            "--codex-invalidation-diagnostic",
+            "--backend=codex",
+            "--consent-owned-providers",
+            "--goatr=/nix/store/example/bin/goatr",
+            "--expected-goatr-sha256=1111111111111111111111111111111111111111111111111111111111111111",
+            "--expected-companion-lock-sha256=2222222222222222222222222222222222222222222222222222222222222222",
+            "--evidence-dir=/private/evidence",
+        ];
+        let parsed = feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();
+        assert!(parsed.get_flag("codex-invalidation-diagnostic"));
+        assert!(!parsed.get_flag("automate-native-inputs"));
+        assert!(feedback_arguments(arguments_base())
+            .try_get_matches_from([
+                "smoke",
+                "--codex-invalidation-diagnostic",
+                "--backend=codex",
+                "--consent-owned-providers",
+                "--automate-native-inputs",
+                "--goatr=/nix/store/example/bin/goatr",
+                "--expected-goatr-sha256=1111111111111111111111111111111111111111111111111111111111111111",
+                "--expected-companion-lock-sha256=2222222222222222222222222222222222222222222222222222222222222222",
+                "--evidence-dir=/private/evidence",
+            ])
+            .is_err());
+    }
+
+    #[test]
+    fn codex_single_creation_drain_projects_only_ordered_owner_and_first_guard() {
+        let progress = CodexDrainProgress::default();
+        for guard in [
+            "owner_start_settled",
+            "owner_child_status_returned",
+            "owner_native_initialize_entered",
+        ] {
+            progress.accepted_guard(&json!({"phase":"owner_progress","guard":guard}));
+        }
+        progress.accepted_guard(&json!({"phase":"creation","guard":"owner_timeout"}));
+        progress.accepted_guard(&json!({"phase":"connection","guard":"ignored_later"}));
+        let summary = progress.snapshot();
+        assert_eq!(summary.owner_progress_mask, 7);
+        assert_eq!(summary.first_nonprogress_phase.as_deref(), Some("creation"));
+        assert_eq!(summary.first_nonprogress_guard.as_deref(), Some("owner_timeout"));
+    }
+
+    #[test]
+    fn owner_pending_drain_projects_one_third_slot_with_explicit_observation() {
+        let progress = CodexDrainProgress::default();
+        for guard in [
+            "owner_start_settled",
+            "owner_child_status_returned",
+            "owner_pending_service_proof",
+            "owner_native_initialize_entered",
+        ] {
+            progress.accepted_guard(&json!({"phase":"owner_progress","guard":guard}));
+        }
+        let summary = progress.snapshot();
+        assert_eq!(summary.owner_progress_mask, 7);
+        assert_eq!(summary.owner_progress_guard, Some("owner_pending_service_proof"));
+        assert!(summary.pending_at_observation);
+    }
+
+    #[test]
+    fn codex_single_creation_drain_refuses_zero_count_dead_or_errored_workers() {
+        let clean = CodexDrainSummary::default();
+        assert!(codex_drain_is_pristine(&clean, false));
+        assert!(!codex_drain_is_pristine(&clean, true));
+        let mut eof = clean.clone();
+        eof.eof = true;
+        eof.termination = CodexDrainTermination::Eof;
+        assert!(!codex_drain_is_pristine(&eof, false));
+        let mut errored = clean;
+        errored.read_error = Some(("other", None));
+        errored.termination = CodexDrainTermination::ReadError;
+        assert!(!codex_drain_is_pristine(&errored, false));
     }
 
     #[test]
@@ -16352,8 +16148,7 @@ mod tests {
             history_command: None,
             omp_capture_budget: None,
             phone_close_reported: false,
-            codex_close_capture: false,
-            grid: Some(witness),
+                grid: Some(witness),
         };
         let body = RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
         delivery: None, native_turn_id: None, images: None,

@@ -1130,6 +1130,48 @@ impl CodexThreadStartObservation {
         state.snapshot
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexOwnerPendingPhase {
+    Authorization,
+    ServiceMetadata,
+    ServiceProof,
+    NativeProcess,
+    SocketEpoch,
+    OwnerRecordProof,
+}
+impl CodexOwnerPendingPhase {
+    const fn guard(self) -> &'static str {
+        match self {
+            Self::Authorization => "owner_pending_authorization",
+            Self::ServiceMetadata => "owner_pending_service_metadata",
+            Self::ServiceProof => "owner_pending_service_proof",
+            Self::NativeProcess => "owner_pending_native_process",
+            Self::SocketEpoch => "owner_pending_socket_epoch",
+            Self::OwnerRecordProof => "owner_pending_owner_record_proof",
+        }
+    }
+}
+/// Independent diagnostic timer for one original owner startup. Dropping it aborts only this
+/// observer and clears its in-memory stage; it never cancels the creation future.
+pub(crate) struct CodexOwnerPendingObservation {
+    reporter: CodexInvalidationReporter,
+    action: Uuid,
+    task: tokio::task::JoinHandle<()>,
+}
+impl CodexOwnerPendingObservation {
+    pub(crate) fn stage(&self, phase: CodexOwnerPendingPhase) {
+        self.reporter.owner_pending_stage(&self.action, phase);
+    }
+    pub(crate) fn disarm(&self) {
+        self.reporter.disarm_owner_pending(&self.action);
+        self.task.abort();
+    }
+}
+impl Drop for CodexOwnerPendingObservation {
+    fn drop(&mut self) {
+        self.disarm();
+    }
+}
 struct CodexInvalidationState {
     original: Option<(Target, Uuid)>,
     original_server: Option<(Uuid, ServerEvidence)>,
@@ -1140,6 +1182,8 @@ struct CodexInvalidationState {
     lines: u8,
     owner_progress_action: Option<Uuid>,
     owner_progress_seen: u8,
+    owner_pending_active: bool,
+    owner_pending_phase: Option<CodexOwnerPendingPhase>,
 }
 impl CodexInvalidationReporter {
     pub(crate) fn new() -> Self {
@@ -1153,6 +1197,8 @@ impl CodexInvalidationReporter {
             lines: 0,
             owner_progress_action: None,
             owner_progress_seen: 0,
+            owner_pending_active: false,
+            owner_pending_phase: None,
         })))
     }
     pub(crate) fn arm_owner_progress(&self, action: &Uuid) {
@@ -1162,6 +1208,71 @@ impl CodexInvalidationReporter {
         {
             state.owner_progress_action = Some(action.clone());
         }
+    }
+    pub(crate) fn observe_owner_pending(
+        &self,
+        action: &Uuid,
+        deadline: tokio::time::Instant,
+    ) -> Option<CodexOwnerPendingObservation> {
+        let now = tokio::time::Instant::now();
+        // The observer starts only after the original child-status return. Observe one fixed
+        // early instant without changing the original creation deadline or any await.
+        let observation_at = (now + Duration::from_secs(15)).min(deadline);
+        {
+            let Ok(mut state) = self.0.lock() else { return None };
+            if state.owner_progress_action.as_ref() != Some(action)
+                || state.original.is_some() || state.prebinding_reported || state.invalidated
+                || state.transport_reported || state.owner_progress_seen & 4 != 0
+                || state.owner_pending_active || state.lines >= 3
+            {
+                return None;
+            }
+            state.owner_pending_active = true;
+            state.owner_pending_phase = Some(CodexOwnerPendingPhase::Authorization);
+        }
+        let reporter = self.clone();
+        let observed_action = action.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep_until(observation_at).await;
+            reporter.emit_owner_pending(&observed_action);
+        });
+        Some(CodexOwnerPendingObservation {
+            reporter: self.clone(),
+            action: action.clone(),
+            task,
+        })
+    }
+    fn owner_pending_stage(&self, action: &Uuid, phase: CodexOwnerPendingPhase) {
+        let Ok(mut state) = self.0.lock() else { return };
+        if state.owner_pending_active && state.owner_progress_action.as_ref() == Some(action) {
+            state.owner_pending_phase = Some(phase);
+        }
+    }
+    fn disarm_owner_pending(&self, action: &Uuid) {
+        let Ok(mut state) = self.0.lock() else { return };
+        if state.owner_progress_action.as_ref() == Some(action) {
+            state.owner_pending_active = false;
+            state.owner_pending_phase = None;
+        }
+    }
+    fn emit_owner_pending(&self, action: &Uuid) {
+        let Ok(mut state) = self.0.lock() else { return };
+        if state.owner_progress_action.as_ref() != Some(action)
+            || !state.owner_pending_active || state.original.is_some()
+            || state.prebinding_reported || state.invalidated || state.transport_reported
+            || state.owner_progress_seen & 4 != 0 || state.lines >= 3
+        {
+            return;
+        }
+        let Some(phase) = state.owner_pending_phase else { return };
+        state.owner_pending_active = false;
+        state.owner_pending_phase = None;
+        state.owner_progress_seen |= 4;
+        state.lines += 1;
+        let guard = phase.guard();
+        eprintln!(
+            "goatr_codex_first_guard phase=owner_progress guard={guard} code=none io=none errno=0"
+        );
     }
     pub(crate) fn owner_progress(&self, action: &Uuid, guard: &'static str) {
         let bit = match guard {
@@ -1177,6 +1288,10 @@ impl CodexInvalidationReporter {
             || state.lines >= 3
         {
             return;
+        }
+        if bit == 4 {
+            state.owner_pending_active = false;
+            state.owner_pending_phase = None;
         }
         // Progress shares the finite budget while reserving five failure slots.
         state.owner_progress_seen |= bit;
@@ -8133,6 +8248,127 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
         let state = reporter.0.lock().unwrap();
         assert!(state.invalidated);
         assert_eq!(state.lines, 1);
+    }
+
+    #[test]
+    fn owner_pending_ordinary_reporter_has_no_observer() {
+        let reporter = CodexInvalidationReporter::new();
+        let action = Uuid::random();
+        reporter.arm_owner_progress(&action);
+        reporter.owner_progress(&action, "owner_start_settled");
+        reporter.owner_progress(&action, "owner_child_status_returned");
+        let state = reporter.0.lock().unwrap();
+        assert_eq!(state.owner_progress_seen, 3);
+        assert_eq!(state.lines, 2);
+        assert!(!state.owner_pending_active);
+    }
+
+    #[test]
+    fn owner_pending_shares_the_third_progress_slot_and_five_failure_slots() {
+        let reporter = CodexInvalidationReporter::new();
+        let action = Uuid::random();
+        reporter.arm_owner_progress(&action);
+        reporter.owner_progress(&action, "owner_start_settled");
+        reporter.owner_progress(&action, "owner_child_status_returned");
+        {
+            let mut state = reporter.0.lock().unwrap();
+            state.owner_pending_active = true;
+            state.owner_pending_phase = Some(CodexOwnerPendingPhase::ServiceProof);
+        }
+        reporter.emit_owner_pending(&action);
+        reporter.owner_progress(&action, "owner_native_initialize_entered");
+        let mut state = reporter.0.lock().unwrap();
+        assert_eq!(state.owner_progress_seen, 7);
+        assert_eq!(state.lines, 3);
+        for _ in 0..6 {
+            CodexInvalidationReporter::emit(
+                &mut state,
+                "creation",
+                "owner_wait",
+                ErrorCode::NotReady,
+                "none",
+                0,
+                None,
+            );
+        }
+        assert_eq!(state.lines, 8);
+    }
+
+    #[tokio::test]
+    async fn owner_pending_observation_drop_aborts_late_callback() {
+        let reporter = CodexInvalidationReporter::new();
+        let action = Uuid::random();
+        reporter.arm_owner_progress(&action);
+        reporter.owner_progress(&action, "owner_start_settled");
+        reporter.owner_progress(&action, "owner_child_status_returned");
+        let observation = reporter
+            .observe_owner_pending(
+                &action,
+                tokio::time::Instant::now() + Duration::from_secs(75),
+            )
+            .expect("armed owner-pending observer");
+        observation.stage(CodexOwnerPendingPhase::Authorization);
+        drop(observation);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let state = reporter.0.lock().unwrap();
+        assert_eq!(state.owner_progress_seen, 3);
+        assert_eq!(state.lines, 2);
+        assert!(!state.owner_pending_active);
+    }
+
+    #[tokio::test]
+    async fn owner_pending_expired_deadline_clamps_to_immediate_atomic_observation() {
+        let reporter = CodexInvalidationReporter::new();
+        let action = Uuid::random();
+        reporter.arm_owner_progress(&action);
+        reporter.owner_progress(&action, "owner_start_settled");
+        reporter.owner_progress(&action, "owner_child_status_returned");
+        let observation = reporter
+            .observe_owner_pending(&action, tokio::time::Instant::now())
+            .expect("armed already-due owner-pending observer");
+        assert_eq!(
+            reporter.0.lock().unwrap().owner_pending_phase,
+            Some(CodexOwnerPendingPhase::Authorization)
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let state = reporter.0.lock().unwrap();
+        assert_eq!(state.owner_progress_seen, 7);
+        assert_eq!(state.lines, 3);
+        drop(state);
+        drop(observation);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_pending_observes_fifteen_seconds_after_arm_with_original_creation_deadline() {
+        let reporter = CodexInvalidationReporter::new();
+        let action = Uuid::random();
+        reporter.arm_owner_progress(&action);
+        reporter.owner_progress(&action, "owner_start_settled");
+        reporter.owner_progress(&action, "owner_child_status_returned");
+        let original_deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        assert_eq!(
+            original_deadline.duration_since(tokio::time::Instant::now()),
+            Duration::from_secs(300)
+        );
+        let observation = reporter
+            .observe_owner_pending(&action, original_deadline)
+            .expect("armed owner-pending observer");
+        observation.stage(CodexOwnerPendingPhase::Authorization);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(14)).await;
+        tokio::task::yield_now().await;
+        {
+            let state = reporter.0.lock().unwrap();
+            assert_eq!(state.owner_progress_seen, 3);
+            assert_eq!(state.lines, 2);
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let state = reporter.0.lock().unwrap();
+        assert_eq!(state.owner_progress_seen, 7);
+        assert_eq!(state.lines, 3);
+        drop(state);
+        drop(observation);
     }
 
     #[test]

@@ -15,6 +15,10 @@ import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.Rule
+import org.junit.rules.RuleChain
+import org.junit.rules.TestRule
+import org.junit.runner.Description
+import org.junit.runners.model.Statement
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.lifecycle.Lifecycle
@@ -30,7 +34,21 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import android.view.WindowManager
+import android.view.inspector.WindowInspector
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.view.accessibility.AccessibilityNodeInfo
+import androidx.compose.ui.window.DialogWindowProvider
 import android.os.Bundle
+import android.os.PersistableBundle
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicInteger
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.text.AnnotatedString
 
@@ -38,8 +56,53 @@ import androidx.compose.ui.text.AnnotatedString
  * The host uses actual Rust State/Security/transport, with synthetic provider-data transitions.
  * No echo server, mocked transport, production host, installed debug command or provider effect. */
 class GoatrConnectionTest {
-    @get:Rule val ui=createEmptyComposeRule()
+    private var privateCheckpointStage="bootstrap"
+    private val composeUi=createEmptyComposeRule()
+    @get:Rule val privateCheckpointRule:TestRule=RuleChain.outerRule(PrivateCheckpointSanitizer()).around(composeUi)
+    private val ui get()=composeUi
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+
+    /** The selected retained-pairing flow can hold a live invitation in Compose semantics.
+     * Its outer rule also encloses Compose teardown, which otherwise may attach that tree to JUnit. */
+    private inner class PrivateCheckpointSanitizer:TestRule {
+        override fun apply(base:Statement,description:Description)=object:Statement() {
+            override fun evaluate() {
+                val selected=privateCheckpointSelected()
+                try {
+                    if(selected) {
+                        privateCheckpointStage="test_body"
+                        val automation=InstrumentationRegistry.getInstrumentation().uiAutomation
+                        val serviceInfo=checkNotNull(automation.serviceInfo)
+                        val originalFlags=serviceInfo.flags
+                        try {
+                            serviceInfo.flags=originalFlags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+                            automation.serviceInfo=serviceInfo
+                            base.evaluate()
+                        } finally {
+                            serviceInfo.flags=originalFlags
+                            automation.serviceInfo=serviceInfo
+                        }
+                    } else base.evaluate()
+                }
+                catch(error:Throwable) {
+                    if(selected) throw AssertionError("pairing_checkpoint_$privateCheckpointStage")
+                    throw error
+                }
+            }
+        }
+    }
+    private fun privateCheckpointSelected():Boolean {
+        val arguments=InstrumentationRegistry.getArguments()
+        val selected=arguments.getString("class")
+        return arguments.getString("goatrSdkForegroundBootstrap")=="main_once" && selected in setOf(
+            "io.github.trevarj.goatr.GoatrConnectionTest#installed_subject_private_pairing_checkpoint",
+            "io.github.trevarj.goatr.GoatrConnectionTest#installed_subject_owned_retirement_checkpoint",
+        ) && (selected!="io.github.trevarj.goatr.GoatrConnectionTest#installed_subject_owned_retirement_checkpoint" || arguments.getString("goatrOwnedRetirementCheckpoint")=="true")
+    }
+    private fun privateCheckpointRequire(stage:String,condition:Boolean) {
+        privateCheckpointStage=stage
+        check(condition)
+    }
     private fun physicalArguments(action:String,shell:Boolean=false)=Bundle().apply {
         putString("ownedUiRunId",Uuid.random().value);putString("ownedUiAction",action)
         putString("ownedUiHostId","a".repeat(64));putString("ownedUiMvpRunId",Uuid.random().value)
@@ -922,6 +985,1173 @@ class GoatrConnectionTest {
         if(requireEnabled) node.assertIsEnabled()
         node.performClick();afterClick?.invoke();ui.waitForIdle()
     }
+
+    private data class PrivateInputEpoch(
+        val activity:MainActivity,
+        val window:android.view.Window,
+        val decor:android.view.View,
+        val token:android.os.IBinder,
+        val baseWindow:Int,
+    )
+
+    private fun privateCheckpointWindow(
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+    ):PrivateInputEpoch? {
+        var epoch:PrivateInputEpoch?=null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val activity=runCatching {runner.sdkOwnedFixtureMainActivity()}.getOrNull() ?: return@runOnMainSync
+            val window=activity.window;val decor=window.decorView;val token=decor.windowToken
+            if(activity.lifecycle.currentState!=Lifecycle.State.RESUMED || activity.isFinishing || activity.isDestroyed ||
+                ViewModelProvider(activity)[GoatrViewModel::class.java]!==owner || !decor.isAttachedToWindow || token==null ||
+                !activity.hasWindowFocus() || !decor.hasWindowFocus()) return@runOnMainSync
+            epoch=PrivateInputEpoch(activity,window,decor,token,-1)
+        }
+        val candidate=epoch ?: return null
+        val root=InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow ?: return null
+        return try {
+            if(root.packageName?.toString()!=candidate.activity.packageName || root.window?.type!=android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION || root.windowId<0) null
+            else candidate.copy(baseWindow=root.windowId)
+        } finally {root.recycle()}
+    }
+
+    private enum class PrivateCheckpointEligibility(val closed:String) {
+        PreviewIdentity("preview_identity"), ActivityIdentity("activity_identity"), ActivityState("activity_state"), OwnerIdentity("owner_identity"), OwnerScene("owner_scene"), SecureState("secure_state"), WindowFocus("window_focus"), Interactive("interactive"), Keyguard("keyguard"), ActiveRoot("active_root"), RootIdentity("root_identity"), RootWindow("root_window"), Eligible("eligible"),
+    }
+
+    private fun privateCheckpointInputEligibility(
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        screen:Screen,
+        preview:Any?,
+        secure:Boolean,
+        popup:Boolean=false,
+    ):PrivateCheckpointEligibility {
+        var cause=PrivateCheckpointEligibility.ActivityIdentity
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val activity=runCatching {runner.sdkOwnedFixtureMainActivity()}.getOrNull()
+            cause=when {
+                activity!==epoch.activity || activity?.window!==epoch.window || epoch.window.decorView!==epoch.decor || !epoch.decor.isAttachedToWindow || epoch.decor.windowToken!==epoch.token -> PrivateCheckpointEligibility.ActivityIdentity
+                epoch.activity.isFinishing || epoch.activity.isDestroyed || epoch.activity.lifecycle.currentState!=Lifecycle.State.RESUMED -> PrivateCheckpointEligibility.ActivityState
+                ViewModelProvider(epoch.activity)[GoatrViewModel::class.java]!==owner -> PrivateCheckpointEligibility.OwnerIdentity
+                owner.preview!==preview -> PrivateCheckpointEligibility.PreviewIdentity
+                !owner.foreground || owner.busy || owner.screen!=screen -> PrivateCheckpointEligibility.OwnerScene
+                (epoch.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE!=0)!=secure -> PrivateCheckpointEligibility.SecureState
+                !popup && (!epoch.activity.hasWindowFocus() || !epoch.decor.hasWindowFocus()) -> PrivateCheckpointEligibility.WindowFocus
+                else -> PrivateCheckpointEligibility.Eligible
+            }
+        }
+        if(cause!=PrivateCheckpointEligibility.Eligible)return cause
+        val app=epoch.activity.applicationContext
+        val power=app.getSystemService(android.os.PowerManager::class.java)
+        val keyguard=app.getSystemService(android.app.KeyguardManager::class.java)
+        if(power?.isInteractive!=true)return PrivateCheckpointEligibility.Interactive
+        if(keyguard?.isKeyguardLocked!=false)return PrivateCheckpointEligibility.Keyguard
+        val root=InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow ?: return PrivateCheckpointEligibility.ActiveRoot
+        return try {
+            when {
+                root.packageName?.toString()!=epoch.activity.packageName || root.window?.type!=android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION -> PrivateCheckpointEligibility.RootIdentity
+                root.windowId<0 || if(popup) root.windowId==epoch.baseWindow else root.windowId!=epoch.baseWindow -> PrivateCheckpointEligibility.RootWindow
+                else -> PrivateCheckpointEligibility.Eligible
+            }
+        } finally {root.recycle()}
+    }
+
+    private fun privateCheckpointGuard(
+        stage:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        screen:Screen,
+        preview:Any?,
+        secure:Boolean,
+        popup:Boolean=false,
+    )=privateCheckpointRequire(stage,privateCheckpointInputEligibility(runner,owner,epoch,screen,preview,secure,popup)==PrivateCheckpointEligibility.Eligible)
+
+    private fun privateCheckpointDeadline(stage:String,deadline:Long) {
+        privateCheckpointRequire(stage,android.os.SystemClock.elapsedRealtime()<deadline)
+    }
+
+    private fun privateCheckpointTap(
+        stage:String,
+        tag:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        screen:Screen,
+        preview:Any?,
+        secure:Boolean,
+        popup:Boolean=false,
+        deadline:Long?=null,
+        beforeClick:(()->Unit)?=null,
+    ) {
+        deadline?.let {privateCheckpointDeadline(stage,it)}
+        privateCheckpointGuard(stage,runner,owner,epoch,screen,preview,secure,popup)
+        val node=ui.onNodeWithTag(tag)
+        if(runCatching {node.assertIsDisplayed()}.isFailure) node.performScrollTo()
+        deadline?.let {privateCheckpointDeadline(stage,it)}
+        node.assertIsDisplayed().assertIsEnabled()
+        deadline?.let {privateCheckpointDeadline(stage,it)}
+        privateCheckpointGuard(stage,runner,owner,epoch,screen,preview,secure,popup)
+        beforeClick?.invoke()
+        node.performClick();ui.waitForIdle();deadline?.let {privateCheckpointDeadline(stage,it)}
+    }
+
+    private fun privateCheckpointModalWindow(
+        stage:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        screen:Screen,
+        tag:String,
+        deadline:Long,
+    ):Int? {
+        privateCheckpointDeadline(stage,deadline)
+        if(privateCheckpointInputEligibility(runner,owner,epoch,screen,null,false,true)!=PrivateCheckpointEligibility.Eligible)return null
+        val root=InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow ?: return null
+        return try {
+            val window=root.window
+            if(root.packageName?.toString()!=epoch.activity.packageName || window?.let {it.type==android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive && it.isFocused}!=true || root.windowId<0 || root.windowId==epoch.baseWindow) null
+            else root.windowId.takeIf {privateCheckpointRawTag(root,epoch.activity.packageName,it,tag)}
+        } finally {root.recycle()}
+    }
+
+    /** Compose exposes raw test tags as virtual view IDs, not framework resource IDs. */
+    private fun privateCheckpointRawTag(root:AccessibilityNodeInfo,expectedPackage:String,expectedWindow:Int,tag:String):Boolean {
+        val queue=java.util.ArrayDeque<AccessibilityNodeInfo>();queue.addLast(AccessibilityNodeInfo.obtain(root));var discovered=1;var matches=0
+        try {
+            while(queue.isNotEmpty()) {
+                val node=queue.removeFirst()
+                try {
+                    if(node.packageName?.toString()!=expectedPackage || node.windowId!=expectedWindow)return false
+                    if(node.viewIdResourceName==tag && node.isVisibleToUser) {matches++;if(matches>1)return false}
+                    repeat(node.childCount) {index->
+                        if(discovered>=512)return false
+                        discovered++
+                        val child=node.getChild(index) ?: return false
+                        queue.addLast(child)
+                    }
+                } finally {node.recycle()}
+            }
+            return matches==1
+        } finally {while(queue.isNotEmpty()) queue.removeFirst().recycle()}
+    }
+
+    private fun privateCheckpointModalGuard(
+        stage:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        screen:Screen,
+        window:Int,
+        tag:String,
+        deadline:Long,
+    ) {
+        privateCheckpointDeadline(stage,deadline)
+        privateCheckpointRequire(stage,privateCheckpointInputEligibility(runner,owner,epoch,screen,null,false,true)==PrivateCheckpointEligibility.Eligible)
+        val root=InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow
+        val exact=if(root==null) false else try {
+            val active=root.window
+            root.packageName?.toString()==epoch.activity.packageName && active?.let {it.type==android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive && it.isFocused}==true && root.windowId==window && root.windowId!=epoch.baseWindow && privateCheckpointRawTag(root,epoch.activity.packageName,window,tag)
+        } finally {root.recycle()}
+        privateCheckpointRequire(stage,exact)
+    }
+
+    private data class PrivateTerminalDialog(
+        val window:android.view.Window,
+        val decor:android.view.View,
+        val providerView:android.view.View,
+        val windowToken:android.os.IBinder,
+        val applicationWindowToken:android.os.IBinder,
+        val baseApplicationToken:android.os.IBinder,
+        val accessibilityWindowId:Int,
+    )
+
+    private fun privateCheckpointTerminalBaseApplicationToken(
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+    ):android.os.IBinder? {
+        var token:android.os.IBinder?=null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val activity=runCatching {runner.sdkOwnedFixtureMainActivity()}.getOrNull()
+            if(activity===epoch.activity && activity.window===epoch.window && epoch.window.decorView===epoch.decor && epoch.decor.windowToken===epoch.token && ViewModelProvider(epoch.activity)[GoatrViewModel::class.java]===owner)token=epoch.window.attributes.token
+        }
+        return token
+    }
+
+    private fun privateCheckpointTerminalProviderContextIsActivity(context:android.content.Context,activity:MainActivity):Boolean {
+        val seen=java.util.IdentityHashMap<android.content.Context,Boolean>();var current:android.content.Context?=context
+        repeat(16) {
+            val value=current ?: return false
+            if(value===activity)return true
+            if(seen.put(value,true)!=null)return false
+            current=(value as? android.content.ContextWrapper)?.baseContext ?: return false
+        }
+        return false
+    }
+
+    private fun privateCheckpointTerminalPopupFailure(stage:String,suffix:String) {
+        if(stage=="terminal_popup")privateCheckpointStage="terminal_popup_window_$suffix"
+    }
+
+    private fun privateCheckpointTerminalDialogWindow(
+        stage:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        dialogTag:String,
+        targetTag:String,
+        controlTag:String,
+        baseApplicationToken:android.os.IBinder,
+        deadline:Long,
+        screen:Screen=Screen.Conversation,
+    ):PrivateTerminalDialog? {
+        privateCheckpointTerminalPopupFailure(stage,"deadline");privateCheckpointDeadline(if(stage=="terminal_popup") "terminal_popup_window_deadline" else stage,deadline)
+        if(android.os.Build.VERSION.SDK_INT<29) {privateCheckpointTerminalPopupFailure(stage,"sdk");return null}
+        val eligibility=privateCheckpointInputEligibility(runner,owner,epoch,screen,null,true,true)
+        if(eligibility!=PrivateCheckpointEligibility.Eligible) {privateCheckpointTerminalPopupFailure(stage,"eligibility_${eligibility.closed}");return null}
+        val automation=InstrumentationRegistry.getInstrumentation().uiAutomation
+        val popup=automation.rootInActiveWindow ?: run {privateCheckpointTerminalPopupFailure(stage,"active_root");return null}
+        val popupWindowId=try {
+            val window=popup.window
+            when {
+                popup.packageName?.toString()!=epoch.activity.packageName || window?.let {it.type==android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive && it.isFocused}!=true || popup.windowId<0 || popup.windowId==epoch.baseWindow -> {privateCheckpointTerminalPopupFailure(stage,"exact_popup_window");null}
+                !privateCheckpointRawTag(popup,epoch.activity.packageName,popup.windowId,dialogTag) -> {privateCheckpointTerminalPopupFailure(stage,"dialog_tag");null}
+                !privateCheckpointRawTag(popup,epoch.activity.packageName,popup.windowId,targetTag) -> {privateCheckpointTerminalPopupFailure(stage,"target_tag");null}
+                !privateCheckpointRawTag(popup,epoch.activity.packageName,popup.windowId,controlTag) -> {privateCheckpointTerminalPopupFailure(stage,"control_tag");null}
+                else -> popup.windowId
+            }
+        } finally {popup.recycle()}
+        if(popupWindowId==null)return null
+        var pinned:PrivateTerminalDialog?=null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val roots=WindowInspector.getGlobalWindowViews()
+            if(roots.size>64) {privateCheckpointTerminalPopupFailure(stage,"root_count");return@runOnMainSync}
+            val matched=roots.filter {root->
+                val node=root.createAccessibilityNodeInfo()
+                try {node?.windowId==popupWindowId} finally {node?.recycle()}
+            }
+            if(matched.size!=1) {privateCheckpointTerminalPopupFailure(stage,"window_id_match");return@runOnMainSync}
+            val root=matched.single()
+            val queue=java.util.ArrayDeque<android.view.View>();queue.addLast(root);val providers=mutableListOf<android.view.View>();var seen=0
+            while(queue.isNotEmpty()) {
+                val view=queue.removeFirst()
+                if(++seen>512) {privateCheckpointTerminalPopupFailure(stage,"root_tree_bound");return@runOnMainSync}
+                if(view is DialogWindowProvider)providers+=view
+                if(view is android.view.ViewGroup)repeat(view.childCount) {index->queue.addLast(view.getChildAt(index))}
+            }
+            if(providers.size!=1) {privateCheckpointTerminalPopupFailure(stage,"provider_count");return@runOnMainSync}
+            val providerView=providers.single();val provider=providerView as DialogWindowProvider;val window=provider.window;val decor=window.decorView
+            val token=root.windowToken;val applicationToken=root.applicationWindowToken;val currentBaseToken=epoch.window.attributes.token;val providerBaseToken=window.attributes.token
+            if(decor!==root || providerView.rootView!==root) {privateCheckpointTerminalPopupFailure(stage,"decor");return@runOnMainSync}
+            if(!privateCheckpointTerminalProviderContextIsActivity(providerView.context,epoch.activity)) {privateCheckpointTerminalPopupFailure(stage,"context");return@runOnMainSync}
+            if(!root.isAttachedToWindow || !decor.isAttachedToWindow) {privateCheckpointTerminalPopupFailure(stage,"attach");return@runOnMainSync}
+            if(token==null || applicationToken==null || currentBaseToken==null || providerBaseToken==null || currentBaseToken!=baseApplicationToken || providerBaseToken!=baseApplicationToken || decor.windowToken!=token || applicationToken!=token) {privateCheckpointTerminalPopupFailure(stage,"tokens");return@runOnMainSync}
+            if(window.attributes.type!=WindowManager.LayoutParams.TYPE_APPLICATION) {privateCheckpointTerminalPopupFailure(stage,"type");return@runOnMainSync}
+            if((window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE)==0) {privateCheckpointTerminalPopupFailure(stage,"secure");return@runOnMainSync}
+            if(token==epoch.token) {privateCheckpointTerminalPopupFailure(stage,"tokens");return@runOnMainSync}
+            pinned=PrivateTerminalDialog(window,decor,providerView,token,applicationToken,baseApplicationToken,popupWindowId)
+        }
+        return pinned
+    }
+
+    private fun privateCheckpointTerminalDialogGuard(
+        stage:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        pinned:PrivateTerminalDialog,
+        dialogTag:String,
+        targetTag:String,
+        controlTag:String,
+        baseApplicationToken:android.os.IBinder,
+        deadline:Long,
+        screen:Screen=Screen.Conversation,
+    ) {
+        val current=checkNotNull(privateCheckpointTerminalDialogWindow(stage,runner,owner,epoch,dialogTag,targetTag,controlTag,baseApplicationToken,deadline,screen))
+        val identical=current.window===pinned.window && current.decor===pinned.decor && current.providerView===pinned.providerView && current.windowToken==pinned.windowToken && current.applicationWindowToken==pinned.applicationWindowToken && current.baseApplicationToken==pinned.baseApplicationToken && current.accessibilityWindowId==pinned.accessibilityWindowId
+        if(stage=="terminal_popup") {privateCheckpointStage="terminal_popup_window_identity";check(identical)} else privateCheckpointRequire(stage,identical)
+    }
+
+    private fun privateCheckpointModalTap(
+        stage:String,
+        tag:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        screen:Screen,
+        window:Int,
+        deadline:Long,
+        scopeTag:String=tag,
+        useUnmergedTree:Boolean=false,
+        beforeClick:(()->Unit)?=null,
+    ) {
+        privateCheckpointModalGuard(stage,runner,owner,epoch,screen,window,scopeTag,deadline)
+        val node=ui.onNodeWithTag(tag,useUnmergedTree=useUnmergedTree)
+        if(runCatching {node.assertIsDisplayed()}.isFailure) node.performScrollTo()
+        privateCheckpointDeadline(stage,deadline)
+        node.assertIsDisplayed().assertIsEnabled()
+        privateCheckpointModalGuard(stage,runner,owner,epoch,screen,window,scopeTag,deadline)
+        beforeClick?.invoke()
+        node.performClick();ui.waitForIdle();privateCheckpointDeadline(stage,deadline)
+    }
+
+    /** Selected-checkpoint-only close instrumentation; it keeps the normal modal tap's reads and order. */
+    private fun privateCheckpointCloseCreationGuard(
+        phase:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        window:Int,
+        scopeTag:String,
+        deadline:Long,
+    ) {
+        privateCheckpointStage="${phase}_deadline"
+        privateCheckpointDeadline("${phase}_deadline",deadline)
+        val eligibility=privateCheckpointInputEligibility(runner,owner,epoch,Screen.Sessions,null,false,true)
+        privateCheckpointRequire("${phase}_eligibility_${eligibility.closed}",eligibility==PrivateCheckpointEligibility.Eligible)
+        val root=InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow ?: run {
+            privateCheckpointRequire("${phase}_window",false)
+            return
+        }
+        try {
+            val active=root.window
+            val qualified=root.packageName?.toString()==epoch.activity.packageName && active?.let {it.type==android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive && it.isFocused}==true && root.windowId==window && root.windowId!=epoch.baseWindow
+            privateCheckpointRequire("${phase}_window",qualified)
+            privateCheckpointRequire("${phase}_scope",privateCheckpointRawTag(root,epoch.activity.packageName,window,scopeTag))
+        } finally {root.recycle()}
+    }
+
+    private fun privateCheckpointPickerTap(
+        stage:String,
+        optionTag:String,
+        runner:OwnedInstrumentationRunner,
+        owner:GoatrViewModel,
+        epoch:PrivateInputEpoch,
+        window:Int,
+        deadline:Long,
+    ) {
+        privateCheckpointModalGuard(stage,runner,owner,epoch,Screen.Sessions,window,optionTag,deadline)
+        val option=ui.onNode(hasAnyDescendant(hasTestTag(optionTag)) and hasClickAction(),useUnmergedTree=true)
+        option.assertIsDisplayed().assertIsEnabled()
+        privateCheckpointModalGuard(stage,runner,owner,epoch,Screen.Sessions,window,optionTag,deadline)
+        option.performClick();ui.waitForIdle();privateCheckpointDeadline(stage,deadline)
+    }
+
+    private suspend fun privateCheckpointActions(owner:GoatrViewModel,host:String):List<LocalAction> {
+        val actions=mutableListOf<LocalAction>();var after:Uuid?=null
+        while(true) {
+            val page=owner.store.localActions(host,after,100);actions+=page
+            if(page.size<100)return actions
+            after=page.last().metadata.actionId
+        }
+    }
+
+
+    private fun privateCheckpointOwnedClip(clipboard:ClipboardManager,nonce:String)=clipboard.primaryClipDescription?.let {description->
+        description.label?.toString()==nonce&&description.mimeTypeCount==1&&description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)&&description.extras?.getString("goatrOwnedClipboardNonce")==nonce
+    }==true
+    private enum class PrivateCheckpointDirectInputOutcome(val closed:String) {Success("success"),Authority("authority"),Window("direct_window"),Lookup("direct_lookup"),Focus("direct_focus"),Connection("direct_connection"),Commit("direct_commit")}
+    private data class PrivateCheckpointShellReceiptObservation(val closed:String,val exact:Boolean)
+    private fun privateCheckpointShellReceiptError(code:ErrorCode)=when(code) {
+        ErrorCode.InvalidRequest->"error_invalid_request";ErrorCode.UnsupportedVersion->"error_unsupported_version";ErrorCode.UnsupportedMethod->"error_unsupported_method";ErrorCode.Unauthorized->"error_unauthorized";ErrorCode.PairingFailed->"error_pairing_failed";ErrorCode.StaleHost->"error_stale_host";ErrorCode.StaleSession->"error_stale_session";ErrorCode.NotFound->"error_not_found";ErrorCode.NotReady->"error_not_ready";ErrorCode.InvalidAnswer->"error_invalid_answer";ErrorCode.AlreadyResolved->"error_already_resolved";ErrorCode.ActionIdConflict->"error_action_id_conflict";ErrorCode.ActionCapacity->"error_action_capacity";ErrorCode.ContentExpired->"error_content_expired";ErrorCode.CursorExpired->"error_cursor_expired";ErrorCode.Busy->"error_busy";ErrorCode.ResourceLimit->"error_resource_limit";ErrorCode.RateLimited->"error_rate_limited";ErrorCode.Timeout->"error_timeout";ErrorCode.BackendError->"error_backend_error";ErrorCode.PushRejected->"error_push_rejected";ErrorCode.StaleRegistration->"error_stale_registration"
+    }
+    private fun privateCheckpointConnectionFailurePhase(phase:ConnectionFailurePhase)=when(phase) {
+        ConnectionFailurePhase.Dial->"dial";ConnectionFailurePhase.OpenStream->"open_stream";ConnectionFailurePhase.Hello->"hello";ConnectionFailurePhase.Snapshot->"snapshot";ConnectionFailurePhase.Reader->"reader";ConnectionFailurePhase.Recovery->"recovery"
+    }
+    private fun privateCheckpointConnectionFailureCategory(category:ConnectionFailureCategory)=when(category) {
+        ConnectionFailureCategory.Timeout->"timeout";ConnectionFailureCategory.Known->"known";ConnectionFailureCategory.Protocol->"protocol";ConnectionFailureCategory.Transport->"transport";ConnectionFailureCategory.Other->"other"
+    }
+    private fun privateCheckpointCaughtAbsentObservation(notice:String?,callbackOwned:Boolean):String {
+        val code=ErrorCode.entries.firstOrNull {notice==safeFailure(StorePolicy(it))}
+        if(code!=null)return when(code) {
+            ErrorCode.NotReady->if(callbackOwned)"confirm_postclick_caught_absent_error_not_ready_callback_owned" else "confirm_postclick_caught_absent_error_not_ready_callback_absent"
+            else->"confirm_postclick_caught_absent_${privateCheckpointShellReceiptError(code)}"
+        }
+        if(notice==safeFailure(ProtectedKeyUnavailable()))return "confirm_postclick_caught_absent_protected_identity"
+        if(notice==safeFailure(IllegalStateException()))return "confirm_postclick_caught_absent_generic"
+        return "confirm_postclick_caught_absent_unclassified"
+    }
+    private fun privateCheckpointConfirmPostclickObservation(helloPresent:Boolean,screen:Screen,busy:Boolean,previewCurrent:Boolean,hostStored:Boolean,startupConnecting:Boolean,failure:ConnectionFailure?,dialSupplied:Boolean?,caughtAbsentNotice:String?,callbackOwned:Boolean):String {
+        if(helloPresent&&screen!=Screen.Sessions)return "confirm_postclick_hello_present_screen_mismatch"
+        if(helloPresent&&busy)return "confirm_postclick_hello_present_busy"
+        failure?.code?.let {return "confirm_postclick_${privateCheckpointShellReceiptError(it)}"}
+        failure?.let {if(it.phase==ConnectionFailurePhase.Dial&&it.category==ConnectionFailureCategory.Timeout)return when(dialSupplied) {false->"confirm_postclick_failure_dial_timeout_endpoint_setup";true->"confirm_postclick_failure_dial_timeout_connect_admitted";null->"confirm_postclick_failure_dial_timeout_origin_unavailable"};return "confirm_postclick_failure_${privateCheckpointConnectionFailurePhase(it.phase)}_${privateCheckpointConnectionFailureCategory(it.category)}"}
+        if(hostStored&&busy)return "confirm_postclick_stored_busy_nofailure"
+        if(!hostStored&&busy&&previewCurrent)return if(startupConnecting)"confirm_postclick_prestore_startup_connecting" else "confirm_postclick_prestore_no_startup"
+        if(!busy&&!previewCurrent)return if(hostStored)"confirm_postclick_caught_stored" else privateCheckpointCaughtAbsentObservation(caughtAbsentNotice,callbackOwned)
+        if(screen==Screen.Sessions)return "confirm_postclick_sessions_without_hello"
+        if(screen==Screen.Pairing&&!busy)return "confirm_postclick_pairing_idle"
+        return "confirm_postclick_other_model"
+    }
+    private fun privateCheckpointShellInteractionReceiptObservation(actions:List<LocalAction>,before:Set<Uuid>,boot:Uuid,target:ShellTarget,shellOwner:TerminalInputOwner,pause:TerminalInputPause?,exact:(LocalAction)->Boolean):PrivateCheckpointShellReceiptObservation {
+        val delta=actions.filter {it.metadata.actionId !in before}
+        if(delta.size>1)return PrivateCheckpointShellReceiptObservation("multiple",false)
+        if(delta.isEmpty()) {
+            val closed=when {
+                shellOwner.paused->when(pause) {TerminalInputPause.Capacity->"paused_capacity";TerminalInputPause.SourceLost->"paused_source_lost";TerminalInputPause.Uncertain->"paused_uncertain";TerminalInputPause.Refused->"paused_refused";TerminalInputPause.Limit->"paused_limit";TerminalInputPause.Unsupported->"paused_unsupported";TerminalInputPause.Closed->"paused_closed";null->"paused_unknown"}
+                !shellOwner.retained()->"unretained"
+                shellOwner.historyBlocked->"history_blocked"
+                shellOwner.pendingEvents>0||shellOwner.pendingTextBytes>0->"queued"
+                shellOwner.accepting()->"accepting_empty"
+                else->"not_accepting"
+            }
+            return PrivateCheckpointShellReceiptObservation(closed,false)
+        }
+        val action=delta.single();val metadata=action.metadata;val receipt=action.receipt
+        if(metadata.method!=ActionMethod.ShellInput||metadata.bootId!=boot||metadata.target!=null||metadata.sourceTarget!=null||metadata.shellTarget!=target||receipt!=null&&(receipt.actionId!=metadata.actionId||receipt.method!=ActionMethod.ShellInput||receipt.bootId!=boot||receipt.target!=null||receipt.shellTarget!=target))return PrivateCheckpointShellReceiptObservation("metadata_binding",false)
+        if(!action.authoritative)return PrivateCheckpointShellReceiptObservation("non_authoritative",false)
+        if(receipt==null)return PrivateCheckpointShellReceiptObservation("no_receipt",false)
+        if(exact(action))return PrivateCheckpointShellReceiptObservation("wait",true)
+        receipt.error?.let {return PrivateCheckpointShellReceiptObservation(privateCheckpointShellReceiptError(it.code),false)}
+        val closed=when(receipt.state) {
+            ReceiptState.Reserved->"reserved";ReceiptState.Dispatching->"dispatching"
+            ReceiptState.Dispatched->when(val result=receipt.result) {null->"dispatched_none";is ActionResultShellDispatch->"dispatched_dispatch_partial";is ActionResultShellInput->if(result.progress.accepted())"dispatched_input_accepted" else "dispatched_input_partial";else->"dispatched_none"}
+            ReceiptState.Succeeded->when(val result=receipt.result) {null->"succeeded_none";is ActionResultShellDispatch->if(result.progress.complete())"succeeded_dispatch_complete" else "succeeded_dispatch_partial";is ActionResultShellInput->"succeeded_input_partial";else->"succeeded_none"}
+            ReceiptState.Failed->when(receipt.result) {is ActionResultShellDispatch->"failed_dispatch";is ActionResultShellInput->"failed_input";else->"failed_none"}
+            ReceiptState.Uncertain->when(receipt.result) {is ActionResultShellDispatch->"uncertain_dispatch";is ActionResultShellInput->"uncertain_input";else->"uncertain_none"}
+        }
+        return PrivateCheckpointShellReceiptObservation(closed,false)
+    }
+    private fun privateCheckpointDirectTerminalInput(pinned:PrivateTerminalDialog,admitted:()->Boolean):PrivateCheckpointDirectInputOutcome {
+        var outcome=PrivateCheckpointDirectInputOutcome.Success
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            fun pinnedMetadata()=pinned.window.decorView===pinned.decor&&pinned.providerView.rootView===pinned.decor&&pinned.decor.isAttachedToWindow&&pinned.decor.hasWindowFocus()&&pinned.window.attributes.type==WindowManager.LayoutParams.TYPE_APPLICATION&&pinned.window.attributes.token==pinned.baseApplicationToken&&(pinned.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE)!=0&&pinned.decor.windowToken==pinned.windowToken&&pinned.decor.applicationWindowToken==pinned.applicationWindowToken
+            if(!admitted()){outcome=PrivateCheckpointDirectInputOutcome.Authority;return@runOnMainSync}
+            if(!pinnedMetadata()){outcome=PrivateCheckpointDirectInputOutcome.Window;return@runOnMainSync}
+            val queue=ArrayDeque<View>();queue.add(pinned.decor);var direct:DirectTerminalInputView?=null;var visited=0
+            while(queue.isNotEmpty()&&visited++<512) {val view=queue.removeFirst();if(view is DirectTerminalInputView) {if(direct!=null){direct=null;break};direct=view};if(view is ViewGroup)for(index in 0 until view.childCount)queue.add(view.getChildAt(index))}
+            if(direct?.rootView!==pinned.decor||direct?.isAttachedToWindow!=true){outcome=PrivateCheckpointDirectInputOutcome.Lookup;return@runOnMainSync}
+            if(!direct.requestFocus()||!direct.hasWindowFocus()){outcome=PrivateCheckpointDirectInputOutcome.Focus;return@runOnMainSync}
+            if(!admitted()){outcome=PrivateCheckpointDirectInputOutcome.Authority;return@runOnMainSync}
+            if(!pinnedMetadata()){outcome=PrivateCheckpointDirectInputOutcome.Window;return@runOnMainSync}
+            val connection=direct.onCreateInputConnection(EditorInfo()) ?: run {outcome=PrivateCheckpointDirectInputOutcome.Connection;return@runOnMainSync}
+            if(!admitted()){outcome=PrivateCheckpointDirectInputOutcome.Authority;return@runOnMainSync}
+            if(!pinnedMetadata()){outcome=PrivateCheckpointDirectInputOutcome.Window;return@runOnMainSync}
+            if(!connection.commitText(" ",1))outcome=PrivateCheckpointDirectInputOutcome.Commit
+        }
+        return outcome
+    }
+
+    /** A single real private-paste pairing checkpoint. The host owns the invitation lifetime
+     * and only releases its finish acknowledgement after the exact authenticated device delta. */
+    @Test fun installed_subject_private_pairing_checkpoint()=runBlocking<Unit> {
+        privateCheckpointRequire("selector",privateCheckpointSelected())
+        val runner=InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner
+        privateCheckpointRequire("runner",runner!=null)
+        // The empty Compose rule has now installed its real test environment. Launching begins
+        // only from the stock runner lifecycle callback; no test-owned composition is created.
+        privateCheckpointStage="awaiting_foreground"
+        runner!!.prepareSdkOwnedFixture()
+        privateCheckpointStage="activity_capture_fixture"
+        val activity=runner!!.sdkOwnedFixtureMainActivity()
+        lateinit var owner:GoatrViewModel
+        privateCheckpointStage="activity_capture_owner"
+        runner.runOnMainSync {owner=ViewModelProvider(activity)[GoatrViewModel::class.java]}
+        privateCheckpointStage="activity_capture_foreground"
+        ui.waitUntil(20_000) {owner.foreground && owner.connection.ownsNetworkCallback()}
+        lateinit var epoch:PrivateInputEpoch
+        privateCheckpointStage="activity_capture_window"
+        ui.waitUntil(10_000) {
+            val current=privateCheckpointWindow(runner,owner)
+            if(current==null) false else {epoch=current;true}
+        }
+        privateCheckpointGuard("initial_scene",runner,owner,epoch,Screen.Sessions,null,false)
+        val beforeHosts=owner.store.state.value.hosts.toList()
+        val beforeAliases=beforeHosts.associate {it.hostId to it.keyAliases.toList()}
+        val beforeIds=beforeHosts.map {it.hostId}.toSet()
+        privateCheckpointStage="creation_selection"
+        val shellCheckpoint=InstrumentationRegistry.getArguments().getString("goatrPairingShellCheckpoint")=="true"
+        val shellInteractionCheckpoint=InstrumentationRegistry.getArguments().getString("goatrPairingShellInteractionCheckpoint")=="true"
+        val requestedCreationProvider=when(InstrumentationRegistry.getArguments().getString("goatrPairingProvider")) {
+            "none"->null
+            "omp"->Provider.Omp
+            "codex"->Provider.Codex
+            else->{privateCheckpointRequire("creation_selection",false);null}
+        }
+        privateCheckpointRequire("creation_selection",!(shellCheckpoint&&requestedCreationProvider!=null)&&(!shellInteractionCheckpoint||shellCheckpoint))
+        privateCheckpointStage="live_info"
+        val infoStarted=android.os.SystemClock.elapsedRealtime()
+        val info=stockControl("live_info")
+        val expectedHost=info.getValue("host").jsonPrimitive.content
+        val expectedName=info.getValue("name").jsonPrimitive.content
+        val checkpointBudget=info.getValue("deadlineMs").jsonPrimitive.long
+        privateCheckpointRequire("creation_selection",checkpointBudget in 1L..120_000L && info.getValue("provider").jsonPrimitive.content==when(requestedCreationProvider) {null->"none";Provider.Omp->"omp";Provider.Codex->"codex"} && info.getValue("shellCheckpoint").jsonPrimitive.boolean==shellCheckpoint && info.getValue("shellInteractionCheckpoint").jsonPrimitive.boolean==shellInteractionCheckpoint)
+        val checkpointDeadline=infoStarted+checkpointBudget
+        privateCheckpointRequire("host_fresh",expectedHost !in beforeIds)
+
+        privateCheckpointTap("navigate_menu","navigation_menu",runner,owner,epoch,Screen.Sessions,null,false)
+        privateCheckpointTap("navigate_hosts","navigation_hosts_menu",runner,owner,epoch,Screen.Sessions,null,false,popup=true)
+        ui.waitUntil(10_000) {owner.screen==Screen.Connections}
+        val pairBeginAdmission=privateCheckpointInputEligibility(runner,owner,epoch,Screen.Connections,null,false)
+        privateCheckpointRequire("pair_begin_admission_${pairBeginAdmission.closed}",pairBeginAdmission==PrivateCheckpointEligibility.Eligible)
+        val pairBeginNodeAdmission=privateCheckpointInputEligibility(runner,owner,epoch,Screen.Connections,null,false)
+        privateCheckpointRequire("pair_begin_node_admission_${pairBeginNodeAdmission.closed}",pairBeginNodeAdmission==PrivateCheckpointEligibility.Eligible)
+        privateCheckpointStage="pair_begin_node_lookup"
+        val pairBegin=ui.onNodeWithTag("pair_begin")
+        privateCheckpointStage="pair_begin_node_visibility"
+        if(runCatching {pairBegin.assertIsDisplayed()}.isFailure) {
+            privateCheckpointStage="pair_begin_node_scroll"
+            privateCheckpointGuard("pair_begin_node_scroll",runner,owner,epoch,Screen.Connections,null,false)
+            ui.onNodeWithTag("connections_list").performScrollToNode(hasTestTag("pair_begin"))
+        }
+        privateCheckpointStage="pair_begin_node_enabled"
+        pairBegin.assertIsDisplayed().assertIsEnabled()
+        val pairBeginRevalidation=privateCheckpointInputEligibility(runner,owner,epoch,Screen.Connections,null,false)
+        privateCheckpointRequire("pair_begin_revalidation_${pairBeginRevalidation.closed}",pairBeginRevalidation==PrivateCheckpointEligibility.Eligible)
+        privateCheckpointStage="pair_begin_click"
+        pairBegin.performClick()
+        privateCheckpointStage="pair_begin_idle"
+        ui.waitForIdle()
+        privateCheckpointStage="pair_begin_postclick_wait"
+        ui.waitUntil(10_000) {owner.screen==Screen.Pairing && owner.preview==null && activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE!=0}
+        privateCheckpointGuard("pairing_secure",runner,owner,epoch,Screen.Pairing,null,true)
+
+        var invitation:String?=null
+        var pasted=false
+        var previewed=false
+        try {
+            privateCheckpointStage="invite_once"
+            invitation=stockControl("live_pair").getValue("uri").jsonPrimitive.content
+            privateCheckpointRequire("invite_nonempty",invitation!!.isNotEmpty())
+            privateCheckpointGuard("paste_admission",runner,owner,epoch,Screen.Pairing,null,true)
+            val paste=ui.onNodeWithTag("pair_paste").performScrollTo().assertIsDisplayed().assertIsEnabled()
+            privateCheckpointGuard("paste_admission",runner,owner,epoch,Screen.Pairing,null,true)
+            pasted=true
+            paste
+                .performSemanticsAction(SemanticsActions.SetText) {it(AnnotatedString(checkNotNull(invitation)))}
+            privateCheckpointGuard("preview_admission",runner,owner,epoch,Screen.Pairing,null,true)
+            privateCheckpointRequire("preview_once",!previewed)
+            previewed=true
+            privateCheckpointTap("preview_admission","pair_preview",runner,owner,epoch,Screen.Pairing,null,true)
+        } finally {invitation=null}
+
+        privateCheckpointStage="confirm_admission"
+        var confirmWait=PrivateCheckpointEligibility.PreviewIdentity
+        try {
+            ui.waitUntil(10_000) {
+                val candidate=owner.preview
+                val previewExact=candidate?.host?.value==expectedHost && candidate?.name?.value==expectedName && candidate?.fingerprint==expectedHost.chunked(8).joinToString(" ")
+                if(!previewExact) {confirmWait=PrivateCheckpointEligibility.PreviewIdentity;false}
+                else {
+                    val eligibility=privateCheckpointInputEligibility(runner,owner,epoch,Screen.Pairing,candidate,false)
+                    confirmWait=eligibility
+                    eligibility==PrivateCheckpointEligibility.Eligible
+                }
+            }
+        } catch(error:ComposeTimeoutException) {
+            privateCheckpointStage="confirm_wait_${confirmWait.closed}"
+            throw error
+        }
+        val preview=owner.preview
+        privateCheckpointRequire("preview_exact",preview?.let {it.host.value==expectedHost && it.name.value==expectedName && it.fingerprint==expectedHost.chunked(8).joinToString(" ")}==true && owner.store.state.value.hosts==beforeHosts && owner.connection.state.value.hello.keys.none {it==expectedHost})
+        privateCheckpointGuard("confirm_admission",runner,owner,epoch,Screen.Pairing,preview,false)
+        privateCheckpointGuard("confirm_admission",runner,owner,epoch,Screen.Pairing,preview,false)
+        val confirm=ui.onNodeWithTag("pair_confirm")
+        if(runCatching {confirm.assertIsDisplayed()}.isFailure) confirm.performScrollTo()
+        confirm.assertIsDisplayed().assertIsEnabled()
+        privateCheckpointGuard("confirm_admission",runner,owner,epoch,Screen.Pairing,preview,false)
+        privateCheckpointStage="confirm_click"
+        confirm.performClick()
+        privateCheckpointStage="confirm_idle"
+        ui.waitForIdle()
+        privateCheckpointStage="confirm_postclick_wait"
+        privateCheckpointDeadline("confirm_postclick_wait",checkpointDeadline)
+        var confirmPostclickObservation="confirm_postclick_other_model"
+        try {
+            ui.waitUntil((checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {
+                val connection=owner.connection.state.value
+                val observedHello=connection.hello[expectedHost]
+                val observedScreen=owner.screen
+                val observedBusy=owner.busy
+                val observedPreviewCurrent=owner.preview===preview
+                val observedHostStored=owner.store.state.value.hosts.any {it.hostId==expectedHost}
+                val observedStartupConnecting=owner.connectingHosts.isNotEmpty()
+                val observedFailure=connection.connectionFailures[expectedHost]
+                val observedCaughtAbsent=observedFailure==null&&!observedBusy&&!observedPreviewCurrent&&!observedHostStored
+                val observedCaughtAbsentNotice=if(observedCaughtAbsent)owner.notice else null
+                val observedCaughtAbsentCallbackOwned=if(observedCaughtAbsent)owner.connection.ownsNetworkCallback() else false
+                confirmPostclickObservation=privateCheckpointConfirmPostclickObservation(observedHello!=null,observedScreen,observedBusy,observedPreviewCurrent,observedHostStored,observedStartupConnecting,observedFailure,connection.routeAttempts[expectedHost]?.supplied,observedCaughtAbsentNotice,observedCaughtAbsentCallbackOwned)
+                observedHello!=null && observedScreen==Screen.Sessions && !observedBusy
+            }
+        } catch(error:ComposeTimeoutException) {
+            privateCheckpointStage=confirmPostclickObservation
+            throw error
+        }
+        privateCheckpointStage="confirm_postclick_wait"
+        privateCheckpointDeadline("confirm_postclick_wait",checkpointDeadline)
+        val hello=owner.connection.state.value.hello[expectedHost]
+        val paired=owner.store.state.value.hosts.firstOrNull {it.hostId==expectedHost}
+        val device=hello?.deviceId
+        val afterHosts=owner.store.state.value.hosts
+        val expectedAliases=listOf(SecretStore.ENDPOINT_ALIAS,SecretStore.hostAlias(expectedHost,"receipt"))
+        privateCheckpointRequire("pairing_exact",hello?.hostId?.value==expectedHost && device!=null && paired?.let {it.hostId==expectedHost && it.name==expectedName && it.deviceId==device && it.keyAliases==expectedAliases}==true && afterHosts.map {it.hostId}.toSet()==beforeIds+expectedHost &&
+            beforeHosts.all {prior->afterHosts.firstOrNull {it.hostId==prior.hostId}===prior || afterHosts.firstOrNull {it.hostId==prior.hostId}==prior} &&
+            beforeAliases.all {(host,aliases)->afterHosts.firstOrNull {it.hostId==host}?.keyAliases==aliases} &&
+            afterHosts.count {it.hostId==expectedHost}==1)
+        val pairedHello=checkNotNull(hello);val pairedMetadata=checkNotNull(paired);val pairedDevice=checkNotNull(device)
+        privateCheckpointGuard("finish_admission",runner,owner,epoch,Screen.Sessions,null,false)
+        privateCheckpointRequire("finish_publication",owner.connection.state.value.hello[expectedHost]===pairedHello &&
+            owner.store.state.value.hosts.firstOrNull {it.hostId==expectedHost}===pairedMetadata && pairedHello.hostId.value==expectedHost &&
+            pairedMetadata.name==expectedName && pairedMetadata.deviceId==pairedDevice && pairedMetadata.keyAliases==expectedAliases && owner.host==expectedHost)
+        privateCheckpointStage="finish_once"
+        val finish=stockControl("pairing_finish","device_id" to JsonPrimitive(pairedDevice.value))
+        privateCheckpointRequire("finish_exact",finish.getValue("retained").jsonPrimitive.boolean)
+        if(shellCheckpoint) {
+            val shellTarget=ShellTarget(Uuid(info.getValue("shellId").jsonPrimitive.content),Uuid(info.getValue("shellGeneration").jsonPrimitive.content))
+            val shellServer=Uuid(info.getValue("serverId").jsonPrimitive.content)
+            val shellWorkspace=Id(info.getValue("workspaceId").jsonPrimitive.content)
+            val shellTab=Id(info.getValue("tabId").jsonPrimitive.content)
+            val shellPane=Id(info.getValue("paneId").jsonPrimitive.content)
+            val shellTerminal=Id(info.getValue("terminalId").jsonPrimitive.content)
+            privateCheckpointRequire("shell_admission",finish.getValue("shellCheckpoint").jsonPrimitive.boolean && finish.getValue("shellInteractionCheckpoint").jsonPrimitive.boolean==shellInteractionCheckpoint)
+            fun shellCurrent()=owner.connection.state.value.inventory[expectedHost]?.let {inventory->
+                inventory.sessions.isEmpty() && owner.connection.state.value.inventoryReady[expectedHost]==true && inventory.servers.singleOrNull {it.serverId==shellServer && it.connectivity==ServerConnectivity.Online}!=null &&
+                    inventory.hierarchy.singleOrNull {it.serverId==shellServer && it.freshness==NativeFreshness.Current}?.let {graph->graph.panes.singleOrNull {it.paneId==shellPane && it.workspaceId==shellWorkspace && it.tabId==shellTab && it.terminalId==shellTerminal && it.shellTarget==shellTarget && it.target==null && it.unboundRowId==null}!=null}==true &&
+                    inventory.shells.singleOrNull {it.target==shellTarget && it.serverId==shellServer && it.workspaceId==shellWorkspace && it.tabId==shellTab && it.paneId==shellPane && it.terminalId==shellTerminal && it.connectivity==SessionConnectivity.Ready && it.capabilities.read && it.capabilities.input && it.capabilities.grid}!=null
+            }==true
+            val shellBeforeActions=privateCheckpointActions(owner,expectedHost)
+            privateCheckpointRequire("shell_admission",shellBeforeActions.isEmpty())
+            privateCheckpointDeadline("shell_admission",checkpointDeadline)
+            privateCheckpointRequire("shell_admission",shellCurrent() && owner.host==expectedHost && owner.connection.state.value.hello[expectedHost]===pairedHello && owner.connection.state.value.mutationReady[expectedHost]==true)
+            privateCheckpointStage="shell_open"
+            privateCheckpointTap("shell_open","host_terminals_$expectedHost",runner,owner,epoch,Screen.Sessions,null,false,deadline=checkpointDeadline)
+            ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {owner.screen==Screen.Terminals && owner.host==expectedHost && shellCurrent()}
+            privateCheckpointDeadline("shell_open",checkpointDeadline)
+            privateCheckpointGuard("shell_open",runner,owner,epoch,Screen.Terminals,null,false)
+            val shellBaseToken=checkNotNull(privateCheckpointTerminalBaseApplicationToken(runner,owner,epoch))
+            val shellOpen=ui.onNodeWithTag("shell_open_${shellTarget.shellId.value}")
+            shellOpen.assertIsDisplayed().assertIsEnabled()
+            privateCheckpointGuard("shell_open",runner,owner,epoch,Screen.Terminals,null,false)
+            shellOpen.performClick();ui.waitForIdle();privateCheckpointDeadline("shell_open",checkpointDeadline)
+            val shellScope="shell_scope_${expectedHost}_${shellTarget.shellId.value}_${shellTarget.generation.value}"
+            privateCheckpointStage="shell_viewer"
+            ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {owner.shell?.let {it.selection==ShellSelection(expectedHost,shellTarget) && it.grid==null && !it.controlBegun && runCatching {ui.onNodeWithTag("shell_viewer").assertIsDisplayed();ui.onNodeWithTag(shellScope,useUnmergedTree=true).assertIsDisplayed()}.isSuccess}==true}
+            val shellViewer=checkNotNull(privateCheckpointTerminalDialogWindow("shell_viewer",runner,owner,epoch,"shell_viewer",shellScope,"shell_begin_control",shellBaseToken,checkpointDeadline,Screen.Terminals))
+            privateCheckpointTerminalDialogGuard("shell_viewer",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_begin_control",shellBaseToken,checkpointDeadline,Screen.Terminals)
+            privateCheckpointStage="shell_begin"
+            val shellBegin=ui.onNodeWithTag("shell_begin_control")
+            shellBegin.assertIsDisplayed().assertIsEnabled();privateCheckpointTerminalDialogGuard("shell_begin",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_begin_control",shellBaseToken,checkpointDeadline,Screen.Terminals);shellBegin.performClick();ui.waitForIdle();privateCheckpointDeadline("shell_begin",checkpointDeadline)
+            val beginScope="shell_begin_scope_${expectedHost}_${shellTarget.shellId.value}_${shellTarget.generation.value}"
+            privateCheckpointStage="shell_confirm"
+            ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {runCatching {ui.onNodeWithTag(beginScope).assertIsDisplayed();ui.onNodeWithTag("shell_begin_confirm").assertIsDisplayed()}.isSuccess}
+            val confirmWindow=checkNotNull(privateCheckpointTerminalDialogWindow("shell_confirm",runner,owner,epoch,beginScope,beginScope,"shell_begin_confirm",shellBaseToken,checkpointDeadline,Screen.Terminals))
+            val shellConfirm=ui.onNodeWithTag("shell_begin_confirm");shellConfirm.assertIsDisplayed().assertIsEnabled();privateCheckpointTerminalDialogGuard("shell_confirm",runner,owner,epoch,confirmWindow,beginScope,beginScope,"shell_begin_confirm",shellBaseToken,checkpointDeadline,Screen.Terminals);shellConfirm.performClick();ui.waitForIdle();privateCheckpointDeadline("shell_confirm",checkpointDeadline)
+            privateCheckpointStage="shell_grid"
+            ui.waitUntil(minOf(20_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {
+                val shown=owner.shell
+                val observation=when {
+                    shown==null->"shell_grid_missing_shell"
+                    shown.selection!=ShellSelection(expectedHost,shellTarget)->"shell_grid_selection"
+                    !shown.controlBegun->"shell_grid_control"
+                    shown.loading->"shell_grid_loading"
+                    shown.error->"shell_grid_error"
+                    else->shown.grid?.let {grid->when {
+                        !runCatching {grid.begin.validate()}.isSuccess->"shell_grid_invalid_grid"
+                        grid.begin.columns.value<=0L->"shell_grid_columns"
+                        grid.begin.rows.value<=0L->"shell_grid_rows"
+                        grid.cells.size.toLong()!=grid.begin.columns.value*grid.begin.rows.value->"shell_grid_cardinality"
+                        !runCatching {ui.onNodeWithTag("terminal_grid").assertIsDisplayed()}.isSuccess->"shell_grid_terminal_grid"
+                        else->{
+                            val enter=runCatching {ui.onNodeWithTag("shell_key_Enter")}.getOrNull()
+                            when {
+                                enter==null->"shell_grid_enter_displayed"
+                                !runCatching {enter.assertIsDisplayed()}.isSuccess->"shell_grid_enter_displayed"
+                                !runCatching {enter.assertIsEnabled()}.isSuccess->"shell_grid_enter_enabled"
+                                else->"shell_grid"
+                            }
+                        }
+                    }} ?: "shell_grid_missing_grid"
+                }
+                privateCheckpointStage=observation
+                observation=="shell_grid"
+            }
+            privateCheckpointStage="shell_grid"
+            val committedShell=checkNotNull(owner.shell);val committedGrid=checkNotNull(committedShell.grid);val shellScopeState=ShellControlScope(committedShell.selection,committedShell.source,committedShell.ticket);val shellOwner=checkNotNull(owner.terminalOwner(shellScopeState));val shellBeforeActionIds=shellBeforeActions.map {it.metadata.actionId}.toSet()
+            privateCheckpointRequire("shell_grid",committedShell.selection==ShellSelection(expectedHost,shellTarget) && committedShell.controlBegun && !committedShell.loading && !committedShell.error && committedGrid.begin.revision.value>=0L && owner.shellInputAllowed(shellScopeState) && owner.terminalOwner(shellScopeState)===shellOwner && shellBeforeActions==privateCheckpointActions(owner,expectedHost))
+            fun exactShellInput(action:LocalAction)=action.authoritative&&action.metadata.method==ActionMethod.ShellInput&&action.metadata.bootId==pairedHello.bootId&&action.metadata.target==null&&action.metadata.sourceTarget==null&&action.metadata.shellTarget==shellTarget&&action.receipt?.let {receipt->receipt.actionId==action.metadata.actionId&&receipt.method==ActionMethod.ShellInput&&receipt.bootId==pairedHello.bootId&&receipt.target==null&&receipt.shellTarget==shellTarget&&receipt.error==null&&when(val result=receipt.result) {is ActionResultShellDispatch->receipt.state==ReceiptState.Dispatched&&result.progress.complete();is ActionResultShellInput->receipt.state==ReceiptState.Succeeded&&result.progress.accepted();else->false}}==true
+            fun shellInteractionAuthority(expectedActionIds:Set<Uuid>)=shellCurrent()&&owner.host==expectedHost&&owner.connection.state.value.hello[expectedHost]===pairedHello&&owner.connection.state.value.mutationReady[expectedHost]==true&&owner.shell?.let {it.selection==committedShell.selection&&it.source==committedShell.source&&it.ticket==committedShell.ticket&&it.controlBegun&&!it.loading&&!it.error}==true&&owner.terminalOwner(shellScopeState)===shellOwner&&shellOwner.retained()&&owner.actions[expectedHost].orEmpty().map {it.metadata.actionId}.toSet()==expectedActionIds
+            var interactionInputs:List<LocalAction>?=null;var interactionPreEnterIds:Set<Uuid>?=null
+            suspend fun shellInteractionInputCheckpoint() {
+                privateCheckpointRequire("shell_interaction_admission",pairedHello.features.shellHistory && committedGrid.begin.scroll!=null)
+                val fixture="i=0; while [ \"\$i\" -lt 300 ]; do printf '.\\n'; i=\$((i+1)); done; unset i"
+                privateCheckpointRequire("shell_interaction_fixture",fixture.encodeToByteArray().size==71)
+                privateCheckpointTerminalDialogGuard("shell_interaction_clipboard_empty",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_draft",shellBaseToken,checkpointDeadline,Screen.Terminals)
+                privateCheckpointRequire("shell_interaction_clipboard_empty",shellInteractionAuthority(shellBeforeActionIds))
+                val clipboard=checkNotNull(context.getSystemService(ClipboardManager::class.java));privateCheckpointRequire("shell_interaction_clipboard_empty",!clipboard.hasPrimaryClip())
+                val nonce=Uuid.random().value;val changes=AtomicInteger();val listener=ClipboardManager.OnPrimaryClipChangedListener {changes.incrementAndGet()};clipboard.addPrimaryClipChangedListener(listener)
+                var draftInput:LocalAction?=null;var directInput:LocalAction?=null
+                try {
+                    val description=ClipDescription(nonce,arrayOf(ClipDescription.MIMETYPE_TEXT_PLAIN)).apply {extras=PersistableBundle().apply {putString("goatrOwnedClipboardNonce",nonce)}}
+                    privateCheckpointTerminalDialogGuard("shell_interaction_clipboard_owned",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_draft",shellBaseToken,checkpointDeadline,Screen.Terminals)
+                    privateCheckpointRequire("shell_interaction_clipboard_owned",shellInteractionAuthority(shellBeforeActionIds))
+                    InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                        // Clipboard installation must still belong to the admitted secure viewer.
+                        privateCheckpointRequire("shell_interaction_clipboard_owned",shellInteractionAuthority(shellBeforeActionIds)&&shellViewer.window.decorView===shellViewer.decor&&shellViewer.decor.isAttachedToWindow&&shellViewer.decor.hasWindowFocus()&&shellViewer.decor.windowToken==shellViewer.windowToken&&shellViewer.decor.applicationWindowToken==shellViewer.applicationWindowToken&&shellViewer.window.attributes.token==shellBaseToken&&(shellViewer.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE)!=0&&!clipboard.hasPrimaryClip())
+                        clipboard.setPrimaryClip(ClipData(description,ClipData.Item(fixture)))
+                    }
+                    privateCheckpointStage="shell_interaction_clipboard_owned";ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {changes.get()==1&&privateCheckpointOwnedClip(clipboard,nonce)};privateCheckpointDeadline("shell_interaction_clipboard_owned",checkpointDeadline)
+                    privateCheckpointRequire("shell_interaction_clipboard_owned",changes.get()==1&&privateCheckpointOwnedClip(clipboard,nonce))
+                    privateCheckpointStage="shell_interaction_draft";val draft=ui.onNodeWithTag("shell_input_draft");draft.assertIsDisplayed().assertIsEnabled();privateCheckpointTerminalDialogGuard("shell_interaction_draft",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_draft",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointRequire("shell_interaction_draft",shellInteractionAuthority(shellBeforeActionIds));draft.performClick();ui.waitForIdle();privateCheckpointDeadline("shell_interaction_draft",checkpointDeadline)
+                    privateCheckpointStage="shell_interaction_paste";val paste=ui.onNodeWithTag("shell_input_paste");paste.assertIsDisplayed().assertIsEnabled();privateCheckpointTerminalDialogGuard("shell_interaction_paste",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_paste",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointRequire("shell_interaction_paste",privateCheckpointOwnedClip(clipboard,nonce)&&changes.get()==1&&shellInteractionAuthority(shellBeforeActionIds));paste.performClick();ui.waitForIdle();privateCheckpointDeadline("shell_interaction_paste",checkpointDeadline)
+                    privateCheckpointRequire("shell_interaction_paste",owner.shellDraft(committedShell.selection).value.text==fixture&&owner.shellDraft(committedShell.selection).revision>0L&&privateCheckpointActions(owner,expectedHost).map {it.metadata.actionId}.toSet()==shellBeforeActionIds)
+                    privateCheckpointTerminalDialogGuard("shell_interaction_clipboard_clear",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_paste",shellBaseToken,checkpointDeadline,Screen.Terminals)
+                    privateCheckpointRequire("shell_interaction_clipboard_clear",privateCheckpointOwnedClip(clipboard,nonce)&&changes.get()==1&&shellInteractionAuthority(shellBeforeActionIds))
+                    InstrumentationRegistry.getInstrumentation().runOnMainSync {if(privateCheckpointOwnedClip(clipboard,nonce)&&changes.get()==1)clipboard.clearPrimaryClip()}
+                    privateCheckpointStage="shell_interaction_clipboard_clear";ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {!clipboard.hasPrimaryClip()&&changes.get()==2};privateCheckpointDeadline("shell_interaction_clipboard_clear",checkpointDeadline)
+                    privateCheckpointRequire("shell_interaction_clipboard_clear",!clipboard.hasPrimaryClip()&&changes.get()==2)
+                    privateCheckpointStage="shell_interaction_draft_send";val send=ui.onNodeWithTag("shell_input_send");send.assertIsDisplayed().assertIsEnabled();privateCheckpointTerminalDialogGuard("shell_interaction_draft_send",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_send",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointRequire("shell_interaction_draft_send",shellInteractionAuthority(shellBeforeActionIds));send.performClick();ui.waitForIdle();ui.waitUntil((checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {owner.actions[expectedHost].orEmpty().singleOrNull {it.metadata.actionId !in shellBeforeActionIds}?.let(::exactShellInput)==true};privateCheckpointDeadline("shell_interaction_draft_send",checkpointDeadline);draftInput=privateCheckpointActions(owner,expectedHost).singleOrNull {it.metadata.actionId !in shellBeforeActionIds};privateCheckpointRequire("shell_interaction_draft_send",draftInput?.let(::exactShellInput)==true)
+                    val draftActionIds=shellBeforeActionIds+checkNotNull(draftInput).metadata.actionId
+                    privateCheckpointStage="shell_interaction_live";val live=ui.onNodeWithTag("shell_input_live");live.assertIsDisplayed().assertIsEnabled();privateCheckpointTerminalDialogGuard("shell_interaction_live",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_live",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointRequire("shell_interaction_live",shellInteractionAuthority(draftActionIds));live.performClick();ui.waitForIdle();privateCheckpointDeadline("shell_interaction_live",checkpointDeadline)
+                    privateCheckpointStage="shell_interaction_commit_wait";ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {shellInteractionAuthority(draftActionIds)&&owner.shellInputAllowed(shellScopeState)};privateCheckpointDeadline("shell_interaction_commit_wait",checkpointDeadline);privateCheckpointStage="shell_interaction_commit_dialog";privateCheckpointTerminalDialogGuard("shell_interaction_commit_dialog",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_live",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointStage="shell_interaction_commit_authority";privateCheckpointRequire("shell_interaction_commit_authority",shellInteractionAuthority(draftActionIds)&&owner.shellInputAllowed(shellScopeState));val directOutcome=privateCheckpointDirectTerminalInput(shellViewer){shellInteractionAuthority(draftActionIds)&&owner.shellInputAllowed(shellScopeState)};privateCheckpointRequire("shell_interaction_commit_${directOutcome.closed}",directOutcome==PrivateCheckpointDirectInputOutcome.Success);privateCheckpointStage="shell_interaction_commit_receipt_wait";var directReceiptObservation=PrivateCheckpointShellReceiptObservation("wait",false);ui.waitUntil((checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {directReceiptObservation=privateCheckpointShellInteractionReceiptObservation(owner.actions[expectedHost].orEmpty(),draftActionIds,pairedHello.bootId,shellTarget,shellOwner,owner.terminalInputPause,::exactShellInput);privateCheckpointStage="shell_interaction_commit_receipt_${directReceiptObservation.closed}";directReceiptObservation.exact};privateCheckpointDeadline("shell_interaction_commit_receipt_${directReceiptObservation.closed}",checkpointDeadline);privateCheckpointStage="shell_interaction_commit_receipt_exact";directInput=privateCheckpointActions(owner,expectedHost).singleOrNull {it.metadata.actionId !in draftActionIds};privateCheckpointRequire("shell_interaction_commit_receipt_exact",directInput?.let(::exactShellInput)==true)
+                } finally {
+                    try {
+                        if(privateCheckpointOwnedClip(clipboard,nonce)) {
+                            privateCheckpointStage="shell_interaction_clipboard_clear";ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {changes.get()==1&&privateCheckpointOwnedClip(clipboard,nonce)};privateCheckpointDeadline("shell_interaction_clipboard_clear",checkpointDeadline)
+                            privateCheckpointTerminalDialogGuard("shell_interaction_clipboard_clear",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_input_paste",shellBaseToken,checkpointDeadline,Screen.Terminals)
+                            InstrumentationRegistry.getInstrumentation().runOnMainSync {if(privateCheckpointOwnedClip(clipboard,nonce)&&changes.get()==1)clipboard.clearPrimaryClip()}
+                            ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {!clipboard.hasPrimaryClip()&&changes.get()==2};privateCheckpointDeadline("shell_interaction_clipboard_clear",checkpointDeadline)
+                        }
+                    } finally {InstrumentationRegistry.getInstrumentation().runOnMainSync {clipboard.removePrimaryClipChangedListener(listener)}}
+                }
+                val firstInput=checkNotNull(draftInput);val secondInput=checkNotNull(directInput);interactionInputs=listOf(firstInput,secondInput);interactionPreEnterIds=shellBeforeActionIds+firstInput.metadata.actionId+secondInput.metadata.actionId
+            }
+            if(shellInteractionCheckpoint)shellInteractionInputCheckpoint()
+            val preEnterShell=if(shellInteractionCheckpoint) checkNotNull(owner.shell) else committedShell;val preEnterGrid=if(shellInteractionCheckpoint) checkNotNull(preEnterShell.grid) else committedGrid;val preEnterRevision=preEnterGrid.begin.revision
+            val preEnterActionIds=if(shellInteractionCheckpoint) checkNotNull(interactionPreEnterIds) else shellBeforeActionIds
+            val enter=ui.onNodeWithTag("shell_key_Enter")
+            privateCheckpointStage="shell_enter"
+            privateCheckpointDeadline("shell_enter",checkpointDeadline);privateCheckpointTerminalDialogGuard("shell_enter",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_key_Enter",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointRequire("shell_enter",shellCurrent() && owner.connection.state.value.hello[expectedHost]===pairedHello && owner.connection.state.value.mutationReady[expectedHost]==true && preEnterShell.selection==committedShell.selection && preEnterShell.source==committedShell.source && preEnterShell.ticket==committedShell.ticket && preEnterShell.controlBegun && !preEnterShell.loading && !preEnterShell.error && owner.shell?.let {it.selection==preEnterShell.selection && it.source==preEnterShell.source && it.ticket==preEnterShell.ticket && it.grid===preEnterGrid && it.controlBegun && !it.loading && !it.error}==true && owner.terminalOwner(shellScopeState)===shellOwner && (if(shellInteractionCheckpoint) shellInteractionAuthority(preEnterActionIds)&&preEnterActionIds.size==shellBeforeActionIds.size+2&&shellBeforeActionIds.all {it in preEnterActionIds} else preEnterActionIds==shellBeforeActionIds));enter.assertIsDisplayed().assertIsEnabled();enter.performClick();ui.waitForIdle();privateCheckpointDeadline("shell_enter",checkpointDeadline)
+            privateCheckpointStage="shell_enter_receipt_count_wait"
+            var shellEnterReceiptObservation=PrivateCheckpointShellReceiptObservation("wait",false)
+            ui.waitUntil((checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {val actions=owner.actions[expectedHost].orEmpty();shellEnterReceiptObservation=privateCheckpointShellInteractionReceiptObservation(actions,preEnterActionIds,pairedHello.bootId,shellTarget,shellOwner,owner.terminalInputPause,::exactShellInput);privateCheckpointStage="shell_enter_receipt_count_${if(shellEnterReceiptObservation.exact)"exact" else shellEnterReceiptObservation.closed}";shellEnterReceiptObservation.exact&&(actions.count {it.metadata.method==ActionMethod.ShellInput && it.metadata.shellTarget==shellTarget}==if(shellInteractionCheckpoint) 3 else 1)}
+            val shellRevision=preEnterRevision
+            privateCheckpointStage="shell_enter_receipt_grid_wait"
+            var shellEnterGridLastObservation:String?=null
+            try {
+                ui.waitUntil((checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {val actions=owner.actions[expectedHost].orEmpty();shellEnterReceiptObservation=privateCheckpointShellInteractionReceiptObservation(actions,preEnterActionIds,pairedHello.bootId,shellTarget,shellOwner,owner.terminalInputPause,::exactShellInput);privateCheckpointStage="shell_enter_receipt_grid_${if(shellEnterReceiptObservation.exact)"exact" else shellEnterReceiptObservation.closed}";if(!shellEnterReceiptObservation.exact) {shellEnterGridLastObservation=null;false} else {val currentShell=owner.shell;val currentGrid=currentShell?.grid;val currentRevision=currentGrid?.begin?.revision?.value?:Long.MIN_VALUE;shellEnterGridLastObservation=when {currentShell==null->"shell_missing";currentShell.selection!=preEnterShell.selection||currentShell.source!=preEnterShell.source||currentShell.ticket!=preEnterShell.ticket||!currentShell.controlBegun->"binding_changed";currentShell.loading->"loading";currentShell.error->"error";currentGrid==null->"grid_missing";currentRevision<shellRevision.value->"revision_regressed";currentRevision==shellRevision.value&&currentGrid===preEnterGrid->"same_revision_original_grid";currentRevision==shellRevision.value->"same_revision_replaced_grid";else->"advanced"};currentRevision>shellRevision.value}}
+            } catch(error:Throwable) {shellEnterGridLastObservation?.let {privateCheckpointStage="shell_enter_receipt_grid_last_observation_$it"};throw error}
+            privateCheckpointStage="shell_enter_receipt_deadline"
+            privateCheckpointDeadline("shell_enter_receipt_deadline",checkpointDeadline)
+            privateCheckpointStage="shell_enter_receipt_lookup"
+            var afterEnterActions=privateCheckpointActions(owner,expectedHost);var afterEnterIds=afterEnterActions.map {it.metadata.actionId}.toSet()
+            val enterInput=if(shellInteractionCheckpoint) afterEnterActions.singleOrNull {it.metadata.actionId !in preEnterActionIds} else null
+            val inputActions=if(shellInteractionCheckpoint) checkNotNull(interactionInputs)+checkNotNull(enterInput) else afterEnterActions.filter {current->shellBeforeActions.none {it.metadata.actionId==current.metadata.actionId}}
+            val shellInput=if(shellInteractionCheckpoint) checkNotNull(enterInput) else checkNotNull(inputActions.singleOrNull())
+            privateCheckpointStage="shell_enter_receipt_exact"
+            privateCheckpointRequire("shell_enter_receipt_exact",afterEnterIds.size==afterEnterActions.size && (if(shellInteractionCheckpoint) afterEnterIds==preEnterActionIds+shellInput.metadata.actionId&&inputActions.size==3&&inputActions.all(::exactShellInput) else inputActions.size==1&&exactShellInput(shellInput)))
+            suspend fun shellInteractionHistoryCheckpoint() {
+                privateCheckpointRequire("shell_interaction_inputs",inputActions.map {it.metadata.actionId}.toSet().size==3&&inputActions.all(::exactShellInput))
+                var outputObservation="shell_interaction_output_missing_shell"
+                ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {
+                    val candidate=owner.shell
+                    val candidateGrid=candidate?.grid
+                    val candidateScroll=candidateGrid?.begin?.scroll
+                    outputObservation=when {
+                        candidate==null->"shell_interaction_output_missing_shell"
+                        candidateGrid==null->"shell_interaction_output_missing_grid"
+                        candidateScroll==null->"shell_interaction_output_missing_scroll"
+                        candidate.selection!=committedShell.selection||candidate.source!=committedShell.source||candidate.ticket!=committedShell.ticket||!candidate.controlBegun||candidate.loading||candidate.error->"shell_interaction_output_binding"
+                        candidateGrid.begin.revision.value<=shellRevision.value->"shell_interaction_output_revision"
+                        candidateScroll.maxOffsetFromBottom.value<=0L->"shell_interaction_output_history_empty"
+                        candidateScroll.viewportRows.value<=0L->"shell_interaction_output_viewport"
+                        candidateScroll.maxOffsetFromBottom.value<candidateScroll.viewportRows.value->"shell_interaction_output_history_empty"
+                        candidateScroll.offsetFromBottom.value!=0L->"shell_interaction_output_not_bottom"
+                        owner.terminalOwner(shellScopeState)!==shellOwner->"shell_interaction_output_owner"
+                        !owner.shellInputAllowed(shellScopeState)->"shell_interaction_output_not_accepting"
+                        else->"shell_interaction_output"
+                    }
+                    privateCheckpointStage=outputObservation
+                    outputObservation=="shell_interaction_output"
+                }
+                privateCheckpointStage="shell_interaction_output"
+                val outputShell=checkNotNull(owner.shell);val outputGrid=checkNotNull(outputShell.grid);val outputScroll=checkNotNull(outputGrid.begin.scroll)
+                privateCheckpointRequire("shell_interaction_output",outputShell.selection==committedShell.selection&&outputShell.source==committedShell.source&&outputShell.ticket==committedShell.ticket&&outputShell.controlBegun&&!outputShell.loading&&!outputShell.error&&outputGrid.begin.revision.value>shellRevision.value&&outputScroll.maxOffsetFromBottom.value>0L&&outputScroll.viewportRows.value>0L&&outputScroll.maxOffsetFromBottom.value>=outputScroll.viewportRows.value&&outputScroll.offsetFromBottom.value==0L&&owner.terminalOwner(shellScopeState)===shellOwner&&owner.shellInputAllowed(shellScopeState))
+                fun olderReady():Boolean {val history=owner.shell?.history ?: return false;val metrics=history.metrics ?: return false;return shellInteractionAuthority(afterEnterIds)&&!owner.busy&&owner.shellHistoryAllowed(shellScopeState)&&history.mode==ShellHistoryMode.Live&&metrics.offsetFromBottom.value==0L&&metrics.viewportRows.value>0L&&metrics.maxOffsetFromBottom.value>=metrics.viewportRows.value}
+                privateCheckpointStage="shell_interaction_older_ready";ui.waitUntil(minOf(10_000L,(checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L))) {olderReady()};privateCheckpointDeadline("shell_interaction_older_ready",checkpointDeadline)
+                privateCheckpointStage="shell_interaction_older_reveal_admission";privateCheckpointRequire("shell_interaction_older_reveal_admission",olderReady());ui.onNodeWithTag("shell_essential_rail").assertIsDisplayed();privateCheckpointTerminalDialogGuard("shell_interaction_older_reveal_admission",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_essential_rail",shellBaseToken,checkpointDeadline,Screen.Terminals)
+                privateCheckpointStage="shell_interaction_older_lookup";val older=ui.onNodeWithTag("shell_history_older");older.assertExists()
+                privateCheckpointStage="shell_interaction_older_scroll_ready";privateCheckpointRequire("shell_interaction_older_scroll_ready",olderReady());privateCheckpointStage="shell_interaction_older_scroll_rail";ui.onNodeWithTag("shell_essential_rail").assertIsDisplayed();privateCheckpointStage="shell_interaction_older_scroll_dialog";privateCheckpointTerminalDialogGuard("shell_interaction_older_scroll_dialog",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_essential_rail",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointStage="shell_interaction_older_scroll_admission";privateCheckpointRequire("shell_interaction_older_scroll_admission",olderReady())
+                privateCheckpointStage="shell_interaction_older_scroll";older.performScrollTo();ui.waitForIdle();privateCheckpointDeadline("shell_interaction_older_scroll",checkpointDeadline)
+                privateCheckpointStage="shell_interaction_older_display";older.assertIsDisplayed();privateCheckpointStage="shell_interaction_older_enabled";older.assertIsEnabled();privateCheckpointStage="shell_interaction_older_dialog";privateCheckpointTerminalDialogGuard("shell_interaction_older_dialog",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_history_older",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointStage="shell_interaction_older_final_admission";older.assertIsDisplayed().assertIsEnabled();privateCheckpointRequire("shell_interaction_older_final_admission",olderReady());privateCheckpointStage="shell_interaction_older_authority";privateCheckpointRequire("shell_interaction_older_authority",shellInteractionAuthority(afterEnterIds));privateCheckpointStage="shell_interaction_older_click";val olderHistory=owner.shell?.history;val olderHistoryAction=olderHistory?.action;older.performClick();ui.waitForIdle();val requestedOlderViewport=outputScroll.viewportRows.value
+                fun exactOlderReceipt(action:LocalAction?):Boolean=action?.let {candidate->candidate.authoritative&&candidate.metadata.method==ActionMethod.ShellScroll&&candidate.metadata.bootId==pairedHello.bootId&&candidate.metadata.target==null&&candidate.metadata.shellTarget==shellTarget&&candidate.receipt?.let {receipt->receipt.actionId==candidate.metadata.actionId&&receipt.method==ActionMethod.ShellScroll&&receipt.bootId==pairedHello.bootId&&receipt.target==null&&receipt.shellTarget==shellTarget&&receipt.error==null&&receipt.state==ReceiptState.Succeeded&&(receipt.result as? ActionResultShellScroll)?.let {it.offsetFromBottom.value>0L&&it.offsetFromBottom.value<=it.maxOffsetFromBottom.value&&it.maxOffsetFromBottom.value>=it.viewportRows.value&&it.viewportRows.value==requestedOlderViewport}==true}==true}==true&&owner.shell?.history?.mode==ShellHistoryMode.Browsing&&owner.terminalOwner(shellScopeState)===shellOwner&&!owner.shellInputAllowed(shellScopeState)
+                fun olderReceiptObservation(actions:List<LocalAction>,candidate:LocalAction?):String {
+                    if(actions.size!=shellBeforeActions.size+4) {
+                        val currentIds=actions.map {it.metadata.actionId}
+                        if(currentIds.toSet().size!=currentIds.size)return "count_duplicate_current_ids"
+                        if(!afterEnterIds.all {it in currentIds})return "count_baseline_ids_missing"
+                        val newIds=currentIds.filter {it !in afterEnterIds}.toSet()
+                        if(newIds.size>1)return "count_multiple_new_ids"
+                        if(newIds.isEmpty()) {
+                            val currentHistory=owner.shell?.history
+                            val busy=if(owner.busy)"busy" else "idle"
+                            if(currentHistory?.action==olderHistoryAction)return "count_no_new_id_history_unchanged_$busy"
+                            return if(currentHistory?.mode==ShellHistoryMode.Pending)"count_no_new_id_history_changed_pending_$busy" else "count_no_new_id_history_changed_non_pending_$busy"
+                        }
+                        return "count_inconsistent"
+                    }
+                    val action=candidate ?: return "selection"
+                    if(!action.authoritative||action.metadata.method!=ActionMethod.ShellScroll||action.metadata.bootId!=pairedHello.bootId||action.metadata.target!=null||action.metadata.shellTarget!=shellTarget)return "metadata"
+                    val receipt=action.receipt ?: return "receipt_absent"
+                    if(receipt.state in setOf(ReceiptState.Reserved,ReceiptState.Dispatching,ReceiptState.Dispatched))return "pending"
+                    if(receipt.state!=ReceiptState.Succeeded)return "non_success"
+                    if(receipt.error!=null)return "error"
+                    if(receipt.actionId!=action.metadata.actionId||receipt.method!=ActionMethod.ShellScroll||receipt.bootId!=pairedHello.bootId||receipt.target!=null||receipt.shellTarget!=shellTarget)return "receipt_identity"
+                    val result=receipt.result as? ActionResultShellScroll ?: return "scrollresult"
+                    if(result.offsetFromBottom.value<=0L||result.offsetFromBottom.value>result.maxOffsetFromBottom.value)return "offset"
+                    if(result.maxOffsetFromBottom.value<result.viewportRows.value)return "max"
+                    if(result.viewportRows.value!=outputScroll.viewportRows.value)return "rows"
+                    val currentHistory=owner.shell?.history ?: return "history_absent"
+                    if(currentHistory!==olderHistory)return "history_replaced"
+                    val currentAction=currentHistory.action==action.metadata.actionId
+                    if(currentHistory.mode==ShellHistoryMode.Pending)return if(currentAction) {if(owner.busy)"history_pending_action_busy" else if(owner.shellControlAllowed(shellScopeState))"history_pending_action_idle_admitted" else "history_pending_action_idle_unadmitted"} else "history_pending_other"
+                    if(currentHistory.mode==ShellHistoryMode.Uncertain)return if(currentAction)"history_uncertain_action" else "history_uncertain_other"
+                    if(currentHistory.mode==ShellHistoryMode.Live)return if(currentAction)"history_live_action" else "history_live_other"
+                    if(owner.terminalOwner(shellScopeState)!==shellOwner)return "owner"
+                    if(owner.shellInputAllowed(shellScopeState))return "input"
+                    return "state_changed_or_unclassified"
+                }
+                var olderLastObservation="base"
+                try {
+                    privateCheckpointStage="shell_interaction_older_receipt_wait"
+                    ui.waitUntil((checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {
+                        val actions=owner.actions[expectedHost].orEmpty()
+                        val candidate=actions.singleOrNull {it.metadata.actionId !in afterEnterIds}
+                        val exact=actions.size==shellBeforeActions.size+4&&exactOlderReceipt(candidate)
+                        olderLastObservation=if(exact)"settled" else olderReceiptObservation(actions,candidate)
+                        exact
+                    }
+                    privateCheckpointDeadline("shell_interaction_older_receipt_wait",checkpointDeadline)
+                } catch(error:Throwable) {
+                    privateCheckpointStage="shell_interaction_older_receipt_last_observation_${olderLastObservation}"
+                    throw error
+                }
+                privateCheckpointStage="shell_interaction_older_receipt_exact";val olderAction=checkNotNull(privateCheckpointActions(owner,expectedHost).singleOrNull {it.metadata.actionId !in afterEnterIds})
+                privateCheckpointRequire("shell_interaction_older_receipt_exact",exactOlderReceipt(olderAction))
+                val afterOlderIds=afterEnterIds+olderAction.metadata.actionId
+                fun bottomReady():Boolean {val history=owner.shell?.history ?: return false;return shellInteractionAuthority(afterOlderIds)&&!owner.busy&&owner.shellHistoryAllowed(shellScopeState)&&history.mode==ShellHistoryMode.Browsing&&history.metrics!=null}
+                privateCheckpointStage="shell_interaction_bottom_ready";ui.waitUntil(minOf(10_000L,(checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L))) {bottomReady()};privateCheckpointDeadline("shell_interaction_bottom_ready",checkpointDeadline)
+                privateCheckpointStage="shell_interaction_bottom_reveal_admission";privateCheckpointRequire("shell_interaction_bottom_reveal_admission",bottomReady());ui.onNodeWithTag("shell_essential_rail").assertIsDisplayed();privateCheckpointTerminalDialogGuard("shell_interaction_bottom_reveal_admission",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_essential_rail",shellBaseToken,checkpointDeadline,Screen.Terminals)
+                privateCheckpointStage="shell_interaction_bottom_lookup";val bottom=ui.onNodeWithTag("shell_history_bottom");bottom.assertExists()
+                privateCheckpointStage="shell_interaction_bottom_scroll_ready";privateCheckpointRequire("shell_interaction_bottom_scroll_ready",bottomReady());privateCheckpointStage="shell_interaction_bottom_scroll_rail";ui.onNodeWithTag("shell_essential_rail").assertIsDisplayed();privateCheckpointStage="shell_interaction_bottom_scroll_dialog";privateCheckpointTerminalDialogGuard("shell_interaction_bottom_scroll_dialog",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_essential_rail",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointStage="shell_interaction_bottom_scroll_admission"
+                // Preserve bottomReady's first-refusal order while recording one local admission observation.
+                val bottomScrollAdmission=owner.shell?.history?.let {history->when { !shellInteractionAuthority(afterOlderIds)->"authority" to false;owner.busy->"busy" to false;!owner.shellHistoryAllowed(shellScopeState)->"history_disallowed" to false;else->when(history.mode) {ShellHistoryMode.Live->"mode_live" to false;ShellHistoryMode.Pending->"mode_pending" to false;ShellHistoryMode.Uncertain->"mode_uncertain" to false;ShellHistoryMode.Browsing->if(history.metrics==null)"metrics_absent" to false else "ready" to true}}}?: ("history_absent" to false)
+                privateCheckpointStage="shell_interaction_bottom_scroll_admission_${bottomScrollAdmission.first}";privateCheckpointRequire("shell_interaction_bottom_scroll_admission_${bottomScrollAdmission.first}",bottomScrollAdmission.second)
+                privateCheckpointStage="shell_interaction_bottom_scroll";bottom.performScrollTo();ui.waitForIdle();privateCheckpointDeadline("shell_interaction_bottom_scroll",checkpointDeadline)
+                privateCheckpointStage="shell_interaction_bottom_ready";ui.waitUntil(minOf(10_000L,(checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L))) {bottomReady()};privateCheckpointDeadline("shell_interaction_bottom_ready",checkpointDeadline)
+                privateCheckpointStage="shell_interaction_bottom_display";bottom.assertIsDisplayed();privateCheckpointStage="shell_interaction_bottom_enabled";bottom.assertIsEnabled();privateCheckpointStage="shell_interaction_bottom_dialog";privateCheckpointTerminalDialogGuard("shell_interaction_bottom_dialog",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_history_bottom",shellBaseToken,checkpointDeadline,Screen.Terminals);privateCheckpointStage="shell_interaction_bottom_final_admission";bottom.assertIsDisplayed().assertIsEnabled();privateCheckpointRequire("shell_interaction_bottom_final_admission",bottomReady());privateCheckpointStage="shell_interaction_bottom_authority";privateCheckpointRequire("shell_interaction_bottom_authority",shellInteractionAuthority(afterOlderIds));privateCheckpointStage="shell_interaction_bottom_click";bottom.performClick();ui.waitForIdle()
+                fun exactBottomReceipt(action:LocalAction?,actionIds:Set<Uuid>):Boolean=action?.let {candidate->actionIds==afterOlderIds+candidate.metadata.actionId&&candidate.authoritative&&candidate.metadata.bootId==pairedHello.bootId&&candidate.metadata.target==null&&candidate.metadata.shellTarget==shellTarget&&candidate.receipt?.let {receipt->receipt.actionId==candidate.metadata.actionId&&receipt.method==ActionMethod.ShellScroll&&receipt.bootId==pairedHello.bootId&&receipt.target==null&&receipt.shellTarget==shellTarget&&receipt.error==null&&receipt.state==ReceiptState.Succeeded&&(receipt.result as? ActionResultShellScroll)?.let {it.offsetFromBottom.value==0L&&it.maxOffsetFromBottom.value>=it.viewportRows.value&&it.viewportRows.value==outputScroll.viewportRows.value}==true}==true}==true&&owner.shell?.history?.mode==ShellHistoryMode.Live&&owner.terminalOwner(shellScopeState)===shellOwner&&owner.shellInputAllowed(shellScopeState)
+                privateCheckpointStage="shell_interaction_bottom_receipt_wait";ui.waitUntil((checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {val actions=owner.actions[expectedHost].orEmpty();val actionIds=actions.map {it.metadata.actionId}.toSet();actions.size==shellBeforeActions.size+5&&exactBottomReceipt(actions.singleOrNull {it.metadata.actionId !in shellBeforeActionIds&&it.metadata.method==ActionMethod.ShellScroll&&it.metadata.actionId!=olderAction.metadata.actionId},actionIds)};privateCheckpointDeadline("shell_interaction_bottom_receipt_wait",checkpointDeadline)
+                privateCheckpointStage="shell_interaction_bottom_receipt_exact";afterEnterActions=privateCheckpointActions(owner,expectedHost);afterEnterIds=afterEnterActions.map {it.metadata.actionId}.toSet();val bottomAction=checkNotNull(afterEnterActions.singleOrNull {it.metadata.actionId !in shellBeforeActionIds&&it.metadata.method==ActionMethod.ShellScroll&&it.metadata.actionId!=olderAction.metadata.actionId})
+                privateCheckpointRequire("shell_interaction_bottom_receipt_exact",exactBottomReceipt(bottomAction,afterEnterIds))
+                privateCheckpointStage="shell_interaction_verify";privateCheckpointRequire("shell_interaction_verify",stockControl("verify_shell_interaction","target" to Protocol.strictJson.encodeToJsonElement(ShellTarget.serializer(),shellTarget),"inputs" to JsonArray(inputActions.map {Protocol.strictJson.encodeToJsonElement(Receipt.serializer(),checkNotNull(it.receipt))}),"older" to Protocol.strictJson.encodeToJsonElement(Receipt.serializer(),checkNotNull(olderAction.receipt)),"bottom" to Protocol.strictJson.encodeToJsonElement(Receipt.serializer(),checkNotNull(bottomAction.receipt)),"draft_bytes" to JsonPrimitive(71),"start_revision" to JsonPrimitive(shellRevision.value),"output_revision" to JsonPrimitive(outputGrid.begin.revision.value),"columns" to JsonPrimitive(outputGrid.begin.columns.value),"rows" to JsonPrimitive(outputGrid.begin.rows.value),"max_offset" to JsonPrimitive(outputScroll.maxOffsetFromBottom.value),"viewport" to JsonPrimitive(outputScroll.viewportRows.value)).getValue("verified").jsonPrimitive.boolean)
+            }
+            if(shellInteractionCheckpoint)shellInteractionHistoryCheckpoint()
+            val release=ui.onNodeWithTag("shell_release_control")
+            privateCheckpointStage="shell_release_reveal_guard";privateCheckpointTerminalDialogGuard("shell_release_reveal_guard",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_release_control",shellBaseToken,checkpointDeadline,Screen.Terminals)
+            privateCheckpointStage="shell_release_reveal_scroll";release.performScrollTo()
+            privateCheckpointStage="shell_release_reveal_idle";ui.waitForIdle()
+            privateCheckpointStage="shell_release_reveal_deadline";privateCheckpointDeadline("shell_release_reveal_deadline",checkpointDeadline)
+            privateCheckpointStage="shell_release_reveal_display";release.assertIsDisplayed()
+            privateCheckpointStage="shell_release_reveal_enabled";release.assertIsEnabled()
+            privateCheckpointStage="shell_release_dialog";privateCheckpointTerminalDialogGuard("shell_release_dialog",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_release_control",shellBaseToken,checkpointDeadline,Screen.Terminals)
+            val postEnterShell=checkNotNull(owner.shell);val postEnterGrid=checkNotNull(postEnterShell.grid)
+            privateCheckpointRequire("shell_release_admission_shell",postEnterShell.selection==committedShell.selection && postEnterShell.source==committedShell.source && postEnterShell.ticket==committedShell.ticket && postEnterShell.controlBegun && !postEnterShell.loading && !postEnterShell.error && postEnterGrid!==committedGrid && postEnterGrid.begin.revision.value>shellRevision.value)
+            privateCheckpointStage="shell_release_admission_ticket";check(committedShell.ticket<Long.MAX_VALUE)
+            privateCheckpointStage="shell_release_admission_current";check(shellCurrent())
+            privateCheckpointStage="shell_release_admission_hello";check(owner.connection.state.value.hello[expectedHost]===pairedHello)
+            privateCheckpointStage="shell_release_admission_mutation";check(owner.connection.state.value.mutationReady[expectedHost]==true)
+            privateCheckpointStage="shell_release_admission_shell";check(owner.shell?.let {it.selection==postEnterShell.selection && it.source==postEnterShell.source && it.ticket==postEnterShell.ticket && it.grid===postEnterGrid && it.controlBegun && !it.loading && !it.error}==true)
+            privateCheckpointStage="shell_release_admission_owner";check(owner.terminalOwner(shellScopeState)===shellOwner)
+            privateCheckpointStage="shell_release_admission_owner_retained";check(shellOwner.retained())
+            privateCheckpointStage="shell_release_admission_actions";check(privateCheckpointActions(owner,expectedHost).map {it.metadata.actionId}.toSet()==afterEnterIds)
+            privateCheckpointStage="shell_release_revalidate";release.assertIsDisplayed().assertIsEnabled()
+            privateCheckpointStage="shell_release_click";release.performClick()
+            privateCheckpointStage="shell_release_idle";ui.waitForIdle();privateCheckpointDeadline("shell_release_idle",checkpointDeadline)
+            privateCheckpointStage="shell_release_posteffect_shell";check(owner.shell?.let {it.selection==ShellSelection(expectedHost,shellTarget) && it.source==committedShell.source && it.ticket==committedShell.ticket+1L && !it.controlBegun && it.grid==null && owner.terminalOwner(shellScopeState)==null && !owner.shellInputAllowed(shellScopeState)}==true)
+            privateCheckpointStage="shell_release_posteffect_owner_retired";check(!shellOwner.retained())
+            privateCheckpointStage="shell_release_posteffect_actions";check(privateCheckpointActions(owner,expectedHost).map {it.metadata.actionId}.toSet()==afterEnterIds)
+            privateCheckpointStage="shell_close"
+            val close=ui.onNodeWithTag("shell_viewer_back");close.assertIsDisplayed().assertIsEnabled();privateCheckpointTerminalDialogGuard("shell_close",runner,owner,epoch,shellViewer,"shell_viewer",shellScope,"shell_viewer_back",shellBaseToken,checkpointDeadline,Screen.Terminals);close.performClick();ui.waitForIdle();privateCheckpointDeadline("shell_close",checkpointDeadline)
+            privateCheckpointRequire("shell_close",owner.shell==null && owner.screen==Screen.Terminals && owner.host==expectedHost && shellCurrent() && privateCheckpointActions(owner,expectedHost).map {it.metadata.actionId}.toSet()==afterEnterIds)
+            privateCheckpointGuard("shell_close",runner,owner,epoch,Screen.Terminals,null,false)
+            privateCheckpointStage="shell_complete"
+            privateCheckpointRequire("shell_complete",stockControl("complete").getValue("complete").jsonPrimitive.boolean)
+        } else
+        requestedCreationProvider?.let {expectedProvider->
+            val expectedServer=info.getValue("serverId").jsonPrimitive.content
+            val expectedProject=info.getValue("projectId").jsonPrimitive.content
+            val expectedServerName=info.getValue("serverName").jsonPrimitive.content
+            val expectedProjectLabel=info.getValue("projectLabel").jsonPrimitive.content
+            val finishRemaining=finish.getValue("creationTimeoutMs").jsonPrimitive.long
+            val creationDeadline=minOf(checkpointDeadline,android.os.SystemClock.elapsedRealtime()+finishRemaining)
+            val inventory=owner.connection.state.value.inventory[expectedHost]
+            val sourceAdmitted=inventory?.servers?.singleOrNull {it.serverId.value==expectedServer}?.let {it.name.value==expectedServerName && it.connectivity==ServerConnectivity.Online && (if(expectedProvider==Provider.Omp) it.canCreate.omp else it.canCreate.codex)}==true && inventory.projects.singleOrNull {it.projectId.value==expectedProject}?.let {it.label.value==expectedProjectLabel && it.available}==true
+            privateCheckpointStage="creation_source_admission"
+            privateCheckpointRequire("creation_source_admission",finishRemaining in 1L..120_000L && sourceAdmitted && owner.host==expectedHost && owner.connection.state.value.hello[expectedHost]===pairedHello && owner.connection.state.value.inventoryReady[expectedHost]==true && owner.connection.state.value.mutationReady[expectedHost]==true && owner.creationActions[expectedHost]==null)
+            privateCheckpointDeadline("creation_source_admission",creationDeadline)
+            privateCheckpointStage="creation_open_new_session"
+            privateCheckpointTap("creation_open_new_session","new_session",runner,owner,epoch,Screen.Sessions,null,false,deadline=creationDeadline)
+            val chooser=ui.onNodeWithTag("landing_new_session_host_"+expectedHost)
+            privateCheckpointStage="creation_host_chooser"
+            if(runCatching {chooser.assertIsDisplayed()}.isSuccess) {
+                val chooserTag="landing_new_session_host_"+expectedHost
+                val chooserWindow=privateCheckpointModalWindow("creation_host_chooser",runner,owner,epoch,Screen.Sessions,chooserTag,creationDeadline)
+                privateCheckpointRequire("creation_host_chooser",chooserWindow!=null)
+                privateCheckpointModalTap("creation_host_chooser",chooserTag,runner,owner,epoch,Screen.Sessions,chooserWindow!!,creationDeadline)
+            }
+            val formStaticTag="new_session_close"
+            privateCheckpointStage="creation_form_opening"
+            privateCheckpointDeadline("creation_form_opening",creationDeadline)
+            ui.waitUntil(minOf(10_000L,creationDeadline-android.os.SystemClock.elapsedRealtime())) {runCatching {ui.onNodeWithTag(formStaticTag).assertIsDisplayed()}.isSuccess}
+            privateCheckpointDeadline("creation_form_opening",creationDeadline)
+            privateCheckpointRequire("creation_form_opening",owner.host==expectedHost && owner.connection.state.value.hello[expectedHost]===pairedHello)
+            val formWindow=privateCheckpointModalWindow("creation_form_opening",runner,owner,epoch,Screen.Sessions,formStaticTag,creationDeadline)
+            privateCheckpointRequire("creation_form_opening",formWindow!=null)
+            privateCheckpointModalGuard("creation_form_opening",runner,owner,epoch,Screen.Sessions,formWindow!!,formStaticTag,creationDeadline)
+            privateCheckpointStage="creation_server_picker"
+            privateCheckpointModalTap("creation_server_picker","create_server",runner,owner,epoch,Screen.Sessions,formWindow,creationDeadline,scopeTag=formStaticTag)
+            val serverOptionTag="creation_server_option_id_"+expectedServer
+            ui.waitUntil(minOf(10_000L,creationDeadline-android.os.SystemClock.elapsedRealtime())) {runCatching {ui.onNodeWithTag(serverOptionTag,useUnmergedTree=true).assertIsDisplayed()}.isSuccess}
+            val serverPickerWindow=privateCheckpointModalWindow("creation_server_picker",runner,owner,epoch,Screen.Sessions,serverOptionTag,creationDeadline)
+            privateCheckpointRequire("creation_server_picker",serverPickerWindow!=null)
+            privateCheckpointPickerTap("creation_server_picker",serverOptionTag,runner,owner,epoch,serverPickerWindow!!,creationDeadline)
+            ui.waitUntil(minOf(10_000L,creationDeadline-android.os.SystemClock.elapsedRealtime())) {runCatching {ui.onNodeWithTag(formStaticTag).assertIsDisplayed()}.isSuccess}
+            privateCheckpointModalGuard("creation_server_picker",runner,owner,epoch,Screen.Sessions,formWindow,formStaticTag,creationDeadline)
+            privateCheckpointStage="creation_project_picker"
+            privateCheckpointModalTap("creation_project_picker","create_project",runner,owner,epoch,Screen.Sessions,formWindow,creationDeadline,scopeTag=formStaticTag)
+            val projectOptionTag="creation_project_option_id_"+expectedProject
+            ui.waitUntil(minOf(10_000L,creationDeadline-android.os.SystemClock.elapsedRealtime())) {runCatching {ui.onNodeWithTag(projectOptionTag,useUnmergedTree=true).assertIsDisplayed()}.isSuccess}
+            val projectPickerWindow=privateCheckpointModalWindow("creation_project_picker",runner,owner,epoch,Screen.Sessions,projectOptionTag,creationDeadline)
+            privateCheckpointRequire("creation_project_picker",projectPickerWindow!=null)
+            privateCheckpointPickerTap("creation_project_picker",projectOptionTag,runner,owner,epoch,projectPickerWindow!!,creationDeadline)
+            ui.waitUntil(minOf(10_000L,creationDeadline-android.os.SystemClock.elapsedRealtime())) {runCatching {ui.onNodeWithTag(formStaticTag).assertIsDisplayed()}.isSuccess}
+            privateCheckpointModalGuard("creation_project_picker",runner,owner,epoch,Screen.Sessions,formWindow,formStaticTag,creationDeadline)
+            val formSource="creation_form_source_"+expectedHost+"_"+pairedHello.bootId.value+"_"+expectedServer+"_"+expectedProject
+            privateCheckpointStage="creation_exact_form_source"
+            privateCheckpointDeadline("creation_exact_form_source",creationDeadline)
+            ui.waitUntil(minOf(10_000L,creationDeadline-android.os.SystemClock.elapsedRealtime())) {runCatching {ui.onNodeWithTag(formSource).assertIsDisplayed()}.isSuccess}
+            privateCheckpointDeadline("creation_exact_form_source",creationDeadline)
+            val exactFormWindow=privateCheckpointModalWindow("creation_exact_form_source",runner,owner,epoch,Screen.Sessions,formSource,creationDeadline)
+            privateCheckpointRequire("creation_exact_form_source",exactFormWindow==formWindow)
+            privateCheckpointModalGuard("creation_exact_form_source",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline)
+            privateCheckpointStage="creation_selected_fields"
+            ui.onNodeWithTag(formSource).assertIsDisplayed()
+            ui.onNode(hasTestTag("creation_server_selected_id_"+expectedServer) and hasText(expectedServerName,substring=true),useUnmergedTree=true).assertIsDisplayed()
+            ui.onNode(hasTestTag("creation_project_selected_id_"+expectedProject) and hasText(expectedProjectLabel,substring=true),useUnmergedTree=true).assertIsDisplayed()
+            val provider=ui.onNode(hasTestTag("create_provider") and hasText(providerLabel(expectedProvider),substring=true))
+            privateCheckpointModalGuard("creation_selected_fields",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline)
+            privateCheckpointStage="creation_provider"
+            provider.performScrollTo();privateCheckpointDeadline("creation_provider",creationDeadline);privateCheckpointModalGuard("creation_provider",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline);provider.assertIsDisplayed().assertIsEnabled().performClick();ui.waitForIdle();privateCheckpointDeadline("creation_provider",creationDeadline)
+            privateCheckpointModalGuard("creation_provider",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline)
+            val name="Retained "+providerLabel(expectedProvider)+" "+java.util.UUID.randomUUID()
+            privateCheckpointStage="creation_name"
+            val nameField=ui.onNodeWithTag("create_name");nameField.performScrollTo();privateCheckpointDeadline("creation_name",creationDeadline);privateCheckpointModalGuard("creation_name",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline);nameField.assertIsDisplayed().assertIsEnabled().performTextReplacement(name);privateCheckpointDeadline("creation_name",creationDeadline)
+            privateCheckpointModalGuard("creation_name",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline)
+            privateCheckpointStage="creation_enabled_wait"
+            privateCheckpointDeadline("creation_enabled_wait",creationDeadline)
+            ui.waitUntil(minOf(10_000L,creationDeadline-android.os.SystemClock.elapsedRealtime())) {runCatching {privateCheckpointModalGuard("creation_enabled_wait",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline);ui.onNodeWithTag("session_create").assertIsDisplayed().assertIsEnabled();true}.getOrDefault(false)}
+            val submit=ui.onNodeWithTag("session_create");privateCheckpointDeadline("creation_enabled_wait",creationDeadline);privateCheckpointModalGuard("creation_enabled_wait",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline);submit.assertIsDisplayed().assertIsEnabled()
+            privateCheckpointStage="creation_final_submit_admission"
+            val beforeActions=privateCheckpointActions(owner,expectedHost)
+            val beforeActionIds=beforeActions.map {it.metadata.actionId}.toSet()
+            val currentInventory=owner.connection.state.value.inventory[expectedHost]
+            val currentSourceAdmitted=currentInventory?.let {current->
+                current.servers.singleOrNull {it.serverId.value==expectedServer}?.let {it.name.value==expectedServerName && it.connectivity==ServerConnectivity.Online && (if(expectedProvider==Provider.Omp) it.canCreate.omp else it.canCreate.codex)}==true &&
+                    current.projects.singleOrNull {it.projectId.value==expectedProject}?.let {it.label.value==expectedProjectLabel && it.available}==true
+            }==true
+            privateCheckpointRequire("creation_final_submit_admission",currentSourceAdmitted && beforeActionIds.size==beforeActions.size && owner.host==expectedHost && owner.connection.state.value.hello[expectedHost]===pairedHello && owner.connection.state.value.inventoryReady[expectedHost]==true && owner.connection.state.value.mutationReady[expectedHost]==true && owner.creationActions[expectedHost]==null)
+            privateCheckpointModalGuard("creation_final_submit_admission",runner,owner,epoch,Screen.Sessions,formWindow,formSource,creationDeadline)
+            privateCheckpointStage="creation_click"
+            submit.performClick()
+            privateCheckpointStage="creation_idle"
+            ui.waitForIdle();privateCheckpointDeadline("creation_idle",creationDeadline)
+            privateCheckpointStage="creation_receipt"
+            // Use the remaining signed checkpoint budget to observe the original creation.
+            val settleDeadline=creationDeadline
+            lateinit var action:Uuid
+            var local:LocalAction?=null
+            privateCheckpointDeadline("creation_receipt",settleDeadline)
+            withTimeout(settleDeadline-android.os.SystemClock.elapsedRealtime()) {while(true) {
+                privateCheckpointDeadline("creation_receipt",settleDeadline)
+                val fresh=privateCheckpointActions(owner,expectedHost).filter {it.metadata.actionId !in beforeActionIds && it.metadata.method==ActionMethod.SessionCreate}
+                privateCheckpointRequire("creation_receipt",fresh.size<=1)
+                val candidate=fresh.singleOrNull()
+                if(candidate!=null && (owner.creationActions[expectedHost]==null||owner.creationActions[expectedHost]==candidate.metadata.actionId)) {
+                    action=candidate.metadata.actionId;local=owner.store.localAction(expectedHost,action)
+                    if(local?.authoritative==true&&local?.receipt?.state !in listOf(ReceiptState.Reserved,ReceiptState.Dispatching)) break
+                }
+                delay(25)
+            }}
+            val receipt=local!!.receipt!!
+            val creation=receipt.creation
+            val post=privateCheckpointActions(owner,expectedHost).filter {it.metadata.actionId !in beforeActionIds}
+            privateCheckpointRequire("creation_exact",post.size==1 && post.single().metadata.method==ActionMethod.SessionCreate && post.single().metadata.actionId==action && post.single().metadata.bootId==pairedHello.bootId && post.single().metadata.target==null && post.single().metadata.sourceTarget==null && post.single().metadata.shellTarget==null && owner.creationActions[expectedHost]==action && receipt.actionId==action && receipt.bootId==pairedHello.bootId && receipt.method==ActionMethod.SessionCreate && receipt.state==ReceiptState.Succeeded && receipt.error==null && receipt.target==null && receipt.shellTarget==null && creation?.let {it.provider==expectedProvider && it.serverId.value==expectedServer && it.projectId.value==expectedProject && it.resources.sessionId!=null && it.resources.generation!=null}==true)
+            privateCheckpointStage="creation_verify"
+            privateCheckpointDeadline("creation_verify",creationDeadline)
+            val verified=stockControl("verify_create","receipt" to Protocol.strictJson.encodeToJsonElement(Receipt.serializer(),receipt))
+            privateCheckpointRequire("creation_verify",verified.getValue("verified").jsonPrimitive.boolean)
+            val createdTarget=Target(checkNotNull(creation?.resources?.sessionId),checkNotNull(creation?.resources?.generation))
+            val chatMarker=info.getValue("chatMarker").jsonPrimitive.content
+            privateCheckpointCloseCreationGuard("chat_close_initial",runner,owner,epoch,formWindow,formStaticTag,checkpointDeadline)
+            privateCheckpointStage="chat_close_node_query"
+            val close=ui.onNodeWithTag(formStaticTag)
+            privateCheckpointStage="chat_close_initial_visibility"
+            if(runCatching {close.assertIsDisplayed()}.isFailure) {
+                privateCheckpointStage="chat_close_scroll"
+                close.performScrollTo()
+            }
+            privateCheckpointStage="chat_close_enabled"
+            privateCheckpointDeadline("chat_close_enabled",checkpointDeadline)
+            close.assertIsDisplayed().assertIsEnabled()
+            privateCheckpointStage="chat_close_final_creation_admission"
+            val currentCreate=owner.store.localAction(expectedHost,action)
+            privateCheckpointDeadline("chat_close_final_creation_admission",checkpointDeadline)
+            privateCheckpointRequire("chat_close_final_creation_admission",owner.host==expectedHost && owner.connection.state.value.hello[expectedHost]===pairedHello && owner.creationActions[expectedHost]==action && currentCreate?.authoritative==true && currentCreate.receipt==receipt && currentCreate.receipt?.creation?.resources?.let {it.sessionId==createdTarget.sessionId && it.generation==createdTarget.generation}==true)
+            privateCheckpointCloseCreationGuard("chat_close_final",runner,owner,epoch,formWindow,formStaticTag,checkpointDeadline)
+            privateCheckpointStage="chat_close_click"
+            close.performClick()
+            privateCheckpointStage="chat_close_idle"
+            ui.waitForIdle()
+            privateCheckpointStage="chat_close_postclick"
+            privateCheckpointDeadline("chat_close_postclick",checkpointDeadline)
+            privateCheckpointStage="chat_close_posteffect_scene"
+            privateCheckpointRequire("chat_close_posteffect_scene",owner.screen==Screen.Sessions && owner.host==expectedHost && owner.selection==null)
+            privateCheckpointGuard("chat_close_posteffect_base_window",runner,owner,epoch,Screen.Sessions,null,false)
+            privateCheckpointStage="chat_close_posteffect_modal_absent"
+            ui.onNodeWithTag(formStaticTag).assertDoesNotExist()
+            privateCheckpointStage="chat_close_posteffect_actions"
+            val afterCloseActions=privateCheckpointActions(owner,expectedHost)
+            privateCheckpointDeadline("chat_close_posteffect_actions",checkpointDeadline)
+            privateCheckpointRequire("chat_close_posteffect_actions",post.size==1 && afterCloseActions.size==beforeActions.size+1 && afterCloseActions.map {it.metadata.actionId}.toSet()==beforeActionIds+action && afterCloseActions.singleOrNull {it.metadata.actionId==action}?.receipt==receipt)
+            val sessionTag="session_${createdTarget.sessionId.value}_${createdTarget.generation.value}"
+            fun preOpenCreatedReady()=owner.host==expectedHost && owner.connection.state.value.hello[expectedHost]===pairedHello && owner.connection.state.value.inventoryReady[expectedHost]==true && owner.connection.state.value.mutationReady[expectedHost]==true && owner.connection.state.value.inventory[expectedHost]?.sessions?.singleOrNull {summary->Target(summary.sessionId,summary.generation)==createdTarget}?.let {it.provider==expectedProvider && it.serverId.value==expectedServer && it.connectivity==SessionConnectivity.Ready}==true
+            fun openedCreatedReady()=owner.host==expectedHost && owner.connection.state.value.hello[expectedHost]===pairedHello && owner.connection.state.value.inventoryReady[expectedHost]==true && owner.connection.state.value.mutationReady[expectedHost]==true && owner.connection.state.value.inventory[expectedHost]?.sessions?.singleOrNull {summary->Target(summary.sessionId,summary.generation)==createdTarget}?.let {it.provider==expectedProvider && it.serverId.value==expectedServer && it.connectivity==SessionConnectivity.Ready}==true && owner.screen==Screen.Conversation && owner.selection==ConversationKey(expectedHost,createdTarget) && owner.connection.state.value.sources[expectedHost]?.containsKey(createdTarget)==true && stockReducer(owner,expectedHost,createdTarget)?.let {reducer->reducer.mutationsEnabled && reducer.state?.summary?.let {summary->Target(summary.sessionId,summary.generation)==createdTarget && summary.provider==expectedProvider && summary.serverId.value==expectedServer && summary.connectivity==SessionConnectivity.Ready}==true}==true && !owner.busy
+            privateCheckpointStage="chat_session_admission"
+            ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {preOpenCreatedReady()}
+            privateCheckpointDeadline("chat_session_admission",checkpointDeadline)
+            privateCheckpointRequire("chat_session_admission",preOpenCreatedReady())
+            privateCheckpointGuard("chat_session_admission",runner,owner,epoch,Screen.Sessions,null,false)
+            val session=ui.onNodeWithTag(sessionTag)
+            if(runCatching {session.assertIsDisplayed()}.isFailure) {
+                privateCheckpointStage="chat_session_scroll"
+                privateCheckpointGuard("chat_session_scroll",runner,owner,epoch,Screen.Sessions,null,false)
+                session.performScrollTo()
+            }
+            privateCheckpointStage="chat_session_click"
+            privateCheckpointDeadline("chat_session_click",checkpointDeadline);privateCheckpointGuard("chat_session_click",runner,owner,epoch,Screen.Sessions,null,false);session.assertIsDisplayed().assertIsEnabled();privateCheckpointDeadline("chat_session_click",checkpointDeadline);privateCheckpointRequire("chat_session_admission",preOpenCreatedReady());privateCheckpointGuard("chat_session_click",runner,owner,epoch,Screen.Sessions,null,false);session.performClick();ui.waitForIdle();privateCheckpointDeadline("chat_session_click",checkpointDeadline)
+            privateCheckpointStage="chat_session_wait"
+            ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {openedCreatedReady()}
+            privateCheckpointDeadline("chat_session_wait",checkpointDeadline)
+            privateCheckpointRequire("chat_session_wait",openedCreatedReady())
+            val conversationTag="conversation_target_${createdTarget.sessionId.value}_${createdTarget.generation.value}"
+            privateCheckpointGuard("chat_prompt_admission",runner,owner,epoch,Screen.Conversation,null,false)
+            ui.onNodeWithTag(conversationTag).assertIsDisplayed()
+            val beforePromptActions=privateCheckpointActions(owner,expectedHost);val beforePromptIds=beforePromptActions.map {it.metadata.actionId}.toSet()
+            fun promptBaselineCurrent(currentActions:List<LocalAction>)=beforeActionIds.size==beforeActions.size && beforePromptIds.size==beforePromptActions.size && post.size==1 && post.single().metadata.actionId==action && beforePromptActions.size==beforeActions.size+1 && beforePromptIds==beforeActionIds+action && beforePromptActions.singleOrNull {it.metadata.actionId==action}?.receipt==receipt && currentActions.map {it.metadata.actionId}.toSet().let {currentIds->currentIds.size==currentActions.size && currentIds==beforePromptIds} && currentActions.singleOrNull {it.metadata.actionId==action}?.receipt==receipt
+            val prompt="Reply only $chatMarker in this exact session."
+            privateCheckpointStage="chat_prompt_text"
+            val composer=ui.onNodeWithTag("composer");composer.assertIsDisplayed().assertIsEnabled();privateCheckpointDeadline("chat_prompt_admission",checkpointDeadline);privateCheckpointRequire("chat_prompt_admission",openedCreatedReady()&&promptBaselineCurrent(beforePromptActions));privateCheckpointGuard("chat_prompt_text",runner,owner,epoch,Screen.Conversation,null,false);composer.performTextReplacement(prompt);privateCheckpointDeadline("chat_prompt_text",checkpointDeadline)
+            privateCheckpointStage="chat_prompt_reservation"
+            ui.waitUntil(minOf(10_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {owner.reservation?.let {it.key==ConversationKey(expectedHost,createdTarget)&&it.text==prompt}==true&&runCatching {ui.onNodeWithTag("prompt_send").assertIsDisplayed().assertIsEnabled()}.isSuccess}
+            privateCheckpointDeadline("chat_prompt_reservation",checkpointDeadline)
+            val promptAction=checkNotNull(owner.reservation?.takeIf {it.key==ConversationKey(expectedHost,createdTarget)&&it.text==prompt}?.action)
+            val currentPromptActions=privateCheckpointActions(owner,expectedHost)
+            privateCheckpointDeadline("chat_prompt_admission",checkpointDeadline)
+            privateCheckpointRequire("chat_prompt_admission",openedCreatedReady()&&promptBaselineCurrent(currentPromptActions))
+            val send=ui.onNodeWithTag("prompt_send")
+            privateCheckpointStage="chat_prompt_click"
+            privateCheckpointDeadline("chat_prompt_click",checkpointDeadline);privateCheckpointGuard("chat_prompt_click",runner,owner,epoch,Screen.Conversation,null,false);send.assertIsDisplayed().assertIsEnabled();privateCheckpointGuard("chat_prompt_click",runner,owner,epoch,Screen.Conversation,null,false);send.performClick();ui.waitForIdle();privateCheckpointDeadline("chat_prompt_click",checkpointDeadline)
+            privateCheckpointStage="chat_prompt_receipt"
+            lateinit var promptLocal:LocalAction
+            withTimeout((checkpointDeadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {while(true) {
+                privateCheckpointDeadline("chat_prompt_receipt",checkpointDeadline)
+                val after=privateCheckpointActions(owner,expectedHost).filter {it.metadata.actionId !in beforePromptIds}
+                privateCheckpointRequire("chat_prompt_receipt",after.size<=1)
+                val candidate=after.singleOrNull()
+                if(candidate?.metadata?.actionId==promptAction&&candidate.metadata.method==ActionMethod.PromptSubmit&&candidate.authoritative&&candidate.receipt?.state in listOf(ReceiptState.Dispatched,ReceiptState.Succeeded)) {promptLocal=candidate;break}
+                delay(25)
+            }}
+            val promptReceipt=checkNotNull(promptLocal.receipt)
+            privateCheckpointRequire("chat_prompt_exact",promptReceipt.actionId==promptAction&&promptReceipt.method==ActionMethod.PromptSubmit&&promptReceipt.bootId==pairedHello.bootId&&promptReceipt.target==createdTarget&&promptReceipt.shellTarget==null&&promptReceipt.creation==null&&promptReceipt.error==null&&promptReceipt.state in listOf(ReceiptState.Dispatched,ReceiptState.Succeeded)&&promptLocal.metadata.bootId==pairedHello.bootId&&promptLocal.metadata.target==createdTarget&&promptLocal.metadata.sourceTarget==null&&promptLocal.metadata.shellTarget==null)
+            privateCheckpointStage="chat_history"
+            lateinit var userRecord:HistoryRecord;lateinit var assistantRecord:HistoryRecord
+            ui.waitUntil(minOf(60_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {
+                val records=stockReducer(owner,expectedHost,createdTarget)?.history.orEmpty()
+                val users=records.filter {it.role==Role.User&&it.complete&&(it.text as? ContentText)?.text?.value?.contains(chatMarker)==true}
+                val assistants=records.filter {it.role==Role.Assistant&&it.complete&&(it.text as? ContentText)?.text?.value?.contains(chatMarker)==true}
+                if(users.size==1&&assistants.size==1) {userRecord=users.single();assistantRecord=assistants.single();true}else false
+            }
+            privateCheckpointDeadline("chat_history",checkpointDeadline);privateCheckpointGuard("chat_history",runner,owner,epoch,Screen.Conversation,null,false)
+            val userNode=ui.onNodeWithTag("history_record_${userRecord.id.value}");if(runCatching {userNode.assertIsDisplayed()}.isFailure) {privateCheckpointGuard("chat_history",runner,owner,epoch,Screen.Conversation,null,false);userNode.performScrollTo()};userNode.assertIsDisplayed()
+            val assistantNode=ui.onNodeWithTag("history_record_${assistantRecord.id.value}");if(runCatching {assistantNode.assertIsDisplayed()}.isFailure) {privateCheckpointGuard("chat_history",runner,owner,epoch,Screen.Conversation,null,false);assistantNode.performScrollTo()};assistantNode.assertIsDisplayed()
+            privateCheckpointStage="chat_observe"
+            privateCheckpointDeadline("chat_observe",checkpointDeadline);privateCheckpointGuard("chat_observe",runner,owner,epoch,Screen.Conversation,null,false)
+            val observed=stockControl("observe","target" to Protocol.strictJson.encodeToJsonElement(Target.serializer(),createdTarget),"marker" to JsonPrimitive(chatMarker),"receipt" to Protocol.strictJson.encodeToJsonElement(Receipt.serializer(),promptReceipt))
+            privateCheckpointRequire("chat_observe",observed.getValue("verified").jsonPrimitive.boolean)
+            val terminalKey=ConversationKey(expectedHost,createdTarget)
+            val terminalSource=checkNotNull(owner.connection.state.value.sources[expectedHost]?.get(createdTarget))
+            val terminalActions=privateCheckpointActions(owner,expectedHost)
+            val terminalActionMetadata=terminalActions.associate {it.metadata.actionId to it.metadata}
+            fun terminalActionMapCurrent(current:List<LocalAction>)=terminalActionMetadata.size==terminalActions.size && current.associate {it.metadata.actionId to it.metadata}.let {metadata->metadata.size==current.size && metadata==terminalActionMetadata}
+            fun terminalCreationCurrent(current:List<LocalAction>)=current.singleOrNull {it.metadata.actionId==action}?.let {latest->latest.authoritative && latest.metadata.method==ActionMethod.SessionCreate && latest.metadata.bootId==pairedHello.bootId && latest.metadata.target==null && latest.metadata.sourceTarget==null && latest.metadata.shellTarget==null && latest.receipt==receipt}==true
+            fun terminalPromptCurrent(current:List<LocalAction>)=current.singleOrNull {it.metadata.actionId==promptAction}?.let {latest->latest.authoritative && latest.metadata.method==ActionMethod.PromptSubmit && latest.metadata.bootId==pairedHello.bootId && latest.metadata.target==createdTarget && latest.metadata.sourceTarget==null && latest.metadata.shellTarget==null && latest.receipt?.let {receipt->receipt.actionId==promptAction && receipt.method==ActionMethod.PromptSubmit && receipt.bootId==pairedHello.bootId && receipt.target==createdTarget && receipt.shellTarget==null && receipt.creation==null && receipt.error==null && receipt.state in listOf(ReceiptState.Dispatched,ReceiptState.Succeeded)}==true}==true
+            fun terminalInMemoryAuthority()=openedCreatedReady() && owner.connection.state.value.sources[expectedHost]?.get(createdTarget)==terminalSource && owner.readOnlyAgentTerminal(terminalKey)
+            fun terminalStoreCurrent(current:List<LocalAction>)=terminalActionMapCurrent(current) && terminalCreationCurrent(current) && terminalPromptCurrent(current)
+            privateCheckpointStage="terminal_admission"
+            privateCheckpointDeadline("terminal_admission",checkpointDeadline)
+            privateCheckpointRequire("terminal_admission",terminalInMemoryAuthority()&&terminalStoreCurrent(terminalActions))
+            val terminalOpen=ui.onNodeWithTag("terminal_open")
+            privateCheckpointStage="terminal_open"
+            privateCheckpointDeadline("terminal_open",checkpointDeadline);privateCheckpointRequire("terminal_open",terminalInMemoryAuthority()&&terminalStoreCurrent(terminalActions));privateCheckpointGuard("terminal_open",runner,owner,epoch,Screen.Conversation,null,false);val terminalBaseApplicationToken=checkNotNull(privateCheckpointTerminalBaseApplicationToken(runner,owner,epoch));terminalOpen.assertIsDisplayed().assertIsEnabled();privateCheckpointDeadline("terminal_open",checkpointDeadline);val terminalOpenActions=privateCheckpointActions(owner,expectedHost);privateCheckpointRequire("terminal_open",terminalInMemoryAuthority()&&terminalStoreCurrent(terminalOpenActions));privateCheckpointGuard("terminal_open",runner,owner,epoch,Screen.Conversation,null,false);privateCheckpointRequire("terminal_open",privateCheckpointTerminalBaseApplicationToken(runner,owner,epoch)==terminalBaseApplicationToken);terminalOpen.performClick();ui.waitForIdle();privateCheckpointDeadline("terminal_open",checkpointDeadline)
+            val terminalDialogTag="terminal_dialog"
+            val terminalTargetTag="terminal_target_"+createdTarget.sessionId.value+"_"+createdTarget.generation.value
+            privateCheckpointStage="terminal_popup_wait"
+            ui.waitUntil(minOf(20_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {
+                val shown=owner.terminal
+                shown?.key==terminalKey && shown.source==terminalSource && terminalInMemoryAuthority() && runCatching {ui.onNodeWithTag(terminalDialogTag).assertIsDisplayed();ui.onNodeWithTag(terminalTargetTag).assertIsDisplayed()}.isSuccess
+            }
+            privateCheckpointDeadline("terminal_popup_store",checkpointDeadline)
+            val terminalPopupActions=privateCheckpointActions(owner,expectedHost)
+            val terminalWindow=privateCheckpointTerminalDialogWindow("terminal_popup",runner,owner,epoch,terminalDialogTag,terminalTargetTag,terminalDialogTag,terminalBaseApplicationToken,checkpointDeadline)
+            checkNotNull(terminalWindow)
+            val terminalSnapshot=checkNotNull(owner.terminal)
+            privateCheckpointRequire("terminal_popup_store",terminalSnapshot.key==terminalKey && terminalSnapshot.source==terminalSource && terminalInMemoryAuthority()&&terminalStoreCurrent(terminalPopupActions))
+            privateCheckpointTerminalDialogGuard("terminal_popup",runner,owner,epoch,terminalWindow!!,terminalDialogTag,terminalTargetTag,terminalTargetTag,terminalBaseApplicationToken,checkpointDeadline)
+            privateCheckpointStage="terminal_grid"
+            ui.waitUntil(minOf(20_000L,checkpointDeadline-android.os.SystemClock.elapsedRealtime())) {
+                val shown=owner.terminal
+                val grid=shown?.grid
+                shown?.key==terminalKey && shown.source==terminalSource && shown.ticket==terminalSnapshot.ticket && !shown.loading && !shown.error && grid?.let {frame->runCatching {frame.begin.validate()}.isSuccess && frame.begin.columns.value>0L && frame.begin.rows.value>0L && frame.cells.size.toLong()==frame.begin.columns.value*frame.begin.rows.value}==true && terminalInMemoryAuthority() && runCatching {ui.onNodeWithTag("terminal_grid").assertIsDisplayed()}.isSuccess
+            }
+            privateCheckpointDeadline("terminal_grid",checkpointDeadline)
+            val terminalGridActions=privateCheckpointActions(owner,expectedHost)
+            val committedTerminal=checkNotNull(owner.terminal)
+            val committedGrid=checkNotNull(committedTerminal.grid)
+            committedGrid.begin.validate()
+            privateCheckpointRequire("terminal_grid",committedTerminal.key==terminalKey && committedTerminal.source==terminalSource && committedTerminal.ticket==terminalSnapshot.ticket && !committedTerminal.loading && !committedTerminal.error && committedGrid.begin.columns.value>0L && committedGrid.begin.rows.value>0L && committedGrid.cells.size.toLong()==committedGrid.begin.columns.value*committedGrid.begin.rows.value && terminalInMemoryAuthority()&&terminalStoreCurrent(terminalGridActions))
+            privateCheckpointTerminalDialogGuard("terminal_grid",runner,owner,epoch,terminalWindow,terminalDialogTag,terminalTargetTag,"terminal_grid",terminalBaseApplicationToken,checkpointDeadline)
+            val terminalGrid=ui.onNodeWithTag("terminal_grid");terminalGrid.assertIsDisplayed();val terminalBounds=terminalGrid.fetchSemanticsNode().boundsInRoot
+            privateCheckpointRequire("terminal_grid",terminalBounds.width>0f&&terminalBounds.height>0f)
+            ui.onNodeWithTag("terminal_selected").assertIsDisplayed().assertIsNotEnabled()
+            val terminalCurrentActions=privateCheckpointActions(owner,expectedHost)
+            privateCheckpointDeadline("terminal_grid",checkpointDeadline)
+            privateCheckpointRequire("terminal_grid",terminalInMemoryAuthority()&&terminalStoreCurrent(terminalCurrentActions))
+            privateCheckpointStage="terminal_close"
+            val terminalClose=ui.onNodeWithTag("terminal_close")
+            privateCheckpointDeadline("terminal_close",checkpointDeadline);privateCheckpointTerminalDialogGuard("terminal_close",runner,owner,epoch,terminalWindow,terminalDialogTag,terminalTargetTag,"terminal_close",terminalBaseApplicationToken,checkpointDeadline);terminalClose.assertIsDisplayed().assertIsEnabled();privateCheckpointDeadline("terminal_close",checkpointDeadline);privateCheckpointTerminalDialogGuard("terminal_close",runner,owner,epoch,terminalWindow,terminalDialogTag,terminalTargetTag,"terminal_close",terminalBaseApplicationToken,checkpointDeadline);terminalClose.performClick();ui.waitForIdle();privateCheckpointDeadline("terminal_close",checkpointDeadline)
+            privateCheckpointStage="terminal_posteffect"
+            privateCheckpointRequire("terminal_posteffect",owner.terminal==null&&terminalInMemoryAuthority())
+            privateCheckpointGuard("terminal_posteffect",runner,owner,epoch,Screen.Conversation,null,false)
+            ui.onNodeWithTag(terminalDialogTag).assertDoesNotExist()
+            ui.onNodeWithTag(conversationTag).assertIsDisplayed()
+            val afterTerminalActions=privateCheckpointActions(owner,expectedHost)
+            privateCheckpointDeadline("terminal_posteffect",checkpointDeadline)
+            privateCheckpointRequire("terminal_posteffect",terminalStoreCurrent(afterTerminalActions))
+        }
+    }
     private fun stockReducer(owner:GoatrViewModel,host:String,target:Target)=owner.connection.state.value.sessions[host]
         ?.firstOrNull {it.state?.summary?.let {s->Target(s.sessionId,s.generation)==target}==true}
     private data class StockAwaitState(
@@ -1182,6 +2412,99 @@ class GoatrConnectionTest {
         tool=Tool("commandExecution",call,status,output=ContentText(InlineText("goatr-terminal-marker"))),
         source=RecordSource.Live,complete=true,sourceTruncated=false,
     )
+    /** Installed-subject cleanup is intentionally UI-only: names arrive only in authenticated
+     * control memory, are resolved once before mutation, and never leave this process. */
+    @Test fun installed_subject_owned_retirement_checkpoint()=runBlocking<Unit> {
+        privateCheckpointRequire("retirement_selector",privateCheckpointSelected())
+        val runner=InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner
+        privateCheckpointRequire("retirement_runner",runner!=null)
+        privateCheckpointStage="retirement_awaiting_foreground";runner!!.prepareSdkOwnedFixture()
+        privateCheckpointStage="retirement_activity";val activity=runner.sdkOwnedFixtureMainActivity()
+        lateinit var owner:GoatrViewModel;activity.runOnUiThread {owner=ViewModelProvider(activity)[GoatrViewModel::class.java]}
+        ui.waitUntil(20_000) {owner.foreground&&owner.connection.ownsNetworkCallback()}
+        lateinit var epoch:PrivateInputEpoch;ui.waitUntil(10_000) {privateCheckpointWindow(runner,owner)?.let {epoch=it;true}?:false}
+        privateCheckpointGuard("retirement_initial",runner,owner,epoch,Screen.Sessions,null,false)
+        val deadline=android.os.SystemClock.elapsedRealtime()+900_000L
+        privateCheckpointStage="retirement_inventory"
+        val inventory=stockControl("retirement_inventory")
+        val targetCount=inventory.getValue("targetCount").jsonPrimitive.int
+        val candidates=inventory.getValue("targets").jsonArray.map {row->
+            val value=row.jsonObject
+            Triple(value.getValue("pairingName").jsonPrimitive.content,value["expectedHostId"]?.jsonPrimitive?.contentOrNull,value["expectedDeviceId"]?.jsonPrimitive?.contentOrNull)
+        }
+        privateCheckpointRequire("retirement_inventory",targetCount in 1..128&&candidates.size==targetCount&&candidates.map {it.first}.toSet().size==candidates.size)
+        val originalHosts=owner.store.state.value.hosts.toList()
+        val originalActions=originalHosts.associate {host->host.hostId to privateCheckpointActions(owner,host.hostId).toSet()}
+        val originalActionIds=originalActions.values.flatten().map {it.metadata.actionId}.toSet()
+        suspend fun currentActionIds()=owner.store.state.value.hosts.flatMap {host->privateCheckpointActions(owner,host.hostId)}.map {it.metadata.actionId}.toSet()
+        val resolved=candidates.map {candidate->
+            val matches=originalHosts.filter {host->host.name==candidate.first&&(candidate.second==null||host.hostId==candidate.second)&&(candidate.third==null||host.deviceId?.value==candidate.third)}
+            privateCheckpointRequire("retirement_inventory",matches.size<=1)
+            candidate to matches.singleOrNull()
+        }
+        val present=resolved.mapNotNull {it.second}
+        privateCheckpointRequire("retirement_inventory",present.size<=32&&present.map {it.hostId}.toSet().size==present.size)
+        val originalHostsById=originalHosts.associateBy {it.hostId}
+        val originalHostIds=originalHosts.map {it.hostId}.toSet()
+        val targetHostIds=present.map {it.hostId}.toSet()
+        val removedHostIds=mutableSetOf<String>()
+        var removed=0;var alreadyAbsent=0
+        for ((candidate,target) in resolved) {
+            val (name,expectedHost,expectedDevice)=candidate
+            privateCheckpointStage="retirement_next";val next=stockControl("retirement_next")
+            privateCheckpointRequire("retirement_next",next.getValue("pairingName").jsonPrimitive.content==name)
+            if(target==null) {privateCheckpointRequire("retirement_actions",currentActionIds().all {it in originalActionIds});privateCheckpointRequire("retirement_result",stockControl("retirement_result", "removed" to JsonPrimitive(false)).getValue("accepted").jsonPrimitive.boolean);alreadyAbsent++;continue}
+
+            privateCheckpointDeadline("retirement_deadline",deadline)
+            fun retirementTargetPresent()=owner.store.state.value.hosts.singleOrNull {it.hostId==target.hostId}==target&&(expectedHost==null||target.hostId==expectedHost)&&(expectedDevice==null||target.deviceId?.value==expectedDevice)&&owner.foreground&&!owner.busy
+            fun retirementTargetCurrent()=owner.host==target.hostId&&retirementTargetPresent()
+            privateCheckpointRequire("retirement_authority",retirementTargetPresent())
+            if(owner.screen==Screen.Sessions) {
+                privateCheckpointTap("retirement_menu","navigation_menu",runner,owner,epoch,Screen.Sessions,null,false,deadline=deadline)
+                privateCheckpointTap("retirement_hosts","navigation_hosts_menu",runner,owner,epoch,Screen.Sessions,null,false,popup=true,deadline=deadline)
+                ui.waitUntil(minOf(10_000L,(deadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L))) {owner.screen==Screen.Connections}
+            }
+            privateCheckpointGuard("retirement_host",runner,owner,epoch,Screen.Connections,null,false)
+            val settings=ui.onNode(hasTestTag("host_settings") and hasAnyAncestor(hasTestTag("host_${target.hostId}")),useUnmergedTree=true)
+            if(runCatching {settings.assertIsDisplayed()}.isFailure) ui.onNodeWithTag("connections_list").performScrollToNode(hasTestTag("host_${target.hostId}"))
+            privateCheckpointGuard("retirement_host",runner,owner,epoch,Screen.Connections,null,false)
+            settings.assertIsDisplayed().assertIsEnabled().performClick();ui.waitForIdle()
+            ui.waitUntil(minOf(10_000L,(deadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L))) {owner.screen==Screen.Settings}
+            privateCheckpointGuard("retirement_forget",runner,owner,epoch,Screen.Settings,null,false)
+            privateCheckpointRequire("retirement_forget",owner.host==target.hostId&&owner.store.state.value.hosts.singleOrNull {it.hostId==target.hostId}==target)
+            if(runCatching {ui.onNodeWithTag("host_forget").assertIsDisplayed()}.isFailure) {
+                privateCheckpointDeadline("retirement_forget",deadline)
+                privateCheckpointGuard("retirement_forget",runner,owner,epoch,Screen.Settings,null,false)
+                privateCheckpointRequire("retirement_forget",retirementTargetCurrent())
+                ui.onNodeWithTag("host_settings_list").performScrollToNode(hasTestTag("host_forget"))
+            }
+            privateCheckpointTap("retirement_forget","host_forget",runner,owner,epoch,Screen.Settings,null,false,deadline=deadline,beforeClick={
+                privateCheckpointRequire("retirement_forget",retirementTargetCurrent())
+            })
+            ui.waitUntil(minOf(10_000L,(deadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L))) {runCatching {ui.onNodeWithTag("forget_confirm").assertIsDisplayed()}.isSuccess}
+            val dialog=privateCheckpointModalWindow("retirement_confirm",runner,owner,epoch,Screen.Settings,"forget_confirm",deadline)
+            privateCheckpointRequire("retirement_confirm",dialog!=null)
+            privateCheckpointRequire("retirement_confirm",owner.host==target.hostId&&owner.store.state.value.hosts.singleOrNull {it.hostId==target.hostId}==target)
+            privateCheckpointModalTap("retirement_confirm","forget_confirm",runner,owner,epoch,Screen.Settings,dialog!!,deadline,beforeClick={
+                privateCheckpointRequire("retirement_confirm",retirementTargetCurrent())
+            })
+            ui.waitUntil((deadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)) {
+                !owner.busy&&owner.screen==Screen.Connections&&owner.host==null&&owner.store.state.value.hosts.none {it.hostId==target.hostId}&&owner.store.state.value.keyDeletion.none {it.hostId==target.hostId}
+            }
+            privateCheckpointGuard("retirement_posteffect",runner,owner,epoch,Screen.Connections,null,false)
+            removedHostIds+=target.hostId
+            privateCheckpointRequire("retirement_preserve",owner.store.state.value.hosts.map {it.hostId}.toSet()==originalHostIds-removedHostIds&&owner.store.state.value.hosts.all {current->current==originalHostsById[current.hostId]})
+            for(current in owner.store.state.value.hosts) if(current.hostId !in targetHostIds) privateCheckpointRequire("retirement_actions",privateCheckpointActions(owner,current.hostId).toSet()==originalActions.getValue(current.hostId))
+            privateCheckpointStage="retirement_result";privateCheckpointRequire("retirement_actions",currentActionIds().all {it in originalActionIds})
+            privateCheckpointRequire("retirement_result",stockControl("retirement_result", "removed" to JsonPrimitive(true)).getValue("accepted").jsonPrimitive.boolean)
+            removed++
+        }
+        privateCheckpointStage="retirement_finish"
+        privateCheckpointRequire("retirement_finish",owner.store.state.value.hosts.map {it.hostId}.toSet()==originalHostIds-removedHostIds&&owner.store.state.value.hosts.all {current->current==originalHostsById[current.hostId]}&&owner.store.state.value.hosts.filter {it.hostId !in targetHostIds}.all {current->privateCheckpointActions(owner,current.hostId).toSet()==originalActions.getValue(current.hostId)}&&currentActionIds().all {it in originalActionIds})
+        val finish=stockControl("retirement_finish","removed" to JsonPrimitive(removed),"already_absent" to JsonPrimitive(alreadyAbsent))
+        privateCheckpointRequire("retirement_finish",finish.getValue("targetCount").jsonPrimitive.int==targetCount&&finish.getValue("removed").jsonPrimitive.int==removed&&finish.getValue("alreadyAbsent").jsonPrimitive.int==alreadyAbsent)
+    }
+
     @Test fun review_completed_tool_output_requires_terminal_singleton_success() {
         val call=Id("call-a")
         val running=stockToolRecord("stable",call,ToolStatus.Running)
@@ -2073,5 +3396,33 @@ class GoatrConnectionTest {
             scenario?.moveToState(Lifecycle.State.CREATED);scenario?.close()
             coldActivity?.let{activity->InstrumentationRegistry.getInstrumentation().runOnMainSync{activity.finish()}}
         }
+    }
+}
+
+/** Pure runner admission/key regressions. This class deliberately has no Compose rule or Activity launch. */
+class SdkForegroundBootstrapContractTest {
+    @Test fun exact_main_once_selector_requires_authenticated_control_and_prepares_p256_material() {
+        fun arguments(mode:String,method:String,port:String?=null)=Bundle().apply {
+            putString("goatrSdkForegroundBootstrap",mode);putString("class",method);port?.let {putString("stockControlPort",it)}
+        }
+        val main="io.github.trevarj.goatr.GoatrConnectionTest#installed_subject_private_pairing_checkpoint"
+        val component="io.github.trevarj.goatr.NativeInventoryTest#directoryRowKeepsStatusAndDetailsContainedAtCompactTwoHundredPercent"
+        val selected=OwnedInstrumentationRunner.sdkFixtureSelection(arguments("main_once",main,"41029"))
+        assertNotNull(selected);assertTrue(selected!!.stockControl);assertEquals("io.github.trevarj.goatr.MainActivity",selected.activityClass)
+        assertNull(OwnedInstrumentationRunner.sdkFixtureSelection(arguments("main_once",main)))
+        assertNull(OwnedInstrumentationRunner.sdkFixtureSelection(arguments("main_once",component,"41029")))
+        assertNull(OwnedInstrumentationRunner.sdkFixtureSelection(arguments("main_once",main,"0")))
+        val retirement="io.github.trevarj.goatr.GoatrConnectionTest#installed_subject_owned_retirement_checkpoint"
+        assertNull(OwnedInstrumentationRunner.sdkFixtureSelection(arguments("main_once",retirement,"41029")))
+        assertNotNull(OwnedInstrumentationRunner.sdkFixtureSelection(arguments("main_once",retirement,"41029").apply {putString("goatrOwnedRetirementCheckpoint","true")}))
+        assertNull(OwnedInstrumentationRunner.sdkFixtureSelection(arguments("unknown",main,"41029")))
+        val componentSelection=OwnedInstrumentationRunner.sdkFixtureSelection(arguments("component_once",component))
+        assertNotNull(componentSelection);assertFalse(componentSelection!!.stockControl)
+        val material=OwnedInstrumentationRunner.freshStockControlKey()
+        assertEquals(65,material.publicIdentity.size);assertEquals(4,material.publicIdentity[0].toInt())
+        val message="GOATR-STOCK-CONTROL-v1".toByteArray(Charsets.US_ASCII)
+        val signature=java.security.Signature.getInstance("SHA256withECDSA").run {initSign(material.pair.private);update(message);sign()}
+        assertTrue(java.security.Signature.getInstance("SHA256withECDSA").run {initVerify(material.pair.public);update(message);verify(signature)})
+        message.fill(0);signature.fill(0)
     }
 }

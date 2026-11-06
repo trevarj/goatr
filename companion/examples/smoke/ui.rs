@@ -70,7 +70,7 @@ fn control_message(challenge: &[u8; 32], bytes: &[u8]) -> Vec<u8> {
     message.extend_from_slice(bytes);
     message
 }
-async fn authenticated_control(stream:&mut tokio::net::TcpStream,public:&[u8;65])->io::Result<Control> {
+pub(super) async fn authenticated_control(stream:&mut tokio::net::TcpStream,public:&[u8;65])->io::Result<Control> {
     authenticated_control_record(stream,public,None).await
 }
 pub(super) async fn authenticated_control_record(
@@ -133,6 +133,9 @@ pub(super) enum Control {
     },
     LivePair {},
     LiveInfo {},
+    PairingFinish {
+        device_id: Uuid,
+    },
     Observe {
         target: Target,
         marker: String,
@@ -166,6 +169,23 @@ pub(super) enum Control {
     VerifyCreate {
         receipt: Receipt,
     },
+    VerifyShellInteraction {
+        target: ShellTarget,
+        inputs: [Receipt; 3],
+        older: Receipt,
+        bottom: Receipt,
+        draft_bytes: Uint,
+        start_revision: Uint,
+        output_revision: Uint,
+        columns: Uint,
+        rows: Uint,
+        max_offset: Uint,
+        viewport: Uint,
+    },
+    RetirementInventory {},
+    RetirementNext {},
+    RetirementResult { removed: bool },
+    RetirementFinish { removed: Uint, already_absent: Uint },
     FaultCreate {
         receipt: Receipt,
     },
@@ -1891,6 +1911,7 @@ pub(super) async fn run(
     let response=match request {
      Control::LivePair{}=>{let b=binary.to_owned();let r=root.to_owned();let s=socket.to_owned();let mut uri=tokio::task::spawn_blocking(move||terminal_pair(&b,Some(&r),Some(&s),None)).await.map_err(io::Error::other)??;let value=json!({"uri":uri,"host":host,"runId":run});unsafe{uri.as_bytes_mut().fill(0)};value},
      Control::LiveInfo{}=>{let inventory=phone.host().await?;let own=native.first().ok_or_else(||failure("no selected actual UI provider"))?;let actual=inventory.sessions.iter().find(|s|s.session_id==own.target.session_id).ok_or_else(||failure("actual UI server missing"))?;let row=inventory.servers.iter().find(|s|s.server_id==actual.server_id).ok_or_else(||failure("actual named UI server missing"))?;json!({"host":host,"runId":run,"deferRetentionCrossing":args.get_flag("defer-retention-crossing"),"serverId":actual.server_id,"serverName":row.name,"projectId":config.projects[0].id,"projectLabel":config.projects[0].label,"sessions":native.iter().map(|p|json!({"provider":p.provider,"target":p.target,"nativeId":p.native,"pane":p.pane,"terminal":p.terminal,"workspace":p.workspace})).collect::<Vec<_>>()})},
+     Control::PairingFinish{..}|Control::RetirementInventory{}|Control::RetirementNext{}|Control::RetirementResult{..}|Control::RetirementFinish{..}=>return Err(failure("retirement and retained pairing control are unavailable during legacy UI acceptance")),
      Control::Observe{target,marker,receipt}=>{if marker.len()>128||!marker.starts_with("goatr-ui-")||receipt.method!=ActionMethod::PromptSubmit||receipt.target.as_ref()!=Some(&target)||!matches!(receipt.state,ReceiptState::Dispatched|ReceiptState::Succeeded){return Err(failure("actual UI prompt correlation/receipt mismatch"));}let p=native.iter().find(|p|p.target==target).ok_or_else(||failure("UI changed/foreign Target"))?;p.recheck_processes()?;let state=wait_history(phone,&target,&marker,true).await?;observed.push(json!({"scenario":"ui-native-prompt-history-tool","target":target,"action":receipt.action_id,"receipt":receipt,"nativeProof":p.evidence(),"recordIds":state.history.iter().map(|r|&r.id).collect::<Vec<_>>() }));json!({"verified":true})},
      Control::Older{target}=>{
       if args.get_flag("defer-retention-crossing"){return Err(failure("exhaustive older witness explicitly deferred; no witness fabricated"));}
@@ -1976,7 +1997,7 @@ pub(super) async fn run(
       for p in native.iter(){p.recheck_processes()?;}
       observed.push(json!({"scenario":"actual-APK-process-death-original-no-replay","lease":lease,"receipt":receipt,"nativeUserCountBefore":death_count,"nativeUserCountAfter":count}));json!({"verified":true})
      },
-     Control::PhysicalReport{..}|Control::FeedbackPaired{..}|Control::FeedbackReady{..}|Control::DevelopmentReady{..}=>return Err(failure("post-acceptance/development/physical control is unavailable during acceptance")),
+     Control::PhysicalReport{..}|Control::FeedbackPaired{..}|Control::FeedbackReady{..}|Control::DevelopmentReady{..}|Control::VerifyShellInteraction{..}=>return Err(failure("post-acceptance/development/physical control is unavailable during acceptance")),
      Control::Complete{}=>{if geometry(herdr_socket,&anchor,GeometryPhase::UiAfter).await.map_err(GeometryFailure::into_io)?!=baseline_geometry||focus(&surface(herdr_socket).await?.1)!=baseline_focus{return Err(failure("actual phone flow changed desktop focus/geometry"));}complete=true;json!({"complete":true})}
     };
     let mut encoded=serde_json::to_vec(&response).map_err(io::Error::other)?;if encoded.len()>65536{return Err(failure("stock control response bound"));}encoded.push(b'\n');tokio::time::timeout(Duration::from_secs(5),stream.write_all(&encoded)).await.map_err(|_|failure("stock control response deadline"))??;encoded.fill(0);
@@ -3344,6 +3365,13 @@ mod tests {
                 .0,
             Ok(Control::LiveInfo {})
         ));
+        assert!(matches!(
+            control_attempt(&key, br#"{"method":"pairing_finish","device_id":"00000000-0000-4000-8000-000000000000"}"#, 0, None)
+                .await
+                .0,
+            Ok(Control::PairingFinish { .. })
+        ));
+        assert!(control_attempt(&key, br#"{"method":"pairing_finish"}"#, 0, None).await.0.is_err());
         assert!(matches!(
             control_attempt(&key, br#"{"method":"restart"}"#, 0, None)
                 .await

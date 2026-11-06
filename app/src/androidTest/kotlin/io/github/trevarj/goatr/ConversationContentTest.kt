@@ -30,14 +30,50 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.v2.AndroidComposeTestRule as createOwnedComposeRule
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.rules.TestRule
+import org.junit.runner.Description
+import org.junit.runners.model.Statement
 
 class ConversationContentTest {
-    @get:Rule val ui=createComposeRule()
+    private val sdkOwnedFixture=(InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner)?.isSdkOwnedFixtureRequested()==true
+    private val noLaunchRule=TestRule {base,_->base}
+    private val ui=if(sdkOwnedFixture) createOwnedComposeRule(noLaunchRule) {_ ->
+        (InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner)?.sdkOwnedFixtureActivity()
+            ?: error("owned_sdk_fixture_unavailable")
+    } else createComposeRule()
+    @get:Rule val stagedUi:TestRule=RuleChain.outerRule(TestRule {base,description->
+        if(description.testClass==ConversationContentTest::class.java && description.methodName in setOf("assistantMessageBackgroundIsTransparentWhileUserAndNativeToolStayContained","productionConversationFrameReservesActionsWithOmpRequestsAtTwoHundredPercent","syntheticGalleryShowsStateBaselineAndLightDarkTextContrast","terminalDisplayScaleRestoresFromIsolatedPreferencesAndKeepsItsCanvasAndControlSynchronized","terminalDisplayScaleFlushesItsCurrentValueWhenCanvasDisposesBeforeDebounceAndRestoresIt")) object:Statement() {
+            override fun evaluate() {
+                if(sdkOwnedFixture) checkNotNull(InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner).prepareSdkOwnedFixture()
+                base.evaluate()
+            }
+        } else base
+    }).around(ui)
+    private data class FrameRootObservation(val stage:String,val reason:String) {
+        fun label()="frame_root_missing_${stage}_$reason"
+    }
+    private fun frameRootObservation(stage:String,runner:OwnedInstrumentationRunner,owner:androidx.activity.ComponentActivity?,window:android.view.Window?,decor:android.view.View?,root:android.view.View?):FrameRootObservation {
+        if(owner==null||window==null||decor==null||root==null)return FrameRootObservation(stage,"observation_unavailable")
+        return try {
+            var destroyed=false;var finishing=false;var current=false;var resumed=false;var sameWindow=false;var sameDecor=false;var sameRoot=false;var attached=false;var focused=false
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                destroyed=owner.isDestroyed;finishing=owner.isFinishing
+                current=if(destroyed||finishing)false else runner.sdkOwnedFixtureActivity()===owner
+                resumed=androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED).any {it===owner}
+                sameWindow=owner.window===window;sameDecor=owner.window.decorView===decor;sameRoot=owner.window.decorView.rootView===root
+                attached=decor.isAttachedToWindow;focused=decor.hasWindowFocus()
+            }
+            val reason=when {destroyed->"owner_destroyed";finishing->"owner_finishing";!current->"current_owner_changed";!resumed->"not_resumed";!sameWindow||!sameDecor||!sameRoot->"window_changed";!attached->"detached";!focused->"unfocused";else->"owner_intact_root_unregistered"}
+            FrameRootObservation(stage,reason)
+        }catch(_:Throwable) {FrameRootObservation(stage,"observation_unavailable")}
+    }
     private data class FocusAdmissionState(val resumed:Boolean,val sameWindow:Boolean,val sameDecorRoot:Boolean,
         val attached:Boolean,val sameWriterRoot:Boolean,val focused:Boolean) {
         fun admitted()=resumed&&sameWindow&&sameDecorRoot&&attached&&sameWriterRoot&&focused
@@ -85,48 +121,93 @@ class ConversationContentTest {
         var sends=0;var stops=0
         var admitted by mutableStateOf(false)
         var availableHeight by mutableStateOf(240.dp)
+        var appearance by mutableStateOf(Appearance.Light)
+        var composerSurface=Color.Unspecified;var composerContent=Color.Unspecified
+        var density=1f
         val request=PendingRequest(Uuid.random(),Provider.Omp,PresentationKind.OmpEditor,
             PresentationOmpEditor(ContentText(InlineText("Synthetic pending question")),ContentText(InlineText(""))))
+        val fixture=if(sdkOwnedFixture) checkNotNull(InstrumentationRegistry.getInstrumentation() as? OwnedInstrumentationRunner) else null
+        var pinnedOwner:androidx.activity.ComponentActivity?=null;var pinnedWindow:android.view.Window?=null;var pinnedDecor:android.view.View?=null;var pinnedRoot:android.view.View?=null
+        if(fixture!=null) runCatching {InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            pinnedOwner=fixture.sdkOwnedFixtureActivity();pinnedWindow=checkNotNull(pinnedOwner).window;pinnedDecor=checkNotNull(pinnedWindow).decorView;pinnedRoot=checkNotNull(pinnedDecor).rootView
+        }}
         ui.setContent {
-            val density=LocalDensity.current
-            GoatrTheme {CompositionLocalProvider(LocalDensity provides Density(density.density,2f)) {
-                // Available conversation space after app bar and IME, using the production frame.
-                Box(Modifier.width(320.dp).height(availableHeight)) {
-                    ConversationFrame(chrome={
-                        RequestDock(listOf(request)) {}
-                        androidx.compose.material3.Text("All branches; desktop-selected branch unavailable",modifier=Modifier.testTag("omp_branches"))
-                        ComposerRecoveryNotice("Recovery copy deleted by 2030-01-01T12:00:00Z (≤7 days).")
-                    },history={androidx.compose.material3.Text("Synthetic long transcript\n".repeat(20))},editor={
-                        ConversationControlRail(admitted,"Current original source is read-only",{stops++},{}) {}
-                    },actions={
-                        ConversationDraftControls(text,{text=it},admitted,{sends++})
-                    })
+            GoatrTheme(appearance) {
+                val currentDensity=LocalDensity.current
+                composerSurface=LocalComposerColors.current.surface;composerContent=LocalComposerColors.current.content
+                density=currentDensity.density
+                CompositionLocalProvider(LocalDensity provides Density(currentDensity.density,2f)) {
+                    // Available conversation space after app bar and IME, using the production frame.
+                    Box(Modifier.width(320.dp).height(availableHeight)) {
+                        ConversationFrame(chrome={
+                            RequestDock(listOf(request)) {}
+                            androidx.compose.material3.Text("All branches; desktop-selected branch unavailable",modifier=Modifier.testTag("omp_branches"))
+                            ComposerRecoveryNotice("Recovery copy deleted by 2030-01-01T12:00:00Z (≤7 days).")
+                        },history={androidx.compose.material3.Text("Synthetic long transcript\n".repeat(20))},editor={
+                            ConversationControlRail(admitted,"Current original source is read-only",{stops++},{}) {}
+                        },actions={
+                            ConversationDraftControls(text,{text=it},admitted,{sends++})
+                        })
+                    }
                 }
-            }}
+            }
         }
+        val afterRootObservation=if(fixture!=null)frameRootObservation("after",fixture,pinnedOwner,pinnedWindow,pinnedDecor,pinnedRoot)else null
         fun assertPinnedComposerVisible() {
             val frame=ui.onNodeWithTag("conversation_frame").fetchSemanticsNode().boundsInRoot
+            val envelope=ui.onNodeWithTag("composer_envelope").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            val rail=ui.onNodeWithTag("composer_region").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            val history=ui.onNodeWithTag("conversation_history_region").fetchSemanticsNode().boundsInRoot
+            assertEquals("Composer keeps the required horizontal inset",10f*density,envelope.left-frame.left,1f)
+            assertEquals("Composer keeps the required horizontal inset",10f*density,frame.right-envelope.right,1f)
+            assertEquals("Rail aligns with the composer envelope",envelope.top,rail.top,1f)
+            assertTrue("Reader ends before the outer composer gap",history.bottom<=envelope.top-6f*density+1f)
+            assertEquals("Composer keeps the required bottom inset",8f*density,frame.bottom-envelope.bottom,1f)
             for(tag in listOf("composer","prompt_send","turn_stop")) {
                 val node=ui.onNodeWithTag(tag).assertIsDisplayed().fetchSemanticsNode()
                 val visible=node.boundsInRoot
                 // Nonempty clipped bounds pass assertIsDisplayed(); require the whole control.
                 assertEquals("$tag visible height",node.size.height.toFloat(),visible.height,1f)
                 assertEquals("$tag visible width",node.size.width.toFloat(),visible.width,1f)
-                assertTrue("$tag stays in the viewport",visible.left>=frame.left&&visible.right<=frame.right&&visible.top>=frame.top&&visible.bottom<=frame.bottom)
+                assertTrue("$tag stays in the grouped composer",visible.left>=envelope.left&&visible.right<=envelope.right&&visible.top>=envelope.top&&visible.bottom<=envelope.bottom)
             }
             ui.onNodeWithTag("prompt_send").assertHeightIsAtLeast(56.dp)
+            ui.onNodeWithTag("composer_send_visual",useUnmergedTree=true).assertWidthIsEqualTo(38.dp).assertHeightIsEqualTo(38.dp)
             ui.onNodeWithTag("turn_stop").assertHeightIsAtLeast(48.dp)
             assertTrue(ui.onNodeWithTag("turn_stop").fetchSemanticsNode().boundsInRoot.bottom<=ui.onNodeWithTag("prompt_send").fetchSemanticsNode().boundsInRoot.top)
+            val contrast=(maxOf(composerContent.luminance(),composerSurface.luminance())+.05f)/(minOf(composerContent.luminance(),composerSurface.luminance())+.05f)
+            assertTrue("Composer content must contrast with its panel",contrast>=4.5f)
+            val pixels=ui.onNodeWithTag("composer_envelope").captureToImage().toPixelMap()
+            val radius=maxOf(1,(24f*density).toInt())
+            val interior=pixels[(radius*2).coerceAtMost(pixels.width-1),radius.coerceAtMost(pixels.height-1)].toArgb()
+            assertEquals("Text-free composer panel interior",composerSurface.toArgb(),interior)
+            assertNotEquals("Hairline differs from the panel at a straight text-free edge",pixels[(radius*2).coerceAtMost(pixels.width-1),0].toArgb(),pixels[(radius*2).coerceAtMost(pixels.width-1),1.coerceAtMost(pixels.height-1)].toArgb())
+            assertNotEquals("Rounded corner remains distinct from its text-free panel interior",interior,pixels[pixels.width-1,0].toArgb())
+            val sendPixels=ui.onNodeWithTag("prompt_send").captureToImage().toPixelMap()
+            assertEquals("The 56dp target has no elevation halo",composerSurface.toArgb(),sendPixels[0,0].toArgb())
         }
-        ui.onNodeWithTag("prompt_send").assertIsDisplayed().assertIsNotEnabled()
-        ui.onNodeWithTag("turn_stop").assertIsDisplayed().assertIsNotEnabled()
-        assertPinnedComposerVisible()
+        for(theme in listOf(Appearance.Light,Appearance.Dark)) for(height in listOf(240.dp,180.dp)) {
+            ui.runOnIdle {appearance=theme;availableHeight=height}
+            ui.waitForIdle()
+            try {ui.onNodeWithTag("prompt_send").assertIsDisplayed().assertIsNotEnabled()}catch(error:IllegalStateException) {
+                if(fixture==null||error.message?.startsWith("No compose hierarchies found in the app.")!=true) throw error
+                val observation=frameRootObservation("current",fixture,pinnedOwner,pinnedWindow,pinnedDecor,pinnedRoot)
+                afterRootObservation?.let {error.addSuppressed(IllegalStateException(it.label()))}
+                error.addSuppressed(IllegalStateException(observation.label()));throw error
+            }
+            ui.onNodeWithTag("turn_stop").assertIsDisplayed().assertIsNotEnabled()
+            if(theme==Appearance.Dark)assertEquals(Color(0xFF212121).toArgb(),composerSurface.toArgb())
+            assertPinnedComposerVisible()
+        }
+        ui.runOnIdle {appearance=Appearance.Light;availableHeight=240.dp}
+        ui.waitForIdle()
         ui.onNodeWithTag("omp_branches").performScrollTo().assertIsDisplayed()
         ui.onNodeWithTag("composer").assertIsDisplayed().performTextReplacement("Original\ndraft")
         ui.onNodeWithTag("send_deadline").performScrollTo().assertIsDisplayed()
         assertPinnedComposerVisible()
         assertEquals(0,sends);assertEquals(0,stops)
         ui.runOnIdle {admitted=true}
+        assertPinnedComposerVisible()
         ui.onNodeWithTag("prompt_send").assertIsEnabled().performClick()
         ui.onNodeWithTag("turn_stop").assertIsEnabled().performClick()
         assertEquals("Original\ndraft",text);assertEquals(1,sends);assertEquals(1,stops)
@@ -167,18 +248,38 @@ class ConversationContentTest {
 
     @Test fun syntheticGalleryShowsStateBaselineAndLightDarkTextContrast() {
         var appearance by mutableStateOf(Appearance.Light)
-        var contrast=0f
+        var ordinaryContrast=0f;var blueContrast=0f;var statusContrast=0f
+        var primary=Color.Unspecified;var density=1f
         ui.setContent {GoatrTheme(appearance) {
             val colors=MaterialTheme.colorScheme
-            val pairs=listOf(colors.onSurface to colors.surface,colors.onPrimary to colors.primary,
-                colors.onPrimaryContainer to colors.primaryContainer,colors.onSurfaceVariant to colors.surfaceVariant,colors.error to colors.surface)
-            SideEffect {contrast=pairs.minOf {(ink,paper)->val a=ink.luminance();val b=paper.luminance();(maxOf(a,b)+0.05f)/(minOf(a,b)+0.05f)}}
+            val status=LocalStatusColors.current
+            density=LocalDensity.current.density;primary=colors.primary
+            val roles=listOf(colors.onSurface to colors.surface,colors.onPrimary to colors.primary,
+                colors.onPrimaryContainer to colors.primaryContainer,colors.onSecondary to colors.secondary,
+                colors.onSecondaryContainer to colors.secondaryContainer,colors.onTertiary to colors.tertiary,
+                colors.onSurfaceVariant to colors.surfaceVariant,colors.error to colors.surface)
+            val statuses=listOf(status.positiveContent to status.positiveContainer,status.attentionContent to status.attentionContainer,
+                status.neutralContent to status.neutralContainer,status.mutedContent to status.mutedContainer)
+            SideEffect {
+                fun contrast(ink:Color,paper:Color):Float {val a=ink.luminance();val b=paper.luminance();return (maxOf(a,b)+.05f)/(minOf(a,b)+.05f)}
+                ordinaryContrast=roles.minOf {(ink,paper)->contrast(ink,paper)}
+                blueContrast=listOf(colors.background,colors.surface,colors.surfaceVariant).minOf {contrast(colors.tertiary,it)}
+                statusContrast=statuses.minOf {(ink,paper)->contrast(ink,paper)}
+            }
             GoatrComponentGallery()
         }}
         for(theme in listOf(Appearance.Light,Appearance.Dark)) {
             ui.runOnIdle {appearance=theme}
+            ui.waitForIdle()
             ui.onNodeWithTag("gallery_disabled").performScrollTo().assertIsNotEnabled()
-            ui.runOnIdle {assertTrue("Actual palette ordinary text contrast",contrast>=4.5f)}
+            ui.runOnIdle {
+                assertTrue("Actual palette ordinary text contrast",ordinaryContrast>=4.5f)
+                assertTrue("Blue markdown accent must contrast with every neutral surface",blueContrast>=4.5f)
+                assertTrue("Actual status labels must contrast with their status surfaces",statusContrast>=4.5f)
+            }
+            val pixels=ui.onNodeWithTag("gallery_action").captureToImage().toPixelMap()
+            val inset=(8f*density).toInt().coerceIn(0,pixels.width-1)
+            assertEquals("Actual primary action uses the current neutral primary",primary.toArgb(),pixels[inset,pixels.height/2].toArgb())
         }
     }
     @Test fun actualNativeMarkdownCopiesExactBackingAndRejectsNonHttpNavigation() {
@@ -295,20 +396,56 @@ class ConversationContentTest {
     }
 
     @Test fun assistantMessageBackgroundIsTransparentWhileUserAndNativeToolStayContained() {
-        var user=Color.Unspecified;var tool=Color.Unspecified
-        ui.setContent {GoatrTheme {
-            user=MaterialTheme.colorScheme.primaryContainer;tool=MaterialTheme.colorScheme.surface
-            Column(Modifier.width(240.dp).background(Color.Magenta)) {
-                Box(Modifier.testTag("assistant_style")){HistoryRecordContainer(false,true){Box(Modifier.fillMaxWidth().height(64.dp))}}
-                Box(Modifier.testTag("user_style")){HistoryRecordContainer(true,false){Box(Modifier.fillMaxWidth().height(64.dp))}}
-                Box(Modifier.testTag("tool_style")){HistoryRecordContainer(false,false){Box(Modifier.fillMaxWidth().height(64.dp))}}
+        fun phase(value:String) {InstrumentationRegistry.getInstrumentation().sendStatus(1,android.os.Bundle().apply {putString("goatr_public_fixture_phase",value)})}
+        phase("method_entry")
+        var appearance by mutableStateOf(Appearance.Light)
+        var fontScale by mutableStateOf(1f);var legacyUser by mutableStateOf(false)
+        var user=Color.Unspecified;var userContent=Color.Unspecified;var legacyContainer=Color.Unspecified;var tool=Color.Unspecified;var density=1f
+        phase("before_content")
+        ui.setContent {GoatrTheme(appearance) {
+            val currentDensity=LocalDensity.current
+            density=currentDensity.density
+            CompositionLocalProvider(LocalDensity provides Density(currentDensity.density,fontScale)) {
+                user=LocalUserMessageColors.current.container;userContent=LocalUserMessageColors.current.content;legacyContainer=MaterialTheme.colorScheme.primaryContainer;tool=MaterialTheme.colorScheme.surface
+                Column(Modifier.width(240.dp).background(Color.Magenta)) {
+                    Box(Modifier.testTag("assistant_style")){HistoryRecordContainer(false,true){Box(Modifier.fillMaxWidth().height(64.dp))}}
+                    Box(Modifier.testTag("user_style")){HistoryRecordContainer(true,false,userMessage=!legacyUser){androidx.compose.material3.Text("Public synthetic user message",modifier=Modifier.padding(horizontal=12.dp,vertical=8.dp).testTag("user_message_text"))}}
+                    Box(Modifier.testTag("tool_style")){HistoryRecordContainer(false,false){Box(Modifier.fillMaxWidth().height(64.dp))}}
+                }
             }
         }}
+        phase("after_content")
         fun middle(tag:String):Int {val pixels=ui.onNodeWithTag(tag).captureToImage().toPixelMap();return pixels[pixels.width/2,pixels.height/2].toArgb()}
-        assertEquals(Color.Magenta.toArgb(),middle("assistant_style"))
-        assertEquals(user.toArgb(),middle("user_style"))
-        assertEquals(tool.toArgb(),middle("tool_style"))
-        assertTrue(ui.onNodeWithTag("history_user_message").fetchSemanticsNode().boundsInRoot.width<ui.onNodeWithTag("assistant_style").fetchSemanticsNode().boundsInRoot.width)
+        fun userInterior():Int {val pixels=ui.onNodeWithTag("user_style").captureToImage().toPixelMap();val radiusPx=maxOf(1,(14f*density).toInt());return pixels[pixels.width-radiusPx*2,radiusPx/2].toArgb()}
+        fun assertPresentation(expectedUser:Color,expectedTool:Color) {
+            assertEquals(Color.Magenta.toArgb(),middle("assistant_style"))
+            assertEquals(expectedUser.toArgb(),userInterior())
+            assertEquals(expectedTool.toArgb(),middle("tool_style"))
+            val userBounds=ui.onNodeWithTag("history_user_message").fetchSemanticsNode().boundsInRoot
+            val assistantBounds=ui.onNodeWithTag("assistant_style").fetchSemanticsNode().boundsInRoot
+            assertEquals(assistantBounds.width*.88f,userBounds.width,1f)
+            val pixels=ui.onNodeWithTag("user_style").captureToImage().toPixelMap()
+            val radiusPx=maxOf(1,(14f*density).toInt())
+            assertNotEquals(expectedUser.toArgb(),pixels[pixels.width-1,0].toArgb())
+            assertEquals(expectedUser.toArgb(),pixels[pixels.width-radiusPx*2,radiusPx/2].toArgb())
+            val textBounds=ui.onNodeWithTag("user_message_text").fetchSemanticsNode().boundsInRoot
+            assertTrue("Public user text must remain inside its bubble",textBounds.left>=userBounds.left&&textBounds.top>=userBounds.top&&textBounds.right<=userBounds.right&&textBounds.bottom<=userBounds.bottom)
+            val contrast=(maxOf(userContent.luminance(),expectedUser.luminance())+.05f)/(minOf(userContent.luminance(),expectedUser.luminance())+.05f)
+            assertTrue("User message content must contrast with its container",contrast>=4.5f)
+        }
+        for(theme in listOf(Appearance.Light,Appearance.Dark)) for(scale in listOf(1f,2f)) {
+            ui.runOnIdle {appearance=theme;fontScale=scale;legacyUser=false}
+            ui.waitForIdle()
+            if(theme==Appearance.Dark)assertEquals(Color(0xFF323232).toArgb(),user.toArgb())
+            assertPresentation(user,tool)
+        }
+        phase("after_primary_variants")
+        for(theme in listOf(Appearance.Light,Appearance.Dark)) {
+            ui.runOnIdle {appearance=theme;fontScale=1f;legacyUser=true}
+            ui.waitForIdle()
+            assertEquals(legacyContainer.toArgb(),userInterior())
+        }
+        phase("after_legacy_variants")
     }
 
     @Test fun presentationSwitchHasOneLabelledLargeTouchOwnerAndTogglesExactlyOnce() {
@@ -334,7 +471,7 @@ class ConversationContentTest {
         val begin=GridBegin(GridMode.Replace,Uint(0),Uint(2),Uint(1),null,false,false,Uint(1),false)
         val cells=listOf(GridCell("X",Uint(1),GridColor.Default,GridColor.Default,attributes),GridCell(" ",Uint(1),GridColor.Default,GridColor.Default,attributes.copy(blink=false)))
         val grid=TerminalGrid(begin,cells,true)
-        ui.setContent {GoatrTheme {TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.width(240.dp).height(96.dp),motionEnabled=false)}}
+        ui.setContent {GoatrTheme {TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.width(240.dp).height(96.dp),displayScale=null,motionEnabled=false)}}
         val canvas=ui.onNodeWithTag("terminal_grid")
         ui.onNodeWithText("X").assertDoesNotExist()
         val actions=canvas.fetchSemanticsNode().config[SemanticsActions.CustomActions]
@@ -353,6 +490,88 @@ class ConversationContentTest {
         action("Reset local view")
         assertTrue(samePixels(steady,canvas.captureToImage()))
         assertSame(begin,grid.begin);assertSame(cells,grid.cells)
+    }
+
+    @Test fun terminalDisplayScaleRestoresFromIsolatedPreferencesAndKeepsItsCanvasAndControlSynchronized() {
+        val base=InstrumentationRegistry.getInstrumentation().targetContext
+        val namespace="terminal_display_scale_${System.nanoTime()}"
+        val isolated=object:android.content.ContextWrapper(base) {
+            override fun getSharedPreferences(name:String,mode:Int)=base.getSharedPreferences("$namespace.$name",mode)
+        }
+        try {
+            val preferences=TerminalAppearancePreferences(isolated)
+            preferences.saveScale(1.5f)
+            val begin=GridBegin(GridMode.Replace,Uint(0),Uint(1),Uint(1),null,false,false,Uint(1),false)
+            val grid=TerminalGrid(begin,listOf(GridCell("X",Uint(1),GridColor.Default,GridColor.Default,GridAttributes(false,false,false,false,false,GridUnderline.None))),false)
+            lateinit var state:TerminalDisplayScaleState
+            ui.setContent {GoatrTheme {
+                state=remember {TerminalDisplayScaleState(preferences.loadScale(),preferences::saveScale)}
+                Column(Modifier.width(240.dp).height(144.dp)) {
+                    TerminalDisplayScaleControl(state)
+                    TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.weight(1f),displayScale=state,motionEnabled=false)
+                }
+            }}
+            ui.onNodeWithTag("terminal_display_scale").assertTextEquals("Display scale · 150%")
+            val canvas=ui.onNodeWithTag("terminal_grid")
+            canvas.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"150 percent zoom, view origin"))
+            val action=canvas.fetchSemanticsNode().config[SemanticsActions.CustomActions].single {it.label=="Zoom in locally"}
+            ui.runOnIdle {assertTrue(action.action())}
+            assertEquals(1.875f,state.value,0f)
+            ui.onNodeWithTag("terminal_display_scale").assertTextEquals("Display scale · 187%")
+            ui.waitUntil(2000) {preferences.loadScale()>1.8f}
+            val move=canvas.fetchSemanticsNode().config[SemanticsActions.CustomActions].single {it.label=="Move view right"}
+            ui.runOnIdle {assertTrue(move.action())}
+            canvas.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"187 percent zoom, local pan active"))
+            ui.onNodeWithTag("terminal_display_scale_reset").performClick()
+            canvas.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"100 percent zoom, view origin"))
+            assertEquals(TERMINAL_DISPLAY_SCALE_DEFAULT,preferences.loadScale(),0f)
+            assertSame(begin,grid.begin)
+        } finally {
+            base.deleteSharedPreferences("$namespace.local_presentation")
+        }
+    }
+
+    @Test fun terminalDisplayScaleFlushesItsCurrentValueWhenCanvasDisposesBeforeDebounceAndRestoresIt() {
+        val base=InstrumentationRegistry.getInstrumentation().targetContext
+        val namespace="terminal_display_scale_dispose_${System.nanoTime()}"
+        val isolated=object:android.content.ContextWrapper(base) {
+            override fun getSharedPreferences(name:String,mode:Int)=base.getSharedPreferences("$namespace.$name",mode)
+        }
+        val oldAutoAdvance=ui.mainClock.autoAdvance
+        try {
+            val preferences=TerminalAppearancePreferences(isolated)
+            val begin=GridBegin(GridMode.Replace,Uint(0),Uint(1),Uint(1),null,false,false,Uint(1),false)
+            val grid=TerminalGrid(begin,listOf(GridCell("X",Uint(1),GridColor.Default,GridColor.Default,GridAttributes(false,false,false,false,false,GridUnderline.None))),false)
+            var shown by mutableStateOf(true)
+            var restorePhase by mutableStateOf(false)
+            lateinit var state:TerminalDisplayScaleState
+            lateinit var restored:TerminalDisplayScaleState
+            ui.mainClock.autoAdvance=false
+            ui.setContent {GoatrTheme {
+                if(!restorePhase) {
+                    state=remember {TerminalDisplayScaleState(preferences.loadScale(),preferences::saveScale)}
+                    if(shown)TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.width(240.dp).height(96.dp),displayScale=state,motionEnabled=false)
+                } else {
+                    restored=remember {TerminalDisplayScaleState(preferences.loadScale(),preferences::saveScale)}
+                    TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.width(240.dp).height(96.dp),displayScale=restored,motionEnabled=false)
+                }
+            }}
+            ui.mainClock.advanceTimeByFrame()
+            val action=ui.onNodeWithTag("terminal_grid").fetchSemanticsNode().config[SemanticsActions.CustomActions].single {it.label=="Zoom in locally"}
+            ui.runOnIdle {assertTrue(action.action());shown=false}
+            ui.mainClock.advanceTimeByFrame()
+            assertEquals(1.25f,state.value,0f)
+            assertEquals(1.25f,preferences.loadScale(),0f)
+            ui.runOnIdle {restorePhase=true}
+            ui.mainClock.advanceTimeByFrame()
+            assertNotSame(state,restored)
+            assertEquals(1.25f,restored.value,0f)
+            ui.onNodeWithTag("terminal_grid").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,"125 percent zoom, view origin"))
+            assertSame(begin,grid.begin)
+        } finally {
+            ui.mainClock.autoAdvance=oldAutoAdvance
+            base.deleteSharedPreferences("$namespace.local_presentation")
+        }
     }
 
     private fun readerRecord(index:Int)=HistoryRecord(Id("reader-$index"),order=Uint(index.toLong()),role=Role.Assistant,kind=RecordKind.Message,source=RecordSource.Live,complete=true,sourceTruncated=false)
@@ -501,7 +720,7 @@ class ConversationContentTest {
         ui.setContent {GoatrTheme(Appearance.Dark) {
             val density=LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density,scale)) {
-                TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.width(240.dp).height(96.dp),motionEnabled=false)
+                TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.width(240.dp).height(96.dp),displayScale=null,motionEnabled=false)
             }
         }}
         val canvas=ui.onNodeWithTag("terminal_grid")
@@ -568,7 +787,7 @@ class ConversationContentTest {
                 val currentReference=remember{mutableStateOf<DirectTerminalInputView?>(null)}
                 reference=currentReference
                 ShellTerminalFrame(Modifier.width(320.dp).height(height).testTag("bounded_shell_frame"),
-                    grid={TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.fillMaxSize(),motionEnabled=false)},
+                    grid={TerminalGridCanvas(grid,TerminalAppearance.Dark,Modifier.fillMaxSize(),displayScale=null,motionEnabled=false)},
                     rail={ShellEssentialRail(input=true,direct=true,pasteAllowed=true,controlBegun=controlBegun,
                         controlAllowed=true,resizeAllowed=true,history=history,historyAllowed=false,
                         onPaste={pastes++},onMode={fail("Layout never changes input mode")},

@@ -26,6 +26,7 @@ internal enum class MaterialGlyph(@DrawableRes val drawable: Int) {
     Stop(R.drawable.ic_material_stop),
     Copy(R.drawable.ic_material_content_copy),
     ExpandMore(R.drawable.ic_material_expand_more),
+    MoreVert(R.drawable.ic_material_more_vert),
     Back(R.drawable.ic_material_arrow_back),
     Menu(R.drawable.ic_material_menu),
     Close(R.drawable.ic_material_close),

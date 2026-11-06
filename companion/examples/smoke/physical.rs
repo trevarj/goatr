@@ -9,6 +9,11 @@ const APP: &str = "io.github.trevarj.goatr.debug";
 const TEST: &str = "io.github.trevarj.goatr.debug.test";
 const VERIFY: &str = "io.github.trevarj.goatr.debug.verify";
 const PRODUCT_RUNNER: &str = "io.github.trevarj.goatr.debug.test/io.github.trevarj.goatr.OwnedInstrumentationRunner";
+const PAIRING_TEST_CLASS: &str = "io.github.trevarj.goatr.GoatrConnectionTest";
+const PAIRING_TEST_METHOD: &str = "installed_subject_private_pairing_checkpoint";
+const PAIRING_TEST_SELECTOR: &str = "io.github.trevarj.goatr.GoatrConnectionTest#installed_subject_private_pairing_checkpoint";
+const RETIREMENT_TEST_METHOD: &str = "installed_subject_owned_retirement_checkpoint";
+const RETIREMENT_TEST_SELECTOR: &str = "io.github.trevarj.goatr.GoatrConnectionTest#installed_subject_owned_retirement_checkpoint";
 const UI_RUNNER: &str = "io.github.trevarj.goatr.debug.test/io.github.trevarj.goatr.OwnedUiAutomationRunner";
 const MAX_CONTROL: usize = 131_072;
 const MVP_AARS: [(&str, &str, &str); 5] = [
@@ -531,6 +536,37 @@ pub(super) fn host_preflight(evidence:&Path,policy:ControllerPolicy<'_>,admitted
 
 #[derive(Clone)]
 struct PhysicalAdb { binary: PathBuf, serial: String }
+#[derive(Clone,Debug,Eq,Ord,PartialEq,PartialOrd)]
+struct PairingCheckpointReverseRow {transport:String,local:u16,remote:u16}
+#[derive(Clone)]
+struct PairingCheckpointReverseBaseline {rows:BTreeSet<PairingCheckpointReverseRow>}
+fn pairing_checkpoint_tcp_endpoint(value:&str)->io::Result<u16> {
+    let digits=value.strip_prefix("tcp:").ok_or_else(||failure("retained pairing reverse endpoint is invalid"))?;if digits.is_empty()||digits.len()>5||digits.len()>1&&digits.starts_with('0')||!digits.bytes().all(|byte|byte.is_ascii_digit()){return Err(failure("retained pairing reverse endpoint is invalid"));}let port=digits.parse::<u16>().map_err(|_|failure("retained pairing reverse endpoint is invalid"))?;if port==0{return Err(failure("retained pairing reverse endpoint is invalid"));}Ok(port)
+}
+fn pairing_checkpoint_reverse_rows(bytes:&[u8])->io::Result<BTreeSet<PairingCheckpointReverseRow>> {
+    let text=std::str::from_utf8(bytes).map_err(|_|failure("retained pairing reverse list is not UTF-8"))?;if text.len()>65_536||text.contains('\r'){return Err(failure("retained pairing reverse list is malformed"));}let rows=text.trim_end_matches('\n');if rows.is_empty(){return Ok(BTreeSet::new());}let mut parsed=BTreeSet::new();for row in rows.split('\n') {if row.is_empty(){return Err(failure("retained pairing reverse list has an interior blank row"));}let fields:Vec<_>=row.split(' ').collect();if fields.len()!=3||fields.iter().any(|field|field.is_empty())||fields[0]!="UsbFfs"{return Err(failure("retained pairing reverse row is malformed"));}let parsed_row=PairingCheckpointReverseRow {transport:fields[0].to_owned(),local:pairing_checkpoint_tcp_endpoint(fields[1])?,remote:pairing_checkpoint_tcp_endpoint(fields[2])?};if !parsed.insert(parsed_row){return Err(failure("retained pairing reverse list repeats a row"));}}Ok(parsed)
+}
+impl PairingCheckpointReverseBaseline {
+    fn port_is_absent(&self,port:u16)->bool {self.rows.iter().all(|row|row.local!=port&&row.remote!=port)}
+}
+fn pairing_checkpoint_reverse_expected(baseline:&PairingCheckpointReverseBaseline,own:Option<&PairingCheckpointReverseRow>,current:&BTreeSet<PairingCheckpointReverseRow>)->io::Result<()> {
+    let mut expected=baseline.rows.clone();if let Some(own)=own {if !expected.insert(own.clone()){return Err(failure("retained pairing own reverse conflicts with the preserved baseline"));}}if &expected!=current{return Err(failure("retained pairing reverse mapping changed"));}Ok(())
+}
+async fn pairing_checkpoint_selected_forwards_absent(adb:&PhysicalAdb)->io::Result<()> {
+    let forwards=adb.invoke(&["forward","--list"],65_536).await?;let rows=std::str::from_utf8(&forwards).map_err(|_|failure("retained pairing forward list is not UTF-8"))?;if rows.len()>65_536||rows.lines().any(|row|row.split_whitespace().next()==Some(adb.serial.as_str())){return Err(failure("retained pairing selected device has an ADB forward"));}Ok(())
+}
+async fn pairing_checkpoint_reverse_read(adb:&PhysicalAdb)->io::Result<BTreeSet<PairingCheckpointReverseRow>> {
+    let reverse=adb.invoke(&["reverse","--list"],65_536).await?;pairing_checkpoint_reverse_rows(&reverse)
+}
+async fn pairing_checkpoint_reverse_baseline(adb:&PhysicalAdb)->io::Result<PairingCheckpointReverseBaseline> {
+    pairing_checkpoint_selected_forwards_absent(adb).await?;Ok(PairingCheckpointReverseBaseline {rows:pairing_checkpoint_reverse_read(adb).await?})
+}
+async fn pairing_checkpoint_reverse_recheck(adb:&PhysicalAdb,baseline:&PairingCheckpointReverseBaseline,own:Option<&PairingCheckpointReverseRow>)->io::Result<()> {
+    pairing_checkpoint_selected_forwards_absent(adb).await?;let current=pairing_checkpoint_reverse_read(adb).await?;pairing_checkpoint_reverse_expected(baseline,own,&current)
+}
+async fn pairing_checkpoint_reverse_capture_own(adb:&PhysicalAdb,baseline:&PairingCheckpointReverseBaseline,port:u16)->io::Result<PairingCheckpointReverseRow> {
+    pairing_checkpoint_reverse_recheck(adb,baseline,None).await?;if !baseline.port_is_absent(port){return Err(failure("retained pairing listener endpoint conflicts with the preserved reverse baseline"));}let mapping=format!("tcp:{port}");adb.invoke(&["reverse","--no-rebind",&mapping,&mapping],4096).await?;pairing_checkpoint_selected_forwards_absent(adb).await?;let current=pairing_checkpoint_reverse_read(adb).await?;let mut added=current.difference(&baseline.rows);let own=added.next().cloned().ok_or_else(||failure("retained pairing reverse add did not produce one owned mapping"))?;if added.next().is_some()||own.local!=port||own.remote!=port{return Err(failure("retained pairing reverse add did not produce the expected owned mapping"));}pairing_checkpoint_reverse_expected(baseline,Some(&own),&current)?;Ok(own)
+}
 impl PhysicalAdb {
     fn command(&self) -> AsyncCommand {
         let mut command = AsyncCommand::new(&self.binary);
@@ -595,15 +631,19 @@ impl PhysicalAdb {
         }).await.map_err(|_| failure("physical private control record deadline expired"))?
     }
     async fn default_product_process_absent(&self)->io::Result<()> {
+        self.package_process_absent(APP).await
+    }
+    async fn package_process_absent(&self,package:&str)->io::Result<()> {
+        if !matches!(package,APP|TEST){return Err(failure("physical process-absence subject is outside the retained pairing checkpoint"));}
         self.recheck_server().await?;
-        let remote=["pidof",APP].into_iter().map(super::shell_literal).collect::<io::Result<Vec<_>>>()?.join(" ");
+        let remote=["pidof",package].into_iter().map(super::shell_literal).collect::<io::Result<Vec<_>>>()?.join(" ");
         let mut child=self.command().args(["shell",&remote]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
         let stdout=child.stdout.take().ok_or_else(||failure("product process stdout unavailable"))?;
         let stderr=child.stderr.take().ok_or_else(||failure("product process stderr unavailable"))?;
         let out=async {let mut bytes=Vec::new();stdout.take(1025).read_to_end(&mut bytes).await?;if bytes.len()>1024{return Err(failure("product pidof output is oversized"));}Ok::<_,io::Error>(bytes)};
         let err=async {let mut bytes=Vec::new();stderr.take(1025).read_to_end(&mut bytes).await?;if bytes.len()>1024{return Err(failure("product pidof error is oversized"));}Ok::<_,io::Error>(bytes)};
         let (status,stdout,stderr)=timeout(Duration::from_secs(45),async{tokio::try_join!(child.wait(),out,err)}).await.map_err(|_|failure("product process absence query expired"))??;
-        if status.code()!=Some(1)||!stdout.is_empty()||!stderr.is_empty(){return Err(failure("prepared PRODUCT process is present or absence is unproved"));}
+        if status.code()!=Some(1)||!stdout.is_empty()||!stderr.is_empty(){return Err(failure("retained pairing subject process is present or absence is unproved"));}
         Ok(())
     }
     async fn qualify(args: &clap::ArgMatches) -> io::Result<(Self,PreparedDevice)> {
@@ -1230,6 +1270,1066 @@ impl ProductInstrumentation {
     }
 }
 
+#[derive(Clone)]
+enum PairingInstrumentationEvent { Owner(ProductEpoch), AwaitingForeground, ForegroundResumed }
+struct PairingInstrumentation { events:mpsc::Receiver<PairingInstrumentationEvent>, task:JoinHandle<io::Result<()>>, eof_summary:std::sync::Arc<std::sync::Mutex<Option<Value>>> }
+struct PairingJUnit {
+    class:Option<String>,test:Option<String>,numtests:Option<String>,current:Option<String>,id:Option<String>,
+    failure_stage:Option<&'static str>,started:bool,finished:bool,final_count:u8,
+}
+impl PairingJUnit {
+    fn new()->Self {Self {class:None,test:None,numtests:None,current:None,id:None,failure_stage:None,started:false,finished:false,final_count:0}}
+    fn closed_stage(value:&str)->Option<&'static str> {
+        let stage=value.strip_prefix("java.lang.AssertionError: pairing_checkpoint_")?;
+        match stage {"bootstrap"=>Some("bootstrap"),"test_body"=>Some("test_body"),"selector"=>Some("selector"),"runner"=>Some("runner"),"awaiting_foreground"=>Some("awaiting_foreground"),"activity_capture"=>Some("activity_capture"),"activity_capture_fixture"=>Some("activity_capture_fixture"),"activity_capture_owner"=>Some("activity_capture_owner"),"activity_capture_foreground"=>Some("activity_capture_foreground"),"activity_capture_window"=>Some("activity_capture_window"),"initial_scene"=>Some("initial_scene"),"live_info"=>Some("live_info"),"host_fresh"=>Some("host_fresh"),"navigate_menu"=>Some("navigate_menu"),"navigate_hosts"=>Some("navigate_hosts"),"pair_begin"=>Some("pair_begin"),"pair_begin_admission_preview_identity"=>Some("pair_begin_admission_preview_identity"),"pair_begin_admission_activity_identity"=>Some("pair_begin_admission_activity_identity"),"pair_begin_admission_activity_state"=>Some("pair_begin_admission_activity_state"),"pair_begin_admission_owner_identity"=>Some("pair_begin_admission_owner_identity"),"pair_begin_admission_owner_scene"=>Some("pair_begin_admission_owner_scene"),"pair_begin_admission_secure_state"=>Some("pair_begin_admission_secure_state"),"pair_begin_admission_window_focus"=>Some("pair_begin_admission_window_focus"),"pair_begin_admission_interactive"=>Some("pair_begin_admission_interactive"),"pair_begin_admission_keyguard"=>Some("pair_begin_admission_keyguard"),"pair_begin_admission_active_root"=>Some("pair_begin_admission_active_root"),"pair_begin_admission_root_identity"=>Some("pair_begin_admission_root_identity"),"pair_begin_admission_root_window"=>Some("pair_begin_admission_root_window"),"pair_begin_admission_eligible"=>Some("pair_begin_admission_eligible"),"pair_begin_node_admission_preview_identity"=>Some("pair_begin_node_admission_preview_identity"),"pair_begin_node_admission_activity_identity"=>Some("pair_begin_node_admission_activity_identity"),"pair_begin_node_admission_activity_state"=>Some("pair_begin_node_admission_activity_state"),"pair_begin_node_admission_owner_identity"=>Some("pair_begin_node_admission_owner_identity"),"pair_begin_node_admission_owner_scene"=>Some("pair_begin_node_admission_owner_scene"),"pair_begin_node_admission_secure_state"=>Some("pair_begin_node_admission_secure_state"),"pair_begin_node_admission_window_focus"=>Some("pair_begin_node_admission_window_focus"),"pair_begin_node_admission_interactive"=>Some("pair_begin_node_admission_interactive"),"pair_begin_node_admission_keyguard"=>Some("pair_begin_node_admission_keyguard"),"pair_begin_node_admission_active_root"=>Some("pair_begin_node_admission_active_root"),"pair_begin_node_admission_root_identity"=>Some("pair_begin_node_admission_root_identity"),"pair_begin_node_admission_root_window"=>Some("pair_begin_node_admission_root_window"),"pair_begin_node_admission_eligible"=>Some("pair_begin_node_admission_eligible"),"pair_begin_revalidation_preview_identity"=>Some("pair_begin_revalidation_preview_identity"),"pair_begin_revalidation_activity_identity"=>Some("pair_begin_revalidation_activity_identity"),"pair_begin_revalidation_activity_state"=>Some("pair_begin_revalidation_activity_state"),"pair_begin_revalidation_owner_identity"=>Some("pair_begin_revalidation_owner_identity"),"pair_begin_revalidation_owner_scene"=>Some("pair_begin_revalidation_owner_scene"),"pair_begin_revalidation_secure_state"=>Some("pair_begin_revalidation_secure_state"),"pair_begin_revalidation_window_focus"=>Some("pair_begin_revalidation_window_focus"),"pair_begin_revalidation_interactive"=>Some("pair_begin_revalidation_interactive"),"pair_begin_revalidation_keyguard"=>Some("pair_begin_revalidation_keyguard"),"pair_begin_revalidation_active_root"=>Some("pair_begin_revalidation_active_root"),"pair_begin_revalidation_root_identity"=>Some("pair_begin_revalidation_root_identity"),"pair_begin_revalidation_root_window"=>Some("pair_begin_revalidation_root_window"),"pair_begin_revalidation_eligible"=>Some("pair_begin_revalidation_eligible"),"pair_begin_node_lookup"=>Some("pair_begin_node_lookup"),"pair_begin_node_visibility"=>Some("pair_begin_node_visibility"),"pair_begin_node_scroll"=>Some("pair_begin_node_scroll"),"pair_begin_node_enabled"=>Some("pair_begin_node_enabled"),"pair_begin_click"=>Some("pair_begin_click"),"pair_begin_idle"=>Some("pair_begin_idle"),"pair_begin_postclick_wait"=>Some("pair_begin_postclick_wait"),"pairing_secure"=>Some("pairing_secure"),"invite_once"=>Some("invite_once"),"invite_nonempty"=>Some("invite_nonempty"),"paste_admission"=>Some("paste_admission"),"preview_admission"=>Some("preview_admission"),"preview_once"=>Some("preview_once"),"preview_exact"=>Some("preview_exact"),"confirm_admission"=>Some("confirm_admission"),"confirm_wait_preview_identity"=>Some("confirm_wait_preview_identity"),"confirm_wait_activity_identity"=>Some("confirm_wait_activity_identity"),"confirm_wait_activity_state"=>Some("confirm_wait_activity_state"),"confirm_wait_owner_identity"=>Some("confirm_wait_owner_identity"),"confirm_wait_owner_scene"=>Some("confirm_wait_owner_scene"),"confirm_wait_secure_state"=>Some("confirm_wait_secure_state"),"confirm_wait_window_focus"=>Some("confirm_wait_window_focus"),"confirm_wait_interactive"=>Some("confirm_wait_interactive"),"confirm_wait_keyguard"=>Some("confirm_wait_keyguard"),"confirm_wait_active_root"=>Some("confirm_wait_active_root"),"confirm_wait_root_identity"=>Some("confirm_wait_root_identity"),"confirm_wait_root_window"=>Some("confirm_wait_root_window"),"confirm_click"=>Some("confirm_click"),"confirm_idle"=>Some("confirm_idle"),"confirm_postclick_wait"=>Some("confirm_postclick_wait"),"confirm_postclick_hello_present_screen_mismatch"=>Some("confirm_postclick_hello_present_screen_mismatch"),"confirm_postclick_hello_present_busy"=>Some("confirm_postclick_hello_present_busy"),"confirm_postclick_error_invalid_request"=>Some("confirm_postclick_error_invalid_request"),"confirm_postclick_error_unsupported_version"=>Some("confirm_postclick_error_unsupported_version"),"confirm_postclick_error_unsupported_method"=>Some("confirm_postclick_error_unsupported_method"),"confirm_postclick_error_unauthorized"=>Some("confirm_postclick_error_unauthorized"),"confirm_postclick_error_pairing_failed"=>Some("confirm_postclick_error_pairing_failed"),"confirm_postclick_error_stale_host"=>Some("confirm_postclick_error_stale_host"),"confirm_postclick_error_stale_session"=>Some("confirm_postclick_error_stale_session"),"confirm_postclick_error_not_found"=>Some("confirm_postclick_error_not_found"),"confirm_postclick_error_not_ready"=>Some("confirm_postclick_error_not_ready"),"confirm_postclick_error_invalid_answer"=>Some("confirm_postclick_error_invalid_answer"),"confirm_postclick_error_already_resolved"=>Some("confirm_postclick_error_already_resolved"),"confirm_postclick_error_action_id_conflict"=>Some("confirm_postclick_error_action_id_conflict"),"confirm_postclick_error_action_capacity"=>Some("confirm_postclick_error_action_capacity"),"confirm_postclick_error_content_expired"=>Some("confirm_postclick_error_content_expired"),"confirm_postclick_error_cursor_expired"=>Some("confirm_postclick_error_cursor_expired"),"confirm_postclick_error_busy"=>Some("confirm_postclick_error_busy"),"confirm_postclick_error_resource_limit"=>Some("confirm_postclick_error_resource_limit"),"confirm_postclick_error_rate_limited"=>Some("confirm_postclick_error_rate_limited"),"confirm_postclick_error_timeout"=>Some("confirm_postclick_error_timeout"),"confirm_postclick_error_backend_error"=>Some("confirm_postclick_error_backend_error"),"confirm_postclick_error_push_rejected"=>Some("confirm_postclick_error_push_rejected"),"confirm_postclick_error_stale_registration"=>Some("confirm_postclick_error_stale_registration"),"confirm_postclick_failure_dial_timeout"=>Some("confirm_postclick_failure_dial_timeout"),"confirm_postclick_failure_dial_timeout_endpoint_setup"=>Some("confirm_postclick_failure_dial_timeout_endpoint_setup"),"confirm_postclick_failure_dial_timeout_connect_admitted"=>Some("confirm_postclick_failure_dial_timeout_connect_admitted"),"confirm_postclick_failure_dial_timeout_origin_unavailable"=>Some("confirm_postclick_failure_dial_timeout_origin_unavailable"),"confirm_postclick_failure_dial_known"=>Some("confirm_postclick_failure_dial_known"),"confirm_postclick_failure_dial_protocol"=>Some("confirm_postclick_failure_dial_protocol"),"confirm_postclick_failure_dial_transport"=>Some("confirm_postclick_failure_dial_transport"),"confirm_postclick_failure_dial_other"=>Some("confirm_postclick_failure_dial_other"),"confirm_postclick_failure_open_stream_timeout"=>Some("confirm_postclick_failure_open_stream_timeout"),"confirm_postclick_failure_open_stream_known"=>Some("confirm_postclick_failure_open_stream_known"),"confirm_postclick_failure_open_stream_protocol"=>Some("confirm_postclick_failure_open_stream_protocol"),"confirm_postclick_failure_open_stream_transport"=>Some("confirm_postclick_failure_open_stream_transport"),"confirm_postclick_failure_open_stream_other"=>Some("confirm_postclick_failure_open_stream_other"),"confirm_postclick_failure_hello_timeout"=>Some("confirm_postclick_failure_hello_timeout"),"confirm_postclick_failure_hello_known"=>Some("confirm_postclick_failure_hello_known"),"confirm_postclick_failure_hello_protocol"=>Some("confirm_postclick_failure_hello_protocol"),"confirm_postclick_failure_hello_transport"=>Some("confirm_postclick_failure_hello_transport"),"confirm_postclick_failure_hello_other"=>Some("confirm_postclick_failure_hello_other"),"confirm_postclick_failure_snapshot_timeout"=>Some("confirm_postclick_failure_snapshot_timeout"),"confirm_postclick_failure_snapshot_known"=>Some("confirm_postclick_failure_snapshot_known"),"confirm_postclick_failure_snapshot_protocol"=>Some("confirm_postclick_failure_snapshot_protocol"),"confirm_postclick_failure_snapshot_transport"=>Some("confirm_postclick_failure_snapshot_transport"),"confirm_postclick_failure_snapshot_other"=>Some("confirm_postclick_failure_snapshot_other"),"confirm_postclick_failure_reader_timeout"=>Some("confirm_postclick_failure_reader_timeout"),"confirm_postclick_failure_reader_known"=>Some("confirm_postclick_failure_reader_known"),"confirm_postclick_failure_reader_protocol"=>Some("confirm_postclick_failure_reader_protocol"),"confirm_postclick_failure_reader_transport"=>Some("confirm_postclick_failure_reader_transport"),"confirm_postclick_failure_reader_other"=>Some("confirm_postclick_failure_reader_other"),"confirm_postclick_failure_recovery_timeout"=>Some("confirm_postclick_failure_recovery_timeout"),"confirm_postclick_failure_recovery_known"=>Some("confirm_postclick_failure_recovery_known"),"confirm_postclick_failure_recovery_protocol"=>Some("confirm_postclick_failure_recovery_protocol"),"confirm_postclick_failure_recovery_transport"=>Some("confirm_postclick_failure_recovery_transport"),"confirm_postclick_failure_recovery_other"=>Some("confirm_postclick_failure_recovery_other"),"confirm_postclick_stored_busy_nofailure"=>Some("confirm_postclick_stored_busy_nofailure"),"confirm_postclick_prestore_startup_connecting"=>Some("confirm_postclick_prestore_startup_connecting"),"confirm_postclick_prestore_no_startup"=>Some("confirm_postclick_prestore_no_startup"),"confirm_postclick_caught_stored"=>Some("confirm_postclick_caught_stored"),"confirm_postclick_caught_absent"=>Some("confirm_postclick_caught_absent"),"confirm_postclick_caught_absent_error_invalid_request"=>Some("confirm_postclick_caught_absent_error_invalid_request"),"confirm_postclick_caught_absent_error_unsupported_version"=>Some("confirm_postclick_caught_absent_error_unsupported_version"),"confirm_postclick_caught_absent_error_unsupported_method"=>Some("confirm_postclick_caught_absent_error_unsupported_method"),"confirm_postclick_caught_absent_error_unauthorized"=>Some("confirm_postclick_caught_absent_error_unauthorized"),"confirm_postclick_caught_absent_error_pairing_failed"=>Some("confirm_postclick_caught_absent_error_pairing_failed"),"confirm_postclick_caught_absent_error_stale_host"=>Some("confirm_postclick_caught_absent_error_stale_host"),"confirm_postclick_caught_absent_error_stale_session"=>Some("confirm_postclick_caught_absent_error_stale_session"),"confirm_postclick_caught_absent_error_not_found"=>Some("confirm_postclick_caught_absent_error_not_found"),"confirm_postclick_caught_absent_error_invalid_answer"=>Some("confirm_postclick_caught_absent_error_invalid_answer"),"confirm_postclick_caught_absent_error_already_resolved"=>Some("confirm_postclick_caught_absent_error_already_resolved"),"confirm_postclick_caught_absent_error_action_id_conflict"=>Some("confirm_postclick_caught_absent_error_action_id_conflict"),"confirm_postclick_caught_absent_error_action_capacity"=>Some("confirm_postclick_caught_absent_error_action_capacity"),"confirm_postclick_caught_absent_error_content_expired"=>Some("confirm_postclick_caught_absent_error_content_expired"),"confirm_postclick_caught_absent_error_cursor_expired"=>Some("confirm_postclick_caught_absent_error_cursor_expired"),"confirm_postclick_caught_absent_error_busy"=>Some("confirm_postclick_caught_absent_error_busy"),"confirm_postclick_caught_absent_error_resource_limit"=>Some("confirm_postclick_caught_absent_error_resource_limit"),"confirm_postclick_caught_absent_error_rate_limited"=>Some("confirm_postclick_caught_absent_error_rate_limited"),"confirm_postclick_caught_absent_error_timeout"=>Some("confirm_postclick_caught_absent_error_timeout"),"confirm_postclick_caught_absent_error_backend_error"=>Some("confirm_postclick_caught_absent_error_backend_error"),"confirm_postclick_caught_absent_error_push_rejected"=>Some("confirm_postclick_caught_absent_error_push_rejected"),"confirm_postclick_caught_absent_error_stale_registration"=>Some("confirm_postclick_caught_absent_error_stale_registration"),"confirm_postclick_caught_absent_error_not_ready_callback_owned"=>Some("confirm_postclick_caught_absent_error_not_ready_callback_owned"),"confirm_postclick_caught_absent_error_not_ready_callback_absent"=>Some("confirm_postclick_caught_absent_error_not_ready_callback_absent"),"confirm_postclick_caught_absent_protected_identity"=>Some("confirm_postclick_caught_absent_protected_identity"),"confirm_postclick_caught_absent_generic"=>Some("confirm_postclick_caught_absent_generic"),"confirm_postclick_caught_absent_unclassified"=>Some("confirm_postclick_caught_absent_unclassified"),"confirm_postclick_sessions_without_hello"=>Some("confirm_postclick_sessions_without_hello"),"confirm_postclick_pairing_idle"=>Some("confirm_postclick_pairing_idle"),"confirm_postclick_other_model"=>Some("confirm_postclick_other_model"),"pairing_exact"=>Some("pairing_exact"),"finish_admission"=>Some("finish_admission"),"finish_publication"=>Some("finish_publication"),"finish_once"=>Some("finish_once"),"finish_exact"=>Some("finish_exact"),"creation_selection"=>Some("creation_selection"),"creation_admission"=>Some("creation_admission"),"creation_source_admission"=>Some("creation_source_admission"),"creation_open_new_session"=>Some("creation_open_new_session"),"creation_host_chooser"=>Some("creation_host_chooser"),"creation_form_opening"=>Some("creation_form_opening"),"creation_server_picker"=>Some("creation_server_picker"),"creation_project_picker"=>Some("creation_project_picker"),"creation_exact_form_source"=>Some("creation_exact_form_source"),"creation_selected_fields"=>Some("creation_selected_fields"),"creation_provider"=>Some("creation_provider"),"creation_name"=>Some("creation_name"),"creation_enabled_wait"=>Some("creation_enabled_wait"),"creation_final_submit_admission"=>Some("creation_final_submit_admission"),"creation_click"=>Some("creation_click"),"creation_idle"=>Some("creation_idle"),"creation_receipt"=>Some("creation_receipt"),"creation_exact"=>Some("creation_exact"),"creation_verify"=>Some("creation_verify"),"chat_close_initial_deadline"=>Some("chat_close_initial_deadline"),"chat_close_initial_eligibility_preview_identity"=>Some("chat_close_initial_eligibility_preview_identity"),"chat_close_initial_eligibility_activity_identity"=>Some("chat_close_initial_eligibility_activity_identity"),"chat_close_initial_eligibility_activity_state"=>Some("chat_close_initial_eligibility_activity_state"),"chat_close_initial_eligibility_owner_identity"=>Some("chat_close_initial_eligibility_owner_identity"),"chat_close_initial_eligibility_owner_scene"=>Some("chat_close_initial_eligibility_owner_scene"),"chat_close_initial_eligibility_secure_state"=>Some("chat_close_initial_eligibility_secure_state"),"chat_close_initial_eligibility_window_focus"=>Some("chat_close_initial_eligibility_window_focus"),"chat_close_initial_eligibility_interactive"=>Some("chat_close_initial_eligibility_interactive"),"chat_close_initial_eligibility_keyguard"=>Some("chat_close_initial_eligibility_keyguard"),"chat_close_initial_eligibility_active_root"=>Some("chat_close_initial_eligibility_active_root"),"chat_close_initial_eligibility_root_identity"=>Some("chat_close_initial_eligibility_root_identity"),"chat_close_initial_eligibility_root_window"=>Some("chat_close_initial_eligibility_root_window"),"chat_close_initial_eligibility_eligible"=>Some("chat_close_initial_eligibility_eligible"),"chat_close_initial_window"=>Some("chat_close_initial_window"),"chat_close_initial_scope"=>Some("chat_close_initial_scope"),"chat_close_node_query"=>Some("chat_close_node_query"),"chat_close_initial_visibility"=>Some("chat_close_initial_visibility"),"chat_close_scroll"=>Some("chat_close_scroll"),"chat_close_enabled"=>Some("chat_close_enabled"),"chat_close_final_deadline"=>Some("chat_close_final_deadline"),"chat_close_final_eligibility_preview_identity"=>Some("chat_close_final_eligibility_preview_identity"),"chat_close_final_eligibility_activity_identity"=>Some("chat_close_final_eligibility_activity_identity"),"chat_close_final_eligibility_activity_state"=>Some("chat_close_final_eligibility_activity_state"),"chat_close_final_eligibility_owner_identity"=>Some("chat_close_final_eligibility_owner_identity"),"chat_close_final_eligibility_owner_scene"=>Some("chat_close_final_eligibility_owner_scene"),"chat_close_final_eligibility_secure_state"=>Some("chat_close_final_eligibility_secure_state"),"chat_close_final_eligibility_window_focus"=>Some("chat_close_final_eligibility_window_focus"),"chat_close_final_eligibility_interactive"=>Some("chat_close_final_eligibility_interactive"),"chat_close_final_eligibility_keyguard"=>Some("chat_close_final_eligibility_keyguard"),"chat_close_final_eligibility_active_root"=>Some("chat_close_final_eligibility_active_root"),"chat_close_final_eligibility_root_identity"=>Some("chat_close_final_eligibility_root_identity"),"chat_close_final_eligibility_root_window"=>Some("chat_close_final_eligibility_root_window"),"chat_close_final_eligibility_eligible"=>Some("chat_close_final_eligibility_eligible"),"chat_close_final_window"=>Some("chat_close_final_window"),"chat_close_final_scope"=>Some("chat_close_final_scope"),"chat_close_click"=>Some("chat_close_click"),"chat_close_idle"=>Some("chat_close_idle"),"chat_close_postclick"=>Some("chat_close_postclick"),"chat_close_final_creation_admission"=>Some("chat_close_final_creation_admission"),"chat_close_posteffect_scene"=>Some("chat_close_posteffect_scene"),"chat_close_posteffect_base_window"=>Some("chat_close_posteffect_base_window"),"chat_close_posteffect_modal_absent"=>Some("chat_close_posteffect_modal_absent"),"chat_close_posteffect_actions"=>Some("chat_close_posteffect_actions"),"chat_session_admission"=>Some("chat_session_admission"),"chat_session_scroll"=>Some("chat_session_scroll"),"chat_session_click"=>Some("chat_session_click"),"chat_session_wait"=>Some("chat_session_wait"),"chat_prompt_admission"=>Some("chat_prompt_admission"),"chat_prompt_text"=>Some("chat_prompt_text"),"chat_prompt_reservation"=>Some("chat_prompt_reservation"),"chat_prompt_click"=>Some("chat_prompt_click"),"chat_prompt_receipt"=>Some("chat_prompt_receipt"),"chat_prompt_exact"=>Some("chat_prompt_exact"),"chat_history"=>Some("chat_history"),"chat_observe"=>Some("chat_observe"),"terminal_admission"=>Some("terminal_admission"),"terminal_open"=>Some("terminal_open"),"terminal_popup"=>Some("terminal_popup"),"terminal_popup_wait"=>Some("terminal_popup_wait"),"terminal_popup_store"=>Some("terminal_popup_store"),"terminal_popup_window_deadline"=>Some("terminal_popup_window_deadline"),"terminal_popup_window_sdk"=>Some("terminal_popup_window_sdk"),"terminal_popup_window_eligibility_preview_identity"=>Some("terminal_popup_window_eligibility_preview_identity"),"terminal_popup_window_eligibility_activity_identity"=>Some("terminal_popup_window_eligibility_activity_identity"),"terminal_popup_window_eligibility_activity_state"=>Some("terminal_popup_window_eligibility_activity_state"),"terminal_popup_window_eligibility_owner_identity"=>Some("terminal_popup_window_eligibility_owner_identity"),"terminal_popup_window_eligibility_owner_scene"=>Some("terminal_popup_window_eligibility_owner_scene"),"terminal_popup_window_eligibility_secure_state"=>Some("terminal_popup_window_eligibility_secure_state"),"terminal_popup_window_eligibility_window_focus"=>Some("terminal_popup_window_eligibility_window_focus"),"terminal_popup_window_eligibility_interactive"=>Some("terminal_popup_window_eligibility_interactive"),"terminal_popup_window_eligibility_keyguard"=>Some("terminal_popup_window_eligibility_keyguard"),"terminal_popup_window_eligibility_active_root"=>Some("terminal_popup_window_eligibility_active_root"),"terminal_popup_window_eligibility_root_identity"=>Some("terminal_popup_window_eligibility_root_identity"),"terminal_popup_window_eligibility_root_window"=>Some("terminal_popup_window_eligibility_root_window"),"terminal_popup_window_eligibility_eligible"=>Some("terminal_popup_window_eligibility_eligible"),"terminal_popup_window_active_root"=>Some("terminal_popup_window_active_root"),"terminal_popup_window_exact_popup_window"=>Some("terminal_popup_window_exact_popup_window"),"terminal_popup_window_dialog_tag"=>Some("terminal_popup_window_dialog_tag"),"terminal_popup_window_target_tag"=>Some("terminal_popup_window_target_tag"),"terminal_popup_window_control_tag"=>Some("terminal_popup_window_control_tag"),"terminal_popup_window_root_count"=>Some("terminal_popup_window_root_count"),"terminal_popup_window_window_id_match"=>Some("terminal_popup_window_window_id_match"),"terminal_popup_window_root_tree_bound"=>Some("terminal_popup_window_root_tree_bound"),"terminal_popup_window_provider_count"=>Some("terminal_popup_window_provider_count"),"terminal_popup_window_decor"=>Some("terminal_popup_window_decor"),"terminal_popup_window_context"=>Some("terminal_popup_window_context"),"terminal_popup_window_attach"=>Some("terminal_popup_window_attach"),"terminal_popup_window_tokens"=>Some("terminal_popup_window_tokens"),"terminal_popup_window_type"=>Some("terminal_popup_window_type"),"terminal_popup_window_secure"=>Some("terminal_popup_window_secure"),"terminal_popup_window_identity"=>Some("terminal_popup_window_identity"),"terminal_grid"=>Some("terminal_grid"),"terminal_close"=>Some("terminal_close"),"terminal_posteffect"=>Some("terminal_posteffect"),"shell_admission"=>Some("shell_admission"),"shell_open"=>Some("shell_open"),"shell_viewer"=>Some("shell_viewer"),"shell_begin"=>Some("shell_begin"),"shell_confirm"=>Some("shell_confirm"),"shell_grid"=>Some("shell_grid"),"shell_grid_missing_shell"=>Some("shell_grid_missing_shell"),"shell_grid_selection"=>Some("shell_grid_selection"),"shell_grid_control"=>Some("shell_grid_control"),"shell_grid_loading"=>Some("shell_grid_loading"),"shell_grid_error"=>Some("shell_grid_error"),"shell_grid_missing_grid"=>Some("shell_grid_missing_grid"),"shell_grid_invalid_grid"=>Some("shell_grid_invalid_grid"),"shell_grid_columns"=>Some("shell_grid_columns"),"shell_grid_rows"=>Some("shell_grid_rows"),"shell_grid_cardinality"=>Some("shell_grid_cardinality"),"shell_grid_terminal_grid"=>Some("shell_grid_terminal_grid"),"shell_grid_enter_displayed"=>Some("shell_grid_enter_displayed"),"shell_grid_enter_enabled"=>Some("shell_grid_enter_enabled"),"shell_enter"=>Some("shell_enter"),"shell_receipt"=>Some("shell_receipt"),"shell_enter_receipt_count_wait"=>Some("shell_enter_receipt_count_wait"),"shell_enter_receipt_grid_wait"=>Some("shell_enter_receipt_grid_wait"),"shell_enter_receipt_grid_last_observation_shell_missing"=>Some("shell_enter_receipt_grid_last_observation_shell_missing"),"shell_enter_receipt_grid_last_observation_binding_changed"=>Some("shell_enter_receipt_grid_last_observation_binding_changed"),"shell_enter_receipt_grid_last_observation_loading"=>Some("shell_enter_receipt_grid_last_observation_loading"),"shell_enter_receipt_grid_last_observation_error"=>Some("shell_enter_receipt_grid_last_observation_error"),"shell_enter_receipt_grid_last_observation_grid_missing"=>Some("shell_enter_receipt_grid_last_observation_grid_missing"),"shell_enter_receipt_grid_last_observation_revision_regressed"=>Some("shell_enter_receipt_grid_last_observation_revision_regressed"),"shell_enter_receipt_grid_last_observation_same_revision_original_grid"=>Some("shell_enter_receipt_grid_last_observation_same_revision_original_grid"),"shell_enter_receipt_grid_last_observation_same_revision_replaced_grid"=>Some("shell_enter_receipt_grid_last_observation_same_revision_replaced_grid"),"shell_enter_receipt_grid_last_observation_advanced"=>Some("shell_enter_receipt_grid_last_observation_advanced"),"shell_enter_receipt_deadline"=>Some("shell_enter_receipt_deadline"),"shell_enter_receipt_lookup"=>Some("shell_enter_receipt_lookup"),"shell_enter_receipt_exact"=>Some("shell_enter_receipt_exact"),"shell_enter_receipt_count_exact"=>Some("shell_enter_receipt_count_exact"),"shell_enter_receipt_count_multiple"=>Some("shell_enter_receipt_count_multiple"),"shell_enter_receipt_count_paused_capacity"=>Some("shell_enter_receipt_count_paused_capacity"),"shell_enter_receipt_count_paused_source_lost"=>Some("shell_enter_receipt_count_paused_source_lost"),"shell_enter_receipt_count_paused_uncertain"=>Some("shell_enter_receipt_count_paused_uncertain"),"shell_enter_receipt_count_paused_refused"=>Some("shell_enter_receipt_count_paused_refused"),"shell_enter_receipt_count_paused_limit"=>Some("shell_enter_receipt_count_paused_limit"),"shell_enter_receipt_count_paused_unsupported"=>Some("shell_enter_receipt_count_paused_unsupported"),"shell_enter_receipt_count_paused_closed"=>Some("shell_enter_receipt_count_paused_closed"),"shell_enter_receipt_count_paused_unknown"=>Some("shell_enter_receipt_count_paused_unknown"),"shell_enter_receipt_count_unretained"=>Some("shell_enter_receipt_count_unretained"),"shell_enter_receipt_count_history_blocked"=>Some("shell_enter_receipt_count_history_blocked"),"shell_enter_receipt_count_queued"=>Some("shell_enter_receipt_count_queued"),"shell_enter_receipt_count_accepting_empty"=>Some("shell_enter_receipt_count_accepting_empty"),"shell_enter_receipt_count_not_accepting"=>Some("shell_enter_receipt_count_not_accepting"),"shell_enter_receipt_count_metadata_binding"=>Some("shell_enter_receipt_count_metadata_binding"),"shell_enter_receipt_count_non_authoritative"=>Some("shell_enter_receipt_count_non_authoritative"),"shell_enter_receipt_count_no_receipt"=>Some("shell_enter_receipt_count_no_receipt"),"shell_enter_receipt_count_error_invalid_request"=>Some("shell_enter_receipt_count_error_invalid_request"),"shell_enter_receipt_count_error_unsupported_version"=>Some("shell_enter_receipt_count_error_unsupported_version"),"shell_enter_receipt_count_error_unsupported_method"=>Some("shell_enter_receipt_count_error_unsupported_method"),"shell_enter_receipt_count_error_unauthorized"=>Some("shell_enter_receipt_count_error_unauthorized"),"shell_enter_receipt_count_error_pairing_failed"=>Some("shell_enter_receipt_count_error_pairing_failed"),"shell_enter_receipt_count_error_stale_host"=>Some("shell_enter_receipt_count_error_stale_host"),"shell_enter_receipt_count_error_stale_session"=>Some("shell_enter_receipt_count_error_stale_session"),"shell_enter_receipt_count_error_not_found"=>Some("shell_enter_receipt_count_error_not_found"),"shell_enter_receipt_count_error_not_ready"=>Some("shell_enter_receipt_count_error_not_ready"),"shell_enter_receipt_count_error_invalid_answer"=>Some("shell_enter_receipt_count_error_invalid_answer"),"shell_enter_receipt_count_error_already_resolved"=>Some("shell_enter_receipt_count_error_already_resolved"),"shell_enter_receipt_count_error_action_id_conflict"=>Some("shell_enter_receipt_count_error_action_id_conflict"),"shell_enter_receipt_count_error_action_capacity"=>Some("shell_enter_receipt_count_error_action_capacity"),"shell_enter_receipt_count_error_content_expired"=>Some("shell_enter_receipt_count_error_content_expired"),"shell_enter_receipt_count_error_cursor_expired"=>Some("shell_enter_receipt_count_error_cursor_expired"),"shell_enter_receipt_count_error_busy"=>Some("shell_enter_receipt_count_error_busy"),"shell_enter_receipt_count_error_resource_limit"=>Some("shell_enter_receipt_count_error_resource_limit"),"shell_enter_receipt_count_error_rate_limited"=>Some("shell_enter_receipt_count_error_rate_limited"),"shell_enter_receipt_count_error_timeout"=>Some("shell_enter_receipt_count_error_timeout"),"shell_enter_receipt_count_error_backend_error"=>Some("shell_enter_receipt_count_error_backend_error"),"shell_enter_receipt_count_error_push_rejected"=>Some("shell_enter_receipt_count_error_push_rejected"),"shell_enter_receipt_count_error_stale_registration"=>Some("shell_enter_receipt_count_error_stale_registration"),"shell_enter_receipt_count_reserved"=>Some("shell_enter_receipt_count_reserved"),"shell_enter_receipt_count_dispatching"=>Some("shell_enter_receipt_count_dispatching"),"shell_enter_receipt_count_dispatched_none"=>Some("shell_enter_receipt_count_dispatched_none"),"shell_enter_receipt_count_dispatched_dispatch_partial"=>Some("shell_enter_receipt_count_dispatched_dispatch_partial"),"shell_enter_receipt_count_dispatched_input_partial"=>Some("shell_enter_receipt_count_dispatched_input_partial"),"shell_enter_receipt_count_dispatched_input_accepted"=>Some("shell_enter_receipt_count_dispatched_input_accepted"),"shell_enter_receipt_count_succeeded_none"=>Some("shell_enter_receipt_count_succeeded_none"),"shell_enter_receipt_count_succeeded_dispatch_partial"=>Some("shell_enter_receipt_count_succeeded_dispatch_partial"),"shell_enter_receipt_count_succeeded_dispatch_complete"=>Some("shell_enter_receipt_count_succeeded_dispatch_complete"),"shell_enter_receipt_count_succeeded_input_partial"=>Some("shell_enter_receipt_count_succeeded_input_partial"),"shell_enter_receipt_count_failed_none"=>Some("shell_enter_receipt_count_failed_none"),"shell_enter_receipt_count_failed_dispatch"=>Some("shell_enter_receipt_count_failed_dispatch"),"shell_enter_receipt_count_failed_input"=>Some("shell_enter_receipt_count_failed_input"),"shell_enter_receipt_count_uncertain_none"=>Some("shell_enter_receipt_count_uncertain_none"),"shell_enter_receipt_count_uncertain_dispatch"=>Some("shell_enter_receipt_count_uncertain_dispatch"),"shell_enter_receipt_count_uncertain_input"=>Some("shell_enter_receipt_count_uncertain_input"),"shell_enter_receipt_grid_exact"=>Some("shell_enter_receipt_grid_exact"),"shell_enter_receipt_grid_multiple"=>Some("shell_enter_receipt_grid_multiple"),"shell_enter_receipt_grid_paused_capacity"=>Some("shell_enter_receipt_grid_paused_capacity"),"shell_enter_receipt_grid_paused_source_lost"=>Some("shell_enter_receipt_grid_paused_source_lost"),"shell_enter_receipt_grid_paused_uncertain"=>Some("shell_enter_receipt_grid_paused_uncertain"),"shell_enter_receipt_grid_paused_refused"=>Some("shell_enter_receipt_grid_paused_refused"),"shell_enter_receipt_grid_paused_limit"=>Some("shell_enter_receipt_grid_paused_limit"),"shell_enter_receipt_grid_paused_unsupported"=>Some("shell_enter_receipt_grid_paused_unsupported"),"shell_enter_receipt_grid_paused_closed"=>Some("shell_enter_receipt_grid_paused_closed"),"shell_enter_receipt_grid_paused_unknown"=>Some("shell_enter_receipt_grid_paused_unknown"),"shell_enter_receipt_grid_unretained"=>Some("shell_enter_receipt_grid_unretained"),"shell_enter_receipt_grid_history_blocked"=>Some("shell_enter_receipt_grid_history_blocked"),"shell_enter_receipt_grid_queued"=>Some("shell_enter_receipt_grid_queued"),"shell_enter_receipt_grid_accepting_empty"=>Some("shell_enter_receipt_grid_accepting_empty"),"shell_enter_receipt_grid_not_accepting"=>Some("shell_enter_receipt_grid_not_accepting"),"shell_enter_receipt_grid_metadata_binding"=>Some("shell_enter_receipt_grid_metadata_binding"),"shell_enter_receipt_grid_non_authoritative"=>Some("shell_enter_receipt_grid_non_authoritative"),"shell_enter_receipt_grid_no_receipt"=>Some("shell_enter_receipt_grid_no_receipt"),"shell_enter_receipt_grid_error_invalid_request"=>Some("shell_enter_receipt_grid_error_invalid_request"),"shell_enter_receipt_grid_error_unsupported_version"=>Some("shell_enter_receipt_grid_error_unsupported_version"),"shell_enter_receipt_grid_error_unsupported_method"=>Some("shell_enter_receipt_grid_error_unsupported_method"),"shell_enter_receipt_grid_error_unauthorized"=>Some("shell_enter_receipt_grid_error_unauthorized"),"shell_enter_receipt_grid_error_pairing_failed"=>Some("shell_enter_receipt_grid_error_pairing_failed"),"shell_enter_receipt_grid_error_stale_host"=>Some("shell_enter_receipt_grid_error_stale_host"),"shell_enter_receipt_grid_error_stale_session"=>Some("shell_enter_receipt_grid_error_stale_session"),"shell_enter_receipt_grid_error_not_found"=>Some("shell_enter_receipt_grid_error_not_found"),"shell_enter_receipt_grid_error_not_ready"=>Some("shell_enter_receipt_grid_error_not_ready"),"shell_enter_receipt_grid_error_invalid_answer"=>Some("shell_enter_receipt_grid_error_invalid_answer"),"shell_enter_receipt_grid_error_already_resolved"=>Some("shell_enter_receipt_grid_error_already_resolved"),"shell_enter_receipt_grid_error_action_id_conflict"=>Some("shell_enter_receipt_grid_error_action_id_conflict"),"shell_enter_receipt_grid_error_action_capacity"=>Some("shell_enter_receipt_grid_error_action_capacity"),"shell_enter_receipt_grid_error_content_expired"=>Some("shell_enter_receipt_grid_error_content_expired"),"shell_enter_receipt_grid_error_cursor_expired"=>Some("shell_enter_receipt_grid_error_cursor_expired"),"shell_enter_receipt_grid_error_busy"=>Some("shell_enter_receipt_grid_error_busy"),"shell_enter_receipt_grid_error_resource_limit"=>Some("shell_enter_receipt_grid_error_resource_limit"),"shell_enter_receipt_grid_error_rate_limited"=>Some("shell_enter_receipt_grid_error_rate_limited"),"shell_enter_receipt_grid_error_timeout"=>Some("shell_enter_receipt_grid_error_timeout"),"shell_enter_receipt_grid_error_backend_error"=>Some("shell_enter_receipt_grid_error_backend_error"),"shell_enter_receipt_grid_error_push_rejected"=>Some("shell_enter_receipt_grid_error_push_rejected"),"shell_enter_receipt_grid_error_stale_registration"=>Some("shell_enter_receipt_grid_error_stale_registration"),"shell_enter_receipt_grid_reserved"=>Some("shell_enter_receipt_grid_reserved"),"shell_enter_receipt_grid_dispatching"=>Some("shell_enter_receipt_grid_dispatching"),"shell_enter_receipt_grid_dispatched_none"=>Some("shell_enter_receipt_grid_dispatched_none"),"shell_enter_receipt_grid_dispatched_dispatch_partial"=>Some("shell_enter_receipt_grid_dispatched_dispatch_partial"),"shell_enter_receipt_grid_dispatched_input_partial"=>Some("shell_enter_receipt_grid_dispatched_input_partial"),"shell_enter_receipt_grid_dispatched_input_accepted"=>Some("shell_enter_receipt_grid_dispatched_input_accepted"),"shell_enter_receipt_grid_succeeded_none"=>Some("shell_enter_receipt_grid_succeeded_none"),"shell_enter_receipt_grid_succeeded_dispatch_partial"=>Some("shell_enter_receipt_grid_succeeded_dispatch_partial"),"shell_enter_receipt_grid_succeeded_dispatch_complete"=>Some("shell_enter_receipt_grid_succeeded_dispatch_complete"),"shell_enter_receipt_grid_succeeded_input_partial"=>Some("shell_enter_receipt_grid_succeeded_input_partial"),"shell_enter_receipt_grid_failed_none"=>Some("shell_enter_receipt_grid_failed_none"),"shell_enter_receipt_grid_failed_dispatch"=>Some("shell_enter_receipt_grid_failed_dispatch"),"shell_enter_receipt_grid_failed_input"=>Some("shell_enter_receipt_grid_failed_input"),"shell_enter_receipt_grid_uncertain_none"=>Some("shell_enter_receipt_grid_uncertain_none"),"shell_enter_receipt_grid_uncertain_dispatch"=>Some("shell_enter_receipt_grid_uncertain_dispatch"),"shell_enter_receipt_grid_uncertain_input"=>Some("shell_enter_receipt_grid_uncertain_input"),"shell_release"=>Some("shell_release"),"shell_release_node"=>Some("shell_release_node"),"shell_release_reveal_guard"=>Some("shell_release_reveal_guard"),"shell_release_reveal_scroll"=>Some("shell_release_reveal_scroll"),"shell_release_reveal_idle"=>Some("shell_release_reveal_idle"),"shell_release_reveal_deadline"=>Some("shell_release_reveal_deadline"),"shell_release_reveal_display"=>Some("shell_release_reveal_display"),"shell_release_reveal_enabled"=>Some("shell_release_reveal_enabled"),"shell_release_dialog"=>Some("shell_release_dialog"),"shell_release_admission"=>Some("shell_release_admission"),"shell_release_revalidate"=>Some("shell_release_revalidate"),"shell_release_click"=>Some("shell_release_click"),"shell_release_idle"=>Some("shell_release_idle"),"shell_release_posteffect"=>Some("shell_release_posteffect"),"shell_release_admission_ticket"=>Some("shell_release_admission_ticket"),"shell_release_admission_current"=>Some("shell_release_admission_current"),"shell_release_admission_hello"=>Some("shell_release_admission_hello"),"shell_release_admission_mutation"=>Some("shell_release_admission_mutation"),"shell_release_admission_shell"=>Some("shell_release_admission_shell"),"shell_release_admission_owner"=>Some("shell_release_admission_owner"),"shell_release_admission_owner_retained"=>Some("shell_release_admission_owner_retained"),"shell_release_admission_actions"=>Some("shell_release_admission_actions"),"shell_release_posteffect_shell"=>Some("shell_release_posteffect_shell"),"shell_release_posteffect_owner_retired"=>Some("shell_release_posteffect_owner_retired"),"shell_release_posteffect_actions"=>Some("shell_release_posteffect_actions"),"shell_close"=>Some("shell_close"),"shell_complete"=>Some("shell_complete"),"shell_interaction_admission"=>Some("shell_interaction_admission"),"shell_interaction_fixture"=>Some("shell_interaction_fixture"),"shell_interaction_clipboard_empty"=>Some("shell_interaction_clipboard_empty"),"shell_interaction_clipboard_owned"=>Some("shell_interaction_clipboard_owned"),"shell_interaction_draft"=>Some("shell_interaction_draft"),"shell_interaction_paste"=>Some("shell_interaction_paste"),"shell_interaction_clipboard_clear"=>Some("shell_interaction_clipboard_clear"),"shell_interaction_draft_send"=>Some("shell_interaction_draft_send"),"shell_interaction_live"=>Some("shell_interaction_live"),"shell_interaction_commit"=>Some("shell_interaction_commit"),"shell_interaction_commit_wait"=>Some("shell_interaction_commit_wait"),"shell_interaction_commit_dialog"=>Some("shell_interaction_commit_dialog"),"shell_interaction_commit_authority"=>Some("shell_interaction_commit_authority"),"shell_interaction_commit_direct_window"=>Some("shell_interaction_commit_direct_window"),"shell_interaction_commit_direct_lookup"=>Some("shell_interaction_commit_direct_lookup"),"shell_interaction_commit_direct_focus"=>Some("shell_interaction_commit_direct_focus"),"shell_interaction_commit_direct_connection"=>Some("shell_interaction_commit_direct_connection"),"shell_interaction_commit_direct_commit"=>Some("shell_interaction_commit_direct_commit"),"shell_interaction_commit_receipt_wait"=>Some("shell_interaction_commit_receipt_wait"),"shell_interaction_commit_receipt_exact"=>Some("shell_interaction_commit_receipt_exact"),"shell_interaction_commit_receipt_multiple"=>Some("shell_interaction_commit_receipt_multiple"),"shell_interaction_commit_receipt_paused_capacity"=>Some("shell_interaction_commit_receipt_paused_capacity"),"shell_interaction_commit_receipt_paused_source_lost"=>Some("shell_interaction_commit_receipt_paused_source_lost"),"shell_interaction_commit_receipt_paused_uncertain"=>Some("shell_interaction_commit_receipt_paused_uncertain"),"shell_interaction_commit_receipt_paused_refused"=>Some("shell_interaction_commit_receipt_paused_refused"),"shell_interaction_commit_receipt_paused_limit"=>Some("shell_interaction_commit_receipt_paused_limit"),"shell_interaction_commit_receipt_paused_unsupported"=>Some("shell_interaction_commit_receipt_paused_unsupported"),"shell_interaction_commit_receipt_paused_closed"=>Some("shell_interaction_commit_receipt_paused_closed"),"shell_interaction_commit_receipt_paused_unknown"=>Some("shell_interaction_commit_receipt_paused_unknown"),"shell_interaction_commit_receipt_unretained"=>Some("shell_interaction_commit_receipt_unretained"),"shell_interaction_commit_receipt_history_blocked"=>Some("shell_interaction_commit_receipt_history_blocked"),"shell_interaction_commit_receipt_queued"=>Some("shell_interaction_commit_receipt_queued"),"shell_interaction_commit_receipt_accepting_empty"=>Some("shell_interaction_commit_receipt_accepting_empty"),"shell_interaction_commit_receipt_not_accepting"=>Some("shell_interaction_commit_receipt_not_accepting"),"shell_interaction_commit_receipt_metadata_binding"=>Some("shell_interaction_commit_receipt_metadata_binding"),"shell_interaction_commit_receipt_non_authoritative"=>Some("shell_interaction_commit_receipt_non_authoritative"),"shell_interaction_commit_receipt_no_receipt"=>Some("shell_interaction_commit_receipt_no_receipt"),"shell_interaction_commit_receipt_error_invalid_request"=>Some("shell_interaction_commit_receipt_error_invalid_request"),"shell_interaction_commit_receipt_error_unsupported_version"=>Some("shell_interaction_commit_receipt_error_unsupported_version"),"shell_interaction_commit_receipt_error_unsupported_method"=>Some("shell_interaction_commit_receipt_error_unsupported_method"),"shell_interaction_commit_receipt_error_unauthorized"=>Some("shell_interaction_commit_receipt_error_unauthorized"),"shell_interaction_commit_receipt_error_pairing_failed"=>Some("shell_interaction_commit_receipt_error_pairing_failed"),"shell_interaction_commit_receipt_error_stale_host"=>Some("shell_interaction_commit_receipt_error_stale_host"),"shell_interaction_commit_receipt_error_stale_session"=>Some("shell_interaction_commit_receipt_error_stale_session"),"shell_interaction_commit_receipt_error_not_found"=>Some("shell_interaction_commit_receipt_error_not_found"),"shell_interaction_commit_receipt_error_not_ready"=>Some("shell_interaction_commit_receipt_error_not_ready"),"shell_interaction_commit_receipt_error_invalid_answer"=>Some("shell_interaction_commit_receipt_error_invalid_answer"),"shell_interaction_commit_receipt_error_already_resolved"=>Some("shell_interaction_commit_receipt_error_already_resolved"),"shell_interaction_commit_receipt_error_action_id_conflict"=>Some("shell_interaction_commit_receipt_error_action_id_conflict"),"shell_interaction_commit_receipt_error_action_capacity"=>Some("shell_interaction_commit_receipt_error_action_capacity"),"shell_interaction_commit_receipt_error_content_expired"=>Some("shell_interaction_commit_receipt_error_content_expired"),"shell_interaction_commit_receipt_error_cursor_expired"=>Some("shell_interaction_commit_receipt_error_cursor_expired"),"shell_interaction_commit_receipt_error_busy"=>Some("shell_interaction_commit_receipt_error_busy"),"shell_interaction_commit_receipt_error_resource_limit"=>Some("shell_interaction_commit_receipt_error_resource_limit"),"shell_interaction_commit_receipt_error_rate_limited"=>Some("shell_interaction_commit_receipt_error_rate_limited"),"shell_interaction_commit_receipt_error_timeout"=>Some("shell_interaction_commit_receipt_error_timeout"),"shell_interaction_commit_receipt_error_backend_error"=>Some("shell_interaction_commit_receipt_error_backend_error"),"shell_interaction_commit_receipt_error_push_rejected"=>Some("shell_interaction_commit_receipt_error_push_rejected"),"shell_interaction_commit_receipt_error_stale_registration"=>Some("shell_interaction_commit_receipt_error_stale_registration"),"shell_interaction_commit_receipt_reserved"=>Some("shell_interaction_commit_receipt_reserved"),"shell_interaction_commit_receipt_dispatching"=>Some("shell_interaction_commit_receipt_dispatching"),"shell_interaction_commit_receipt_dispatched_none"=>Some("shell_interaction_commit_receipt_dispatched_none"),"shell_interaction_commit_receipt_dispatched_dispatch_partial"=>Some("shell_interaction_commit_receipt_dispatched_dispatch_partial"),"shell_interaction_commit_receipt_dispatched_input_partial"=>Some("shell_interaction_commit_receipt_dispatched_input_partial"),"shell_interaction_commit_receipt_dispatched_input_accepted"=>Some("shell_interaction_commit_receipt_dispatched_input_accepted"),"shell_interaction_commit_receipt_succeeded_none"=>Some("shell_interaction_commit_receipt_succeeded_none"),"shell_interaction_commit_receipt_succeeded_dispatch_partial"=>Some("shell_interaction_commit_receipt_succeeded_dispatch_partial"),"shell_interaction_commit_receipt_succeeded_dispatch_complete"=>Some("shell_interaction_commit_receipt_succeeded_dispatch_complete"),"shell_interaction_commit_receipt_succeeded_input_partial"=>Some("shell_interaction_commit_receipt_succeeded_input_partial"),"shell_interaction_commit_receipt_failed_none"=>Some("shell_interaction_commit_receipt_failed_none"),"shell_interaction_commit_receipt_failed_dispatch"=>Some("shell_interaction_commit_receipt_failed_dispatch"),"shell_interaction_commit_receipt_failed_input"=>Some("shell_interaction_commit_receipt_failed_input"),"shell_interaction_commit_receipt_uncertain_none"=>Some("shell_interaction_commit_receipt_uncertain_none"),"shell_interaction_commit_receipt_uncertain_dispatch"=>Some("shell_interaction_commit_receipt_uncertain_dispatch"),"shell_interaction_commit_receipt_uncertain_input"=>Some("shell_interaction_commit_receipt_uncertain_input"),"shell_interaction_inputs"=>Some("shell_interaction_inputs"),"shell_interaction_output"=>Some("shell_interaction_output"),"shell_interaction_output_missing_shell"=>Some("shell_interaction_output_missing_shell"),"shell_interaction_output_missing_grid"=>Some("shell_interaction_output_missing_grid"),"shell_interaction_output_missing_scroll"=>Some("shell_interaction_output_missing_scroll"),"shell_interaction_output_binding"=>Some("shell_interaction_output_binding"),"shell_interaction_output_revision"=>Some("shell_interaction_output_revision"),"shell_interaction_output_history_empty"=>Some("shell_interaction_output_history_empty"),"shell_interaction_output_viewport"=>Some("shell_interaction_output_viewport"),"shell_interaction_output_not_bottom"=>Some("shell_interaction_output_not_bottom"),"shell_interaction_output_owner"=>Some("shell_interaction_output_owner"),"shell_interaction_output_not_accepting"=>Some("shell_interaction_output_not_accepting"),"shell_interaction_older"=>Some("shell_interaction_older"),"shell_interaction_older_node"=>Some("shell_interaction_older_node"),"shell_interaction_older_ready"=>Some("shell_interaction_older_ready"),"shell_interaction_older_reveal_admission"=>Some("shell_interaction_older_reveal_admission"),"shell_interaction_older_lookup"=>Some("shell_interaction_older_lookup"),"shell_interaction_older_scroll_admission"=>Some("shell_interaction_older_scroll_admission"),"shell_interaction_older_scroll_ready"=>Some("shell_interaction_older_scroll_ready"),"shell_interaction_older_scroll_rail"=>Some("shell_interaction_older_scroll_rail"),"shell_interaction_older_scroll_dialog"=>Some("shell_interaction_older_scroll_dialog"),"shell_interaction_older_scroll"=>Some("shell_interaction_older_scroll"),"shell_interaction_older_display"=>Some("shell_interaction_older_display"),"shell_interaction_older_enabled"=>Some("shell_interaction_older_enabled"),"shell_interaction_older_dialog"=>Some("shell_interaction_older_dialog"),"shell_interaction_older_final_admission"=>Some("shell_interaction_older_final_admission"),"shell_interaction_older_authority"=>Some("shell_interaction_older_authority"),"shell_interaction_older_click"=>Some("shell_interaction_older_click"),"shell_interaction_older_receipt_wait"=>Some("shell_interaction_older_receipt_wait"),"shell_interaction_older_receipt_last_observation_base"=>Some("shell_interaction_older_receipt_last_observation_base"),"shell_interaction_older_receipt_last_observation_settled"=>Some("shell_interaction_older_receipt_last_observation_settled"),"shell_interaction_older_receipt_last_observation_count"=>Some("shell_interaction_older_receipt_last_observation_count"),"shell_interaction_older_receipt_last_observation_count_duplicate_current_ids"=>Some("shell_interaction_older_receipt_last_observation_count_duplicate_current_ids"),"shell_interaction_older_receipt_last_observation_count_baseline_ids_missing"=>Some("shell_interaction_older_receipt_last_observation_count_baseline_ids_missing"),"shell_interaction_older_receipt_last_observation_count_multiple_new_ids"=>Some("shell_interaction_older_receipt_last_observation_count_multiple_new_ids"),"shell_interaction_older_receipt_last_observation_count_no_new_id_history_unchanged_busy"=>Some("shell_interaction_older_receipt_last_observation_count_no_new_id_history_unchanged_busy"),"shell_interaction_older_receipt_last_observation_count_no_new_id_history_unchanged_idle"=>Some("shell_interaction_older_receipt_last_observation_count_no_new_id_history_unchanged_idle"),"shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_pending_busy"=>Some("shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_pending_busy"),"shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_pending_idle"=>Some("shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_pending_idle"),"shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_non_pending_busy"=>Some("shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_non_pending_busy"),"shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_non_pending_idle"=>Some("shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_non_pending_idle"),"shell_interaction_older_receipt_last_observation_count_inconsistent"=>Some("shell_interaction_older_receipt_last_observation_count_inconsistent"),"shell_interaction_older_receipt_last_observation_selection"=>Some("shell_interaction_older_receipt_last_observation_selection"),"shell_interaction_older_receipt_last_observation_metadata"=>Some("shell_interaction_older_receipt_last_observation_metadata"),"shell_interaction_older_receipt_last_observation_receipt_absent"=>Some("shell_interaction_older_receipt_last_observation_receipt_absent"),"shell_interaction_older_receipt_last_observation_pending"=>Some("shell_interaction_older_receipt_last_observation_pending"),"shell_interaction_older_receipt_last_observation_non_success"=>Some("shell_interaction_older_receipt_last_observation_non_success"),"shell_interaction_older_receipt_last_observation_error"=>Some("shell_interaction_older_receipt_last_observation_error"),"shell_interaction_older_receipt_last_observation_receipt_identity"=>Some("shell_interaction_older_receipt_last_observation_receipt_identity"),"shell_interaction_older_receipt_last_observation_scrollresult"=>Some("shell_interaction_older_receipt_last_observation_scrollresult"),"shell_interaction_older_receipt_last_observation_offset"=>Some("shell_interaction_older_receipt_last_observation_offset"),"shell_interaction_older_receipt_last_observation_max"=>Some("shell_interaction_older_receipt_last_observation_max"),"shell_interaction_older_receipt_last_observation_rows"=>Some("shell_interaction_older_receipt_last_observation_rows"),"shell_interaction_older_receipt_last_observation_history"=>Some("shell_interaction_older_receipt_last_observation_history"),"shell_interaction_older_receipt_last_observation_history_absent"=>Some("shell_interaction_older_receipt_last_observation_history_absent"),"shell_interaction_older_receipt_last_observation_history_replaced"=>Some("shell_interaction_older_receipt_last_observation_history_replaced"),"shell_interaction_older_receipt_last_observation_history_pending_action_busy"=>Some("shell_interaction_older_receipt_last_observation_history_pending_action_busy"),"shell_interaction_older_receipt_last_observation_history_pending_action_idle_admitted"=>Some("shell_interaction_older_receipt_last_observation_history_pending_action_idle_admitted"),"shell_interaction_older_receipt_last_observation_history_pending_action_idle_unadmitted"=>Some("shell_interaction_older_receipt_last_observation_history_pending_action_idle_unadmitted"),"shell_interaction_older_receipt_last_observation_history_pending_other"=>Some("shell_interaction_older_receipt_last_observation_history_pending_other"),"shell_interaction_older_receipt_last_observation_history_uncertain_action"=>Some("shell_interaction_older_receipt_last_observation_history_uncertain_action"),"shell_interaction_older_receipt_last_observation_history_uncertain_other"=>Some("shell_interaction_older_receipt_last_observation_history_uncertain_other"),"shell_interaction_older_receipt_last_observation_history_live_action"=>Some("shell_interaction_older_receipt_last_observation_history_live_action"),"shell_interaction_older_receipt_last_observation_history_live_other"=>Some("shell_interaction_older_receipt_last_observation_history_live_other"),"shell_interaction_older_receipt_last_observation_owner"=>Some("shell_interaction_older_receipt_last_observation_owner"),"shell_interaction_older_receipt_last_observation_input"=>Some("shell_interaction_older_receipt_last_observation_input"),"shell_interaction_older_receipt_last_observation_state_changed_or_unclassified"=>Some("shell_interaction_older_receipt_last_observation_state_changed_or_unclassified"),"shell_interaction_older_receipt_exact"=>Some("shell_interaction_older_receipt_exact"),"shell_interaction_bottom"=>Some("shell_interaction_bottom"),"shell_interaction_bottom_node"=>Some("shell_interaction_bottom_node"),"shell_interaction_bottom_ready"=>Some("shell_interaction_bottom_ready"),"shell_interaction_bottom_reveal_admission"=>Some("shell_interaction_bottom_reveal_admission"),"shell_interaction_bottom_lookup"=>Some("shell_interaction_bottom_lookup"),"shell_interaction_bottom_scroll_admission"=>Some("shell_interaction_bottom_scroll_admission"),"shell_interaction_bottom_scroll_admission_history_absent"=>Some("shell_interaction_bottom_scroll_admission_history_absent"),"shell_interaction_bottom_scroll_admission_authority"=>Some("shell_interaction_bottom_scroll_admission_authority"),"shell_interaction_bottom_scroll_admission_busy"=>Some("shell_interaction_bottom_scroll_admission_busy"),"shell_interaction_bottom_scroll_admission_history_disallowed"=>Some("shell_interaction_bottom_scroll_admission_history_disallowed"),"shell_interaction_bottom_scroll_admission_mode_live"=>Some("shell_interaction_bottom_scroll_admission_mode_live"),"shell_interaction_bottom_scroll_admission_mode_pending"=>Some("shell_interaction_bottom_scroll_admission_mode_pending"),"shell_interaction_bottom_scroll_admission_mode_uncertain"=>Some("shell_interaction_bottom_scroll_admission_mode_uncertain"),"shell_interaction_bottom_scroll_admission_metrics_absent"=>Some("shell_interaction_bottom_scroll_admission_metrics_absent"),"shell_interaction_bottom_scroll_admission_ready"=>Some("shell_interaction_bottom_scroll_admission_ready"),"shell_interaction_bottom_scroll_ready"=>Some("shell_interaction_bottom_scroll_ready"),"shell_interaction_bottom_scroll_rail"=>Some("shell_interaction_bottom_scroll_rail"),"shell_interaction_bottom_scroll_dialog"=>Some("shell_interaction_bottom_scroll_dialog"),"shell_interaction_bottom_scroll"=>Some("shell_interaction_bottom_scroll"),"shell_interaction_bottom_display"=>Some("shell_interaction_bottom_display"),"shell_interaction_bottom_enabled"=>Some("shell_interaction_bottom_enabled"),"shell_interaction_bottom_dialog"=>Some("shell_interaction_bottom_dialog"),"shell_interaction_bottom_final_admission"=>Some("shell_interaction_bottom_final_admission"),"shell_interaction_bottom_authority"=>Some("shell_interaction_bottom_authority"),"shell_interaction_bottom_click"=>Some("shell_interaction_bottom_click"),"shell_interaction_bottom_receipt_wait"=>Some("shell_interaction_bottom_receipt_wait"),"shell_interaction_bottom_receipt_exact"=>Some("shell_interaction_bottom_receipt_exact"),"shell_interaction_verify"=>Some("shell_interaction_verify"),"retirement_selector"=>Some("retirement_selector"),"retirement_runner"=>Some("retirement_runner"),"retirement_awaiting_foreground"=>Some("retirement_awaiting_foreground"),"retirement_activity"=>Some("retirement_activity"),"retirement_initial"=>Some("retirement_initial"),"retirement_inventory"=>Some("retirement_inventory"),"retirement_next"=>Some("retirement_next"),"retirement_deadline"=>Some("retirement_deadline"),"retirement_authority"=>Some("retirement_authority"),"retirement_menu"=>Some("retirement_menu"),"retirement_hosts"=>Some("retirement_hosts"),"retirement_host"=>Some("retirement_host"),"retirement_forget"=>Some("retirement_forget"),"retirement_confirm"=>Some("retirement_confirm"),"retirement_preserve"=>Some("retirement_preserve"),"retirement_actions"=>Some("retirement_actions"),"retirement_posteffect"=>Some("retirement_posteffect"),"retirement_result"=>Some("retirement_result"),"retirement_finish"=>Some("retirement_finish"),_=>None}
+    }
+    fn status(&mut self,key:&str,value:&str)->io::Result<()> {
+        if key=="stack" {if let Some(stage)=Self::closed_stage(value) {if self.failure_stage.replace(stage).is_some(){return Err(failure("retained pairing JUnit repeats a closed failure stage"));}}return Ok(());}
+        let field=match key {"class"=>&mut self.class,"test"=>&mut self.test,"numtests"=>&mut self.numtests,"current"=>&mut self.current,"id"=>&mut self.id,_=>return Ok(())};
+        if field.replace(value.to_owned()).is_some(){return Err(failure("retained pairing JUnit bundle repeats a selected status field"));}
+        Ok(())
+    }
+    fn status_code(&mut self,record:&str,class:&str,method:&str)->io::Result<()> {
+        let code=record.strip_prefix("INSTRUMENTATION_STATUS_CODE: ").ok_or_else(||failure("retained pairing JUnit status code is malformed"))?;
+        let class_seen=self.class.take();let test_seen=self.test.take();let numtests=self.numtests.take();let current=self.current.take();let id=self.id.take();
+        if class_seen.is_none()&&test_seen.is_none()&&numtests.is_none()&&current.is_none()&&id.is_none(){return Err(failure("retained pairing JUnit status code has no selected method bundle"));}
+        if class_seen.as_deref()!=Some(class)||test_seen.as_deref()!=Some(method)||current.as_deref()!=Some("1")||id.as_deref()!=Some("AndroidJUnitRunner")||numtests.as_deref()!=Some("1") {
+            return Err(failure("retained pairing JUnit bundle is not the exact selected method"));
+        }
+        match (self.started,self.finished,code) {
+            (false,false,"1")=>self.started=true,
+            (true,false,"0")=>self.finished=true,
+            (true,false,"-2") if self.failure_stage.is_some()=>return Err(failure(&format!("retained pairing JUnit failed at closed stage {}",self.failure_stage.expect("checked")))),
+            (true,false,"-2")=>return Err(failure("retained pairing JUnit failed without a closed stage")),
+            _=>return Err(failure("retained pairing JUnit method status is not one start then one finish")),
+        }
+        Ok(())
+    }
+    fn final_cardinality(&self)->&'static str {match self.final_count {0=>"missing",1=>"one",_=>"multiple"}}
+    fn eof_summary(&self,class:&str,method:&str,child_exit:&'static str)->Value {json!({"expectedClass":class,"expectedMethod":method,"pendingSelectedStatus":self.class.is_some()||self.test.is_some()||self.numtests.is_some()||self.current.is_some()||self.id.is_some(),"selectedStart":self.started,"selectedPass":self.finished,"finalCodeCardinality":self.final_cardinality(),"childExit":child_exit})}
+    fn eof_error(&self)->io::Result<()> {
+        if self.class.is_some()||self.test.is_some()||self.numtests.is_some()||self.current.is_some()||self.id.is_some(){return Err(failure("retained pairing JUnit EOF has a pending selected status bundle"));}
+        if !self.started{return Err(failure("retained pairing JUnit EOF is missing the selected start"));}
+        if !self.finished{return Err(failure("retained pairing JUnit EOF is missing the selected pass"));}
+        match self.final_cardinality() {"missing"=>Err(failure("retained pairing JUnit EOF is missing the final success code")),"one"=>Ok(()),"multiple"=>Err(failure("retained pairing JUnit EOF has multiple final codes")),_=>unreachable!()}
+    }
+    fn final_code(&mut self,record:&str)->io::Result<()> {
+        let code=record.strip_prefix("INSTRUMENTATION_CODE: ");
+        if !self.finished{return Err(failure("retained pairing JUnit final code is out of order or repeated"));}
+        if self.final_count!=0 {
+            if code==Some("-1"){self.final_count=self.final_count.saturating_add(1);return Ok(());}
+            return Err(failure("retained pairing JUnit final code is out of order or repeated"));
+        }
+        if code!=Some("-1"){return Err(failure("retained pairing JUnit final code is not success"));}
+        self.final_count=1;
+        Ok(())
+    }
+    fn finish(self)->io::Result<()> {self.eof_error()}
+}
+fn pairing_instrumentation_terminal(result:io::Result<()>,invite_issued:bool,launched:bool,foreground:bool,finished:bool)->io::Result<()> {
+    result?;
+    if !finished||!launched||!foreground{return Err(failure(&format!("retained pairing instrumentation ended before the one admitted pairing finish; inviteIssued={invite_issued}; launched={launched}; foreground={foreground}; finishAcknowledged={finished}")));}
+    Ok(())
+}
+fn pairing_instrumentation_reader_deadline(retirement:bool)->Option<tokio::time::Instant> {
+    retirement.then(||tokio::time::Instant::now()+Duration::from_secs(900))
+}
+async fn pairing_instrumentation_read_line<R:tokio::io::AsyncBufRead+Unpin>(reader:&mut R,line:&mut String,retirement_deadline:Option<tokio::time::Instant>)->io::Result<usize> {
+    match retirement_deadline {Some(deadline)=>tokio::time::timeout_at(deadline,reader.read_line(line)).await, None=>timeout(Duration::from_secs(120),reader.read_line(line)).await}.map_err(|_|failure("retained pairing instrumentation deadline expired"))?
+}
+impl PairingInstrumentation {
+    fn owner(fields:&BTreeMap<String,String>)->io::Result<ProductEpoch> {
+        if fields.len()!=4||fields.get("goatrOwner").map(String::as_str)!=Some("fresh-start") {return Err(failure("retained pairing instrumentation owner status is not singular"));}
+        let pid=fields.get("goatrPid").and_then(|value|value.parse::<u32>().ok()).filter(|value|*value>0).ok_or_else(||failure("retained pairing instrumentation PID is invalid"))?;
+        let start=fields.get("goatrStart").and_then(|value|value.parse::<u64>().ok()).filter(|value|*value>0).ok_or_else(||failure("retained pairing instrumentation start is invalid"))?;
+        let encoded=fields.get("goatrControlPublic").ok_or_else(||failure("retained pairing instrumentation signing identity is absent"))?;
+        if encoded.len()!=130||!encoded.bytes().all(|value|value.is_ascii_hexdigit()&&!value.is_ascii_uppercase()){return Err(failure("retained pairing instrumentation signing identity is invalid"));}
+        let mut public=[0u8;65];for(index,byte)in public.iter_mut().enumerate(){*byte=u8::from_str_radix(&encoded[index*2..index*2+2],16).map_err(io::Error::other)?;}
+        if public[0]!=4{return Err(failure("retained pairing instrumentation signing key is not P-256"));}
+        Ok(ProductEpoch {pid,start,uid:0,public})
+    }
+    async fn start(adb:&PhysicalAdb,port:u16,provider:Option<Provider>,shell_checkpoint:bool,shell_interaction_checkpoint:bool,retirement:bool)->io::Result<Self> {
+        adb.recheck_server().await?;
+        let provider=match provider {None=>"none",Some(Provider::Omp)=>"omp",Some(Provider::Codex)=>"codex"};
+        let (selector,method)=if retirement {(RETIREMENT_TEST_SELECTOR,RETIREMENT_TEST_METHOD)} else {(PAIRING_TEST_SELECTOR,PAIRING_TEST_METHOD)};
+        let mut words=vec!["am".to_owned(),"instrument".to_owned(),"-w".to_owned(),"-r".to_owned(),"-e".to_owned(),"class".to_owned(),selector.to_owned(),"-e".to_owned(),"goatrSdkForegroundBootstrap".to_owned(),"main_once".to_owned(),"-e".to_owned(),"stockControlPort".to_owned(),port.to_string()];
+        if retirement {words.extend(["-e".to_owned(),"goatrOwnedRetirementCheckpoint".to_owned(),"true".to_owned()]);} else {words.extend(["-e".to_owned(),"goatrPairingProvider".to_owned(),provider.to_owned(),"-e".to_owned(),"goatrPairingShellCheckpoint".to_owned(),if shell_checkpoint {"true"} else {"false"}.to_owned(),"-e".to_owned(),"goatrPairingShellInteractionCheckpoint".to_owned(),if shell_interaction_checkpoint {"true"} else {"false"}.to_owned()]);}
+        words.push(PRODUCT_RUNNER.to_owned());
+        let remote=words.iter().map(|word|super::shell_literal(word)).collect::<io::Result<Vec<_>>>()?.join(" ");
+        let mut command=adb.command();command.args(["shell",&remote]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(false);let reader_deadline=pairing_instrumentation_reader_deadline(retirement);
+        let mut child=command.spawn()?;let stdout=child.stdout.take().ok_or_else(||failure("retained pairing instrumentation status pipe is absent"))?;
+        let (sender,events)=mpsc::channel(4);let eof_summary=std::sync::Arc::new(std::sync::Mutex::new(None));let task_eof_summary=std::sync::Arc::clone(&eof_summary);
+        let selected_class=PAIRING_TEST_CLASS.to_owned();let selected_method=method.to_owned();
+        let task=tokio::spawn(async move {
+            let mut reader=tokio::io::BufReader::new(stdout.take(2_097_153));let mut total=0usize;let mut owner=None;let mut bootstrap=None;let mut junit=PairingJUnit::new();
+            loop {
+                let mut line=String::new();let read=pairing_instrumentation_read_line(&mut reader,&mut line,reader_deadline).await?;
+                if read==0{break;}total=total.checked_add(read).ok_or_else(||failure("retained pairing instrumentation output overflow"))?;if read>65536||total>2_097_152{return Err(failure("retained pairing instrumentation output is unbounded"));}
+                let record=line.trim_end_matches(['\r','\n']);
+                if let Some(value)=record.strip_prefix("INSTRUMENTATION_STATUS: ") {
+                    if let Some((key,value))=value.split_once('=') {
+                        match key {
+                            "goatrOwner"|"goatrPid"|"goatrStart"|"goatrControlPublic"=>{if owner.get_or_insert_with(BTreeMap::new).insert(key.to_owned(),value.to_owned()).is_some(){return Err(failure("retained pairing instrumentation repeated owner field"));}},
+                            "goatrSdkBootstrap"=>{if bootstrap.replace(value.to_owned()).is_some(){return Err(failure("retained pairing instrumentation repeated bootstrap status"));}},
+                            _=>junit.status(key,value)?,
+                        }
+                    }
+                } else if record.starts_with("INSTRUMENTATION_STATUS_CODE:") {
+                    if let Some(fields)=owner.take() {
+                        let epoch=Self::owner(&fields)?;sender.send(PairingInstrumentationEvent::Owner(epoch)).await.map_err(|_|failure("retained pairing owner receiver ended"))?;
+                        continue;
+                    }
+                    if let Some(status)=bootstrap.take() {
+                        match status.as_str() {
+                            "awaiting_foreground"=>sender.send(PairingInstrumentationEvent::AwaitingForeground).await.map_err(|_|failure("retained pairing bootstrap receiver ended"))?,
+                            "foreground_resumed"=>sender.send(PairingInstrumentationEvent::ForegroundResumed).await.map_err(|_|failure("retained pairing bootstrap receiver ended"))?,
+                            _=>return Err(failure("retained pairing bootstrap was rejected")),
+                        }
+                        continue;
+                    }
+                    junit.status_code(record,&selected_class,&selected_method)?;
+                } else if record.starts_with("INSTRUMENTATION_CODE:") {junit.final_code(record)?;}
+            }
+            let child_exit=match child.wait().await {Ok(status)=>if status.success(){"success"}else{"nonzero_or_signal"},Err(error)=>{
+                *task_eof_summary.lock().map_err(|_|failure("retained pairing EOF summary latch is unavailable"))?=Some(junit.eof_summary(&selected_class,&selected_method,"unavailable"));return Err(error);
+            }};
+            *task_eof_summary.lock().map_err(|_|failure("retained pairing EOF summary latch is unavailable"))?=Some(junit.eof_summary(&selected_class,&selected_method,child_exit));
+            if owner.is_some()||bootstrap.is_some(){return Err(failure("retained pairing instrumentation EOF has incomplete owner or bootstrap status"));}
+            if child_exit!="success"{return Err(failure("retained pairing instrumentation child exit is not success"));}
+            junit.finish()?;
+            Ok(())
+        });
+        Ok(Self {events,task,eof_summary})
+    }
+    async fn finished(self,evidence:&Path,invite_issued:bool,launched:bool,foreground:bool,finished:bool,shell_verified:bool)->io::Result<()> {
+        let result=match timeout(Duration::from_secs(35),self.task).await {Ok(Ok(result))=>result,Ok(Err(_))=>Err(failure("retained pairing instrumentation task failed")),Err(_)=>Err(failure("retained pairing instrumentation finish expired"))};
+        let mut summary=self.eof_summary.lock().map_err(|_|failure("retained pairing EOF summary latch is unavailable"))?.take();
+        if let Some(summary)=summary.as_mut() {summary.as_object_mut().expect("retained pairing EOF summary is an object").extend([("inviteIssued".to_owned(),json!(invite_issued)),("launched".to_owned(),json!(launched)),("foreground".to_owned(),json!(foreground)),("pairingFinishAcknowledged".to_owned(),json!(finished)),("shellVerified".to_owned(),json!(shell_verified))]);write_json(&evidence.join("retained-pairing-junit-eof.json"),summary)?;}
+        result
+    }
+}
+
+async fn pairing_subject_epoch(adb:&PhysicalAdb,epoch:&ProductEpoch,uid:u32)->io::Result<()> {
+    let script=format!("if 'test' '-r' '/proc/{0}/stat' && 'test' '-r' '/proc/{0}/status'; then 'cat' '/proc/{0}/stat'; 'sed' '-n' 's/^Uid:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' '/proc/{0}/status'; else 'printf' '%s' 'missing'; fi",epoch.pid);
+    let bytes=adb.shell(&["run-as",APP,"sh","-c",&script],4096).await?;let output=text(&bytes)?;
+    let mut lines=output.lines();let stat=lines.next().ok_or_else(||failure("retained pairing product process is unavailable"))?;let observed_uid=lines.next().and_then(|line|line.parse::<u32>().ok()).ok_or_else(||failure("retained pairing product process UID is unavailable"))?;
+    if lines.next().is_some()||stat=="missing"||stat.split_once(' ').and_then(|(pid,_)|pid.parse::<u32>().ok())!=Some(epoch.pid)||observed_uid!=uid{return Err(failure("retained pairing original product process identity changed"));}
+    let fields=stat.rsplit_once(')').map(|(_,tail)|tail.trim().split_whitespace().collect::<Vec<_>>()).ok_or_else(||failure("retained pairing product stat is malformed"))?;
+    if fields.get(19).and_then(|value|value.parse::<u64>().ok())!=Some(epoch.start){return Err(failure("retained pairing original product process start changed"));}
+    Ok(())
+}
+fn pairing_device_ids(value:&Value)->io::Result<BTreeSet<String>> {
+    let rows=value.get("devices").and_then(Value::as_array).filter(|rows|!rows.is_empty()&&rows.len()<=128).ok_or_else(||failure("retained pairing devices list is invalid"))?;
+    let mut ids=BTreeSet::new();for row in rows {let id=row.get("deviceId").and_then(Value::as_str).filter(|id|uuid_text(id).is_ok()).ok_or_else(||failure("retained pairing device ID is invalid"))?;if !ids.insert(id.to_owned()){return Err(failure("retained pairing devices list repeats a device"));}}
+    Ok(ids)
+}
+#[derive(Clone,PartialEq,Eq)]
+struct PairingCheckpointProviderSelection {provider:Provider,server:Uuid,project:Uuid,server_name:String,project_label:String}
+struct PairingCheckpointProviderBaseline {selection:PairingCheckpointProviderSelection,sessions:Vec<Target>,focus:(Option<Id>,Option<Id>,Option<Id>)}
+fn pairing_checkpoint_deadline(deadline:Instant)->io::Result<()> {
+    if Instant::now()>=deadline {Err(failure("retained pairing selected provider verification exceeded the original checkpoint deadline"))} else {Ok(())}
+}
+fn pairing_checkpoint_session_targets(sessions:&[SessionSummary])->io::Result<Vec<Target>> {
+    let targets=sessions.iter().map(|session|Target {session_id:session.session_id.clone(),generation:session.generation.clone()}).collect::<Vec<_>>();
+    if targets.iter().enumerate().any(|(index,target)|targets[..index].iter().any(|prior|prior==target)){return Err(failure("retained pairing selected provider inventory repeats a session target"));}
+    Ok(targets)
+}
+fn pairing_checkpoint_exact_target_delta(baseline:&[Target],target:&Target,current:&[Target])->io::Result<()> {
+    if baseline.iter().enumerate().any(|(index,value)|baseline[..index].iter().any(|prior|prior==value))||current.iter().enumerate().any(|(index,value)|current[..index].iter().any(|prior|prior==value))
+        ||baseline.iter().any(|prior|prior==target)||current.len()!=baseline.len()+1||current.iter().filter(|value|*value==target).count()!=1
+        ||baseline.iter().any(|prior|current.iter().filter(|value|*value==prior).count()!=1) {
+        return Err(failure("retained pairing selected provider inventory delta is not exactly the new receipt target"));
+    }
+    Ok(())
+}
+fn pairing_checkpoint_target_published(baseline:&[Target],target:&Target,current:&[Target])->io::Result<bool> {
+    if current.len()==baseline.len()&&baseline.iter().all(|prior|current.iter().filter(|value|*value==prior).count()==1) {return Ok(false);}
+    pairing_checkpoint_exact_target_delta(baseline,target,current)?;Ok(true)
+}
+fn pairing_checkpoint_provider_selection(stock:&StockRun,inventory:&HostSnapshotResult,provider:Provider)->io::Result<PairingCheckpointProviderSelection> {
+    if stock.config.backend_reason(provider)?.is_some(){return Err(prerequisite("retained pairing selected provider is not configured for this owned stock run"));}
+    if provider==Provider::Codex {let owner=stock.config.creation_codex_owner().map_err(|_|prerequisite("retained pairing exact Codex owner is unavailable"))?;private_dir(&owner.bindings_dir,false)?;}
+    let mut servers=inventory.servers.iter().filter(|server|server.name.0==stock.name);
+    let server=servers.next().ok_or_else(||prerequisite("retained pairing exact OMP stock server is absent"))?;if servers.next().is_some(){return Err(failure("retained pairing selected provider stock server selection is ambiguous"));}
+    if server.connectivity!=ServerConnectivity::Online||!(if provider==Provider::Omp {server.can_create.omp}else{server.can_create.codex}){return Err(prerequisite("retained pairing exact selected stock server is not online/creatable"));}
+    let configured=stock.config.projects.first().ok_or_else(||failure("retained pairing selected provider configured project is absent"))?;let mut projects=inventory.projects.iter().filter(|project|project.project_id==configured.id);
+    let project=projects.next().ok_or_else(||prerequisite("retained pairing exact configured project is absent"))?;if projects.next().is_some(){return Err(failure("retained pairing configured project selection is ambiguous"));}
+    if project.label!=configured.label||!project.available{return Err(prerequisite("retained pairing exact configured project is unavailable"));}
+    Ok(PairingCheckpointProviderSelection {provider,server:server.server_id.clone(),project:project.project_id.clone(),server_name:server.name.0.clone(),project_label:project.label.0.clone()})
+}
+async fn pairing_checkpoint_provider_selection_current(stock:&mut StockRun,provider:Provider)->io::Result<PairingCheckpointProviderSelection> {
+    let inventory=stock.inventory().await?;pairing_checkpoint_provider_selection(stock,&inventory,provider)
+}
+async fn pairing_checkpoint_provider_baseline(stock:&mut StockRun,expected:&PairingCheckpointProviderSelection,deadline:Instant)->io::Result<PairingCheckpointProviderBaseline> {
+    pairing_checkpoint_deadline(deadline)?;let inventory=stock.inventory().await?;pairing_checkpoint_deadline(deadline)?;let selection=pairing_checkpoint_provider_selection(stock,&inventory,expected.provider)?;
+    if selection!=*expected{return Err(failure("retained pairing selected provider selection changed before creation admission"));}
+    let sessions=pairing_checkpoint_session_targets(&inventory.sessions)?;pairing_checkpoint_deadline(deadline)?;let focus=focus(&stock.native_snapshot().await?);pairing_checkpoint_deadline(deadline)?;
+    Ok(PairingCheckpointProviderBaseline {selection,sessions,focus})
+}
+fn pairing_checkpoint_provider_proof_projection(provider:Provider)->io::Result<Value> {
+    let provider=match provider {Provider::Omp=>"omp",Provider::Codex=>"codex"};
+    Ok(json!({"provider":provider,"exactReadyInventory":true,"exactReceiptResources":true,"nativeCapsZero":true,"projectCwdExact":true,"desktopFocusUnchanged":true}))
+}
+fn pairing_checkpoint_provider_proof_facts(proof:&NativeProof)->io::Result<Value> {
+    let mut facts=pairing_checkpoint_provider_proof_projection(proof.provider)?;
+    // Retain actual original identities so a future cleanup review can join this run.
+    facts["ownership"]=proof_facts(proof)?;
+    Ok(facts)
+}
+fn pairing_checkpoint_provider_chat_proof_facts(proof:&NativeProof)->io::Result<Value> {
+    pairing_checkpoint_provider_proof_projection(proof.provider)?;
+    Ok(json!({"target":proof.target,"provider":match proof.provider {Provider::Omp=>"omp",Provider::Codex=>"codex"},"native":proof.native,"pane":proof.pane,"terminal":proof.terminal,"workspace":proof.workspace,"owner":proof.owner,"tui":proof.tui,"relay":proof.relay,"exactPromptReceipt":true,"completeUserMarker":true,"completeAssistantMarker":true,"exactCreatedTarget":true,"providerProofRetained":true}))
+}
+async fn pairing_checkpoint_provider_verify(stock:&mut StockRun,baseline:&PairingCheckpointProviderBaseline,receipt:&Receipt,deadline:Instant)->io::Result<NativeProof> {
+    pairing_checkpoint_deadline(deadline)?;receipt.validate().map_err(|_|failure("retained pairing selected provider receipt is invalid"))?;
+    let creation=receipt.creation.as_ref().ok_or_else(||failure("retained pairing selected provider receipt omits creation"))?;
+    let Some(ActionResult::Created(created))=receipt.result.as_ref() else{return Err(failure("retained pairing selected provider receipt lacks its created result"));};
+    if receipt.method!=ActionMethod::SessionCreate||receipt.state!=ReceiptState::Succeeded||receipt.error.is_some()||receipt.target.is_some()||receipt.shell_target.is_some()||receipt.boot_id!=stock.phone.hello.boot_id||creation.source_target.is_some()||creation.provider!=baseline.selection.provider||creation.server_id!=baseline.selection.server||creation.project_id!=baseline.selection.project {return Err(failure("retained pairing selected provider receipt is not the exact succeeded selected creation"));}
+    let target=Target {session_id:creation.resources.session_id.clone().ok_or_else(||failure("retained pairing selected provider receipt session identity is absent"))?,generation:creation.resources.generation.clone().ok_or_else(||failure("retained pairing selected provider receipt generation is absent"))?};
+    if created.target!=target||creation.resources.workspace_id.as_ref()!=Some(&created.workspace_id)||creation.resources.pane_id.as_ref()!=Some(&created.pane_id)||creation.resources.terminal_id.as_ref()!=Some(&created.terminal_id)||creation.resources.native_id.as_ref()!=Some(&created.native_id)||creation.resources.binding_id!=created.binding_id{return Err(failure("retained pairing selected provider created result differs from its receipt resources"));}
+    let ready_deadline=(Instant::now()+Duration::from_secs(60)).min(deadline);let session=loop {
+        pairing_checkpoint_deadline(deadline)?;stock.recheck()?;let inventory=stock.inventory().await?;pairing_checkpoint_deadline(deadline)?;
+        let current=pairing_checkpoint_session_targets(&inventory.sessions)?;let published=pairing_checkpoint_target_published(&baseline.sessions,&target,&current)?;
+        let matches=if published {inventory.sessions.into_iter().filter(|session|super::created_session_matches(&creation.resources,session,baseline.selection.provider)&&session.server_id==baseline.selection.server&&session.connectivity==SessionConnectivity::Ready).collect::<Vec<_>>()} else {Vec::new()};
+        if matches.len()==1 {break matches.into_iter().next().expect("single exact created session");}
+        if Instant::now()>=ready_deadline{return Err(prerequisite("retained pairing selected provider creation did not reach exact Ready inventory before the original checkpoint deadline"));}
+        tokio::time::sleep(Duration::from_millis(150)).await;pairing_checkpoint_deadline(deadline)?;
+    };
+    pairing_checkpoint_deadline(deadline)?;let proof=stock.created_provider_proof(&session,receipt,deadline).await?;pairing_checkpoint_deadline(deadline)?;
+    if proof.provider!=baseline.selection.provider||proof.target!=target||proof.native!=created.native_id||proof.pane!=created.pane_id||proof.terminal!=created.terminal_id||proof.workspace!=created.workspace_id{return Err(failure("retained pairing selected provider provider proof differs from the exact created resources"));}
+    let process=proof.tui.as_ref().unwrap_or(&proof.owner);let cwd=fs::metadata(format!("/proc/{}/cwd",process.pid))?;let project=fs::metadata(&stock.config.projects[0].path)?;
+    if (cwd.dev(),cwd.ino())!=(project.dev(),project.ino()){return Err(failure("retained pairing selected provider native project proof changed"));}
+    pairing_checkpoint_deadline(deadline)?;let snapshot=stock.native_snapshot().await?;pairing_checkpoint_deadline(deadline)?;
+    if focus(&snapshot)!=baseline.focus{return Err(failure("retained pairing selected provider native focus proof changed"));}
+    pairing_checkpoint_deadline(deadline)?;stock.recheck()?;proof.recheck_processes()?;pairing_checkpoint_deadline(deadline)?;Ok(proof)
+}
+async fn pairing_checkpoint_provider_observe(stock:&mut StockRun,proof:&NativeProof,creation:&Receipt,marker:&str,receipt:&Receipt,deadline:Instant)->io::Result<Value> {
+    pairing_checkpoint_deadline(deadline)?;
+    if marker.len()>128||!marker.bytes().all(|byte|byte.is_ascii_lowercase()||byte.is_ascii_digit()||byte==b'-') {return Err(failure("retained pairing selected provider Observe marker is invalid"));}
+    receipt.validate().map_err(|_|failure("retained pairing selected provider Observe receipt is invalid"))?;
+    if receipt.action_id==creation.action_id||receipt.method!=ActionMethod::PromptSubmit||receipt.boot_id!=stock.phone.hello.boot_id||receipt.target.as_ref()!=Some(&proof.target)||receipt.shell_target.is_some()||receipt.creation.is_some()||receipt.error.is_some()||!matches!(receipt.state,ReceiptState::Dispatched|ReceiptState::Succeeded) {return Err(failure("retained pairing selected provider Observe receipt is not the exact dispatched prompt"));}
+    tokio::time::timeout_at(deadline.into(),async {
+        loop {
+            pairing_checkpoint_deadline(deadline)?;stock.recheck()?;proof.recheck_processes()?;
+            let current=stock.phone.open(&proof.target,"retained_pairing_provider_observe").await?;
+            if current.state.summary.provider!=proof.provider||current.state.summary.connectivity!=SessionConnectivity::Ready||current.state.summary.native_id!=proof.native {return Err(failure("retained pairing selected provider Observe changed the exact created session"));}
+            if super::shared_user_record(&current.history,marker)?.is_some()&&super::shared_assistant_record(&current.history,marker)?.is_some() {break;}
+            pairing_checkpoint_deadline(deadline)?;tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        Ok::<(),io::Error>(())
+    }).await.map_err(|_|failure("retained pairing selected provider Observe exceeded the original checkpoint deadline"))??;
+    pairing_checkpoint_deadline(deadline)?;let inventory=stock.inventory().await?;pairing_checkpoint_deadline(deadline)?;
+    let sessions=inventory.sessions.into_iter().filter(|session|Target {session_id:session.session_id.clone(),generation:session.generation.clone()}==proof.target&&session.provider==proof.provider&&session.connectivity==SessionConnectivity::Ready).collect::<Vec<_>>();
+    if sessions.len()!=1{return Err(failure("retained pairing selected provider Observe lost the exact Ready created session"));}
+    let current=stock.created_provider_proof(&sessions[0],creation,deadline).await?;pairing_checkpoint_deadline(deadline)?;
+    if !proof.same_input_binding(&current) {return Err(failure("retained pairing selected provider Observe changed the original native proof binding"));}
+    current.recheck_processes()?;stock.recheck()?;pairing_checkpoint_deadline(deadline)?;
+    Ok(json!({"proof":pairing_checkpoint_provider_chat_proof_facts(proof)?}))
+}
+
+struct PairingCheckpointShellSelection {shell:ShellSummary,process:super::TerminalShellProcess,incarnation:Uuid,focus:(Option<Id>,Option<Id>,Option<Id>)}
+async fn pairing_checkpoint_shell_selection(stock:&mut StockRun)->io::Result<PairingCheckpointShellSelection> {
+    let inventory=stock.inventory().await?;let native=stock.native_snapshot().await?;
+    if !inventory.sessions.is_empty()||inventory.shells.len()!=1 {return Err(prerequisite("retained pairing shell requires exactly one fresh ordinary shell and zero sessions"));}
+    let (shell,incarnation)=super::terminal_select(&inventory,&native,&stock.name,None)?.ok_or_else(||prerequisite("retained pairing shell current Ready route is unavailable"))?;
+    if !shell.capabilities.input||!shell.capabilities.grid {return Err(prerequisite("retained pairing shell requires current input and grid capability"));}
+    let info=stock.native_process_info(&shell.pane_id).await?;let process=super::TerminalShellProcess::capture(&stock.desktop.process,&info,&stock.config.projects[0].path)?
+        .ok_or_else(||prerequisite("retained pairing shell requires one exact idle project shell"))?;
+    Ok(PairingCheckpointShellSelection {shell,process,incarnation,focus:focus(&native)})
+}
+fn pairing_checkpoint_shell_final_scroll(actual:Option<GridScroll>,expected_viewport:Option<&Uint>)->io::Result<()> {
+    let Some(expected_viewport)=expected_viewport else{return Ok(());};
+    let actual=actual.ok_or_else(||failure("retained pairing shell final native pane scroll is absent"))?;
+    actual.validate().map_err(|_|failure("retained pairing shell final native pane scroll is invalid"))?;
+    if actual.offset_from_bottom.0!=0||actual.viewport_rows!=*expected_viewport||actual.max_offset_from_bottom.0<actual.viewport_rows.0 {return Err(failure("retained pairing shell final native pane scroll differs from the verified interaction"));}
+    Ok(())
+}
+async fn pairing_checkpoint_shell_recheck(stock:&mut StockRun,expected:&PairingCheckpointShellSelection,expected_viewport:Option<&Uint>)->io::Result<()> {
+    let inventory=stock.inventory().await?;let native=stock.native_snapshot().await?;
+    if !inventory.sessions.is_empty()||inventory.shells.len()!=1||focus(&native)!=expected.focus {return Err(failure("retained pairing shell preflight changed its exact stock topology"));}
+    if let Some(expected_viewport)=expected_viewport {
+        let pane=native.pane(&expected.shell.pane_id)?;let scroll=pane.scroll.as_ref().map(|scroll|GridScroll {offset_from_bottom:Uint(scroll.offset_from_bottom),max_offset_from_bottom:Uint(scroll.max_offset_from_bottom),viewport_rows:Uint(scroll.viewport_rows)});pairing_checkpoint_shell_final_scroll(scroll,Some(expected_viewport))?;
+    }
+    let (shell,incarnation)=super::terminal_select(&inventory,&native,&stock.name,Some(&(expected.shell.server_id.clone(),expected.incarnation.clone())))?
+        .ok_or_else(||failure("retained pairing shell current route is unavailable"))?;
+    if shell!=expected.shell||incarnation!=expected.incarnation||!shell.capabilities.input||!shell.capabilities.grid {return Err(failure("retained pairing shell identity or capability changed"));}
+    let info=stock.native_process_info(&shell.pane_id).await?;expected.process.recheck_idle(&stock.desktop.process,&info,&shell.pane_id)?;stock.recheck()
+}
+
+
+fn pairing_checkpoint_shell_input_receipt(receipt:&Receipt,boot:&Uuid,target:&ShellTarget)->bool {
+    receipt.method==ActionMethod::ShellInput&&receipt.boot_id==*boot&&receipt.target.is_none()&&receipt.shell_target.as_ref()==Some(target)&&receipt.error.is_none()&&match (&receipt.state,&receipt.result) {
+        (ReceiptState::Dispatched,Some(ActionResult::ShellDispatch(result)))=>result.progress.complete(),
+        (ReceiptState::Succeeded,Some(ActionResult::ShellInput(result)))=>result.progress.accepted(),
+        _=>false,
+    }
+}
+fn pairing_checkpoint_shell_interaction_receipts(boot:&Uuid,target:&ShellTarget,inputs:&[Receipt;3],older:&Receipt,bottom:&Receipt,max_offset:Uint,viewport:Uint)->io::Result<()> {
+    let mut ids=BTreeSet::new();
+    for receipt in inputs {
+        receipt.validate().map_err(|_|failure("retained pairing shell interaction input receipt is invalid"))?;
+        if !pairing_checkpoint_shell_input_receipt(receipt,boot,target)||!ids.insert(receipt.action_id.0.clone()) {return Err(failure("retained pairing shell interaction input receipt is not exact"));}
+    }
+    if !(inputs[0].updated_at.0<inputs[1].created_at.0&&inputs[1].updated_at.0<inputs[2].created_at.0&&inputs[2].updated_at.0<older.created_at.0) {return Err(failure("retained pairing shell interaction input order is not exact"));}
+    if max_offset.0<viewport.0{return Err(failure("retained pairing shell interaction baseline metrics are not exact"));}
+    for (receipt,older_receipt) in [(older,true),(bottom,false)] {
+        receipt.validate().map_err(|_|failure("retained pairing shell interaction scroll receipt is invalid"))?;
+        let ActionResult::ShellScroll(metrics)=receipt.result.as_ref().ok_or_else(||failure("retained pairing shell interaction scroll result is absent"))? else {return Err(failure("retained pairing shell interaction scroll result is not exact"));};
+        let offset_exact=if older_receipt {metrics.offset_from_bottom.0>0&&metrics.offset_from_bottom.0<=metrics.max_offset_from_bottom.0} else {metrics.offset_from_bottom.0==0};
+        if receipt.method!=ActionMethod::ShellScroll||receipt.boot_id!=*boot||receipt.target.is_some()||receipt.shell_target.as_ref()!=Some(target)||receipt.error.is_some()||receipt.state!=ReceiptState::Succeeded||!offset_exact||metrics.max_offset_from_bottom.0<metrics.viewport_rows.0||metrics.viewport_rows.0!=viewport.0||!ids.insert(receipt.action_id.0.clone()) {return Err(failure("retained pairing shell interaction scroll receipt is not exact"));}
+    }
+    if older.updated_at.0>=bottom.created_at.0{return Err(failure("retained pairing shell interaction scroll order is not exact"));}
+    if ids.len()!=5{return Err(failure("retained pairing shell interaction action delta is not exact"));}
+    Ok(())
+}
+
+fn pairing_checkpoint_shell_interaction_verify(shell:&PairingCheckpointShellSelection,hello:&HelloResult,target:&ShellTarget,inputs:&[Receipt;3],older:&Receipt,bottom:&Receipt,draft_bytes:Uint,start_revision:Uint,output_revision:Uint,columns:Uint,rows:Uint,max_offset:Uint,viewport:Uint)->io::Result<Value> {
+    if target!=&shell.shell.target||!hello.features.shell_history||draft_bytes.0!=71||columns.0==0||rows.0==0||columns.0>512||rows.0>256||columns.0*rows.0>32768||output_revision.0<=start_revision.0||max_offset.0==0||viewport.0==0||viewport.0>256||viewport.0>max_offset.0{return Err(failure("retained pairing shell interaction scalar facts are not exact"));}
+    pairing_checkpoint_shell_interaction_receipts(&hello.boot_id,target,inputs,older,bottom,max_offset,viewport)?;
+    Ok(json!({"verified":true,"inputCount":3,"scrollCount":2,"draftBytes":draft_bytes,"startRevision":start_revision,"outputRevision":output_revision,"columns":columns,"rows":rows,"maxOffset":max_offset,"viewport":viewport}))
+}
+
+async fn pairing_subject_recheck(adb:&PhysicalAdb,product:&InstalledProductEpoch,pins:&RetainedSubjectPins,product_sha:&str,test_sha:&str,epoch:Option<&ProductEpoch>,inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<()> {
+    recheck_inputs(inputs)?;let packages=package_inventory(adb).await?;recheck_inputs(inputs)?;
+    let current=packages.get(APP).ok_or_else(||failure("retained pairing PRODUCT disappeared"))?;if current!=&product.record||package_ownership(adb,current).await?!=pins.product||installed_hash(adb,APP).await?!=product_sha{return Err(failure("retained pairing PRODUCT subject identity or bytes changed"));}
+    let test_record=packages.get(TEST).ok_or_else(||failure("retained pairing TEST disappeared"))?;if package_ownership(adb,test_record).await?!=pins.test||installed_hash(adb,TEST).await?!=test_sha{return Err(failure("retained pairing TEST subject identity or bytes changed"));}
+    if let Some(epoch)=epoch {pairing_subject_epoch(adb,epoch,product.record.uid).await?;}
+    recheck_inputs(inputs)
+}
+
+/// Small physical route for one retained installed subject. It intentionally does not enter the
+/// fresh-only baseline/matrix: product bytes and data already belong to the user and are only
+/// qualified, while the helper APK may receive the same-signer in-place test update.
+pub(super) async fn pairing_checkpoint(args:&clap::ArgMatches,evidence:&Path,admitted:goatr::codex_relay::UnitWakePin) -> io::Result<()> {
+    let shell_checkpoint=args.get_flag("physical-pairing-shell-checkpoint");
+    let shell_interaction_checkpoint=args.get_flag("physical-pairing-shell-interaction-checkpoint");
+    let create_provider=super::retained_pairing_provider_create(args)?;
+    if shell_interaction_checkpoint&&!shell_checkpoint{return Err(failure("retained pairing shell interaction checkpoint requires its shell parent"));}
+    if shell_checkpoint&&create_provider.is_some(){return Err(failure("retained pairing shell checkpoint cannot create a provider"));}
+    let run=Uuid::random();let label=format!("Goatr retained pairing {}",&run.0[..8]);let chat_marker=format!("goatr-pairing-{}-{}",&run.0[..8],match create_provider.as_ref() {Some(Provider::Omp)=>"omp",Some(Provider::Codex)=>"codex",None=>"none"});
+    let controller_sha=args.get_one::<String>("expected-controller-sha256").ok_or_else(||prerequisite("retained_pairing_controller_pin_unavailable"))?;
+    let binary=canonical_file(args.get_one::<PathBuf>("goatr").ok_or_else(||failure("retained pairing companion path is missing"))?)?;
+    let binary_sha=args.get_one::<String>("expected-goatr-sha256").ok_or_else(||failure("retained pairing companion hash is missing"))?;
+    let config_path=args.get_one::<PathBuf>("config").ok_or_else(||failure("retained pairing configuration is missing"))?;
+    let config_sha=args.get_one::<String>("expected-config-sha256").ok_or_else(||prerequisite("retained_pairing_config_pin_unavailable"))?;
+    let (deployment,config_file,config_metadata)=qualified_configuration(config_path,config_sha)?;
+    let apk=canonical_file(args.get_one::<PathBuf>("apk").ok_or_else(||failure("retained pairing PRODUCT APK is missing"))?)?;
+    let test_apk=canonical_file(args.get_one::<PathBuf>("test-apk").ok_or_else(||failure("retained pairing TEST APK is missing"))?)?;
+    let product_sha=args.get_one::<String>("expected-apk-sha256").ok_or_else(||failure("retained pairing PRODUCT APK hash is missing"))?;
+    let test_sha=args.get_one::<String>("expected-test-apk-sha256").ok_or_else(||failure("retained pairing TEST APK hash is missing"))?;
+    let pins=retained_subject_pins(args)?;
+    if args.get_one::<String>("expected-companion-lock-sha256").map(String::as_str)!=Some(transport::lock_sha256()){return Err(failure("retained pairing source lock pin differs"));}
+    let controller=frozen_input(&std::env::current_exe()?,controller_sha)?;let inputs=vec![frozen_input(&binary,binary_sha)?,frozen_input(&apk,product_sha)?,frozen_input(&test_apk,test_sha)?,(config_path.clone(),config_file,config_metadata),controller];
+    admitted.observe(recheck_inputs(&inputs))?;let unit=args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("retained pairing controller unit is absent"))?;
+    let authority=original_host_authority(ControllerPolicy::UnitWake {unit},None,Some(admitted))?;recheck_original_host(&authority)?;
+    let sdk=canonical_directory(&PathBuf::from(std::env::var_os("ANDROID_HOME").or_else(||std::env::var_os("ANDROID_SDK_ROOT")).ok_or_else(||failure("retained pairing SDK is missing"))?))?;
+    let (adb,device)=PhysicalAdb::qualify(args).await?;let reverse_baseline=pairing_checkpoint_reverse_baseline(&adb).await?;recheck_inputs(&inputs)?;
+    let product=qualify_artifact(&apk,product_sha,&sdk,APP,false).await?;let test=qualify_artifact(&test_apk,test_sha,&sdk,TEST,true).await?;
+    if product.signer!=test.signer{return Err(failure("retained pairing candidate PRODUCT/TEST signers differ"));}
+    let packages=package_inventory(&adb).await?;let product_record=packages.get(APP).ok_or_else(||prerequisite("retained_pairing_product_absent"))?;let product_observation=product_observation(&adb,product_record).await?;let product_epoch=product_observation.epoch;
+    let test_record=packages.get(TEST).ok_or_else(||prerequisite("retained_pairing_test_absent"))?.clone();
+    let test_ownership=package_ownership(&adb,&test_record).await?;
+    if !retained_subject_identity_matches(&pins,&product_epoch.ownership,&test_ownership){return Err(failure("retained pairing installed subject pins differ before TEST update"));}
+    let current_product=installed_artifact(&adb,&sdk,APP,evidence,"retained-pairing-current-product.apk").await?;let current_test=installed_artifact(&adb,&sdk,TEST,evidence,"retained-pairing-current-test.apk").await?;
+    if current_product.sha256!=product.sha256||current_product.signer!=product.signer||current_product.signer!=current_test.signer||current_test.signer!=test.signer||current_test.sha256!=pins.current_test_sha{return Err(failure("retained pairing installed PRODUCT/TEST artifact pins or signers differ"));}
+    adb.package_process_absent(APP).await?;adb.package_process_absent(TEST).await?;
+    if current_test.sha256!=test.sha256 {install_subject_test_update(&adb,&current_test,&product_epoch.record,&pins,&product.sha256,&test,&inputs).await?;}
+    pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,None,&inputs).await?;
+    write_json(&evidence.join("retained-pairing-admission.json"),&json!({"runId":run,"device":device,"product":{"sha256":product.sha256,"signer":product.signer},"test":{"sha256":test.sha256,"signer":test.signer,"updated":current_test.sha256!=test.sha256},"productInstall":"never","testInstall":"same_signer_replace_only_if_needed","privacy":"no URI, fingerprint, aliases, keys, database rows, preview, screenshots, clipboard, or raw control payload retained"}))?;
+    let diagnostic_capture=create_provider==Some(Provider::Codex);
+    let mut stock=StockRun::start(args,evidence,run.clone(),&label,deployment,binary,config_sha,binary_sha,authority.controller_unit.as_ref().ok_or_else(||failure("retained pairing controller authority disappeared"))?,&inputs,diagnostic_capture).await?;
+    let creation_selection=match create_provider.clone() {Some(provider)=>Some(pairing_checkpoint_provider_selection_current(&mut stock,provider).await?),None=>None};
+    let shell_selection=if shell_checkpoint {Some(pairing_checkpoint_shell_selection(&mut stock).await?)} else {None};
+    if shell_interaction_checkpoint&&!stock.phone.hello.features.shell_history{return Err(prerequisite("retained_pairing_shell_history_unavailable"));}
+    let host=stock.phone.hello.host_id.0.clone();let helper=stock.phone.hello.device_id.0.clone();let baseline=pairing_device_ids(&goatr::admin::call(&stock.socket,"devices.list",json!({})).await?)?;
+    if !baseline.contains(&helper){return Err(failure("retained pairing helper device is absent from post-helper baseline"));}
+    let listener=TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await?;let port=listener.local_addr()?.port();let own_reverse=pairing_checkpoint_reverse_capture_own(&adb,&reverse_baseline,port).await?;
+    let mut instrumentation=Some(PairingInstrumentation::start(&adb,port,create_provider.clone(),shell_checkpoint,shell_interaction_checkpoint,false).await?);let deadline=Instant::now()+Duration::from_secs(120);let mut epoch=None;let mut launched=false;let mut foreground=false;let mut invite_issued=false;let mut finished=false;let mut creation_baseline=None;let mut creation_proof=None;let mut creation_receipt=None;let mut creation_verified=create_provider.is_none();let mut chat_verified=create_provider.is_none();let mut terminal_verified=create_provider.is_none();let mut shell_verified=!shell_checkpoint;let mut shell_interaction_verified=!shell_interaction_checkpoint;let mut shell_interaction_scroll=None;
+    loop {
+        if Instant::now()>=deadline{return Err(failure("retained pairing checkpoint deadline expired; resources retained"));}
+        tokio::select! {
+            event=instrumentation.as_mut().expect("retained pairing instrumentation remains until terminal closure").events.recv()=>match event {
+                Some(PairingInstrumentationEvent::Owner(mut owner))=>{
+                    if epoch.is_some(){return Err(failure("retained pairing instrumentation repeated owner epoch"));}
+                    owner.uid=product_epoch.record.uid;pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(&owner),&inputs).await?;
+                    write_json(&evidence.join("retained-pairing-sdk-owner.json"),&json!({"runId":run,"pid":owner.pid,"startTicks":owner.start,"expectedUid":product_epoch.record.uid,"package":APP,"firstInstallTime":product_epoch.ownership.first_install_time,"apkSha256":product.sha256,"bootId":"unavailable"}))?;
+                    epoch=Some(owner);
+                }
+                Some(PairingInstrumentationEvent::AwaitingForeground)=>{
+                    let owner=epoch.as_ref().ok_or_else(||failure("retained pairing bootstrap preceded owner epoch"))?;if launched{return Err(failure("retained pairing launcher was requested more than once"));}
+                    pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;launch_product(&adb).await?;launched=true;
+                }
+                Some(PairingInstrumentationEvent::ForegroundResumed)=>{
+                    let owner=epoch.as_ref().ok_or_else(||failure("retained pairing foreground preceded owner epoch"))?;if !launched||foreground{return Err(failure("retained pairing foreground bootstrap is not singular"));}
+                    pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;foreground=true;
+                }
+                None=>{
+                    let terminal=instrumentation.take().expect("retained pairing instrumentation closure has its task").finished(evidence,invite_issued,launched,foreground,finished,shell_verified).await;
+                    if create_provider.is_some()&&terminal.is_ok(){terminal_verified=true;}
+                    pairing_instrumentation_terminal(terminal,invite_issued,launched,foreground,finished&&creation_verified&&chat_verified&&terminal_verified&&shell_verified&&shell_interaction_verified)?;
+                    break;
+                },
+            },
+            incoming=listener.accept()=>{
+                let (mut stream,peer)=incoming?;if !peer.ip().is_loopback(){continue;}
+                let owner=epoch.as_ref().ok_or_else(||failure("retained pairing control preceded owner epoch"))?;if !foreground{return Err(failure("retained pairing control preceded foreground admission"));}
+                let request=match super::ui::authenticated_control(&mut stream,&owner.public).await {Ok(request)=>request,Err(_)=>continue};
+                let response=tokio::time::timeout_at(deadline.into(),async {
+                pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;stock.recheck()?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;
+                let response=match request {
+                    super::ui::Control::LiveInfo{}=>match creation_selection.as_ref() {
+                        Some(selection)=>json!({"host":host,"name":label,"runId":run,"deadlineMs":deadline.saturating_duration_since(Instant::now()).as_millis(),"provider":match selection.provider {Provider::Omp=>"omp",Provider::Codex=>"codex"},"serverId":selection.server,"serverName":selection.server_name,"projectId":selection.project,"projectLabel":selection.project_label,"chatMarker":chat_marker,"shellCheckpoint":false,"shellInteractionCheckpoint":false}),
+                        None=>match shell_selection.as_ref() {
+                            Some(shell)=>json!({"host":host,"name":label,"runId":run,"deadlineMs":deadline.saturating_duration_since(Instant::now()).as_millis(),"provider":"none","shellCheckpoint":true,"shellInteractionCheckpoint":shell_interaction_checkpoint,"shellId":shell.shell.target.shell_id,"shellGeneration":shell.shell.target.generation,"serverId":shell.shell.server_id,"workspaceId":shell.shell.workspace_id,"tabId":shell.shell.tab_id,"paneId":shell.shell.pane_id,"terminalId":shell.shell.terminal_id}),
+                            None=>json!({"host":host,"name":label,"runId":run,"deadlineMs":deadline.saturating_duration_since(Instant::now()).as_millis(),"provider":"none","shellCheckpoint":false,"shellInteractionCheckpoint":false}),
+                        },
+                    },
+                    super::ui::Control::LivePair{} if !invite_issued=>{
+                        invite_issued=true;let mut uri=tokio::task::spawn_blocking({let binary=stock.binary.clone();let root=stock.root.clone();let socket=stock.socket.clone();move||terminal_pair(&binary,Some(&root),Some(&socket),Some(Instant::now()+Duration::from_secs(30)))}).await.map_err(io::Error::other)??;
+                        let response=json!({"uri":uri});unsafe{uri.as_bytes_mut().fill(0)};response
+                    }
+                    super::ui::Control::PairingFinish{device_id} if invite_issued&&!finished=>{
+                        let now=pairing_device_ids(&goatr::admin::call(&stock.socket,"devices.list",json!({})).await?)?;let expected=baseline.iter().cloned().chain(std::iter::once(device_id.0.clone())).collect::<BTreeSet<_>>();
+                        if device_id.0==helper||now!=expected{return Err(failure("retained pairing devices delta is not exactly the authenticated phone"));}
+                        pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;stock.recheck()?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;
+                        if let Some(selection)=creation_selection.as_ref(){creation_baseline=Some(pairing_checkpoint_provider_baseline(&mut stock,selection,deadline).await?);pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;stock.recheck()?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;}
+                        finished=true;json!({"retained":true,"creationTimeoutMs":if create_provider.is_some() {deadline.saturating_duration_since(Instant::now()).as_millis()} else {0},"shellCheckpoint":shell_checkpoint,"shellInteractionCheckpoint":shell_interaction_checkpoint})
+                    }
+                    super::ui::Control::VerifyCreate{receipt} if create_provider.is_some()&&finished&&!creation_verified=>{
+                        let baseline=creation_baseline.as_ref().ok_or_else(||failure("retained pairing selected provider creation baseline is absent"))?;
+                        let proof=tokio::time::timeout_at(deadline.into(),pairing_checkpoint_provider_verify(&mut stock,baseline,&receipt,deadline)).await.map_err(|_|failure("retained pairing selected provider verification exceeded the original checkpoint deadline"))??;
+                        let facts=pairing_checkpoint_provider_proof_facts(&proof)?;pairing_checkpoint_deadline(deadline)?;
+                        pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;stock.recheck()?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;pairing_checkpoint_deadline(deadline)?;
+                        write_json(&evidence.join(format!("retained-pairing-provider-proof-{}.json",run.0)),&json!({"runId":run,"actionId":receipt.action_id,"bootId":receipt.boot_id,"originals":"physical-originals.json","phoneProcess":{"pid":owner.pid,"startTicks":owner.start,"uid":owner.uid},"optionalProviderCreation":true,"provider":match proof.provider {Provider::Omp=>"omp",Provider::Codex=>"codex"},"verified":true,"proof":facts}))?;
+                        creation_proof=Some(proof);creation_receipt=Some(receipt);creation_verified=true;json!({"verified":true})
+                    }
+                    super::ui::Control::Observe{target,marker,receipt} if create_provider.is_some()&&finished&&creation_verified&&!chat_verified=>{
+                        if marker!=chat_marker{return Err(failure("retained pairing selected provider Observe marker differs from the one admitted run marker"));}
+                        let proof=creation_proof.as_ref().ok_or_else(||failure("retained pairing selected provider Observe lacks the exact creation proof"))?;
+                        let creation=creation_receipt.as_ref().ok_or_else(||failure("retained pairing selected provider Observe lacks the exact creation receipt"))?;
+                        if target!=proof.target{return Err(failure("retained pairing selected provider Observe target differs from the exact creation proof"));}
+                        let facts=pairing_checkpoint_provider_observe(&mut stock,proof,creation,&marker,&receipt,deadline).await?;pairing_checkpoint_deadline(deadline)?;
+                        pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;stock.recheck()?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;pairing_checkpoint_deadline(deadline)?;
+                        write_json(&evidence.join(format!("retained-pairing-provider-chat-proof-{}.json",run.0)),&json!({"runId":run,"creationActionId":creation.action_id,"promptActionId":receipt.action_id,"bootId":receipt.boot_id,"originals":"physical-originals.json","phoneProcess":{"pid":owner.pid,"startTicks":owner.start,"uid":owner.uid},"optionalProviderChat":true,"provider":match proof.provider {Provider::Omp=>"omp",Provider::Codex=>"codex"},"verified":true,"facts":facts}))?;
+                        chat_verified=true;json!({"verified":true})
+                    }
+                    super::ui::Control::VerifyShellInteraction{target,inputs:input_receipts,older,bottom,draft_bytes,start_revision,output_revision,columns,rows,max_offset,viewport} if shell_interaction_checkpoint&&finished&&!shell_interaction_verified=>{
+                        let shell=shell_selection.as_ref().ok_or_else(||failure("retained pairing shell interaction selection is absent"))?;
+                        let facts=pairing_checkpoint_shell_interaction_verify(shell,&stock.phone.hello,&target,&input_receipts,&older,&bottom,draft_bytes,start_revision,output_revision,columns,rows,max_offset,viewport)?;
+                        pairing_checkpoint_deadline(deadline)?;pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;stock.recheck()?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;pairing_checkpoint_deadline(deadline)?;
+                        let expected_viewport=viewport.clone();shell_interaction_scroll=Some(expected_viewport);
+                        write_json(&evidence.join(format!("retained-pairing-shell-interaction-proof-{}.json",run.0)),&json!({"runId":run,"originals":"physical-originals.json","phoneProcess":{"pid":owner.pid,"startTicks":owner.start,"uid":owner.uid},"optionalShellInteraction":true,"facts":facts}))?;
+                        shell_interaction_verified=true;json!({"verified":true})
+                    }
+                    super::ui::Control::Complete{} if shell_checkpoint&&finished&&shell_interaction_verified&&!shell_verified=>{
+                        let shell=shell_selection.as_ref().ok_or_else(||failure("retained pairing shell selection is absent"))?;
+                        let expected_scroll=if shell_interaction_checkpoint {Some(shell_interaction_scroll.as_ref().ok_or_else(||failure("retained pairing shell interaction final scroll was not latched"))?)}else{None};
+                        pairing_checkpoint_shell_recheck(&mut stock,shell,expected_scroll).await?;pairing_checkpoint_deadline(deadline)?;
+                        pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;stock.recheck()?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;
+                        shell_verified=true;json!({"complete":true})
+                    }
+                    _=>return Err(failure("retained pairing control is unavailable or replayed")),
+                };
+                Ok::<Value,io::Error>(response)
+                }).await.map_err(|_|failure("retained pairing control exceeded the original checkpoint deadline"))??;
+                let mut bytes=serde_json::to_vec(&response).map_err(io::Error::other)?;if bytes.len()>65536{return Err(failure("retained pairing control response exceeds bound"));}
+                let write_deadline=(Instant::now()+Duration::from_secs(5)).min(deadline);
+                let sent=tokio::time::timeout_at(write_deadline.into(),async {stream.write_all(&bytes).await?;stream.write_all(b"\n").await}).await;bytes.fill(0);sent.map_err(|_|failure("retained pairing control response deadline"))??;
+            }
+            _=tokio::time::sleep(Duration::from_millis(50))=>{},
+        }
+    }
+    let owner=epoch.ok_or_else(||failure("retained pairing completed without an owner epoch"))?;wait_original_process_absent(&adb,&owner).await?;
+    pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,None,&inputs).await?;
+    pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;let mapping=format!("tcp:{port}");adb.invoke(&["reverse","--remove",&mapping],4096).await?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,None).await?;
+    write_json(&evidence.join("retained-pairing-finished.json"),&json!({"runId":run,"status":"passed","productProcessAbsent":true,"productInstall":"untouched","packageIdentityRetained":true,"pairedDeviceDelta":"one_authenticated_device","optionalProvider":create_provider.as_ref().map(|provider|match provider {Provider::Omp=>"omp",Provider::Codex=>"codex"}),"optionalProviderCreationVerified":create_provider.is_some()&&creation_verified,"optionalProviderChatVerified":create_provider.is_some()&&chat_verified,"optionalProviderTerminalVerified":create_provider.is_some()&&terminal_verified,"optionalShellCheckpoint":shell_checkpoint,"optionalShellVerified":shell_checkpoint&&shell_verified,"optionalShellInteractionCheckpoint":shell_interaction_checkpoint,"optionalShellInteractionVerified":shell_interaction_checkpoint&&shell_interaction_verified,"optionalShellInteractionProof":if shell_interaction_checkpoint {Some(format!("retained-pairing-shell-interaction-proof-{}.json",run.0))}else{None},"optionalProviderCreationProof":if create_provider.is_some() {Some(format!("retained-pairing-provider-proof-{}.json",run.0))}else{None},"optionalProviderChatProof":if create_provider.is_some() {Some(format!("retained-pairing-provider-chat-proof-{}.json",run.0))}else{None},"stockResourcesRetained":true,"nativeCleanup":false}))?;
+    Ok(())
+}
+
+impl PairingInstrumentation {
+    async fn retirement_finished(self,evidence:&Path,launched:bool,foreground:bool,completed:bool)->io::Result<()> {
+        let result=match timeout(Duration::from_secs(35),self.task).await {Ok(Ok(result))=>result,Ok(Err(_))=>Err(failure("owned retirement instrumentation task failed")),Err(_)=>Err(failure("owned retirement instrumentation finish expired"))};
+        if let Some(summary)=self.eof_summary.lock().map_err(|_|failure("owned retirement EOF summary latch is unavailable"))?.take() {
+            let mut summary=summary;summary.as_object_mut().expect("owned retirement EOF summary object").extend([("launched".to_owned(),json!(launched)),("foreground".to_owned(),json!(foreground)),("completed".to_owned(),json!(completed))]);write_json(&evidence.join("owned-retirement-junit-eof.json"),&summary)?;
+        }
+        result?;if !launched||!foreground||!completed{return Err(failure("owned retirement instrumentation ended before closed completion"));}Ok(())
+    }
+}
+
+enum RetirementControlStep {Inventory,Next,Result(bool),Finish}
+fn retirement_cleanup_outcome<T>(primary:io::Result<T>,cleanup:io::Result<()>)->io::Result<T> {
+    match (primary,cleanup) {
+        (Ok(value),Ok(()))=>Ok(value),
+        (Ok(_),Err(_))=>Err(failure("owned retirement reverse cleanup failed")),
+        (Err(primary),Ok(()))|(Err(primary),Err(_))=>Err(primary),
+    }
+}
+fn retirement_control_step(control:&super::ui::Control,index:usize,inventory_issued:bool,next_issued:bool,removed:usize,absent:usize,total:usize)->io::Result<RetirementControlStep> {
+    match control {
+        super::ui::Control::RetirementInventory{} if index==0&&!inventory_issued&&!next_issued=>Ok(RetirementControlStep::Inventory),
+        super::ui::Control::RetirementNext{} if inventory_issued&&index<total&&!next_issued=>Ok(RetirementControlStep::Next),
+        super::ui::Control::RetirementResult{removed} if index<total&&next_issued=>Ok(RetirementControlStep::Result(*removed)),
+        super::ui::Control::RetirementFinish{removed:reported,already_absent} if index==total&&!next_issued&&reported.0 as usize==removed&&already_absent.0 as usize==absent=>Ok(RetirementControlStep::Finish),
+        _=>Err(failure("owned retirement control is unavailable or replayed")),
+    }
+}
+
+pub(super) async fn owned_retirement(args:&clap::ArgMatches,evidence:&Path,admitted:goatr::codex_relay::UnitWakePin)->io::Result<()> {
+    let (manifest,manifest_input)=retirement_manifest(args)?;let run=Uuid::random();
+    let controller_sha=args.get_one::<String>("expected-controller-sha256").ok_or_else(||prerequisite("owned_retirement_controller_pin_unavailable"))?;
+    let binary=canonical_file(args.get_one::<PathBuf>("goatr").ok_or_else(||failure("owned retirement companion path is missing"))?)?;let binary_sha=args.get_one::<String>("expected-goatr-sha256").ok_or_else(||failure("owned retirement companion hash is missing"))?;
+    let config_path=args.get_one::<PathBuf>("config").ok_or_else(||failure("owned retirement configuration is missing"))?;let config_sha=args.get_one::<String>("expected-config-sha256").ok_or_else(||prerequisite("owned_retirement_config_pin_unavailable"))?;
+    let (_config,config_file,config_metadata)=qualified_configuration(config_path,config_sha)?;
+    let apk=canonical_file(args.get_one::<PathBuf>("apk").ok_or_else(||failure("owned retirement PRODUCT APK is missing"))?)?;let test_apk=canonical_file(args.get_one::<PathBuf>("test-apk").ok_or_else(||failure("owned retirement TEST APK is missing"))?)?;
+    let product_sha=args.get_one::<String>("expected-apk-sha256").ok_or_else(||failure("owned retirement PRODUCT APK hash is missing"))?;let test_sha=args.get_one::<String>("expected-test-apk-sha256").ok_or_else(||failure("owned retirement TEST APK hash is missing"))?;let pins=retained_subject_pins(args)?;
+    if args.get_one::<String>("expected-companion-lock-sha256").map(String::as_str)!=Some(transport::lock_sha256()){return Err(failure("owned retirement source lock pin differs"));}
+    let controller=frozen_input(&std::env::current_exe()?,controller_sha)?;let inputs=vec![frozen_input(&binary,binary_sha)?,frozen_input(&apk,product_sha)?,frozen_input(&test_apk,test_sha)?,(config_path.clone(),config_file,config_metadata),controller,manifest_input];
+    admitted.observe(recheck_inputs(&inputs))?;let unit=args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("owned retirement controller unit is absent"))?;let authority=original_host_authority(ControllerPolicy::UnitWake {unit},None,Some(admitted))?;recheck_original_host(&authority)?;
+    let sdk=canonical_directory(&PathBuf::from(std::env::var_os("ANDROID_HOME").or_else(||std::env::var_os("ANDROID_SDK_ROOT")).ok_or_else(||failure("owned retirement SDK is missing"))?))?;let (adb,_device)=PhysicalAdb::qualify(args).await?;let reverse_baseline=pairing_checkpoint_reverse_baseline(&adb).await?;recheck_inputs(&inputs)?;
+    let product=qualify_artifact(&apk,product_sha,&sdk,APP,false).await?;let test=qualify_artifact(&test_apk,test_sha,&sdk,TEST,true).await?;if product.signer!=test.signer{return Err(failure("owned retirement PRODUCT/TEST signers differ"));}
+    let packages=package_inventory(&adb).await?;let product_record=packages.get(APP).ok_or_else(||prerequisite("owned_retirement_product_absent"))?;let product_epoch=product_observation(&adb,product_record).await?.epoch;let test_record=packages.get(TEST).ok_or_else(||prerequisite("owned_retirement_test_absent"))?.clone();let test_ownership=package_ownership(&adb,&test_record).await?;
+    if !retained_subject_identity_matches(&pins,&product_epoch.ownership,&test_ownership){return Err(failure("owned retirement installed subject pins differ"));}
+    let current_product=installed_artifact(&adb,&sdk,APP,evidence,"owned-retirement-current-product.apk").await?;let current_test=installed_artifact(&adb,&sdk,TEST,evidence,"owned-retirement-current-test.apk").await?;
+    if current_product.sha256!=product.sha256||current_product.signer!=product.signer||current_product.signer!=current_test.signer||current_test.signer!=test.signer||current_test.sha256!=pins.current_test_sha{return Err(failure("owned retirement installed artifact pins differ"));}
+    adb.package_process_absent(APP).await?;adb.package_process_absent(TEST).await?;if current_test.sha256!=test.sha256 {install_subject_test_update(&adb,&current_test,&product_epoch.record,&pins,&product.sha256,&test,&inputs).await?;} pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,None,&inputs).await?;
+    let listener=TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await?;let port=listener.local_addr()?.port();let own_reverse=pairing_checkpoint_reverse_capture_own(&adb,&reverse_baseline,port).await?;let retirement_result:io::Result<(usize,usize)>=async {
+    let mut instrumentation=Some(PairingInstrumentation::start(&adb,port,None,false,false,true).await?);let deadline=Instant::now()+Duration::from_secs(900);let mut epoch=None;let mut launched=false;let mut foreground=false;let mut index=0usize;let mut inventory_issued=false;let mut next_issued=false;let mut removed=0usize;let mut absent=0usize;let mut completed=false;
+    loop {if Instant::now()>=deadline{return Err(failure("owned retirement deadline expired; remaining targets retained"));} tokio::select! {
+        event=instrumentation.as_mut().expect("owned retirement instrumentation remains").events.recv()=>match event {Some(PairingInstrumentationEvent::Owner(mut owner))=>{if epoch.is_some(){return Err(failure("owned retirement repeated owner"));}owner.uid=product_epoch.record.uid;pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(&owner),&inputs).await?;write_json(&evidence.join("owned-retirement-sdk-owner.json"),&json!({"runId":run,"pid":owner.pid,"startTicks":owner.start,"expectedUid":owner.uid,"package":APP,"firstInstallTime":product_epoch.ownership.first_install_time,"apkSha256":product.sha256,"bootId":"unavailable"}))?;epoch=Some(owner);},Some(PairingInstrumentationEvent::AwaitingForeground)=>{let owner=epoch.as_ref().ok_or_else(||failure("owned retirement bootstrap preceded owner"))?;if launched{return Err(failure("owned retirement launch repeated"));}pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;launch_product(&adb).await?;launched=true;},Some(PairingInstrumentationEvent::ForegroundResumed)=>{let owner=epoch.as_ref().ok_or_else(||failure("owned retirement foreground preceded owner"))?;if !launched||foreground{return Err(failure("owned retirement foreground invalid"));}pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;foreground=true;},None=>{let terminal=instrumentation.take().expect("owned retirement terminal task").retirement_finished(evidence,launched,foreground,completed).await;terminal?;break;}},
+        incoming=listener.accept()=>{let (mut stream,peer)=incoming?;if !peer.ip().is_loopback(){continue;}let owner=epoch.as_ref().ok_or_else(||failure("owned retirement control preceded owner"))?;if !foreground{return Err(failure("owned retirement control preceded foreground"));}let request=match super::ui::authenticated_control(&mut stream,&owner.public).await {Ok(request)=>request,Err(_)=>continue};pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,Some(owner),&inputs).await?;recheck_original_host(&authority)?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;
+            let response=match retirement_control_step(&request,index,inventory_issued,next_issued,removed,absent,manifest.targets.len())? {RetirementControlStep::Inventory=>{inventory_issued=true;json!({"targetCount":manifest.targets.len(),"targets":manifest.targets.iter().map(|target|json!({"pairingName":target.pairing_name,"expectedHostId":target.expected_host_id.as_deref(),"expectedDeviceId":target.expected_device_id.as_deref()})).collect::<Vec<_>>() })},RetirementControlStep::Next=>{next_issued=true;json!({"pairingName":manifest.targets[index].pairing_name})},RetirementControlStep::Result(did_remove)=>{next_issued=false;if did_remove {removed+=1}else{absent+=1};index+=1;json!({"accepted":true})},RetirementControlStep::Finish=>{completed=true;json!({"targetCount":manifest.targets.len(),"removed":removed,"alreadyAbsent":absent})}};let mut bytes=serde_json::to_vec(&response).map_err(io::Error::other)?;if bytes.len()>65536{return Err(failure("owned retirement control response exceeds bound"));}timeout(Duration::from_secs(5),async {stream.write_all(&bytes).await?;stream.write_all(b"\n").await}).await.map_err(|_|failure("owned retirement control response deadline"))??;bytes.fill(0);
+        },_ = tokio::time::sleep(Duration::from_millis(50))=>{}, }
+    }
+    let owner=epoch.ok_or_else(||failure("owned retirement completed without owner"))?;wait_original_process_absent(&adb,&owner).await?;pairing_subject_recheck(&adb,&product_epoch,&pins,&product.sha256,&test.sha256,None,&inputs).await?;
+    Ok((removed,absent))
+}.await;
+    let cleanup_result=async {pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,Some(&own_reverse)).await?;let mapping=format!("tcp:{port}");adb.invoke(&["reverse","--remove",&mapping],4096).await?;pairing_checkpoint_reverse_recheck(&adb,&reverse_baseline,None).await}.await;
+    if cleanup_result.is_err(){let _=write_json(&evidence.join("owned-retirement-reverse-cleanup.json"),&json!({"status":"cleanup_failed","primaryFailureRetained":retirement_result.is_err(),"cleanupVerified":false}));}
+    let (removed,absent)=retirement_cleanup_outcome(retirement_result,cleanup_result)?;
+    write_json(&evidence.join("owned-retirement-finished.json"),&json!({"runId":run,"targetCount":manifest.targets.len(),"presentRemoved":removed,"alreadyAbsent":absent,"productProcessAbsent":true,"packageIdentityRetained":true,"stockResourcesRetained":true,"nativeCleanup":false}))?;Ok(())
+}
+
+const OWNED_PROCESS_SOURCE_REVIEW:&str="/home/trev/Workspace/.orca-goatr-study-f2GyVO/goatr-old-process-sources-review2675.json";
+const OWNED_PROCESS_SOURCE_REVIEW_SHA256:&str="163de40be79494859b1d1470ba2e8eaf6e5b98566abcf02124da2daad149215a";
+const OWNED_PROCESS_SOURCE_COUNT:usize=52;
+const OWNED_PROCESS_SERVING_COUNT:usize=3;
+const OWNED_PROCESS_CODEX_COUNT:usize=3;
+const OWNED_PROCESS_EXCLUDED_COUNT:usize=5;
+const OWNED_PROCESS_MAX_GROUP_PIDS:usize=4096;
+const OWNED_PROCESS_MAX_INPUT:usize=2*1024*1024;
+
+#[derive(Clone,Debug,PartialEq,Eq,Serialize)]
+#[serde(rename_all="camelCase")]
+struct InventoryObject {device:u64,inode:u64}
+#[derive(Clone,Debug,PartialEq,Eq,Serialize)]
+#[serde(rename_all="camelCase")]
+struct InventoryProcessProof {
+    process:ProcessEvidence,parent_pid:u32,network_namespace:(u64,u64),executable:InventoryObject,
+    capability:&'static str,cgroup:String,
+}
+#[derive(Clone,PartialEq,Eq)]
+enum InventoryExpectedProcess {Full(ProcessEvidence),Epoch {linux_boot_id:Uuid,pid:u32,start_ticks:u64}}
+impl InventoryExpectedProcess {
+    fn pid(&self)->u32 {match self {Self::Full(process)=>process.pid,Self::Epoch {pid,..}=>*pid}}
+    fn matches(&self,process:&ProcessEvidence)->bool {match self {Self::Full(expected)=>expected==process,Self::Epoch {linux_boot_id,pid,start_ticks}=>process.linux_boot_id==*linux_boot_id&&process.pid==*pid&&process.start_ticks==*start_ticks}}
+}
+#[derive(Clone)]
+struct InventoryRoot {
+    role:String,process:InventoryExpectedProcess,executable:Option<PathBuf>,sha256:Option<String>,wake:bool,
+}
+#[derive(Clone)]
+enum InventoryGroupKind {
+    Physical {argv:Option<Vec<String>>,environment:BTreeSet<String>,working_directory:Option<String>},
+    Serving,
+    Codex {argv:Vec<String>,environment_digest:String,working_directory:String},
+}
+#[derive(Clone)]
+struct InventorySourceGroup {
+    source_ref:String,unit:String,cgroup:Option<String>,main:ProcessEvidence,manager:Option<ProcessEvidence>,
+    roots:Vec<InventoryRoot>,kind:InventoryGroupKind,kill_mode:&'static str,
+}
+#[derive(Clone,Debug,PartialEq,Eq)]
+struct InventoryManagerFacts {values:BTreeMap<String,String>}
+#[derive(Clone)]
+struct InventoryStableSample {facts:InventoryManagerFacts,cgroup:String,pids:Vec<u32>,proofs:BTreeMap<u32,InventoryProcessProof>,failures:BTreeMap<u32,&'static str>,roots:Vec<InventoryRoot>,candidates:Vec<Value>,unproved:Vec<Value>}
+enum InventoryGroupSample {Stable(InventoryStableSample),Closed(Value)}
+struct InventoryStopTarget {proof:InventoryProcessProof,unit:String,depth:usize}
+struct InventoryHeldTarget {target:InventoryStopTarget,pidfd:OwnedFd,term:bool,kill:bool,exited:bool}
+struct InventoryStopProgress {term_attempted:usize,kill_attempted:usize,error:Option<io::Error>}
+struct InventoryStopScope {mixed_groups:u64,mixed_candidates:u64,unproved:u64,rejected_groups:u64,excluded_sources:u64,retained_groups:u64}
+#[derive(Clone,Copy)]
+enum InventoryStopCgroupPostcheck {NotPerformed,CheckedEmptyOrAbsent,Unavailable,NewMember}
+impl InventoryStopCgroupPostcheck {fn as_str(self)->&'static str {match self {Self::NotPerformed=>"not_performed",Self::CheckedEmptyOrAbsent=>"checked_empty_or_absent",Self::Unavailable=>"unavailable",Self::NewMember=>"new_member"}}}
+
+fn inventory_deadline(deadline:Instant)->io::Result<()> {
+    if Instant::now()>=deadline {Err(io::Error::new(io::ErrorKind::TimedOut,"owned process inventory deadline expired"))}else{Ok(())}
+}
+#[derive(Clone,Copy)]
+enum InventoryInputPolicy {Private0600,LegacyOpaqueReadOnly}
+struct InventoryInput {path:PathBuf,file:File,metadata:fs::Metadata,parent:PathBuf,parent_metadata:fs::Metadata,sha256:String,policy:InventoryInputPolicy}
+fn inventory_input_policy_allows(policy:InventoryInputPolicy,metadata:&fs::Metadata,owner:u32)->bool {
+    metadata.is_file()&&metadata.uid()==owner&&metadata.nlink()==1&&match policy {InventoryInputPolicy::Private0600=>metadata.mode()&0o7777==0o600,InventoryInputPolicy::LegacyOpaqueReadOnly=>matches!(metadata.mode()&0o7777,0o400|0o600)}
+}
+fn inventory_input_policy(policy:InventoryInputPolicy,path:&Path,metadata:&fs::Metadata)->io::Result<()> {
+    if matches!(policy,InventoryInputPolicy::Private0600){private_file(path)?;}
+    if !inventory_input_policy_allows(policy,metadata,unsafe{libc::geteuid()}) {return Err(failure("owned process inventory input policy differs"));}Ok(())
+}
+fn inventory_input(path:&Path,expected:&str,policy:InventoryInputPolicy)->io::Result<InventoryInput> {
+    if !path.is_absolute()||!hex64(expected)||fs::canonicalize(path)?!=path{return Err(failure("owned process inventory input path is not canonical"));}
+    let input=frozen_input(path,expected)?;if input.0!=path{return Err(failure("owned process inventory input path changed"));}
+    let parent=input.0.parent().ok_or_else(||failure("owned process inventory input parent is absent"))?.to_owned();
+    if fs::canonicalize(&parent)?!=parent{return Err(failure("owned process inventory input parent is not canonical"));}
+    private_dir(&parent,false)?;inventory_input_policy(policy,&input.0,&input.2)?;let parent_metadata=fs::symlink_metadata(&parent)?;
+    Ok(InventoryInput {path:input.0,file:input.1,metadata:input.2,parent,parent_metadata,sha256:expected.to_owned(),policy})
+}
+fn inventory_private_input(path:&Path,expected:&str)->io::Result<InventoryInput> {inventory_input(path,expected,InventoryInputPolicy::Private0600)}
+fn inventory_legacy_opaque_input(path:&Path,expected:&str)->io::Result<InventoryInput> {inventory_input(path,expected,InventoryInputPolicy::LegacyOpaqueReadOnly)}
+fn inventory_recheck_inputs(inputs:&[InventoryInput])->io::Result<()> {use sha2::{Digest,Sha256};let mut paths=BTreeSet::new();for input in inputs {if !paths.insert((input.metadata.dev(),input.metadata.ino())){return Err(failure("owned process inventory input object repeats"));}private_dir(&input.parent,false)?;let parent=fs::symlink_metadata(&input.parent)?;if complete_stamp(&parent)!=complete_stamp(&input.parent_metadata)||fs::canonicalize(&input.parent)?!=input.parent{return Err(failure("owned process inventory input parent changed"));}let metadata=fs::symlink_metadata(&input.path)?;inventory_input_policy(input.policy,&input.path,&metadata)?;if complete_stamp(&metadata)!=complete_stamp(&input.metadata)||metadata.nlink()!=1{return Err(failure("owned process inventory input changed"));}let mut file=input.file.try_clone()?;std::io::Seek::seek(&mut file,std::io::SeekFrom::Start(0))?;let mut bytes=Vec::with_capacity(metadata.len() as usize);file.take(OWNED_PROCESS_MAX_INPUT as u64+1).read_to_end(&mut bytes)?;if bytes.len()>OWNED_PROCESS_MAX_INPUT||hex(&Sha256::digest(&bytes))!=input.sha256{return Err(failure("owned process inventory input bytes changed"));}}Ok(())}
+fn inventory_bytes(input:&InventoryInput,limit:usize)->io::Result<Vec<u8>> {
+    if input.metadata.len()>limit as u64{return Err(failure("owned process inventory input exceeds bound"));}
+    let mut file=input.file.try_clone()?;std::io::Seek::seek(&mut file,std::io::SeekFrom::Start(0))?;
+    let mut bytes=Vec::with_capacity(input.metadata.len() as usize);file.take((limit+1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len()>limit{return Err(failure("owned process inventory input exceeds bound"));}Ok(bytes)
+}
+fn inventory_json(input:&InventoryInput,limit:usize)->io::Result<Value> {
+    serde_json::from_slice(&inventory_bytes(input,limit)?).map_err(|_|failure("owned process inventory JSON shape is invalid"))
+}
+fn inventory_reference(value:&Value,inputs:&mut Vec<InventoryInput>)->io::Result<Value> {
+    object(value,&["path","sha256"])?;let path=PathBuf::from(string(value,"path")?);let sha=string(value,"sha256")?;
+    if !path.is_absolute()||!hex64(sha){return Err(failure("owned process inventory reference is invalid"));}
+    let input=inventory_private_input(&path,sha)?;let result=inventory_json(&input,OWNED_PROCESS_MAX_INPUT)?;inputs.push(input);Ok(result)
+}
+fn inventory_file_reference(value:&Value,inputs:&mut Vec<InventoryInput>)->io::Result<()> {
+    object(value,&["path","sha256"])?;let path=PathBuf::from(string(value,"path")?);let sha=string(value,"sha256")?;if !path.is_absolute()||!hex64(sha){return Err(failure("owned process inventory file reference is invalid"));}inputs.push(inventory_private_input(&path,sha)?);Ok(())
+}
+fn inventory_historical_config_reference(value:&Value,inputs:&mut Vec<InventoryInput>)->io::Result<()> {
+    object(value,&["object","path","sha256"])?;let path=PathBuf::from(string(value,"path")?);let sha=string(value,"sha256")?;
+    if !path.is_absolute()||!hex64(sha){return Err(failure("owned process inventory historical config reference is invalid"));}
+    let input=inventory_private_input(&path,sha)?;let metadata_value=&value["object"];object(metadata_value,&["device","inode","mode","path","uid"])?;
+    let metadata=&input.metadata;
+    if string(metadata_value,"path")?!=path.to_string_lossy().as_ref()
+        ||unsigned(metadata_value,"device")?!=metadata.dev()
+        ||unsigned(metadata_value,"inode")?!=metadata.ino()
+        ||unsigned(metadata_value,"uid")?!=u64::from(metadata.uid())
+        ||metadata.uid()!=unsafe{libc::geteuid()}
+        ||unsigned(metadata_value,"mode")?!=u64::from(metadata.mode()&0o7777) {
+        return Err(failure("owned process inventory historical config metadata differs"));
+    }
+    inputs.push(input);Ok(())
+}
+fn inventory_legacy_opaque_reference(value:&Value,inputs:&mut Vec<InventoryInput>)->io::Result<()> {
+    object(value,&["path","sha256"])?;let path=PathBuf::from(string(value,"path")?);let sha=string(value,"sha256")?;
+    if !path.is_absolute()||!hex64(sha){return Err(failure("owned process inventory legacy opaque reference is invalid"));}
+    inputs.push(inventory_legacy_opaque_input(&path,sha)?);Ok(())
+}
+fn inventory_optional_reference(value:&Value,inputs:&mut Vec<InventoryInput>)->io::Result<Option<Value>> {
+    object(value,&["path","sha256"])?;
+    match (&value["path"],&value["sha256"]) {(Value::Null,Value::Null)=>Ok(None),(Value::String(_),Value::String(_))=>inventory_reference(value,inputs).map(Some),_=>Err(failure("owned process inventory optional reference is invalid"))}
+}
+fn inventory_process(value:&Value)->io::Result<ProcessEvidence> {
+    serde_json::from_value(value.clone()).map_err(|_|failure("owned process inventory retained process evidence is invalid"))
+}
+fn inventory_unit(value:&str)->io::Result<()> {
+    if value.is_empty()||value.starts_with('-')||value.len()>255||!value.ends_with(".service")||!value.bytes().all(|byte|byte.is_ascii_alphanumeric()||b"_.-".contains(&byte))||value.contains("..") {
+        return Err(failure("owned process inventory unit is invalid"));
+    } Ok(())
+}
+fn inventory_wake_caps(value:&Value,unit:&str,cgroup:&str)->io::Result<()> {
+    object(value,&["NoNewPrivs","actualOwnedUnitWakeQualified","cgroup","masks","unit"])?;
+    if unsigned(value,"NoNewPrivs")?!=1||!boolean(value,"actualOwnedUnitWakeQualified")?||string(value,"unit")?!=unit||string(value,"cgroup")?!=cgroup{return Err(failure("owned process inventory retained Wake capability proof differs"));}
+    let masks=&value["masks"];object(masks,&["CapAmb","CapEff","CapInh","CapPrm"])?;
+    if ["CapAmb","CapEff","CapInh","CapPrm"].into_iter().any(|key|string(masks,key).ok()!=Some("0000000800000000")){return Err(failure("owned process inventory retained Wake masks differ"));}Ok(())
+}
+fn inventory_root(role:&str,process:ProcessEvidence,executable:Option<PathBuf>,sha256:Option<String>,wake:bool)->io::Result<InventoryRoot> {
+    if role.is_empty()||role.len()>64||executable.as_ref().is_some_and(|path|!path.is_absolute())||sha256.as_deref().is_some_and(|sha|!hex64(sha)){return Err(failure("owned process inventory retained root is invalid"));}
+    Ok(InventoryRoot {role:role.to_owned(),process:InventoryExpectedProcess::Full(process),executable,sha256,wake})
+}
+fn inventory_property(properties:&[Value],name:&str)->Option<String> {
+    properties.iter().filter_map(Value::as_str).find_map(|property|property.strip_prefix(&format!("{name}=")).map(str::to_owned))
+}
+enum InventoryPhysicalRowKind {Current,Legacy,Direct}
+
+fn inventory_physical_row_kind(row:&Value)->io::Result<InventoryPhysicalRowKind> {
+    let current=["config","intent","lineageSha256","opaqueRef","originals","resources","rootObject","runId"];
+    let legacy=["config","exactUnit","lineageSha256","opaqueRef","originalLaunch","originals","pairedHostRecord","resources","rootObject","runId","runRecord"];
+    let direct=["appTargetAuthorized","config","lineageSha256","opaqueRef","originals","resources","reviewBasis","rootObject","runId","scope"];
+    if object(row,&current).is_ok(){Ok(InventoryPhysicalRowKind::Current)}
+    else if object(row,&legacy).is_ok(){Ok(InventoryPhysicalRowKind::Legacy)}
+    else if object(row,&direct).is_ok(){Ok(InventoryPhysicalRowKind::Direct)}
+    else{Err(failure("owned process inventory physical row schema differs"))}
+}
+
+fn inventory_legacy_metadata(row:&Value,launch:&Value,paired:&Value,unit:&str,cgroup:&str,controller:&ProcessEvidence,native:&ProcessEvidence,companion:&ProcessEvidence)->io::Result<()> {
+    object(launch,&["actualOwnedUnitWakeQualified","cgroup","originalCompanion","originalController","originalNative"])?;
+    if !boolean(launch,"actualOwnedUnitWakeQualified")?||string(row,"exactUnit")?!=unit||string(launch,"cgroup")?!=cgroup
+        ||inventory_process(&launch["originalController"])?!=controller.clone()||inventory_process(&launch["originalNative"])?!=native.clone()||inventory_process(&launch["originalCompanion"])?!=companion.clone() {
+        return Err(failure("owned process inventory legacy launch differs"));
+    }
+    object(paired,&["coldSurvivalProved","facts","foregroundServiceSoleLivenessProved","host","humanAcknowledgementIsNotEffectProof","instrumentedLiveness","preparedRecordSha256","productApkSha256","productPid","productStart","runId"])?;
+    string(paired,"host")?;
+    if string(paired,"runId")?!=string(row,"runId")?||boolean(paired,"coldSurvivalProved")?||boolean(paired,"foregroundServiceSoleLivenessProved")?||!boolean(paired,"humanAcknowledgementIsNotEffectProof")? {
+        return Err(failure("owned process inventory legacy paired host differs"));
+    }
+    Ok(())
+}
+
+fn inventory_direct_metadata(row:&Value)->io::Result<()> {
+    if boolean(row,"appTargetAuthorized")?
+        ||string(row,"scope")?!="process_only_direct_original_run_evidence_no_app_host_authority"
+        ||string(row,"reviewBasis")?!="PASS2077_2650 direct original/resource evidence sufficient only with complete fresh current identity checks" {
+        return Err(failure("owned process inventory direct row differs"));
+    }
+    Ok(())
+}
+
+fn inventory_physical_group(row:&Value,inputs:&mut Vec<InventoryInput>)->io::Result<InventorySourceGroup> {
+    let kind=inventory_physical_row_kind(row)?;
+    let source_ref=string(row,"opaqueRef")?;if source_ref.is_empty()||source_ref.len()>128||!hex64(string(row,"lineageSha256")?){return Err(failure("owned process inventory row identity is invalid"));}
+    uuid_text(string(row,"runId")?)?;
+    let originals=inventory_reference(&row["originals"],inputs)?;let resources=inventory_reference(&row["resources"],inputs)?;
+    match &kind {InventoryPhysicalRowKind::Current=>inventory_file_reference(&row["config"],inputs)?,InventoryPhysicalRowKind::Legacy|InventoryPhysicalRowKind::Direct=>inventory_historical_config_reference(&row["config"],inputs)?,}
+    let original_fields_a=["binarySocket","companion","companionCaps","helperPairIsNotCameraPairingProof","native","nativeInitial","nativeSnapshotIsNotPhoneOutput","publicSocket","retained","runId"];
+    let original_fields_b=["binarySocket","companion","companionCaps","helperPairIsNotProductPairingProof","native","nativeInitial","nativeSnapshotIsNotPhoneOutput","publicSocket","retained","runId"];
+    if object(&originals,&original_fields_a).is_err()&&object(&originals,&original_fields_b).is_err(){return Err(failure("owned process inventory originals schema differs"));}
+    let mut resource_fields=vec!["OMPownedListener","admin","companion","companionLockSha256","companionSha256","config","configSha256","nativeClose","nativeConfig","nativeConfigPathVariable","nativeConfigSha256","nativeInputAutomation","privateCaptures","resourcesRetainedOnFailure","root","runId","template","templateSha256"];
+    if resources.get("closedReporterCapture").is_some(){resource_fields.push("closedReporterCapture");}
+    object(&resources,&resource_fields)?;
+    if string(&originals,"runId")?!=string(row,"runId")?||string(&resources,"runId")?!=string(row,"runId")?||resources["root"]!=row["rootObject"]
+        ||!boolean(&originals,"retained")?||boolean(&resources,"nativeClose")?||boolean(&resources,"nativeInputAutomation")?||!boolean(&resources,"resourcesRetainedOnFailure")? {
+        return Err(failure("owned process inventory physical lineage differs"));
+    }
+    let listener=&resources["OMPownedListener"];object(listener,&["device","fd","inode","parent","port","runtimeDir","v"])?;if unsigned(listener,"v")?!=1{return Err(failure("owned process inventory listener version differs"));}
+    let controller=inventory_process(&listener["parent"])?;let native=inventory_process(&originals["native"])?;let companion=inventory_process(&originals["companion"])?;
+    let unit=string(&originals["companionCaps"],"unit")?.to_owned();let cgroup=string(&originals["companionCaps"],"cgroup")?.to_owned();inventory_unit(&unit)?;
+    goatr::codex_relay::unit_cgroup(&format!("0::{cgroup}\n"),&unit)?;inventory_wake_caps(&originals["companionCaps"],&unit,&cgroup)?;
+    if string(&resources,"companionLockSha256")?!=transport::lock_sha256(){return Err(failure("owned process inventory retained companion lock differs"));}
+    let intent=match kind {
+        InventoryPhysicalRowKind::Current=>inventory_optional_reference(&row["intent"],inputs)?,
+        InventoryPhysicalRowKind::Legacy=>{
+            let paired=inventory_reference(&row["pairedHostRecord"],inputs)?;
+            inventory_legacy_opaque_reference(&row["runRecord"],inputs)?;
+            inventory_legacy_metadata(row,&row["originalLaunch"],&paired,&unit,&cgroup,&controller,&native,&companion)?;None
+        }
+        InventoryPhysicalRowKind::Direct=>{inventory_direct_metadata(row)?;None}
+    };
+    let companion_path=PathBuf::from(string(&resources,"companion")?);let companion_sha=string(&resources,"companionSha256")?.to_owned();
+    let mut argv=None;let mut environment=BTreeSet::new();let mut working_directory=None;let mut controller_path=None;let mut controller_sha=None;
+    if let Some(intent)=intent {
+        let intent_unit=string(&intent,"unit")?;if intent_unit!=unit||string(&intent,"controller")?.is_empty()||!hex64(string(&intent,"controllerSha256")?){return Err(failure("owned process inventory physical intent differs"));}
+        controller_path=Some(PathBuf::from(string(&intent,"controller")?));controller_sha=Some(string(&intent,"controllerSha256")?.to_owned());
+        let mut expected=vec![string(&intent,"controller")?.to_owned()];for argument in array(&intent,"argv",256)? {expected.push(argument.as_str().filter(|value|value.len()<=4096).ok_or_else(||failure("owned process inventory intent argv is invalid"))?.to_owned());}argv=Some(expected);
+        for name in array(&intent,"environmentNames",64)? {let name=name.as_str().filter(|name|!name.is_empty()&&name.len()<=128&&!name.contains('=')&&!name.chars().any(char::is_control)).ok_or_else(||failure("owned process inventory environment name is invalid"))?;if !environment.insert(name.to_owned()){return Err(failure("owned process inventory environment name repeats"));}}
+        let properties=array(&intent,"properties",64)?;working_directory=inventory_property(properties,"WorkingDirectory");
+    }
+    let main=controller.clone();let roots=vec![inventory_root("controller",controller,controller_path,controller_sha,true)?,inventory_root("native",native,Some(PathBuf::from(INSTALLED_HERDR)),Some(INSTALLED_HERDR_SHA256.to_owned()),false)?,inventory_root("companion",companion,Some(companion_path),Some(companion_sha),true)?];
+    Ok(InventorySourceGroup {source_ref:source_ref.to_owned(),unit,cgroup:Some(cgroup),main,manager:None,roots,kind:InventoryGroupKind::Physical {argv,environment,working_directory},kill_mode:"process"})
+}
+fn inventory_serving_group(row:&Value,inputs:&mut Vec<InventoryInput>)->io::Result<InventorySourceGroup> {
+    object(row,&["opaqueRef","proof"])?;let source_ref=string(row,"opaqueRef")?;if source_ref.is_empty()||source_ref.len()>128{return Err(failure("owned process inventory serving reference is invalid"));}
+    let proof=inventory_reference(&row["proof"],inputs)?;object(&proof,&["adminResponsive","adminSocket","authenticatedDuplicateConsumed","cgroup","controller","controllerCaps","inheritedListenerDevice","inheritedListenerInode","manager","native","noDeviceOrApk","originalStartupDeadlinePreserved","resourcesRetained","root","serving","servingCaps","status","unit"])?;
+    if string(&proof,"status")?!="pass"||!boolean(&proof,"adminResponsive")?||!boolean(&proof,"authenticatedDuplicateConsumed")?||!boolean(&proof,"noDeviceOrApk")?||!boolean(&proof,"originalStartupDeadlinePreserved")?||!boolean(&proof,"resourcesRetained")? {return Err(failure("owned process inventory serving proof is not a retained pass"));}
+    let unit=string(&proof,"unit")?.to_owned();let cgroup=string(&proof,"cgroup")?.to_owned();inventory_unit(&unit)?;goatr::codex_relay::unit_cgroup(&format!("0::{cgroup}\n"),&unit)?;
+    inventory_wake_caps(&proof["controllerCaps"],&unit,&cgroup)?;inventory_wake_caps(&proof["servingCaps"],&unit,&cgroup)?;
+    let controller=inventory_process(&proof["controller"])?;let native=inventory_process(&proof["native"])?;let serving=inventory_process(&proof["serving"])?;let manager=inventory_process(&proof["manager"])?;
+    let main=controller.clone();let roots=vec![inventory_root("controller",controller,None,None,true)?,inventory_root("native",native,Some(PathBuf::from(INSTALLED_HERDR)),Some(INSTALLED_HERDR_SHA256.to_owned()),false)?,inventory_root("serving",serving,None,None,true)?];
+    Ok(InventorySourceGroup {source_ref:source_ref.to_owned(),unit,cgroup:Some(cgroup),main,manager:Some(manager),roots,kind:InventoryGroupKind::Serving,kill_mode:"process"})
+}
+fn inventory_epoch(value:&Value)->io::Result<(InventoryExpectedProcess,String)> {
+    object(value,&["executableSha256","linuxBootId","pid","socketDevice","socketInode","socketSource","startTicks"])?;
+    let boot=Uuid::new(string(value,"linuxBootId")?.to_owned()).map_err(|_|failure("owned process inventory Codex boot identity is invalid"))?;
+    let pid=u32::try_from(unsigned(value,"pid")?).ok().filter(|pid|*pid>0).ok_or_else(||failure("owned process inventory Codex PID is invalid"))?;
+    let start=string(value,"startTicks")?.parse::<u64>().ok().filter(|value|*value>0).ok_or_else(||failure("owned process inventory Codex start is invalid"))?;
+    let sha=string(value,"executableSha256")?;if !hex64(sha){return Err(failure("owned process inventory Codex executable pin is invalid"));}Ok((InventoryExpectedProcess::Epoch {linux_boot_id:boot,pid,start_ticks:start},sha.to_owned()))
+}
+fn inventory_codex_group(row:&Value,inputs:&mut Vec<InventoryInput>)->io::Result<InventorySourceGroup> {
+    object(row,&["binding","opaqueRef"])?;let source_ref=string(row,"opaqueRef")?;if source_ref.is_empty()||source_ref.len()>128{return Err(failure("owned process inventory Codex reference is invalid"));}
+    let binding_path=PathBuf::from(string(&row["binding"],"path")?);let binding=inventory_reference(&row["binding"],inputs)?;
+    object(&binding,&["actionId","argv","cwd","environmentDigest","epoch","launcher","manager","ownerId","service","socketAgent","unit","v","wrapper"])?;
+    if unsigned(&binding,"v")?!=2{return Err(failure("owned process inventory Codex owner version differs"));}uuid_text(string(&binding,"ownerId")?)?;uuid_text(string(&binding,"actionId")?)?;
+    let unit=string(&binding,"unit")?.to_owned();inventory_unit(&unit)?;let launcher=PathBuf::from(string(&binding,"launcher")?);let wrapper=PathBuf::from(string(&binding,"wrapper")?);let cwd=string(&binding,"cwd")?.to_owned();
+    if !launcher.is_absolute()||!wrapper.is_absolute()||!Path::new(&cwd).is_absolute()||!hex64(string(&binding,"environmentDigest")?){return Err(failure("owned process inventory Codex owner paths/digest are invalid"));}
+    let socket=string(&binding,"socketAgent")?;let expected_agent=format!("unix://{socket}");let owner_argv=array(&binding,"argv",3)?;
+    if owner_argv.as_slice()!=[json!("app-server"),json!("--listen"),json!(expected_agent)] {return Err(failure("owned process inventory Codex app-server argv differs"));}
+    let manager=inventory_process(&binding["manager"])?;let service=inventory_process(&binding["service"])?;let (owner,owner_sha)=inventory_epoch(&binding["epoch"])?;
+    let argv=vec![launcher.to_string_lossy().into_owned(),"codex-owner".to_owned(),"--record".to_owned(),binding_path.to_string_lossy().into_owned()];
+    let mut owner_root=inventory_root("owner",service.clone(),None,Some(owner_sha),false)?;owner_root.process=owner;
+    let roots=vec![inventory_root("service",service.clone(),None,None,false)?,owner_root];
+    Ok(InventorySourceGroup {source_ref:source_ref.to_owned(),unit,cgroup:None,main:service,manager:Some(manager),roots,kind:InventoryGroupKind::Codex {argv,environment_digest:string(&binding,"environmentDigest")?.to_owned(),working_directory:cwd},kill_mode:"control-group"})
+}
+fn inventory_words(value:&str)->io::Result<Vec<String>> {
+    if value.len()>65536||value.chars().any(|ch|matches!(ch,'\0'|'\r'|'\n')){return Err(failure("owned process inventory manager word list is invalid"));}
+    let mut words=Vec::new();let mut word=String::new();let mut quote=None;let mut chars=value.chars().peekable();
+    while let Some(ch)=chars.next(){match (quote,ch) {
+        (None,' '|'\t')=>{if !word.is_empty(){words.push(std::mem::take(&mut word));}},
+        (None,'\''|'"')=>quote=Some(ch),(Some(q),c) if c==q=>quote=None,
+        (_, '\\')=>{let next=chars.next().ok_or_else(||failure("owned process inventory manager escape is incomplete"))?;if next=='x' {let hi=chars.next().and_then(|c|c.to_digit(16)).ok_or_else(||failure("owned process inventory manager hex escape is invalid"))?;let lo=chars.next().and_then(|c|c.to_digit(16)).ok_or_else(||failure("owned process inventory manager hex escape is invalid"))?;let byte=(hi*16+lo) as u8;if byte==0{return Err(failure("owned process inventory manager word contains NUL"));}word.push(char::from(byte));}else{word.push(next);}},
+        (_,c)=>word.push(c),
+    }}
+    if quote.is_some(){return Err(failure("owned process inventory manager quote is incomplete"));}if !word.is_empty(){words.push(word);}if words.len()>512{return Err(failure("owned process inventory manager word count exceeds bound"));}Ok(words)
+}
+fn inventory_exec_argv(value:&str)->io::Result<Vec<String>> {
+    let value=value.strip_prefix("{ path=").ok_or_else(||failure("owned process inventory ExecStart shape differs"))?;
+    let (path,rest)=value.split_once(" ; argv[]=").ok_or_else(||failure("owned process inventory ExecStart path is absent"))?;
+    let (argv,tail)=rest.split_once(" ; ignore_errors=no ; ").ok_or_else(||failure("owned process inventory ExecStart argv is absent"))?;
+    let tail=tail.strip_suffix(" }").ok_or_else(||failure("owned process inventory ExecStart suffix differs"))?;
+    let fields=tail.split(" ; ").map(|field|field.split_once('=').map(|(key,_)|key)).collect::<Option<Vec<_>>>().ok_or_else(||failure("owned process inventory ExecStart metadata is malformed"))?;
+    if fields!=["start_time","stop_time","pid","code","status"]{return Err(failure("owned process inventory ExecStart metadata differs"));}
+    let words=inventory_words(argv)?;if words.first().map(String::as_str)!=Some(path)||!Path::new(path).is_absolute(){return Err(failure("owned process inventory ExecStart executable differs"));}Ok(words)
+}
+fn inventory_environment(value:&str)->io::Result<Vec<(String,String)>> {
+    let mut result=Vec::new();let mut names=BTreeSet::new();for word in inventory_words(value)? {let (name,value)=word.split_once('=').ok_or_else(||failure("owned process inventory manager environment is malformed"))?;if name.is_empty()||name.len()>128||name.contains('=')||name.chars().any(char::is_control)||!names.insert(name.to_owned()){return Err(failure("owned process inventory manager environment name is invalid"));}result.push((name.to_owned(),value.to_owned()));}result.sort();Ok(result)
+}
+fn inventory_environment_sha(values:&[(String,String)])->io::Result<String> {use sha2::{Digest,Sha256};Ok(hex(&Sha256::digest(serde_json::to_vec(values).map_err(io::Error::other)?)))}
+enum InventoryManagerQuery { Facts(InventoryManagerFacts), TargetRejected }
+fn inventory_manager_facts(pin:&goatr::codex_relay::UnitWakePin,unit:&str,deadline:Instant)->io::Result<InventoryManagerQuery> {
+    inventory_deadline(deadline)?;let output=match pin.inventory_unit_properties(unit,deadline)? {goatr::codex_relay::UnitInventoryProperties::Properties(output)=>output,goatr::codex_relay::UnitInventoryProperties::TargetRejected=>return Ok(InventoryManagerQuery::TargetRejected)};inventory_deadline(deadline)?;
+    if output.len()>131072||output.chars().any(|character|matches!(character,'\r'|'\0')){return Err(failure("owned process inventory manager output is invalid"));}
+    let expected=BTreeSet::from(["Id","ControlGroup","ExecMainPID","InvocationID","KillMode","ExecStart","Environment","WorkingDirectory"]);let mut values=BTreeMap::new();
+    for line in output.lines(){let (key,value)=line.split_once('=').ok_or_else(||failure("owned process inventory manager property is malformed"))?;if !expected.contains(key)||values.insert(key.to_owned(),value.to_owned()).is_some(){return Err(failure("owned process inventory manager property is unknown or repeated"));}}
+    if values.len()!=expected.len(){return Err(failure("owned process inventory manager property is missing"));}Ok(InventoryManagerQuery::Facts(InventoryManagerFacts {values}))
+}
+fn inventory_bounded_proc(pid:u32,name:&str)->io::Result<String> {
+    let mut text=String::new();File::open(format!("/proc/{pid}/{name}"))?.take(65_537).read_to_string(&mut text)?;if text.len()>65_536{return Err(failure("owned process inventory proc value exceeds bound"));}Ok(text)
+}
+fn inventory_status_field<'a>(status:&'a str,name:&str)->io::Result<&'a str> {
+    let prefix=format!("{name}:");let mut found=status.lines().filter_map(|line|line.strip_prefix(&prefix));let value=found.next().ok_or_else(||failure("owned process inventory status field is absent"))?;if found.next().is_some(){return Err(failure("owned process inventory status field repeats"));}Ok(value.trim())
+}
+fn inventory_capability(status:&str)->io::Result<&'static str> {
+    let mut values=[0u64;4];for (index,name) in ["CapInh","CapPrm","CapEff","CapAmb"].into_iter().enumerate(){let value=inventory_status_field(status,name)?;if value.len()!=16||!value.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)){return Err(failure("owned process inventory capability mask is invalid"));}values[index]=u64::from_str_radix(value,16).map_err(|_|failure("owned process inventory capability mask is invalid"))?;}
+    if inventory_status_field(status,"NoNewPrivs")?!="1"{return Err(failure("owned process inventory NoNewPrivs differs"));}
+    if values==[0;4]{Ok("zero")}else if values==[0x0000000800000000;4]{Ok("wake")}else{Err(failure("owned process inventory process capability shape is unsupported"))}
+}
+fn inventory_capture_process(pid:u32,unit:&str)->io::Result<InventoryProcessProof> {
+    let process=herdr::process_evidence(pid)?;let status=inventory_bounded_proc(pid,"status")?;
+    let parent_pid=inventory_status_field(&status,"PPid")?.parse::<u32>().ok().ok_or_else(||failure("owned process inventory parent PID is invalid"))?;
+    let uids=inventory_status_field(&status,"Uid")?.split_whitespace().map(str::parse::<u32>).collect::<Result<Vec<_>,_>>().map_err(|_|failure("owned process inventory UID shape is invalid"))?;
+    if uids.len()!=4||uids.iter().any(|uid|*uid!=unsafe{libc::geteuid()}){return Err(failure("owned process inventory process UID differs"));}
+    let capability=inventory_capability(&status)?;let network=fs::metadata(format!("/proc/{pid}/ns/net"))?;let executable=fs::metadata(format!("/proc/{pid}/exe"))?;
+    let cgroup=inventory_bounded_proc(pid,"cgroup")?;let cgroup=goatr::codex_relay::unit_cgroup(&cgroup,unit)?.to_owned();
+    Ok(InventoryProcessProof {process,parent_pid,network_namespace:(network.dev(),network.ino()),executable:InventoryObject {device:executable.dev(),inode:executable.ino()},capability,cgroup})
+}
+fn inventory_recheck_process(proof:&InventoryProcessProof,unit:&str)->io::Result<()> {
+    if inventory_capture_process(proof.process.pid,unit)?!=*proof{return Err(failure("owned process inventory process changed across capture"));}Ok(())
+}
+fn inventory_group_pids(cgroup:&str,unit:&str)->io::Result<Vec<u32>> {
+    goatr::codex_relay::unit_cgroup(&format!("0::{cgroup}\n"),unit)?;let relative=cgroup.strip_prefix('/').ok_or_else(||failure("owned process inventory cgroup is not absolute"))?;
+    let root=Path::new("/sys/fs/cgroup");let directory=root.join(relative);let canonical=fs::canonicalize(&directory)?;
+    if canonical!=directory||!canonical.starts_with(root)||canonical.file_name().and_then(|name|name.to_str())!=Some(unit){return Err(failure("owned process inventory cgroup directory differs"));}
+    let mut text=String::new();OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(canonical.join("cgroup.procs"))?.take(65_537).read_to_string(&mut text)?;if text.len()>65_536{return Err(failure("owned process inventory cgroup membership exceeds bound"));}
+    let mut pids=BTreeSet::new();for line in text.lines(){let pid=line.parse::<u32>().ok().filter(|pid|*pid>0).ok_or_else(||failure("owned process inventory cgroup PID is invalid"))?;if !pids.insert(pid){return Err(failure("owned process inventory cgroup PID repeats"));}}
+    if pids.len()>OWNED_PROCESS_MAX_GROUP_PIDS{return Err(failure("owned process inventory cgroup PID count exceeds bound"));}Ok(pids.into_iter().collect())
+}
+fn inventory_validate_root(root:&InventoryRoot,proof:&InventoryProcessProof)->io::Result<()> {
+    if !root.process.matches(&proof.process)||proof.capability!=(if root.wake{"wake"}else{"zero"}){return Err(failure("owned process inventory retained root process/capability differs"));}
+    if let Some(path)=&root.executable {let path=fs::canonicalize(path)?;let actual=fs::canonicalize(format!("/proc/{}/exe",proof.process.pid))?;if path!=actual{return Err(failure("owned process inventory retained root executable path differs"));}}
+    if let Some(sha)=&root.sha256 {if binary_sha256(Path::new(&format!("/proc/{}/exe",proof.process.pid)))?!=*sha{return Err(failure("owned process inventory retained root executable hash differs"));}}
+    Ok(())
+}
+fn inventory_reason(error:&io::Error)->&'static str {
+    match error.kind(){io::ErrorKind::NotFound=>"process_evidence_unavailable",io::ErrorKind::PermissionDenied=>"process_evidence_unavailable",io::ErrorKind::TimedOut=>"deadline",_=>"process_evidence_unavailable"}
+}
+fn inventory_classify(observed:&[u32],proofs:&BTreeMap<u32,InventoryProcessProof>,capture_failures:&BTreeMap<u32,&'static str>,roots:&[InventoryRoot])->io::Result<(Vec<Value>,Vec<Value>)> {
+    let mut root_map:BTreeMap<u32,(&InventoryExpectedProcess,Vec<String>)>=BTreeMap::new();for root in roots {let pid=root.process.pid();if let Some((expected,roles))=root_map.get_mut(&pid){if *expected!=&root.process{return Err(failure("owned process inventory distinct roots reuse one PID"));}roles.push(root.role.clone());}else{root_map.insert(pid,(&root.process,vec![root.role.clone()]));}}
+    let expected_wake=roots.iter().filter(|root|root.wake).map(|root|root.process.pid()).collect::<BTreeSet<_>>();let mut candidates=Vec::new();let mut unproved=Vec::new();
+    for pid in observed {
+        if let Some(reason)=capture_failures.get(pid){unproved.push(json!({"pid":pid,"reason":reason}));continue;}
+        let Some(target)=proofs.get(pid) else {unproved.push(json!({"pid":pid,"reason":"process_evidence_unavailable"}));continue;};
+        if (target.capability=="wake")!=expected_wake.contains(pid){unproved.push(json!({"pid":pid,"reason":"source_mismatch"}));continue;}
+        let mut chain=Vec::new();let mut current=*pid;let mut seen=BTreeSet::new();let outcome=loop {
+            if !seen.insert(current){break Err("cycle");}let Some(proof)=proofs.get(&current) else{break Err("missing_parent")};chain.push(proof.clone());
+            if let Some((expected,roles))=root_map.get(&current){if !expected.matches(&proof.process){break Err("root_absent");}break Ok((current,roles.clone()));}
+            if proof.parent_pid==0||proof.parent_pid==current{break Err("missing_parent");}let Some(parent)=proofs.get(&proof.parent_pid) else{break Err(if capture_failures.contains_key(&proof.parent_pid){"parent_unavailable"}else{"missing_parent"})};
+            if parent.cgroup!=proof.cgroup{break Err("cross_group_parent");}if parent.process.start_ticks>proof.process.start_ticks{break Err("start_order_invalid");}current=proof.parent_pid;
+            if chain.len()>observed.len(){break Err("cycle");}
+        };
+        match outcome {Ok((root_pid,roles))=>{let mut ancestry=chain.into_iter().skip(1).collect::<Vec<_>>();ancestry.reverse();candidates.push(json!({"target":target,"rootRef":root_pid,"rootRoles":roles,"ancestry":ancestry}));},Err(reason)=>unproved.push(json!({"pid":pid,"reason":reason}))}
+    }
+    if candidates.len()+unproved.len()!=observed.len(){return Err(failure("owned process inventory group coverage is incomplete"));}Ok((candidates,unproved))
+}
+fn inventory_validate_manager(group:&InventorySourceGroup,facts:&InventoryManagerFacts,authority:&HostAuthority)->io::Result<(String,Vec<String>)> {
+    let get=|key:&str|facts.values.get(key).map(String::as_str).ok_or_else(||failure("owned process inventory manager field is absent"));
+    if get("Id")?!=group.unit||get("ExecMainPID")?.parse::<u32>().ok()!=Some(group.main.pid)||get("KillMode")?!=group.kill_mode{return Err(failure("owned process inventory manager unit/main/kill policy differs"));}
+    let invocation=get("InvocationID")?;if invocation.len()!=32||!invocation.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)){return Err(failure("owned process inventory manager invocation is invalid"));}
+    let cgroup=get("ControlGroup")?.to_owned();goatr::codex_relay::unit_cgroup(&format!("0::{cgroup}\n"),&group.unit)?;if group.cgroup.as_ref().is_some_and(|expected|expected!=&cgroup){return Err(failure("owned process inventory manager cgroup differs"));}
+    if group.manager.as_ref().is_some_and(|manager|manager!=&authority.manager){return Err(failure("owned process inventory retained manager epoch differs"));}
+    let argv=inventory_exec_argv(get("ExecStart")?)?;let environment=inventory_environment(get("Environment")?)?;let working=get("WorkingDirectory")?;
+    match &group.kind {
+        InventoryGroupKind::Physical {argv:Some(expected),environment:expected_environment,working_directory}=>{
+            if &argv!=expected||environment.iter().map(|(name,_)|name).collect::<BTreeSet<_>>()!=expected_environment.iter().collect::<BTreeSet<_>>()||working_directory.as_deref().is_some_and(|expected|expected!=working){return Err(failure("owned process inventory physical manager command/environment/cwd differs"));}
+        }
+        InventoryGroupKind::Physical {argv:None,..}|InventoryGroupKind::Serving=>{
+            if argv.is_empty()||environment.iter().any(|(name,_)|matches!(name.as_str(),"LD_LIBRARY_PATH"|"LD_PRELOAD"|"LD_AUDIT")){return Err(failure("owned process inventory legacy manager command/environment differs"));}
+        }
+        InventoryGroupKind::Codex {argv:expected,environment_digest,working_directory}=>{
+            if &argv!=expected||inventory_environment_sha(&environment)?!=*environment_digest||working!=working_directory{return Err(failure("owned process inventory Codex manager command/environment/cwd differs"));}
+        }
+    }
+    Ok((cgroup,argv))
+}
+fn inventory_load_sources(args:&clap::ArgMatches,inputs:&mut Vec<InventoryInput>)->io::Result<(PathBuf,String,Vec<InventorySourceGroup>)> {
+    let path=args.get_one::<PathBuf>("owned-process-source-manifest").ok_or_else(||failure("owned process inventory source manifest is absent"))?;
+    let expected=args.get_one::<String>("expected-owned-process-source-manifest-sha256").ok_or_else(||failure("owned process inventory source manifest pin is absent"))?;
+    let source_input=inventory_private_input(path,expected)?;let source=inventory_json(&source_input,OWNED_PROCESS_MAX_INPUT)?;let source_path=source_input.path.clone();inputs.push(source_input);
+    object(&source,&["codexOwnerBindings","rows","sourceInputs","status","unitServingProofs","version"])?;
+    if unsigned(&source,"version")?!=2||string(&source,"status")?!="root_reviewed_process_sources_not_stop_authority"
+        ||array(&source,"rows",OWNED_PROCESS_SOURCE_COUNT)?.len()!=OWNED_PROCESS_SOURCE_COUNT||array(&source,"unitServingProofs",OWNED_PROCESS_SERVING_COUNT)?.len()!=OWNED_PROCESS_SERVING_COUNT
+        ||array(&source,"codexOwnerBindings",OWNED_PROCESS_CODEX_COUNT)?.len()!=OWNED_PROCESS_CODEX_COUNT||array(&source,"sourceInputs",2)?.len()!=2 {
+        return Err(failure("owned process inventory reviewed source manifest differs"));
+    }
+    for reference in array(&source,"sourceInputs",2)? {let _=inventory_reference(reference,inputs)?;}
+    let review=inventory_private_input(Path::new(OWNED_PROCESS_SOURCE_REVIEW),OWNED_PROCESS_SOURCE_REVIEW_SHA256)?;let review_value=inventory_json(&review,65536)?;
+    if review_value["status"]!="PASS_SOURCE2077_2675" {return Err(failure("owned process inventory source review is not the exact pass"));}inputs.push(review);
+    let mut groups=Vec::new();for row in array(&source,"rows",OWNED_PROCESS_SOURCE_COUNT)? {groups.push(inventory_physical_group(row,inputs)?);}for row in array(&source,"unitServingProofs",OWNED_PROCESS_SERVING_COUNT)? {groups.push(inventory_serving_group(row,inputs)?);}for row in array(&source,"codexOwnerBindings",OWNED_PROCESS_CODEX_COUNT)? {groups.push(inventory_codex_group(row,inputs)?);}
+    let mut sources=BTreeSet::new();let mut units=BTreeSet::new();for group in &groups {if !sources.insert(group.source_ref.clone())||!units.insert(group.unit.clone()){return Err(failure("owned process inventory source or unit repeats"));}}
+    Ok((source_path,expected.clone(),groups))
+}
+fn inventory_utc(value:&str)->bool {
+    let bytes=value.as_bytes();if !(20..=64).contains(&bytes.len())||bytes.last()!=Some(&b'Z')||!bytes.iter().all(u8::is_ascii_graphic)||bytes.get(4)!=Some(&b'-')||bytes.get(7)!=Some(&b'-')||bytes.get(10)!=Some(&b'T')||bytes.get(13)!=Some(&b':')||bytes.get(16)!=Some(&b':'){return false;}
+    if ![&bytes[0..4],&bytes[5..7],&bytes[8..10],&bytes[11..13],&bytes[14..16],&bytes[17..19]].iter().all(|digits|digits.iter().all(u8::is_ascii_digit)){return false;}
+    let integer=|range:std::ops::Range<usize>|std::str::from_utf8(&bytes[range]).ok()?.parse::<u32>().ok();let (Some(year),Some(month),Some(day),Some(hour),Some(minute),Some(second))=(integer(0..4),integer(5..7),integer(8..10),integer(11..13),integer(14..16),integer(17..19))else{return false;};let month_days=match month {1|3|5|7|8|10|12=>31,4|6|9|11=>30,2 if year%4==0&&(year%100!=0||year%400==0)=>29,2=>28,_=>return false};
+    day>=1&&day<=month_days&&hour<24&&minute<60&&second<60&&(bytes.len()==20||(bytes[19]==b'.'&&bytes.len()>21&&bytes[20..bytes.len()-1].iter().all(u8::is_ascii_digit)))
+}
+fn inventory_controller_identity(at:&str,pid:u64,invocation:&str,unit:&str)->bool {
+    inventory_utc(at)&&u32::try_from(pid).ok().is_some_and(|pid|pid>0)&&Uuid::new(invocation.to_owned()).ok().is_some_and(|value|value.0==invocation)&&inventory_unit(unit).is_ok()
+}
+fn inventory_app_retirement_gate(args:&clap::ArgMatches,inputs:&mut Vec<InventoryInput>)->io::Result<(PathBuf,String,Value)> {
+    const TARGET_PATH:&str="/home/trev/Workspace/.orca-goatr-study-f2GyVO/goatr-owned-retirement-targets2658.json";
+    const TARGET_SHA:&str="1d2521d05a28a209c38b089bba65f2886ed99177bc6129444c344007b6fb50ac";
+    let path=args.get_one::<PathBuf>("owned-app-retirement-gate").ok_or_else(||failure("owned app retirement gate is absent"))?;
+    let expected=args.get_one::<String>("expected-owned-app-retirement-gate-sha256").ok_or_else(||failure("owned app retirement gate pin is absent"))?;
+    let gate_input=inventory_private_input(path,expected)?;let gate=inventory_json(&gate_input,65536)?;
+    object(&gate,&["approvedAt","approvedBy","controllerResult","finishedResult","junitClosure","processStop","reviewReceipt","status","targetManifest","version"])?;
+    if unsigned(&gate,"version")?!=1||string(&gate,"status")?!="root_reviewed_app_retirement_complete"||string(&gate,"approvedBy")?!="root-integration-owner"||boolean(&gate,"processStop")? {return Err(failure("owned app retirement gate approval differs"));}
+    let approved=string(&gate,"approvedAt")?;if !inventory_utc(approved){return Err(failure("owned app retirement gate time is invalid"));}
+    let target_ref=&gate["targetManifest"];object(target_ref,&["path","sha256"])?;if string(target_ref,"path")?!=TARGET_PATH||string(target_ref,"sha256")?!=TARGET_SHA{return Err(failure("owned app retirement gate target manifest differs"));}
+    let target=inventory_reference(target_ref,inputs)?;object(&target,&["approval","binding","status","targets","version"])?;if unsigned(&target,"version")?!=1||string(&target,"status")?!="root_reviewed_unexecuted"||array(&target,"targets",128)?.len()!=49||unsigned(&target["binding"],"targetCount")?!=49{return Err(failure("owned app retirement target manifest is invalid"));}
+    let finished_ref=&gate["finishedResult"];let finished=inventory_reference(finished_ref,inputs)?;object(&finished,&["alreadyAbsent","nativeCleanup","packageIdentityRetained","presentRemoved","productProcessAbsent","runId","stockResourcesRetained","targetCount"])?;
+    uuid_text(string(&finished,"runId")?)?;let target_count=unsigned(&finished,"targetCount")?;let removed=unsigned(&finished,"presentRemoved")?;let absent=unsigned(&finished,"alreadyAbsent")?;
+    if target_count!=49||removed.checked_add(absent)!=Some(49)||!boolean(&finished,"productProcessAbsent")?||!boolean(&finished,"packageIdentityRetained")?||!boolean(&finished,"stockResourcesRetained")?||boolean(&finished,"nativeCleanup")? {return Err(failure("owned app retirement finished result differs"));}
+    let junit_ref=&gate["junitClosure"];let junit=inventory_reference(junit_ref,inputs)?;object(&junit,&["childExit","completed","expectedClass","expectedMethod","finalCodeCardinality","foreground","launched","pendingSelectedStatus","selectedPass","selectedStart"])?;
+    if string(&junit,"expectedClass")?!="io.github.trevarj.goatr.GoatrConnectionTest"||string(&junit,"expectedMethod")?!="installed_subject_owned_retirement_checkpoint"||boolean(&junit,"pendingSelectedStatus")?||!boolean(&junit,"selectedStart")?||!boolean(&junit,"selectedPass")?||string(&junit,"finalCodeCardinality")?!="one"||string(&junit,"childExit")?!="success"||!boolean(&junit,"launched")?||!boolean(&junit,"foreground")?||!boolean(&junit,"completed")? {return Err(failure("owned app retirement JUnit closure differs"));}
+    let controller_ref=&gate["controllerResult"];let controller=inventory_reference(controller_ref,inputs)?;object(&controller,&["appRemoval","at","controllerExitStatus","controllerInvocation","controllerPid","finishedResultSha256","junitClosureSha256","nativeActions","nativeCleanup","packageIdentityRetained","packageReset","pairingCreation","processStop","productProcessAbsent","reverseCleanupVerified","runId","status","stockResourcesRetained","targetManifestSha256","unit","unrelatedRetained","version"])?;
+    if unsigned(&controller,"version")?!=1||string(&controller,"status")?!="PASS_ACTUAL_OWNED_APP_RETIREMENT"||!inventory_controller_identity(string(&controller,"at")?,unsigned(&controller,"controllerPid")?,string(&controller,"controllerInvocation")?,string(&controller,"unit")?)||unsigned(&controller,"controllerExitStatus")?!=0||string(&controller,"targetManifestSha256")?!=TARGET_SHA||string(&controller,"finishedResultSha256")?!=string(finished_ref,"sha256")?||string(&controller,"junitClosureSha256")?!=string(junit_ref,"sha256")?||string(&controller,"runId")?!=string(&finished,"runId")?||!boolean(&controller,"appRemoval")?||!boolean(&controller,"productProcessAbsent")?||!boolean(&controller,"packageIdentityRetained")?||!boolean(&controller,"stockResourcesRetained")?||!boolean(&controller,"reverseCleanupVerified")?||boolean(&controller,"processStop")?||boolean(&controller,"nativeActions")?||boolean(&controller,"nativeCleanup")?||boolean(&controller,"pairingCreation")?||boolean(&controller,"packageReset")?||!boolean(&controller,"unrelatedRetained")? {return Err(failure("owned app retirement controller result differs"));}
+    let review_ref=&gate["reviewReceipt"];let review=inventory_reference(review_ref,inputs)?;object(&review,&["controllerResultSha256","findings","finishedResultSha256","junitClosureSha256","processStop","reviewedAt","reviewedBy","status","targetManifestSha256","version"])?;
+    if unsigned(&review,"version")?!=1||string(&review,"status")?!="PASS_ROOT_REVIEWED_APP_RETIREMENT"||string(&review,"reviewedBy")?!="root-integration-owner"||!inventory_utc(string(&review,"reviewedAt")?)||string(&review,"reviewedAt")?!=approved||string(&review,"targetManifestSha256")?!=TARGET_SHA||string(&review,"finishedResultSha256")?!=string(finished_ref,"sha256")?||string(&review,"controllerResultSha256")?!=string(controller_ref,"sha256")?||string(&review,"junitClosureSha256")?!=string(junit_ref,"sha256")?||!array(&review,"findings",1)?.is_empty()||boolean(&review,"processStop")? {return Err(failure("owned app retirement review differs"));}
+    let gate_path=gate_input.path.clone();inputs.push(gate_input);Ok((gate_path,expected.clone(),finished))
+}
+fn inventory_closed(group:&InventorySourceGroup,coverage:&str,reason:&str)->InventoryGroupSample {InventoryGroupSample::Closed(json!({"sourceRef":group.source_ref,"unit":group.unit,"coverage":coverage,"reason":reason,"observedPids":[],"candidates":[],"unprovedPids":[]}))}
+fn inventory_sample_group(group:&InventorySourceGroup,pin:&goatr::codex_relay::UnitWakePin,authority:&HostAuthority,deadline:Instant)->io::Result<InventoryGroupSample> {
+    let facts=match inventory_manager_facts(pin,&group.unit,deadline)? {InventoryManagerQuery::Facts(facts)=>facts,InventoryManagerQuery::TargetRejected=>return Ok(inventory_closed(group,"source_rejected","manager_query_rejected"))};let (cgroup,_)=match inventory_validate_manager(group,&facts,authority){Ok(value)=>value,Err(_)=>return Ok(inventory_closed(group,"source_rejected","manager_mismatch"))};
+    inventory_deadline(deadline)?;let pids=match inventory_group_pids(&cgroup,&group.unit){Ok(pids)=>pids,Err(_)=>return Ok(inventory_closed(group,"source_rejected","cgroup_unavailable"))};inventory_deadline(deadline)?;let mut proofs=BTreeMap::new();let mut failures=BTreeMap::new();for pid in &pids {inventory_deadline(deadline)?;match inventory_capture_process(*pid,&group.unit){Ok(proof)=>{proofs.insert(*pid,proof);},Err(error)=>{failures.insert(*pid,inventory_reason(&error));}}inventory_deadline(deadline)?;}
+    inventory_deadline(deadline)?;let second=match inventory_group_pids(&cgroup,&group.unit){Ok(pids)=>pids,Err(_)=>return Ok(inventory_closed(group,"source_rejected","cgroup_unavailable"))};inventory_deadline(deadline)?;if pids!=second{return Ok(inventory_closed(group,"unstable","snapshot_changed"));}for proof in proofs.values(){inventory_deadline(deadline)?;if inventory_recheck_process(proof,&group.unit).is_err(){return Ok(inventory_closed(group,"unstable","process_changed"));}inventory_deadline(deadline)?;}
+    let roots=inventory_current_roots(&group.roots,&proofs,deadline)?;if roots.is_empty(){return Ok(inventory_closed(group,"source_rejected","root_absent"));}let (candidates,unproved)=inventory_classify(&pids,&proofs,&failures,&roots)?;Ok(InventoryGroupSample::Stable(InventoryStableSample {facts,cgroup,pids,proofs,failures,roots,candidates,unproved}))
+}
+fn inventory_current_roots(roots:&[InventoryRoot],proofs:&BTreeMap<u32,InventoryProcessProof>,deadline:Instant)->io::Result<Vec<InventoryRoot>> {
+    inventory_deadline(deadline)?;let mut current=Vec::new();for root in roots {inventory_deadline(deadline)?;if proofs.get(&root.process.pid()).is_some_and(|proof|inventory_validate_root(root,proof).is_ok()){current.push(root.clone());}inventory_deadline(deadline)?;}inventory_deadline(deadline)?;Ok(current)
+}
+fn inventory_final_sample_recheck(initial:&InventoryStableSample,facts:&InventoryManagerFacts,cgroup:&str,pids:&[u32],proofs:&BTreeMap<u32,InventoryProcessProof>)->io::Result<Option<&'static str>> {
+    if facts!=&initial.facts||cgroup!=initial.cgroup{return Ok(Some("manager"));}
+    if pids!=initial.pids{return Ok(Some("membership"));}
+    if proofs!=&initial.proofs{return Ok(Some("process"));}
+    let (candidates,unproved)=inventory_classify(pids,proofs,&initial.failures,&initial.roots)?;
+    if candidates!=initial.candidates||unproved!=initial.unproved{return Ok(Some("partition"));}
+    Ok(None)
+}
+fn inventory_final_group(group:&InventorySourceGroup,pin:&goatr::codex_relay::UnitWakePin,authority:&HostAuthority,initial:InventoryStableSample,deadline:Instant)->io::Result<InventoryGroupSample> {
+    let facts=match inventory_manager_facts(pin,&group.unit,deadline)? {InventoryManagerQuery::Facts(facts)=>facts,InventoryManagerQuery::TargetRejected=>return Ok(inventory_closed(group,"source_rejected","manager_query_rejected"))};let (cgroup,_)=match inventory_validate_manager(group,&facts,authority){Ok(value)=>value,Err(_)=>return Ok(inventory_closed(group,"source_rejected","manager_mismatch"))};
+    inventory_deadline(deadline)?;let pids=match inventory_group_pids(&cgroup,&group.unit){Ok(pids)=>pids,Err(_)=>return Ok(inventory_closed(group,"source_rejected","cgroup_unavailable"))};inventory_deadline(deadline)?;for proof in initial.proofs.values(){inventory_deadline(deadline)?;if inventory_recheck_process(proof,&group.unit).is_err(){return Ok(inventory_closed(group,"unstable","process_changed"));}inventory_deadline(deadline)?;}for root in &initial.roots {inventory_deadline(deadline)?;if initial.proofs.get(&root.process.pid()).is_none_or(|proof|inventory_validate_root(root,proof).is_err()){return Ok(inventory_closed(group,"source_rejected","source_mismatch"));}inventory_deadline(deadline)?;}
+    match inventory_final_sample_recheck(&initial,&facts,&cgroup,&pids,&initial.proofs) {Ok(Some("manager"))=>Ok(inventory_closed(group,"source_rejected","manager_mismatch")),Ok(Some("membership"))=>Ok(inventory_closed(group,"unstable","snapshot_changed")),Ok(Some("process"))=>Ok(inventory_closed(group,"unstable","process_changed")),Ok(Some("partition"))=>Ok(inventory_closed(group,"source_rejected","source_mismatch")),Ok(Some(_))=>Ok(inventory_closed(group,"source_rejected","source_mismatch")),Ok(None)=>Ok(InventoryGroupSample::Stable(initial)),Err(_)=>Ok(inventory_closed(group,"source_rejected","source_mismatch"))}
+}
+fn inventory_render_group(group:&InventorySourceGroup,authority:&HostAuthority,sample:InventoryGroupSample)->Value {match sample {InventoryGroupSample::Closed(report)=>report,InventoryGroupSample::Stable(sample)=>json!({"sourceRef":group.source_ref,"unit":group.unit,"managerEpoch":authority.manager,"invocationId":sample.facts.values["InvocationID"],"controlGroup":sample.cgroup,"sourceRoles":sample.roots.iter().map(|root|root.role.clone()).collect::<Vec<_>>(),"coverage":"stable","observedPids":sample.pids,"candidates":sample.candidates,"unprovedPids":sample.unproved})}}
+fn inventory_invocation_collisions(values:&[Option<String>])->BTreeSet<usize> {let mut seen=BTreeMap::<String,Vec<usize>>::new();for (index,value) in values.iter().enumerate(){if let Some(value)=value {seen.entry(value.clone()).or_default().push(index);}}seen.into_values().filter(|indexes|indexes.len()>1).flatten().collect()}
+pub(super) fn owned_process_inventory(args:&clap::ArgMatches,evidence:&Path,admitted:goatr::codex_relay::UnitWakePin)->io::Result<()> {
+    if !args.get_flag("physical-owned-process-inventory")||args.get_one::<String>("expected-companion-lock-sha256").map(String::as_str)!=Some(transport::lock_sha256()){return Err(failure("owned process inventory selector or lock differs"));}
+    let controller_sha=args.get_one::<String>("expected-controller-sha256").ok_or_else(||failure("owned process inventory controller pin is absent"))?;let controller=frozen_input(&std::env::current_exe()?,controller_sha)?;
+    let mut inputs=Vec::new();let (completed_path,completed_sha,completed)=inventory_app_retirement_gate(args,&mut inputs)?;let (source_path,source_sha,groups)=inventory_load_sources(args,&mut inputs)?;
+    recheck_inputs(std::slice::from_ref(&controller))?;inventory_recheck_inputs(&inputs)?;let unit=args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("owned process inventory controller unit is absent"))?;
+    let authority=original_host_authority(ControllerPolicy::UnitWake {unit},None,Some(admitted))?;recheck_original_host(&authority)?;let pin=authority.controller_unit.as_ref().ok_or_else(||failure("owned process inventory admitted unit pin is absent"))?;
+    let deadline=Instant::now()+Duration::from_secs(120);
+    let mut samples=Vec::new();for group in &groups {inventory_deadline(deadline)?;samples.push(inventory_sample_group(group,pin,&authority,deadline)?);}let invocations=samples.iter().map(|sample|match sample {InventoryGroupSample::Stable(sample)=>Some(sample.facts.values["InvocationID"].clone()),InventoryGroupSample::Closed(_)=>None}).collect::<Vec<_>>();for index in inventory_invocation_collisions(&invocations){samples[index]=inventory_closed(&groups[index],"source_rejected","source_mismatch");}
+    for (index,group) in groups.iter().enumerate(){let sample=std::mem::replace(&mut samples[index],inventory_closed(group,"unstable","snapshot_changed"));samples[index]=match sample {InventoryGroupSample::Stable(sample)=>inventory_final_group(group,pin,&authority,sample,deadline)?,closed=>closed};}recheck_original_host(&authority)?;recheck_inputs(std::slice::from_ref(&controller))?;inventory_recheck_inputs(&inputs)?;inventory_deadline(deadline)?;let reports=groups.iter().zip(samples).map(|(group,sample)|inventory_render_group(group,&authority,sample)).collect::<Vec<_>>();
+    let stable=reports.iter().filter(|report|report["coverage"]=="stable").count();let candidates=reports.iter().filter_map(|report|report["candidates"].as_array()).map(Vec::len).sum::<usize>();let unproved=reports.iter().filter_map(|report|report["unprovedPids"].as_array()).map(Vec::len).sum::<usize>();
+    let candidate=json!({"version":1,"kind":"owned_process_inventory_only","status":"root_review_required_not_stop_authority","sourceManifest":{"path":source_path,"sha256":source_sha},"sourceReview":{"path":OWNED_PROCESS_SOURCE_REVIEW,"sha256":OWNED_PROCESS_SOURCE_REVIEW_SHA256},"appRetirementGate":{"path":completed_path,"sha256":completed_sha,"targetCount":completed["targetCount"],"removed":completed["presentRemoved"],"alreadyAbsent":completed["alreadyAbsent"]},"controller":{"unit":unit,"process":authority.caller.clone(),"manager":authority.manager.clone(),"cgroup":pin.cgroup(),"capabilityQualified":true},"deadlineSeconds":120,"groups":reports,"excludedSourceCount":OWNED_PROCESS_EXCLUDED_COUNT,"signalsAttempted":0,"nativeActions":0,"deviceActions":0});
+    write_json(&evidence.join("owned-process-inventory-candidate.json"),&candidate)?;println!("{}",json!({"gate":"owned-process-inventory","status":"candidate_written","groupCount":groups.len(),"stableGroupCount":stable,"candidateCount":candidates,"unprovedCount":unproved,"signalsAttempted":0,"nativeActions":0,"deviceActions":0}));Ok(())
+}
+
+fn inventory_stop_proof(value:&Value)->io::Result<InventoryProcessProof> {
+    object(value,&["capability","cgroup","executable","networkNamespace","parentPid","process"])?;let capability=match string(value,"capability")? {"zero"=>"zero","wake"=>"wake",_=>return Err(failure("owned process stop target capability is invalid"))};let executable=&value["executable"];object(executable,&["device","inode"])?;let network=array(value,"networkNamespace",2)?;if network.len()!=2{return Err(failure("owned process stop target namespace is invalid"));}
+    let first=network[0].as_u64().ok_or_else(||failure("owned process stop target namespace is invalid"))?;let second=network[1].as_u64().ok_or_else(||failure("owned process stop target namespace is invalid"))?;
+    Ok(InventoryProcessProof {process:inventory_process(&value["process"])?,parent_pid:u32::try_from(unsigned(value,"parentPid")?).map_err(|_|failure("owned process stop parent PID is invalid"))?,network_namespace:(first,second),executable:InventoryObject {device:unsigned(executable,"device")?,inode:unsigned(executable,"inode")?},capability,cgroup:string(value,"cgroup")?.to_owned()})
+}
+fn inventory_stop_target(value:&Value,unit:&str)->io::Result<InventoryStopTarget> {
+    object(value,&["ancestry","rootRef","rootRoles","target"])?;let ancestry=array(value,"ancestry",OWNED_PROCESS_MAX_GROUP_PIDS)?;
+    let proof=inventory_stop_proof(&value["target"])?;
+    if proof.process.pid==0||proof.cgroup.is_empty()||proof.cgroup.len()>4096||proof.capability!="zero"&&proof.capability!="wake"||inventory_unit(unit).is_err(){return Err(failure("owned process stop target is invalid"));}
+    for parent in ancestry {let _=inventory_stop_proof(parent)?;}
+    Ok(InventoryStopTarget {proof,unit:unit.to_owned(),depth:ancestry.len()})
+}
+fn inventory_stop_candidate(value:&Value)->io::Result<()> {
+    object(value,&["appRetirementGate","controller","deadlineSeconds","deviceActions","excludedSourceCount","groups","kind","nativeActions","signalsAttempted","sourceManifest","sourceReview","status","version"])?;
+    if unsigned(value,"version")?!=1||string(value,"kind")?!="owned_process_inventory_only"||string(value,"status")?!="root_review_required_not_stop_authority"||unsigned(value,"deadlineSeconds")?!=120||unsigned(value,"excludedSourceCount")?!=OWNED_PROCESS_EXCLUDED_COUNT as u64||unsigned(value,"signalsAttempted")?!=0||unsigned(value,"nativeActions")?!=0||unsigned(value,"deviceActions")?!=0||array(value,"groups",58)?.len()!=58 {return Err(failure("owned process stop candidate differs"));}Ok(())
+}
+fn inventory_stop_runtime(value:&Value,_candidate:&Value,candidate_ref:&Value)->io::Result<()> {
+    object(value,&["at","candidate","descendantAbsence","deviceActions","inventoryDeadlineSeconds","liveWitness","nativeActions","output","processStop","properties","root","sourceSnapshotSha256","status","totalElapsedMicros","unit"])?;
+    if string(value,"status")?!="PASS_BOUNDED_OWNED_PROCESS_INVENTORY"||boolean(value,"processStop")?||boolean(value,"nativeActions")?||boolean(value,"deviceActions")?||unsigned(value,"inventoryDeadlineSeconds")?!=120 {return Err(failure("owned process stop runtime differs"));}
+    let output=&value["output"];object(output,&["candidateCount","deviceActions","gate","groupCount","nativeActions","signalsAttempted","stableGroupCount","status","unprovedCount"])?;
+    object(&value["candidate"],&["bytes","mode","nlink","path","sha256"])?;
+    if string(output,"gate")?!="owned-process-inventory"||string(output,"status")?!="candidate_written"||unsigned(output,"groupCount")?!=58||unsigned(output,"stableGroupCount")?!=15||unsigned(output,"candidateCount")?!=41||unsigned(output,"unprovedCount")?!=12||unsigned(output,"signalsAttempted")?!=0||unsigned(output,"nativeActions")?!=0||unsigned(output,"deviceActions")?!=0||string(&value["candidate"],"path")?!=string(candidate_ref,"path")?||string(&value["candidate"],"sha256")?!=string(candidate_ref,"sha256")?||unsigned(&value["candidate"],"mode")?!=0o600||unsigned(&value["candidate"],"nlink")?!=1 {return Err(failure("owned process stop runtime output differs"));}Ok(())
+}
+fn inventory_stop_validate_approval(candidate:&Value,approval:&Value)->io::Result<(Vec<Value>,InventoryStopScope)> {
+    object(approval,&["appRetirementGate","approvedAt","approvedBy","approvedGroups","inventoryCandidate","inventoryRuntime","processStopAuthorized","scope","sourceManifest","status","version"])?;
+    if unsigned(approval,"version")?!=1||string(approval,"status")?!="root_reviewed_owned_process_stop_subset"||string(approval,"approvedBy")?!="root-integration-owner"||!boolean(approval,"processStopAuthorized")?||!inventory_utc(string(approval,"approvedAt")?) {return Err(failure("owned process stop approval differs"));}
+    for key in ["sourceManifest","appRetirementGate"] {object(&approval[key],&["path","sha256"])?;}
+    let scope=&approval["scope"];object(scope,&["allApprovedGroupsFullyProved","approvedGroupCount","approvedTargetCount","retainedExcludedSourceCount","retainedMixedCandidateCount","retainedMixedGroupCount","retainedRejectedGroupCount","retainedUnprovedCount"])?;
+    let result=InventoryStopScope {mixed_groups:unsigned(scope,"retainedMixedGroupCount")?,mixed_candidates:unsigned(scope,"retainedMixedCandidateCount")?,unproved:unsigned(scope,"retainedUnprovedCount")?,rejected_groups:unsigned(scope,"retainedRejectedGroupCount")?,excluded_sources:unsigned(scope,"retainedExcludedSourceCount")?,retained_groups:0};let mut result=result;result.retained_groups=result.mixed_groups+result.rejected_groups+result.excluded_sources;
+    if unsigned(scope,"approvedGroupCount")?!=12||unsigned(scope,"approvedTargetCount")?!=38||result.mixed_groups!=3||result.mixed_candidates!=3||result.unproved!=12||result.rejected_groups!=43||result.excluded_sources!=5||result.retained_groups!=51||!boolean(scope,"allApprovedGroupsFullyProved")? {return Err(failure("owned process stop scope differs"));}
+    let groups=array(approval,"approvedGroups",12)?;if groups.len()!=12{return Err(failure("owned process stop approved group count differs"));}let candidate_groups=array(candidate,"groups",58)?;let mut selected=BTreeSet::new();let mut targets=BTreeSet::new();let mut selected_values=Vec::new();
+    for group in groups {object(group,&["candidates","controlGroup","coverage","invocationId","managerEpoch","observedPids","sourceRef","sourceRoles","unit","unprovedPids"])?;if string(group,"coverage")?!="stable"||!array(group,"unprovedPids",0)?.is_empty(){return Err(failure("owned process stop approval contains partial group"));}let key=(string(group,"sourceRef")?.to_owned(),string(group,"unit")?.to_owned());if !selected.insert(key){return Err(failure("owned process stop approved group repeats"));}if candidate_groups.iter().filter(|candidate|*candidate==group).count()!=1{return Err(failure("owned process stop approved group is not exact candidate"));}let observed=array(group,"observedPids",OWNED_PROCESS_MAX_GROUP_PIDS)?;let candidates=array(group,"candidates",OWNED_PROCESS_MAX_GROUP_PIDS)?;if observed.len()!=candidates.len()||observed.is_empty(){return Err(failure("owned process stop approved group coverage differs"));}for value in candidates {let target=inventory_stop_target(value,string(group,"unit")?)?;if !observed.iter().any(|pid|pid.as_u64()==Some(target.proof.process.pid as u64))||!targets.insert((target.proof.process.linux_boot_id.0.clone(),target.proof.process.pid,target.proof.process.start_ticks)){return Err(failure("owned process stop approved target differs"));}}selected_values.push(group.clone());}
+    if targets.len()!=38{return Err(failure("owned process stop target count differs"));}let mut all_targets=BTreeSet::new();for group in candidate_groups {let group_selected=selected_values.iter().any(|selected|selected==group);let unit=string(group,"unit")?;for value in array(group,"candidates",OWNED_PROCESS_MAX_GROUP_PIDS)? {let target=inventory_stop_target(value,unit)?;let identity=(target.proof.process.linux_boot_id.0.clone(),target.proof.process.pid,target.proof.process.start_ticks);if !all_targets.insert(identity.clone())||!group_selected&&targets.contains(&identity){return Err(failure("owned process stop candidate target is not globally unique"));}}}Ok((selected_values,result))
+}
+fn inventory_stop_approval(args:&clap::ArgMatches,inputs:&mut Vec<InventoryInput>)->io::Result<(Value,Value,Vec<Value>,InventoryStopScope)> {
+    let path=args.get_one::<PathBuf>("owned-process-stop-approval").ok_or_else(||failure("owned process stop approval is absent"))?;let sha=args.get_one::<String>("expected-owned-process-stop-approval-sha256").ok_or_else(||failure("owned process stop approval pin is absent"))?;
+    let approval_input=inventory_private_input(path,sha)?;let approval=inventory_json(&approval_input,OWNED_PROCESS_MAX_INPUT)?;inputs.push(approval_input);
+    let runtime=inventory_reference(&approval["inventoryRuntime"],inputs)?;let candidate_ref=&approval["inventoryCandidate"];let candidate=inventory_reference(candidate_ref,inputs)?;inventory_stop_candidate(&candidate)?;inventory_stop_runtime(&runtime,&candidate,candidate_ref)?;
+    let (selected_values,scope)=inventory_stop_validate_approval(&candidate,&approval)?;Ok((candidate,approval,selected_values,scope))
+}
+fn inventory_stop_bindings(candidate:&Value,approval:&Value,source:&Value,completed:&Value)->io::Result<()> {
+    if candidate["sourceManifest"]!=*source||candidate["appRetirementGate"]["path"]!=completed["path"]||candidate["appRetirementGate"]["sha256"]!=completed["sha256"]||approval["sourceManifest"]!=candidate["sourceManifest"]||approval["appRetirementGate"]!=*completed {return Err(failure("owned process stop source/app approval binding differs"));}Ok(())
+}
+fn inventory_stop_recheck_group(group:&InventorySourceGroup,expected:&Value,pin:&goatr::codex_relay::UnitWakePin,authority:&HostAuthority,deadline:Instant)->io::Result<InventoryStableSample> {
+    let initial=match inventory_sample_group(group,pin,authority,deadline)? {InventoryGroupSample::Stable(sample)=>sample,InventoryGroupSample::Closed(_)=>return Err(failure("owned process stop group is no longer stable"))};
+    if inventory_render_group(group,authority,InventoryGroupSample::Stable(initial.clone()))!=*expected{return Err(failure("owned process stop group differs from approval"));}
+    let final_sample=match inventory_final_group(group,pin,authority,initial,deadline)? {InventoryGroupSample::Stable(sample)=>sample,InventoryGroupSample::Closed(_)=>return Err(failure("owned process stop group changed during recheck"))};
+    if inventory_render_group(group,authority,InventoryGroupSample::Stable(final_sample.clone()))!=*expected{return Err(failure("owned process stop final group differs from approval"));}Ok(final_sample)
+}
+fn inventory_pin_target(target:&InventoryStopTarget)->io::Result<InventoryHeldTarget> {
+    if inventory_capture_process(target.proof.process.pid,&target.unit)?!=target.proof{return Err(failure("owned process stop target changed before pidfd"));}
+    let pidfd=pin_process(&target.proof.process)?;
+    if inventory_capture_process(target.proof.process.pid,&target.unit)?!=target.proof{return Err(failure("owned process stop target changed after pidfd"));}
+    Ok(InventoryHeldTarget {target:InventoryStopTarget {proof:target.proof.clone(),unit:target.unit.clone(),depth:target.depth},pidfd,term:false,kill:false,exited:false})
+}
+fn inventory_pidfd_signal(fd:&OwnedFd,signal:i32)->io::Result<()> {let result=unsafe {libc::syscall(libc::SYS_pidfd_send_signal,fd.as_raw_fd(),signal,std::ptr::null::<libc::siginfo_t>(),0)};if result<0 {let error=io::Error::last_os_error();if error.raw_os_error()==Some(libc::ESRCH)&&inventory_pidfd_exited(fd)? {Ok(())}else{Err(error)}}else{Ok(())}}
+fn inventory_pidfd_exited(fd:&OwnedFd)->io::Result<bool> {let mut pollfd=libc::pollfd {fd:fd.as_raw_fd(),events:libc::POLLIN|libc::POLLHUP,revents:0};let result=unsafe {libc::poll(&mut pollfd,1,0)};if result<0 {Err(io::Error::last_os_error())}else{Ok(result>0&&(pollfd.revents&(libc::POLLIN|libc::POLLHUP))!=0)}}
+fn inventory_stop_order(targets:&mut [InventoryHeldTarget]) {targets.sort_by(|left,right|right.target.depth.cmp(&left.target.depth).then_with(||left.target.proof.process.pid.cmp(&right.target.proof.process.pid)));}
+fn inventory_stop_target_current(target:&InventoryHeldTarget)->io::Result<()> {if inventory_capture_process(target.target.proof.process.pid,&target.target.unit)?!=target.target.proof{return Err(failure("owned process stop target proof changed"));}Ok(())}
+fn inventory_stop_effect_admission(authority:&HostAuthority,pin:&goatr::codex_relay::UnitWakePin,target:&InventoryHeldTarget,deadline:Instant)->io::Result<()> {
+    inventory_deadline(deadline)?;recheck_original_host(authority)?;pin.recheck(Some(deadline))?;inventory_stop_target_current(target)
+}
+fn inventory_stop_wait(targets:&mut [InventoryHeldTarget],until:Instant)->io::Result<()> {while Instant::now()<until {let mut pending=false;for target in targets.iter_mut(){if !target.exited {target.exited=inventory_pidfd_exited(&target.pidfd)?;pending|=!target.exited;}}if !pending{return Ok(());}std::thread::sleep(Duration::from_millis(20));}for target in targets.iter_mut(){if !target.exited {target.exited=inventory_pidfd_exited(&target.pidfd)?;}}Ok(())}
+fn inventory_stop_execute<G,A,S,W,P>(targets:&mut [InventoryHeldTarget],expected_targets:usize,deadline:Instant,global_preflight:G,mut admission:A,mut signal:S,mut wait:W,mut postcheck:P)->InventoryStopProgress where G:FnOnce()->io::Result<()>,A:FnMut(&InventoryHeldTarget)->io::Result<()>,S:FnMut(&OwnedFd,i32)->io::Result<()>,W:FnMut(&mut [InventoryHeldTarget],Instant)->io::Result<()>,P:FnMut()->io::Result<()> {
+    if targets.len()!=expected_targets{return InventoryStopProgress {term_attempted:0,kill_attempted:0,error:Some(failure("owned process stop pidfd set differs from approval"))};}if let Err(error)=global_preflight(){return InventoryStopProgress {term_attempted:0,kill_attempted:0,error:Some(error)};}inventory_stop_order(targets);let mut progress=InventoryStopProgress {term_attempted:0,kill_attempted:0,error:None};for target in targets.iter_mut(){if let Err(error)=admission(target).and_then(|_|signal(&target.pidfd,libc::SIGTERM)){progress.error=Some(error);return progress;}target.term=true;progress.term_attempted+=1;}if let Err(error)=wait(targets,std::cmp::min(deadline,Instant::now()+Duration::from_secs(10))){progress.error=Some(error);return progress;}for target in targets.iter_mut().filter(|target|!target.exited){if let Err(error)=admission(target).and_then(|_|signal(&target.pidfd,libc::SIGKILL)){progress.error=Some(error);return progress;}target.kill=true;progress.kill_attempted+=1;}if let Err(error)=wait(targets,std::cmp::min(deadline,Instant::now()+Duration::from_secs(5))){progress.error=Some(error);return progress;}if let Err(error)=postcheck(){progress.error=Some(error);}progress
+}
+pub(super) fn owned_process_stop(args:&clap::ArgMatches,evidence:&Path,admitted:goatr::codex_relay::UnitWakePin)->io::Result<()> {
+    if !args.get_flag("physical-owned-process-stop")||args.get_one::<String>("expected-companion-lock-sha256").map(String::as_str)!=Some(transport::lock_sha256()){return Err(failure("owned process stop selector or lock differs"));}
+    let controller_sha=args.get_one::<String>("expected-controller-sha256").ok_or_else(||failure("owned process stop controller pin is absent"))?;let controller=frozen_input(&std::env::current_exe()?,controller_sha)?;let mut inputs=Vec::new();let (candidate,approval,approved,scope)=inventory_stop_approval(args,&mut inputs)?;let (completed_path,completed_sha,_)=inventory_app_retirement_gate(args,&mut inputs)?;let (source_path,source_sha,groups)=inventory_load_sources(args,&mut inputs)?;
+    let completed_reference=json!({"path":completed_path,"sha256":completed_sha});let source_reference=json!({"path":source_path,"sha256":source_sha});inventory_stop_bindings(&candidate,&approval,&source_reference,&completed_reference)?;
+    recheck_inputs(std::slice::from_ref(&controller))?;inventory_recheck_inputs(&inputs)?;let unit=args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("owned process stop controller unit is absent"))?;let authority=original_host_authority(ControllerPolicy::UnitWake {unit},None,Some(admitted))?;recheck_original_host(&authority)?;let pin=authority.controller_unit.as_ref().ok_or_else(||failure("owned process stop admitted unit pin is absent"))?;let deadline=Instant::now()+Duration::from_secs(120);
+    let mut selected=Vec::new();for expected in approved {let source_ref=string(&expected,"sourceRef")?;let expected_unit=string(&expected,"unit")?;let group=groups.iter().filter(|group|group.source_ref==source_ref&&group.unit==expected_unit).collect::<Vec<_>>();if group.len()!=1{return Err(failure("owned process stop approved source is missing or ambiguous"));}let sample=inventory_stop_recheck_group(group[0],&expected,pin,&authority,deadline)?;let targets=array(&expected,"candidates",OWNED_PROCESS_MAX_GROUP_PIDS)?.iter().map(|value|inventory_stop_target(value,&group[0].unit)).collect::<io::Result<Vec<_>>>()?;selected.push((group[0].clone(),expected,sample,targets));}
+    let mut held=Vec::new();for (_,_,_,targets) in &selected {for target in targets {held.push(inventory_pin_target(target)?);}}
+    let mut cgroup_postcheck=InventoryStopCgroupPostcheck::NotPerformed;let progress=inventory_stop_execute(&mut held,38,deadline,|| {for (group,expected,sample,_) in &selected {let rechecked=match inventory_final_group(group,pin,&authority,sample.clone(),deadline)? {InventoryGroupSample::Stable(sample)=>sample,InventoryGroupSample::Closed(_)=>return Err(failure("owned process stop global recheck changed"))};if inventory_render_group(group,&authority,InventoryGroupSample::Stable(rechecked))!=*expected{return Err(failure("owned process stop global approval recheck differs"));}}recheck_original_host(&authority)?;pin.recheck(Some(deadline))?;recheck_inputs(std::slice::from_ref(&controller))?;inventory_recheck_inputs(&inputs)?;if Instant::now()+Duration::from_secs(30)>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"owned process stop reserve unavailable"));}Ok(())},|target|inventory_stop_effect_admission(&authority,pin,target,deadline),inventory_pidfd_signal,inventory_stop_wait,|| {for (group,_,sample,_) in &selected {match inventory_group_pids(&sample.cgroup,&group.unit) {Ok(pids) if pids.is_empty()=>{},Err(error) if error.kind()==io::ErrorKind::NotFound=>{},Ok(_)=>{cgroup_postcheck=InventoryStopCgroupPostcheck::NewMember;return Err(failure("owned process stop cgroup retains member"));},Err(error)=>{cgroup_postcheck=InventoryStopCgroupPostcheck::Unavailable;return Err(error);},}}cgroup_postcheck=InventoryStopCgroupPostcheck::CheckedEmptyOrAbsent;Ok(())});
+    let exited=held.iter().filter(|target|target.exited).count();let retained=held.len()-exited;let status=if progress.term_attempted==0 {"refused_before_signals"}else if progress.error.is_none()&&retained==0 {"completed"}else{"partial"};let outcomes=held.iter().map(|target|json!({"bootId":target.target.proof.process.linux_boot_id.0,"pid":target.target.proof.process.pid,"startTicks":target.target.proof.process.start_ticks,"term":target.term,"kill":target.kill,"exited":target.exited})).collect::<Vec<_>>();let result=json!({"status":status,"approvedGroupCount":12,"approvedTargetCount":38,"retainedMixedGroupCount":scope.mixed_groups,"retainedMixedCandidateCount":scope.mixed_candidates,"retainedUnprovedCount":scope.unproved,"retainedRejectedGroupCount":scope.rejected_groups,"retainedExcludedSourceCount":scope.excluded_sources,"retainedGroupCount":scope.retained_groups,"cgroupPostcheck":cgroup_postcheck.as_str(),"termAttempted":progress.term_attempted,"killAttempted":progress.kill_attempted,"exitedCount":exited,"retainedCount":retained,"signalsAttempted":progress.term_attempted+progress.kill_attempted,"nativeActions":0,"deviceActions":0,"approvalSha256":args.get_one::<String>("expected-owned-process-stop-approval-sha256"),"candidate":approval["inventoryCandidate"],"outcomes":outcomes});let write=write_json(&evidence.join("owned-process-stop-result.json"),&result);println!("{}",json!({"gate":"owned-process-stop","status":status,"approvedGroupCount":12,"approvedTargetCount":38,"termAttempted":progress.term_attempted,"killAttempted":progress.kill_attempted,"exitedCount":exited,"retainedCount":retained,"signalsAttempted":progress.term_attempted+progress.kill_attempted}));match (write,progress.error) {( _,Some(error))=>return Err(error),(Err(error),None)=>return Err(error),(Ok(()),None)=>{}}if retained!=0{return Err(failure("owned process stop retained approved target"));}Ok(())
+}
+
 fn validate_keeper(value:&Value) -> io::Result<()> {
     object(value,&["running","reconnecting","foregroundNotification","endpointOwned","networkCallback","serviceRequested","privateEnabled","privateMode","privateVerified","privateRequiresKeeper","privateCompleted","retained","privateRegistrationGeneration","privateRegistrationSha256","health"])?;
     for key in ["running","foregroundNotification","endpointOwned","networkCallback","serviceRequested","privateEnabled","privateVerified","privateRequiresKeeper","privateCompleted"] {boolean(value,key)?;}
@@ -1460,7 +2560,7 @@ struct StockRun {
     serve_unit:goatr::codex_relay::UnitWakePin,
 }
 impl StockRun {
-    async fn start(args:&clap::ArgMatches,evidence:&Path,run:Uuid,label:&str,deployment:Config,binary:PathBuf,template_sha:&str,expected_binary_sha:&str,controller:&goatr::codex_relay::UnitWakePin,original_inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<Self> {
+    async fn start(args:&clap::ArgMatches,evidence:&Path,run:Uuid,label:&str,deployment:Config,binary:PathBuf,template_sha:&str,expected_binary_sha:&str,controller:&goatr::codex_relay::UnitWakePin,original_inputs:&[(PathBuf,File,fs::Metadata)],diagnostic_capture:bool) -> io::Result<Self> {
         controller.recheck(None)?;
         recheck_inputs(original_inputs)?;
         let template=args.get_one::<PathBuf>("config").ok_or_else(||failure("physical frozen configuration is required"))?;
@@ -1507,7 +2607,7 @@ impl StockRun {
             inputs.push((path.to_path_buf(),file,metadata));
         }
         recheck_inputs(original_inputs)?;recheck_inputs(&inputs)?;
-        write_json(&evidence.join("physical-resources-before-launch.json"),&json!({"runId":run,"root":roots.0,"admin":roots.1,"template":identity(template)?,"templateSha256":template_sha,"config":identity(&config_path)?,"configSha256":config_sha256,"nativeConfig":identity(&native_config)?,"nativeConfigSha256":binary_sha256(&native_config)?,"nativeConfigPathVariable":"HERDR_CONFIG_PATH","companion":binary,"companionSha256":package_sha,"companionLockSha256":transport::lock_sha256(),"OMPownedListener":listener,"nativeInputAutomation":false,"privateCaptures":false,"nativeClose":false,"resourcesRetainedOnFailure":true}))?;
+        write_json(&evidence.join("physical-resources-before-launch.json"),&json!({"runId":run,"root":roots.0,"admin":roots.1,"template":identity(template)?,"templateSha256":template_sha,"config":identity(&config_path)?,"configSha256":config_sha256,"nativeConfig":identity(&native_config)?,"nativeConfigSha256":binary_sha256(&native_config)?,"nativeConfigPathVariable":"HERDR_CONFIG_PATH","companion":binary,"companionSha256":package_sha,"companionLockSha256":transport::lock_sha256(),"OMPownedListener":listener,"nativeInputAutomation":false,"privateCaptures":false,"closedReporterCapture":diagnostic_capture,"nativeClose":false,"resourcesRetainedOnFailure":true}))?;
         let mut command=std::process::Command::new(&config.executables.herdr);
         command.args(["--session",&name,"server"]).current_dir(&config.projects[0].path)
             .env("HERDR_STARTUP_CWD",&config.projects[0].path).env("HERDR_CONFIG_PATH",&native_config)
@@ -1545,7 +2645,7 @@ impl StockRun {
         for client in [&native,&binary_peer]{native_desktop_join(client,&desktop.process)?;}
         recheck_inputs(original_inputs)?;recheck_inputs(&inputs)?;
         controller.recheck(Some(deadline))?;
-        let mut serve=start_serve_with_capture(&binary,&config_path,&root,&socket,Some(&relay),ServeLaunch {diagnostic_capture:false,herdr_report_capture:None,preserve_xdg_config_home:false,retain_process:true,hello_capture:false,grid_hold:None,project_read:None,startup_deadline:Some(deadline),unit_authority:Some(controller)})?;
+        let mut serve=start_serve_with_capture(&binary,&config_path,&root,&socket,Some(&relay),ServeLaunch {diagnostic_capture,herdr_report_capture:None,preserve_xdg_config_home:false,retain_process:true,hello_capture:false,grid_hold:None,project_read:None,startup_deadline:Some(deadline),unit_authority:Some(controller)})?;
         // Capture the ORIGINAL child profile before any admin/readiness/pairing effect.
         let held=original_inputs.iter().find(|(path,_,_)|path==&binary).ok_or_else(||failure("serving held artifact missing"))?;
         let serve_unit=controller.capture_child(serve.process.clone(),&held.1,deadline)?;
@@ -1612,9 +2712,19 @@ impl StockRun {
         }
         Ok(proof)
     }
+    async fn created_provider_proof(&mut self,session:&SessionSummary,receipt:&Receipt,deadline:Instant) -> io::Result<NativeProof> {
+        pairing_checkpoint_deadline(deadline)?;
+        let proof=match session.provider {Provider::Omp=>self.provider_proof(session).await?,Provider::Codex=>super::created_codex_proof(&self.config,&self.native_socket,session,receipt,deadline).await?};
+        pairing_checkpoint_deadline(deadline)?;self.recheck()?;proof.recheck_processes()?;
+        for process in std::iter::once(&proof.owner).chain(proof.tui.iter()).chain(proof.relay.iter()) {
+            if process.pid==self.serve.process.pid{return Err(failure("retained pairing created provider proof aliases the retained serving companion"));}
+            dev_continuity::zero_native_caps(process)?;
+        }
+        Ok(proof)
+    }
 }
 fn startup_profile_deadline(controller:&goatr::codex_relay::UnitWakePin,serve:&goatr::codex_relay::UnitWakePin,deadline:Instant)->io::Result<()> {
-    controller.recheck(Some(deadline))?;serve.recheck(Some(deadline))?;
+    controller.recheck_family(serve,Some(deadline))?;
     if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original absolute startup deadline expired after unit/profile proof"));}
     Ok(())
 }
@@ -1907,6 +3017,59 @@ fn maven_aar(group:&str,module:&str,version:&str) -> io::Result<PathBuf> {
 struct PackageRecord {package:String,uid:u32,path:Option<String>}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
 struct PackageOwnership {package:String,uid:u32,first_install_time:String,data_dir:String}
+#[derive(Clone,Debug,PartialEq,Eq,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+struct RetirementTarget {
+    #[serde(rename="opaqueRef")] opaque_ref:String,
+    #[serde(rename="pairingName")] pairing_name:String,
+    #[serde(rename="expectedHostId",default,skip_serializing_if="Option::is_none")] expected_host_id:Option<String>,
+    #[serde(rename="expectedDeviceId",default,skip_serializing_if="Option::is_none")] expected_device_id:Option<String>,
+    #[serde(rename="ownedRunRef")] owned_run_ref:String,
+    #[serde(rename="lineageSha256")] lineage_sha256:String,
+}
+#[derive(Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+struct RetirementApproval {
+    #[serde(rename="planSha256")] plan_sha256:String,
+    #[serde(rename="rootIndexPath")] root_index_path:String,
+    #[serde(rename="rootIndexSha256")] root_index_sha256:String,
+    #[serde(rename="ownedLineageProofPath")] owned_lineage_proof_path:String,
+    #[serde(rename="ownedLineageProofSha256")] owned_lineage_proof_sha256:String,
+    #[serde(rename="approvedAt")] approved_at:String,
+    #[serde(rename="approvedBy")] approved_by:String,
+    authority:String,
+    #[serde(rename="processStopAuthority")] process_stop_authority:bool,
+    #[serde(rename="supersedesTargetManifest")] supersedes_target_manifest:String,
+    #[serde(rename="legacyEligibleAdded")] legacy_eligible_added:u8,
+    #[serde(rename="legacyUnprovedRetained")] legacy_unproved_retained:u8,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetirementBinding { #[serde(rename="targetCount")] target_count:usize, #[serde(rename="rootApprovalSha256")] root_approval_sha256:String }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetirementManifest { version:u8,status:String,approval:RetirementApproval,targets:Vec<RetirementTarget>,binding:RetirementBinding }
+fn retirement_manifest(args:&clap::ArgMatches)->io::Result<(RetirementManifest,(PathBuf,File,fs::Metadata))> {
+    let path=args.get_one::<PathBuf>("retirement-target-manifest").ok_or_else(||failure("owned retirement target manifest is absent"))?;
+    let expected=args.get_one::<String>("expected-retirement-manifest-sha256").ok_or_else(||failure("owned retirement target manifest hash is absent"))?;
+    let input=frozen_input(path,expected)?;private_file(&input.0)?;private_dir(input.0.parent().ok_or_else(||failure("owned retirement target manifest parent is absent"))?,false)?;
+    let mut held=input.1.try_clone()?;std::io::Seek::seek(&mut held,std::io::SeekFrom::Start(0))?;let mut bytes=Vec::new();held.read_to_end(&mut bytes)?;recheck_inputs(std::slice::from_ref(&input))?;if bytes.len()>65536{return Err(failure("owned retirement target manifest exceeds bound"));}
+    let manifest:RetirementManifest=serde_json::from_slice(&bytes).map_err(|_|failure("owned retirement target manifest shape is invalid"))?;
+    if manifest.version!=1||manifest.status!="root_reviewed_unexecuted"||!(1..=128).contains(&manifest.targets.len())||manifest.binding.target_count!=manifest.targets.len()||!hex64(&manifest.binding.root_approval_sha256) {return Err(failure("owned retirement target manifest admission is invalid"));}
+    let approval=&manifest.approval;
+    if !hex64(&approval.plan_sha256)||!hex64(&approval.root_index_sha256)||!hex64(&approval.owned_lineage_proof_sha256)||approval.root_index_path.is_empty()||approval.owned_lineage_proof_path.is_empty()||approval.approved_at.is_empty()||approval.approved_by.is_empty()||approval.authority.is_empty()||approval.process_stop_authority||approval.supersedes_target_manifest.is_empty() {return Err(failure("owned retirement target manifest approval is invalid"));}
+    let names=manifest.targets.iter().map(|target|target.pairing_name.as_str()).collect::<BTreeSet<_>>();
+    if names.len()!=manifest.targets.len()||manifest.targets.iter().any(|target|target.opaque_ref.is_empty()||target.pairing_name.is_empty()||target.owned_run_ref.is_empty()||!hex64(&target.lineage_sha256)||target.expected_host_id.as_deref().is_some_and(|value|!hex64(value))||target.expected_device_id.as_deref().is_some_and(|value|uuid_text(value).is_err())){return Err(failure("owned retirement target manifest targets are not unique bounded reviewed rows"));}
+    // serde_json::Value uses recursively key-sorted maps here (the crate omits preserve_order);
+    // arrays retain reviewed target order, matching the sole canonical approval binding recipe.
+    let canonical=serde_json::to_vec(&json!({"version":manifest.version,"approval":&manifest.approval,"targets":&manifest.targets})).map_err(io::Error::other)?;
+    use sha2::{Digest,Sha256};
+    if hex(&Sha256::digest(&canonical))!=manifest.binding.root_approval_sha256{return Err(failure("owned retirement root approval binding differs"));}
+    Ok((manifest,input))
+}
+
+#[derive(Clone,Debug,PartialEq,Eq)]
+struct RetainedSubjectPins {product:PackageOwnership,test:PackageOwnership,current_test_sha:String}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize)]
 struct InstalledProductEpoch {
     record:PackageRecord, ownership:PackageOwnership, version_code:String, version_name:String,
@@ -2163,6 +3326,18 @@ fn ownership_from_fields(record:&PackageRecord,fields:&BTreeMap<&str,&str>)->io:
     }
     Ok(PackageOwnership {package:record.package.clone(),uid:record.uid,first_install_time:(*first).to_owned(),data_dir:(*data).to_owned()})
 }
+fn expected_subject_ownership(args:&clap::ArgMatches,role:&str,package:&str)->io::Result<PackageOwnership> {
+    let uid=args.get_one::<String>(&format!("expected-{role}-uid")).and_then(|value|value.parse::<u32>().ok()).filter(|uid|*uid>=10000).ok_or_else(||failure("retained pairing expected package UID is invalid"))?;
+    let first=args.get_one::<String>(&format!("expected-{role}-first-install-time")).filter(|value|!value.is_empty()&&value.len()<=128&&!value.chars().any(char::is_control)).ok_or_else(||failure("retained pairing expected first-install identity is invalid"))?;
+    let data=args.get_one::<String>(&format!("expected-{role}-data-dir")).filter(|value|value.starts_with("/data/")&&value.ends_with(&format!("/{package}"))&&!value.chars().any(char::is_whitespace)&&value.split('/').skip(1).all(|part|!matches!(part,""|"."|".."))).ok_or_else(||failure("retained pairing expected data identity is invalid"))?;
+    Ok(PackageOwnership {package:package.to_owned(),uid,first_install_time:first.clone(),data_dir:data.clone()})
+}
+fn retained_subject_pins(args:&clap::ArgMatches)->io::Result<RetainedSubjectPins> {
+    let current_test_sha=args.get_one::<String>("expected-current-test-apk-sha256").filter(|hash|hex64(hash)).ok_or_else(||failure("retained pairing expected current TEST APK hash is invalid"))?;
+    Ok(RetainedSubjectPins {product:expected_subject_ownership(args,"product",APP)?,test:expected_subject_ownership(args,"test",TEST)?,current_test_sha:current_test_sha.clone()})
+}
+fn retained_subject_identity_matches(pins:&RetainedSubjectPins,product:&PackageOwnership,test:&PackageOwnership)->bool {pins.product==*product&&pins.test==*test}
+pub(super) fn validate_retained_subject_pin_arguments(args:&clap::ArgMatches)->io::Result<()> {retained_subject_pins(args).map(|_|())}
 fn package_ownership_facts(output:&str,record:&PackageRecord)->io::Result<PackageOwnership> {ownership_from_fields(record,&package_detail_fields(output,record)?)}
 fn product_observation_fields(output:&str,record:&PackageRecord,launcher:String)->io::Result<ProductObservation> {
     let fields=package_detail_fields(output,record)?;let ownership=ownership_from_fields(record,&fields)?;
@@ -2269,6 +3444,27 @@ async fn install_test_update(adb:&PhysicalAdb,previous:&Artifact,ownership:&Pack
     if !text(&result)?.lines().any(|line|line.trim()=="Success")||installed!=artifact.sha256 {
         return Err(failure("physical same-signer APK update did not install the frozen artifact; no downgrade, uninstall, clearing, or retry"));
     }
+    Ok(())
+}
+/// The retained-pairing checkpoint owns only an in-place TEST APK replacement. PRODUCT is
+/// already the authenticated subject and is deliberately never an installation target here.
+async fn install_subject_test_update(adb:&PhysicalAdb,previous:&Artifact,product:&PackageRecord,pins:&RetainedSubjectPins,product_sha:&str,artifact:&Artifact,inputs:&[(PathBuf,File,fs::Metadata)]) -> io::Result<()> {
+    test_update_admission(previous,artifact)?;
+    recheck_inputs(inputs)?;
+    adb.package_process_absent(APP).await?;adb.package_process_absent(TEST).await?;
+    let packages=package_inventory(adb).await?;recheck_inputs(inputs)?;
+    let current_product=packages.get(APP).ok_or_else(||failure("retained pairing PRODUCT disappeared before TEST update"))?;
+    let record=packages.get(TEST).ok_or_else(||failure("retained pairing original TEST disappeared; never create a replacement helper"))?;
+    if current_product!=product||package_ownership(adb,current_product).await?!=pins.product||installed_hash(adb,APP).await?!=product_sha||package_ownership(adb,record).await?!=pins.test||previous.sha256!=pins.current_test_sha||installed_hash(adb,TEST).await?!=pins.current_test_sha{return Err(failure("retained pairing original subject identity changed before TEST update"));}
+    let path=artifact.path.to_str().ok_or_else(||failure("retained pairing TEST APK path is not UTF-8"))?;
+    let result=adb.invoke(&["install","-r","-t",path],65_536).await?;recheck_inputs(inputs)?;
+    if !text(&result)?.lines().any(|line|line.trim()=="Success")||installed_hash(adb,TEST).await?!=artifact.sha256 {
+        return Err(failure("retained pairing same-signer TEST update did not install its frozen artifact"));
+    }
+    let after=package_inventory(adb).await?;recheck_inputs(inputs)?;
+    let current_product=after.get(APP).ok_or_else(||failure("retained pairing PRODUCT disappeared after TEST update"))?;
+    let current=after.get(TEST).ok_or_else(||failure("retained pairing TEST disappeared after update"))?;
+    if current_product!=product||package_ownership(adb,current_product).await?!=pins.product||installed_hash(adb,APP).await?!=product_sha||package_ownership(adb,current).await?!=pins.test{return Err(failure("retained pairing TEST update changed retained subject identity"));}
     Ok(())
 }
 async fn install_fresh_product(adb:&PhysicalAdb,artifact:&Artifact,inputs:&[(PathBuf,File,fs::Metadata)])->io::Result<()> {
@@ -2696,7 +3892,7 @@ pub(super) async fn run(args:&clap::ArgMatches,evidence:&Path,admitted:goatr::co
     require_product_epoch(&adb,&product_epoch,&product.sha256,&inputs,None).await?;
     connector_admission(&baseline,None)?;
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
-    let stock=StockRun::start(args,evidence,run.clone(),&label,deployment,binary,template_sha,expected_binary_sha,authority.controller_unit.as_ref().ok_or_else(||failure("original admitted controller pin missing"))?,&inputs).await?;recheck_inputs(&inputs)?;
+    let stock=StockRun::start(args,evidence,run.clone(),&label,deployment,binary,template_sha,expected_binary_sha,authority.controller_unit.as_ref().ok_or_else(||failure("original admitted controller pin missing"))?,&inputs,false).await?;recheck_inputs(&inputs)?;
     let host=stock.phone.hello.host_id.0.clone();if !hex64(&host){return Err(failure("physical new private companion host identity is invalid"));}
     connector_admission(&baseline,Some(&host))?;
     recheck_original_host(&authority)?;recheck_inputs(&inputs)?;
@@ -3403,6 +4599,141 @@ impl Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn inventory_test_process(pid:u32,start:u64)->ProcessEvidence {ProcessEvidence {linux_boot_id:Uuid::random(),pid,start_ticks:start,namespaces:goatr::herdr::ProcessNamespaces {pid:(1,u64::from(pid)+10),mount:(1,u64::from(pid)+20),user:(1,u64::from(pid)+30),nspids:vec![pid]}}}
+    fn inventory_test_proof(process:ProcessEvidence,parent_pid:u32,cgroup:&str)->InventoryProcessProof {InventoryProcessProof {network_namespace:(1,u64::from(process.pid)+40),executable:InventoryObject {device:1,inode:u64::from(process.pid)+50},capability:"zero",cgroup:cgroup.to_owned(),parent_pid,process}}
+    fn inventory_test_sample(invocation:&str,pid:u32)->InventoryStableSample {
+        let process=inventory_test_process(pid,10);let cgroup="/user.slice/owned.service";let roots=vec![inventory_root("native",process.clone(),None,None,false).unwrap()];let proofs=BTreeMap::from([(pid,inventory_test_proof(process,1,cgroup))]);
+        let (candidates,unproved)=inventory_classify(&[pid],&proofs,&BTreeMap::new(),&roots).unwrap();InventoryStableSample {facts:InventoryManagerFacts {values:BTreeMap::from([("InvocationID".to_owned(),invocation.to_owned())])},cgroup:cgroup.to_owned(),pids:vec![pid],proofs,failures:BTreeMap::new(),roots,candidates,unproved}
+    }
+    #[test]
+    fn owned_process_inventory_classifier_requires_complete_start_ordered_same_group_ancestry() {
+        let root=inventory_test_process(10,10);let child=ProcessEvidence {linux_boot_id:root.linux_boot_id.clone(),..inventory_test_process(11,11)};let group="/user.slice/owned.service";
+        let roots=vec![inventory_root("native",root.clone(),None,None,false).unwrap()];let mut proofs=BTreeMap::from([(10,inventory_test_proof(root.clone(),1,group)),(11,inventory_test_proof(child.clone(),10,group))]);
+        let (candidates,unproved)=inventory_classify(&[10,11],&proofs,&BTreeMap::new(),&roots).unwrap();assert_eq!(candidates.len(),2);assert!(unproved.is_empty());assert_eq!(candidates[1]["rootRef"],10);assert_eq!(candidates[1]["ancestry"].as_array().unwrap().len(),1);
+        proofs.get_mut(&11).unwrap().cgroup="/user.slice/other.service".to_owned();let (_,unproved)=inventory_classify(&[10,11],&proofs,&BTreeMap::new(),&roots).unwrap();assert_eq!(unproved[0]["pid"],11);assert_eq!(unproved[0]["reason"],"cross_group_parent");
+        proofs.get_mut(&11).unwrap().cgroup=group.to_owned();proofs.get_mut(&10).unwrap().process.start_ticks=12;let (_,unproved)=inventory_classify(&[10,11],&proofs,&BTreeMap::new(),&roots).unwrap();assert!(unproved.iter().any(|value|value["reason"]=="start_order_invalid"));
+        proofs.get_mut(&10).unwrap().process.start_ticks=10;proofs.get_mut(&11).unwrap().parent_pid=12;let (_,unproved)=inventory_classify(&[10,11],&proofs,&BTreeMap::new(),&roots).unwrap();assert!(unproved.iter().any(|value|value["reason"]=="missing_parent"));
+        proofs.get_mut(&11).unwrap().parent_pid=11;let (_,unproved)=inventory_classify(&[10,11],&proofs,&BTreeMap::new(),&roots).unwrap();assert!(unproved.iter().any(|value|value["reason"]=="missing_parent"));
+        let sibling=ProcessEvidence {linux_boot_id:root.linux_boot_id.clone(),..inventory_test_process(12,11)};proofs.get_mut(&11).unwrap().parent_pid=12;proofs.insert(12,inventory_test_proof(sibling,11,group));let (_,unproved)=inventory_classify(&[10,11,12],&proofs,&BTreeMap::new(),&roots).unwrap();assert_eq!(unproved.iter().filter(|value|value["reason"]=="cycle").count(),2);
+        let failures=BTreeMap::from([(12,"process_evidence_unavailable")]);proofs.remove(&12);let (_,unproved)=inventory_classify(&[10,11,12],&proofs,&failures,&roots).unwrap();assert!(unproved.iter().any(|value|value["reason"]=="parent_unavailable"));
+    }
+    #[test]
+    fn owned_process_inventory_manager_words_and_exec_are_finite_and_exact() {
+        let exec="{ path=/nix/store/a/bin/goatr ; argv[]=/nix/store/a/bin/goatr codex-owner --record '/private/owner record' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=7 ; code=(null) ; status=0/0 }";
+        assert_eq!(inventory_exec_argv(exec).unwrap(),["/nix/store/a/bin/goatr","codex-owner","--record","/private/owner record"]);
+        assert!(inventory_exec_argv(&exec.replace("ignore_errors=no","ignore_errors=yes")).is_err());assert!(inventory_words("A=1 A=2\n").is_err());
+    }
+    #[test]
+    fn owned_process_inventory_physical_row_forms_are_exact_and_legacy_metadata_is_bound() {
+        let current=json!({"config":null,"intent":null,"lineageSha256":"a".repeat(64),"opaqueRef":"current","originals":null,"resources":null,"rootObject":null,"runId":"00000000-0000-4000-8000-000000000001"});
+        let legacy=json!({"config":null,"exactUnit":"owned.service","lineageSha256":"a".repeat(64),"opaqueRef":"legacy","originalLaunch":null,"originals":null,"pairedHostRecord":null,"resources":null,"rootObject":null,"runId":"00000000-0000-4000-8000-000000000001","runRecord":null});
+        let direct=json!({"appTargetAuthorized":false,"config":null,"lineageSha256":"a".repeat(64),"opaqueRef":"direct","originals":null,"resources":null,"reviewBasis":"PASS2077_2650 direct original/resource evidence sufficient only with complete fresh current identity checks","rootObject":null,"runId":"00000000-0000-4000-8000-000000000001","scope":"process_only_direct_original_run_evidence_no_app_host_authority"});
+        assert!(matches!(inventory_physical_row_kind(&current),Ok(InventoryPhysicalRowKind::Current)));assert!(matches!(inventory_physical_row_kind(&legacy),Ok(InventoryPhysicalRowKind::Legacy)));assert!(matches!(inventory_physical_row_kind(&direct),Ok(InventoryPhysicalRowKind::Direct)));assert!(inventory_direct_metadata(&direct).is_ok());
+        let mut mixed=legacy.clone();mixed["intent"]=Value::Null;assert!(inventory_physical_row_kind(&mixed).is_err());let mut unknown=current.clone();unknown["unknown"]=Value::Null;assert!(inventory_physical_row_kind(&unknown).is_err());
+        let mut direct_app=direct.clone();direct_app["appTargetAuthorized"]=json!(true);assert!(inventory_direct_metadata(&direct_app).is_err());let mut direct_scope=direct.clone();direct_scope["scope"]=json!("other");assert!(inventory_direct_metadata(&direct_scope).is_err());
+        let controller=inventory_test_process(10,10);let native=ProcessEvidence {linux_boot_id:controller.linux_boot_id.clone(),..inventory_test_process(11,11)};let companion=ProcessEvidence {linux_boot_id:controller.linux_boot_id.clone(),..inventory_test_process(12,12)};
+        let launch=json!({"actualOwnedUnitWakeQualified":true,"cgroup":"/user.slice/owned.service","originalController":serde_json::to_value(&controller).unwrap(),"originalNative":serde_json::to_value(&native).unwrap(),"originalCompanion":serde_json::to_value(&companion).unwrap()});
+        let paired=json!({"coldSurvivalProved":false,"facts":null,"foregroundServiceSoleLivenessProved":false,"host":"host","humanAcknowledgementIsNotEffectProof":true,"instrumentedLiveness":null,"preparedRecordSha256":null,"productApkSha256":null,"productPid":null,"productStart":null,"runId":"00000000-0000-4000-8000-000000000001"});
+        assert!(inventory_legacy_metadata(&legacy,&launch,&paired,"owned.service","/user.slice/owned.service",&controller,&native,&companion).is_ok());let mut bad_launch=launch.clone();bad_launch["cgroup"]=json!("/other.service");assert!(inventory_legacy_metadata(&legacy,&bad_launch,&paired,"owned.service","/user.slice/owned.service",&controller,&native,&companion).is_err());let mut bad_unit=legacy.clone();bad_unit["exactUnit"]=json!("other.service");assert!(inventory_legacy_metadata(&bad_unit,&launch,&paired,"owned.service","/user.slice/owned.service",&controller,&native,&companion).is_err());let mut bad_process=launch.clone();bad_process["originalNative"]=serde_json::to_value(&controller).unwrap();assert!(inventory_legacy_metadata(&legacy,&bad_process,&paired,"owned.service","/user.slice/owned.service",&controller,&native,&companion).is_err());
+    }
+    #[test]
+    fn owned_process_inventory_historical_config_reference_is_exact_and_held() {
+        use sha2::{Digest,Sha256};let root=std::env::temp_dir().join(format!("goatr-owned-process-config-{}",Uuid::random().0));private_directory(&root).unwrap();let config_path=root.join("config.json");fs::write(&config_path,b"{}").unwrap();fs::set_permissions(&config_path,fs::Permissions::from_mode(0o600)).unwrap();let metadata=fs::metadata(&config_path).unwrap();let sha=hex(&Sha256::digest(b"{}"));
+        let reference=json!({"object":{"device":metadata.dev(),"inode":metadata.ino(),"mode":metadata.mode()&0o7777,"path":config_path,"uid":metadata.uid()},"path":config_path,"sha256":sha});
+        let mut held=Vec::new();assert!(inventory_historical_config_reference(&reference,&mut held).is_ok());assert_eq!(held.len(),1);assert!(inventory_file_reference(&reference,&mut Vec::new()).is_err());
+        for (key,value) in [("device",json!(metadata.dev().saturating_add(1))),("inode",json!(metadata.ino().saturating_add(1))),("uid",json!(u64::from(metadata.uid()).saturating_add(1))),("mode",json!(u64::from(metadata.mode()&0o7777).saturating_add(1))),("path",json!("/different"))] {let mut invalid=reference.clone();invalid["object"][key]=value;assert!(inventory_historical_config_reference(&invalid,&mut Vec::new()).is_err());}
+        let mut unknown=reference.clone();unknown["object"]["unknown"]=Value::Null;assert!(inventory_historical_config_reference(&unknown,&mut Vec::new()).is_err());let mut missing=reference.clone();missing["object"].as_object_mut().unwrap().remove("mode");assert!(inventory_historical_config_reference(&missing,&mut Vec::new()).is_err());fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn owned_process_inventory_final_pass_closes_cross_group_invocation_collisions() {
+        let collisions=inventory_invocation_collisions(&[Some("a".to_owned()),Some("b".to_owned()),Some("a".to_owned()),None]);
+        assert_eq!(collisions,BTreeSet::from([0,2]));assert!(inventory_invocation_collisions(&[Some("a".to_owned()),Some("b".to_owned())]).is_empty());
+        for invalid in ["2026-11-05", "2026-11-05T00:00:00+00:00", "2026-11-05T00:00:00\nZ","2026-02-30T00:00:00Z","2026-01-01T00:00:00.Z","+026-11-05T00:00:00Z","2026-+1-05T00:00:00Z"] {assert!(!inventory_utc(invalid));}
+        assert!(inventory_utc("2026-11-05T00:00:00.000Z"));assert!(inventory_unit("owned.service").is_ok());assert!(inventory_unit("--owned.service").is_err());
+        let invocation="00000000-0000-4000-8000-000000000001";assert!(inventory_controller_identity("2026-11-05T00:00:00Z",1,invocation,"owned.service"));assert!(!inventory_controller_identity("2026-11-05T00:00:00Z",0,invocation,"owned.service"));assert!(!inventory_controller_identity("2026-11-05T00:00:00Z",u64::from(u32::MAX)+1,invocation,"owned.service"));assert!(!inventory_controller_identity("2026-11-05T00:00:00Z",1,"not-a-uuid","owned.service"));
+    }
+    #[test]
+    fn owned_process_inventory_final_pass_rechecks_all_sampled_group_facts_and_proofs() {
+        let initial_a=inventory_test_sample("a",10);let initial_b=inventory_test_sample("b",20);
+        assert_eq!(inventory_final_sample_recheck(&initial_b,&initial_b.facts,&initial_b.cgroup,&initial_b.pids,&initial_b.proofs).unwrap(),None);
+        let mut changed_facts=initial_a.facts.clone();changed_facts.values.insert("InvocationID".to_owned(),"changed".to_owned());assert_eq!(inventory_final_sample_recheck(&initial_a,&changed_facts,&initial_a.cgroup,&initial_a.pids,&initial_a.proofs).unwrap(),Some("manager"));
+        let mut unproved=initial_a.clone();let extra=ProcessEvidence {linux_boot_id:unproved.proofs[&10].process.linux_boot_id.clone(),..inventory_test_process(11,11)};let mut extra_proof=inventory_test_proof(extra,10,&unproved.cgroup);extra_proof.capability="wake";unproved.pids.push(11);unproved.proofs.insert(11,extra_proof);let (candidates,unproved_rows)=inventory_classify(&unproved.pids,&unproved.proofs,&unproved.failures,&unproved.roots).unwrap();unproved.candidates=candidates;unproved.unproved=unproved_rows;
+        let mut changed_proofs=unproved.proofs.clone();changed_proofs.get_mut(&11).unwrap().network_namespace.1+=1;let (same_candidates,same_unproved)=inventory_classify(&unproved.pids,&changed_proofs,&unproved.failures,&unproved.roots).unwrap();assert_eq!(same_candidates,unproved.candidates);assert_eq!(same_unproved,unproved.unproved);assert_eq!(inventory_final_sample_recheck(&unproved,&unproved.facts,&unproved.cgroup,&unproved.pids,&changed_proofs).unwrap(),Some("process"));
+    }
+    #[test]
+    fn owned_process_inventory_uses_current_root_subset_and_refuses_zero_current_roots() {
+        let valid=inventory_test_process(10,10);let child=ProcessEvidence {linux_boot_id:valid.linux_boot_id.clone(),..inventory_test_process(11,11)};let historical=inventory_test_process(12,1);let cgroup="/user.slice/owned.service";let roots=vec![inventory_root("historical",historical,None,None,false).unwrap(),inventory_root("native",valid.clone(),None,None,false).unwrap()];let proofs=BTreeMap::from([(10,inventory_test_proof(valid,1,cgroup)),(11,inventory_test_proof(child,10,cgroup))]);let current=inventory_current_roots(&roots,&proofs,Instant::now()+Duration::from_secs(1)).unwrap();assert_eq!(current.len(),1);let (candidates,unproved)=inventory_classify(&[10,11],&proofs,&BTreeMap::new(),&current).unwrap();assert_eq!(candidates.len(),2);assert!(unproved.is_empty());assert!(inventory_current_roots(&roots[..1],&proofs,Instant::now()+Duration::from_secs(1)).unwrap().is_empty());
+    }
+    #[test]
+    fn owned_process_inventory_expired_deadline_refuses_further_observation() {
+        assert_eq!(inventory_current_roots(&[],&BTreeMap::new(),Instant::now()).err().expect("expired deadline must be refused").kind(),io::ErrorKind::TimedOut);
+    }
+    #[test]
+    fn owned_process_inventory_legacy_opaque_reference_is_held_without_json_authority() {
+        use sha2::{Digest,Sha256};let root=std::env::temp_dir().join(format!("goatr-owned-process-opaque-{}",Uuid::random().0));private_directory(&root).unwrap();let opaque=root.join("run.record");let bytes=b"\xffopaque legacy provenance\x00";fs::write(&opaque,bytes).unwrap();fs::set_permissions(&opaque,fs::Permissions::from_mode(0o400)).unwrap();let sha=hex(&Sha256::digest(bytes));let reference=json!({"path":opaque.to_string_lossy().to_string(),"sha256":sha.clone()});let mut held=Vec::new();assert!(inventory_legacy_opaque_reference(&reference,&mut held).is_ok());assert_eq!(held.len(),1);assert!(inventory_private_input(&opaque,&sha).is_err());let metadata=fs::metadata(&opaque).unwrap();assert!(!inventory_input_policy_allows(InventoryInputPolicy::LegacyOpaqueReadOnly,&metadata,metadata.uid().saturating_add(1)));assert!(inventory_recheck_inputs(&held).is_ok());fs::set_permissions(&opaque,fs::Permissions::from_mode(0o600)).unwrap();assert!(inventory_recheck_inputs(&held).is_err());
+        for mode in [0o440,0o000] {fs::set_permissions(&opaque,fs::Permissions::from_mode(mode)).unwrap();assert!(inventory_legacy_opaque_reference(&reference,&mut Vec::new()).is_err());}fs::set_permissions(&opaque,fs::Permissions::from_mode(0o600)).unwrap();assert!(inventory_legacy_opaque_reference(&reference,&mut Vec::new()).is_ok());let mut unknown=reference.clone();unknown["unknown"]=Value::Null;assert!(inventory_legacy_opaque_reference(&unknown,&mut Vec::new()).is_err());let mut missing=reference.clone();missing.as_object_mut().unwrap().remove("sha256");assert!(inventory_legacy_opaque_reference(&missing,&mut Vec::new()).is_err());let link=root.join("link.record");std::os::unix::fs::symlink(&opaque,&link).unwrap();assert!(inventory_legacy_opaque_reference(&json!({"path":link.to_string_lossy().to_string(),"sha256":sha}),&mut Vec::new()).is_err());fs::remove_file(&link).unwrap();let hard=root.join("hard.record");fs::hard_link(&opaque,&hard).unwrap();assert!(inventory_legacy_opaque_reference(&reference,&mut Vec::new()).is_err());fs::remove_file(&hard).unwrap();fs::set_permissions(&root,fs::Permissions::from_mode(0o755)).unwrap();assert!(inventory_legacy_opaque_reference(&reference,&mut Vec::new()).is_err());fs::set_permissions(&root,fs::Permissions::from_mode(0o700)).unwrap();let changed=root.join("changed.record");fs::write(&changed,b"opaque").unwrap();fs::set_permissions(&changed,fs::Permissions::from_mode(0o400)).unwrap();let changed_sha=hex(&Sha256::digest(b"opaque"));let mut changed_held=Vec::new();inventory_legacy_opaque_reference(&json!({"path":changed.to_string_lossy().to_string(),"sha256":changed_sha}),&mut changed_held).unwrap();fs::set_permissions(&changed,fs::Permissions::from_mode(0o600)).unwrap();fs::write(&changed,b"change").unwrap();fs::set_permissions(&changed,fs::Permissions::from_mode(0o400)).unwrap();assert!(inventory_recheck_inputs(&changed_held).is_err());fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn owned_process_stop_planner_orders_deepest_target_before_root() {
+        let root=inventory_test_process(10,10);let child=ProcessEvidence {linux_boot_id:root.linux_boot_id.clone(),..inventory_test_process(11,11)};let cgroup="/user.slice/owned.service";
+        let held=|proof,depth|InventoryHeldTarget {target:InventoryStopTarget {proof,unit:"owned.service".to_owned(),depth},pidfd:File::open("/dev/null").unwrap().into(),term:false,kill:false,exited:false};
+        let mut targets=vec![held(inventory_test_proof(root,1,cgroup),0),held(inventory_test_proof(child,10,cgroup),1)];inventory_stop_order(&mut targets);assert_eq!(targets[0].target.proof.process.pid,11);assert_eq!(targets[1].target.proof.process.pid,10);
+    }
+    #[test]
+    fn owned_process_stop_target_parser_refuses_ambiguous_structure() {
+        let root=inventory_test_process(10,10);let cgroup="/user.slice/owned.service";let roots=vec![inventory_root("native",root.clone(),None,None,false).unwrap()];let proofs=BTreeMap::from([(root.pid,inventory_test_proof(root,1,cgroup))]);let (candidates,unproved)=inventory_classify(&[10],&proofs,&BTreeMap::new(),&roots).unwrap();assert!(unproved.is_empty());assert!(inventory_stop_target(&candidates[0],"owned.service").is_ok());let mut changed=candidates[0].clone();changed["target"]["unknown"]=Value::Null;assert!(inventory_stop_target(&changed,"owned.service").is_err());assert!(inventory_stop_target(&candidates[0],"--invalid.service").is_err());
+    }
+    fn owned_process_stop_approval_fixture()->(Value,Value) {
+        let mut groups=Vec::new();let mut pid=100u32;for index in 0..12 {let count=if index<2 {4}else{3};let mut candidates=Vec::new();let mut observed=Vec::new();for _ in 0..count {let process=inventory_test_process(pid,u64::from(pid));let proof=inventory_test_proof(process.clone(),1,&format!("/user.slice/owned-{index}.service"));candidates.push(json!({"ancestry":[],"rootRef":pid,"rootRoles":["native"],"target":serde_json::to_value(proof).unwrap()}));observed.push(pid);pid+=1;}groups.push(json!({"candidates":candidates,"controlGroup":format!("/user.slice/owned-{index}.service"),"coverage":"stable","invocationId":format!("invocation-{index}"),"managerEpoch":"epoch","observedPids":observed,"sourceRef":format!("source-{index}"),"sourceRoles":["native"],"unit":format!("owned-{index}.service"),"unprovedPids":[]}));}for index in 12..58 {groups.push(json!({"candidates":[],"sourceRef":format!("retained-{index}"),"unit":format!("retained-{index}.service")}));}let source=json!({"path":"/private/source","sha256":"d".repeat(64)});let gate=json!({"path":"/private/gate","sha256":"a".repeat(64)});let candidate=json!({"appRetirementGate":{"alreadyAbsent":30,"path":gate["path"],"presentRemoved":19,"sha256":gate["sha256"],"targetCount":49},"sourceManifest":source,"groups":groups});let approval=json!({"appRetirementGate":gate,"approvedAt":"2026-11-05T00:00:00Z","approvedBy":"root-integration-owner","approvedGroups":candidate["groups"].as_array().unwrap()[..12].to_vec(),"inventoryCandidate":{"path":"/private/candidate","sha256":"b".repeat(64)},"inventoryRuntime":{"path":"/private/runtime","sha256":"c".repeat(64)},"processStopAuthorized":true,"scope":{"allApprovedGroupsFullyProved":true,"approvedGroupCount":12,"approvedTargetCount":38,"retainedExcludedSourceCount":5,"retainedMixedCandidateCount":3,"retainedMixedGroupCount":3,"retainedRejectedGroupCount":43,"retainedUnprovedCount":12},"sourceManifest":candidate["sourceManifest"],"status":"root_reviewed_owned_process_stop_subset","version":1});(candidate,approval)
+    }
+    #[test]
+    fn owned_process_stop_approval_boundary_requires_exact_full_subset() {
+        let (candidate,approval)=owned_process_stop_approval_fixture();let (selected,scope)=inventory_stop_validate_approval(&candidate,&approval).unwrap();assert_eq!(selected.len(),12);assert_eq!(scope.retained_groups,51);let source=candidate["sourceManifest"].clone();let gate=approval["appRetirementGate"].clone();assert!(inventory_stop_bindings(&candidate,&approval,&source,&gate).is_ok());let mut changed_gate=candidate.clone();changed_gate["appRetirementGate"]["sha256"]=json!("e".repeat(64));assert!(inventory_stop_bindings(&changed_gate,&approval,&source,&gate).is_err());let mut mixed=approval.clone();mixed["approvedGroups"][0]["unprovedPids"]=json!([100]);assert!(inventory_stop_validate_approval(&candidate,&mixed).is_err());let mut subset=approval.clone();subset["approvedGroups"].as_array_mut().unwrap().pop();assert!(inventory_stop_validate_approval(&candidate,&subset).is_err());let mut repeated_candidate=candidate.clone();let mut repeated_approval=approval.clone();let duplicate=repeated_candidate["groups"][0]["candidates"][0].clone();repeated_candidate["groups"][1]["candidates"][0]=duplicate.clone();repeated_candidate["groups"][1]["observedPids"][0]=duplicate["target"]["process"]["pid"].clone();repeated_approval["approvedGroups"][1]=repeated_candidate["groups"][1].clone();assert!(inventory_stop_validate_approval(&repeated_candidate,&repeated_approval).is_err());let mut changed_reference=candidate.clone();changed_reference["groups"][0]["sourceRef"]=json!("different-source");assert!(inventory_stop_validate_approval(&changed_reference,&approval).is_err());
+    }
+    #[test]
+    fn owned_process_stop_pidfd_terminates_only_the_held_owned_child() {
+        const MARKER:&[u8]=b"GOATR_OWNED_PROCESS_STOP_READY";
+        if let Ok(mode)=std::env::var("GOATR_OWNED_PROCESS_STOP_CHILD") {
+            match mode.as_str() {
+                "term"=>{},
+                "kill"=>assert_ne!(unsafe {libc::signal(libc::SIGTERM,libc::SIG_IGN)},libc::SIG_ERR),
+                _=>panic!("unexpected owned process stop child mode"),
+            }
+            println!("{}",std::str::from_utf8(MARKER).unwrap());
+            std::thread::sleep(Duration::from_secs(8));
+            return;
+        }
+        let test=concat!(module_path!(),"::owned_process_stop_pidfd_terminates_only_the_held_owned_child");let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
+        let exercise=|mode:&str,requires_kill:bool|->io::Result<()> {
+            let mut command=std::process::Command::new(std::env::current_exe()?);command.args(["--exact",test,"--test-threads=1","--nocapture"]).env("GOATR_OWNED_PROCESS_STOP_CHILD",mode).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());let mut child=command.spawn()?;
+            let proof=herdr::process_evidence(child.id())?;let pidfd=pin_process(&proof)?;
+            let result=(||->io::Result<()> {
+                let stdout=child.stdout.as_mut().ok_or_else(||io::Error::other("owned child stdout unavailable"))?;let flags=unsafe {libc::fcntl(stdout.as_raw_fd(),libc::F_GETFL)};if flags<0{return Err(io::Error::last_os_error())}if unsafe {libc::fcntl(stdout.as_raw_fd(),libc::F_SETFL,flags|libc::O_NONBLOCK)}<0{return Err(io::Error::last_os_error())}
+                let deadline=Instant::now()+Duration::from_secs(2);let mut seen=Vec::new();let mut ready=false;while Instant::now()<deadline&&seen.len()<4096 {let mut bytes=[0u8;256];match std::io::Read::read(stdout,&mut bytes) {Ok(0)=>std::thread::sleep(Duration::from_millis(10)),Ok(count)=>{seen.extend_from_slice(&bytes[..count]);ready|=seen.windows(MARKER.len()).any(|window|window==MARKER);if ready{break}},Err(error)if error.kind()==io::ErrorKind::WouldBlock=>std::thread::sleep(Duration::from_millis(10)),Err(error)=>return Err(error)}}if !ready{return Err(io::Error::other("owned child readiness marker missing"))}
+                inventory_pidfd_signal(&pidfd,libc::SIGTERM)?;let grace=Instant::now()+Duration::from_millis(250);while Instant::now()<grace {if inventory_pidfd_exited(&pidfd)?{break}std::thread::sleep(Duration::from_millis(10))}
+                if requires_kill {if inventory_pidfd_exited(&pidfd)?{return Err(io::Error::other("TERM unexpectedly exited kill-mode child"))}inventory_pidfd_signal(&pidfd,libc::SIGKILL)?}
+                let deadline=Instant::now()+Duration::from_secs(2);while Instant::now()<deadline {if inventory_pidfd_exited(&pidfd)?{return Ok(())}std::thread::sleep(Duration::from_millis(10))}Err(io::Error::other("held pidfd child did not exit"))
+            })();
+            if result.is_err()&&!inventory_pidfd_exited(&pidfd).unwrap_or(false) {let _=inventory_pidfd_signal(&pidfd,libc::SIGKILL);}
+            let status=child.wait()?;result?;if status.success(){return Err(io::Error::other("owned child unexpectedly exited successfully"))}Ok(())
+        };
+        exercise("term",false).unwrap();exercise("kill",true).unwrap();
+    }
+    #[test]
+    fn owned_process_stop_global_preflight_refuses_before_any_signal() {
+        let proof=inventory_test_proof(inventory_test_process(10,10),1,"/user.slice/owned.service");let mut targets=vec![InventoryHeldTarget {target:InventoryStopTarget {proof,unit:"owned.service".to_owned(),depth:0},pidfd:File::open("/dev/null").unwrap().into(),term:false,kill:false,exited:false}];let mut signals=0usize;let progress=inventory_stop_execute(&mut targets,1,Instant::now()+Duration::from_secs(1),||Err(io::Error::other("global preflight")),|_|Ok(()),|_,_|{signals+=1;Ok(())},|_,_|Ok(()),||Ok(()));assert_eq!(signals,0);assert_eq!(progress.term_attempted,0);assert_eq!(progress.kill_attempted,0);assert!(progress.error.is_some());
+    }
+    #[test]
+    fn owned_process_stop_partial_paths_preserve_error_and_stop_escalation() {
+        let held=|pid|InventoryHeldTarget {target:InventoryStopTarget {proof:inventory_test_proof(inventory_test_process(pid,10),1,"/user.slice/owned.service"),unit:"owned.service".to_owned(),depth:0},pidfd:File::open("/dev/null").unwrap().into(),term:false,kill:false,exited:false};let mut postcheck_targets=vec![held(10)];let postcheck=inventory_stop_execute(&mut postcheck_targets,1,Instant::now()+Duration::from_secs(1),||Ok(()),|_|Ok(()),|_,_|Ok(()),|_,_|Ok(()),||Err(io::Error::other("postcheck")));assert_eq!(postcheck.term_attempted,1);assert_eq!(postcheck.kill_attempted,1);assert!(postcheck.error.is_some());let mut changed_targets=vec![held(10),held(11)];let mut calls=0usize;let changed=inventory_stop_execute(&mut changed_targets,2,Instant::now()+Duration::from_secs(1),||Ok(()),|_|Ok(()),|_,signal|{calls+=1;if signal==libc::SIGKILL&&calls==4 {Err(io::Error::other("changed survivor"))}else{Ok(())}},|_,_|Ok(()),||Ok(()));assert_eq!(changed.term_attempted,2);assert_eq!(changed.kill_attempted,1);assert_eq!(calls,4);assert!(changed.error.is_some());
+    }
+    #[test]
+    fn owned_process_inventory_private_inputs_reject_aliases_and_recheck_parent_and_held_bytes() {
+        use sha2::{Digest,Sha256};let root=std::env::temp_dir().join(format!("goatr-owned-process-input-{}",Uuid::random().0));private_directory(&root).unwrap();let input_path=root.join("input.json");fs::write(&input_path,b"{}").unwrap();fs::set_permissions(&input_path,fs::Permissions::from_mode(0o600)).unwrap();let expected=hex(&Sha256::digest(b"{}"));
+        let alias=root.join("alias.json");std::os::unix::fs::symlink(&input_path,&alias).unwrap();assert!(inventory_private_input(&alias,&expected).is_err());fs::remove_file(&alias).unwrap();
+        let input=inventory_private_input(&input_path,&expected).unwrap();assert!(inventory_recheck_inputs(std::slice::from_ref(&input)).is_ok());fs::set_permissions(&root,fs::Permissions::from_mode(0o755)).unwrap();assert!(inventory_recheck_inputs(std::slice::from_ref(&input)).is_err());fs::set_permissions(&root,fs::Permissions::from_mode(0o700)).unwrap();fs::write(&input_path,b"[]").unwrap();fs::set_permissions(&input_path,fs::Permissions::from_mode(0o600)).unwrap();assert!(inventory_recheck_inputs(std::slice::from_ref(&input)).is_err());
+        let extra_path=root.join("legacy-run.json");fs::write(&extra_path,b"{}").unwrap();fs::set_permissions(&extra_path,fs::Permissions::from_mode(0o600)).unwrap();let extra_sha=hex(&Sha256::digest(b"{}"));let mut held=Vec::new();assert_eq!(inventory_reference(&json!({"path":extra_path,"sha256":extra_sha}),&mut held).unwrap(),json!({}));assert!(inventory_recheck_inputs(&held).is_ok());fs::write(&extra_path,b"[]").unwrap();fs::set_permissions(&extra_path,fs::Permissions::from_mode(0o600)).unwrap();assert!(inventory_recheck_inputs(&held).is_err());fs::remove_dir_all(root).unwrap();
+    }
     /// Main runs this ONLY in a fresh reviewed Wake/NNP user unit, never the physical-device path.
     #[test]
     #[ignore = "requires explicit owned user unit, independent binary/config pins and fresh retained evidence"]
@@ -3433,7 +4764,7 @@ mod tests {
         let runtime=tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         runtime.block_on(async {
             let mut stock=StockRun::start(&args,&evidence,Uuid::random(),"Owned unit serving proof",deployment,binary,
-                &config_sha,&binary_sha,&controller,&inputs).await.unwrap();
+                &config_sha,&binary_sha,&controller,&inputs,false).await.unwrap();
             stock.recheck().unwrap();controller.recheck(None).unwrap();recheck_inputs(&inputs).unwrap();
             assert_eq!(stock.serve_unit.cgroup(),controller.cgroup());
             assert_eq!(stock.serve_unit.manager(),controller.manager());
@@ -3465,6 +4796,96 @@ mod tests {
                 "authenticatedDuplicateConsumed":retained,"originalStartupDeadlinePreserved":true,"adminResponsive":true,
                 "noDeviceOrApk":true,"resourcesRetained":true,"root":stock.root,"adminSocket":stock.socket})).unwrap();
         });
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields,rename_all="camelCase")]
+    struct DurablePairRecord {
+        version:u8, original_unit:String, process:DurableProcess, executable:DurableObject, cgroup:String, caps:DurableCaps,
+        root:DurableObject, admin:DurableObject, config:DurableObject, config_sha256:String, admin_socket:DurableObject, helper_label:String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields,rename_all="camelCase")]
+    struct DurableProcess {linux_boot_id:Uuid,pid:u32,start_ticks:u64,namespaces:DurableNamespaces}
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DurableNamespaces {pid:(u64,u64),mount:(u64,u64),user:(u64,u64),nspids:Vec<u32>}
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DurableCaps {inheritable:u64,permitted:u64,effective:u64,ambient:u64,no_new_privs:bool}
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DurableObject {path:PathBuf,uid:u32,device:u64,inode:u64,mode:u32}
+    impl DurableProcess {
+        fn evidence(&self)->goatr::herdr::ProcessEvidence {goatr::herdr::ProcessEvidence {linux_boot_id:self.linux_boot_id.clone(),pid:self.pid,start_ticks:self.start_ticks,namespaces:goatr::herdr::ProcessNamespaces {pid:self.namespaces.pid,mount:self.namespaces.mount,user:self.namespaces.user,nspids:self.namespaces.nspids.clone()}}}
+    }
+    impl DurableCaps {
+        fn exact_unit_wake(&self)->bool {goatr::codex_relay::CapabilityState {inheritable:self.inheritable,permitted:self.permitted,effective:self.effective,ambient:self.ambient,no_new_privs:self.no_new_privs}.unit_wake()}
+        fn matches(&self,current:goatr::codex_relay::CapabilityState)->bool {self.exact_unit_wake()&&current.unit_wake()&&self.inheritable==current.inheritable&&self.permitted==current.permitted&&self.effective==current.effective&&self.ambient==current.ambient&&self.no_new_privs==current.no_new_privs}
+    }
+    fn durable_record_admission(original_unit:&str,cgroup:&str,caps:&DurableCaps,config_sha256:&str,helper_label:&str)->io::Result<()> {
+        if helper_label!=super::OWNED_STOCK_CHECKPOINT_PAIR_LABEL||cgroup.is_empty()||cgroup.len()>8192||!hex64(config_sha256)||!caps.exact_unit_wake(){return Err(failure("retained durable pair record is incomplete"));}
+        validate_controller_unit(original_unit)?;goatr::codex_relay::unit_cgroup(cgroup,original_unit)?;Ok(())
+    }
+    fn durable_fresh_observer_unit(original_unit:&str,unit:&str)->io::Result<()> {
+        validate_controller_unit(unit)?;if original_unit==unit{return Err(failure("retained durable pair observer unit must differ from the original companion unit"));}Ok(())
+    }
+    fn durable_object_current(object:&DurableObject,kind:&str)->io::Result<fs::Metadata> {
+        if !object.path.is_absolute()||object.path.as_os_str().as_encoded_bytes().contains(&0){return Err(failure("retained durable pair object path is invalid"));}
+        let metadata=fs::symlink_metadata(&object.path)?;
+        if metadata.uid()!=object.uid||metadata.dev()!=object.device||metadata.ino()!=object.inode||metadata.mode()&0o7777!=object.mode{return Err(failure(kind));}
+        Ok(metadata)
+    }
+    fn durable_process_read(path:&Path,limit:usize)->io::Result<Vec<u8>> {
+        let file=File::open(path)?;let mut reader=file.take((limit+1) as u64);let mut bytes=Vec::new();reader.read_to_end(&mut bytes)?;if bytes.len()>limit{return Err(failure("retained durable pair procfs read exceeds bound"));}Ok(bytes)
+    }
+    fn durable_record(path:&Path,hash:&str)->io::Result<(DurablePairRecord,(PathBuf,File,fs::Metadata))> {
+        private_file(path)?;private_dir(path.parent().ok_or_else(||failure("retained durable pair record parent is absent"))?,false)?;
+        let input=frozen_input(path,hash)?;let mut reader=input.1.try_clone()?;use std::io::{Seek,SeekFrom};reader.seek(SeekFrom::Start(0))?;
+        let mut bytes=Vec::new();reader.take(65_537).read_to_end(&mut bytes)?;if bytes.len()>65_536{return Err(failure("retained durable pair record exceeds bound"));}
+        let decoded=(|| {let value=goatr::native_json::parse(&bytes,goatr::native_json::REGISTRY).map_err(|_|failure("retained durable pair record is not canonical JSON"))?;serde_json::from_value::<DurablePairRecord>(value).map_err(|_|failure("retained durable pair record schema is invalid"))})();
+        bytes.fill(0);recheck_inputs(std::slice::from_ref(&input))?;let record=decoded?;
+        if record.version!=1{return Err(failure("retained durable pair record version is invalid"));}durable_record_admission(&record.original_unit,&record.cgroup,&record.caps,&record.config_sha256,&record.helper_label)?;
+        Ok((record,input))
+    }
+    fn durable_original_recheck(record:&DurablePairRecord,inputs:&[(PathBuf,File,fs::Metadata)])->io::Result<()> {
+        if inputs.len()!=3{return Err(failure("retained durable pair held input shape changed"));}recheck_inputs(inputs)?;private_file(&inputs[0].0)?;private_dir(inputs[0].0.parent().ok_or_else(||failure("retained durable pair record parent is absent"))?,false)?;durable_record_admission(&record.original_unit,&record.cgroup,&record.caps,&record.config_sha256,&record.helper_label)?;let process=record.process.evidence();if goatr::herdr::process_evidence(process.pid)?!=process{return Err(failure("retained durable pair original process changed"));}
+        let artifact=&inputs[1];if artifact.0!=record.executable.path||durable_object_current(&record.executable,"retained durable pair executable object changed")?.dev()!=artifact.2.dev()||durable_object_current(&record.executable,"retained durable pair executable object changed")?.ino()!=artifact.2.ino(){return Err(failure("retained durable pair executable artifact differs"));}let config=&inputs[2];if config.0!=record.config.path||durable_object_current(&record.config,"retained durable pair config object changed")?.dev()!=config.2.dev()||durable_object_current(&record.config,"retained durable pair config object changed")?.ino()!=config.2.ino(){return Err(failure("retained durable pair config artifact differs"));}
+        let actual=fs::metadata(format!("/proc/{}/exe",process.pid))?;if actual.uid()!=record.executable.uid||actual.dev()!=record.executable.device||actual.ino()!=record.executable.inode{return Err(failure("retained durable pair original executable changed"));}
+        let cgroup=durable_process_read(&PathBuf::from(format!("/proc/{}/cgroup",process.pid)),8192)?;if cgroup!=record.cgroup.as_bytes(){return Err(failure("retained durable pair original cgroup changed"));}goatr::codex_relay::unit_cgroup(std::str::from_utf8(&cgroup).map_err(|_|failure("retained durable pair cgroup is invalid"))?,&record.original_unit)?;
+        let status=durable_process_read(&PathBuf::from(format!("/proc/{}/status",process.pid)),65_536)?;let status=std::str::from_utf8(&status).map_err(|_|failure("retained durable pair status is invalid"))?;if !record.caps.matches(goatr::codex_relay::capability_state(status)?){return Err(failure("retained durable pair original capabilities changed"));}
+        private_dir(&record.root.path,false)?;durable_object_current(&record.root,"retained durable pair root changed")?;private_dir(&record.admin.path,false)?;durable_object_current(&record.admin,"retained durable pair admin directory changed")?;private_file(&record.config.path)?;durable_object_current(&record.config,"retained durable pair config changed")?;
+        if record.admin_socket.path.parent()!=Some(record.admin.path.as_path())||record.admin_socket.path.file_name().and_then(|name|name.to_str())!=Some("admin.sock"){return Err(failure("retained durable pair admin socket location changed"));}
+        goatr::admin::validate_socket_path(&record.admin_socket.path,false,true)?;if !std::os::unix::fs::FileTypeExt::is_socket(&durable_object_current(&record.admin_socket,"retained durable pair admin socket changed")?.file_type()){return Err(failure("retained durable pair admin socket is not a socket"));}
+        recheck_inputs(inputs)
+    }
+    async fn durable_devices(stream:&mut tokio::net::UnixStream)->io::Result<goatr::admin::Devices> {
+        let id=Uuid::random();goatr::admin::write_line(stream,&json!({"v":1,"id":id,"method":"devices.list","params":{}})).await?;
+        let mut bytes=goatr::admin::read_line(stream).await?;let result=(|| {let value=goatr::native_json::parse(&bytes,goatr::native_json::REGISTRY).map_err(|_|failure("retained durable pair admin response is invalid"))?;let object=value.as_object().ok_or_else(||failure("retained durable pair admin response is invalid"))?;if !object.keys().all(|key|matches!(key.as_str(),"v"|"id"|"result"|"error"))||object.get("v")!=Some(&json!(1))||object.get("id")!=Some(&json!(id))||object.contains_key("result")==object.contains_key("error"){return Err(failure("retained durable pair admin response is uncorrelated"));}let value=object.get("result").ok_or_else(||failure("retained durable pair admin response is not a result"))?.clone();let devices:goatr::admin::Devices=serde_json::from_value(value).map_err(|_|failure("retained durable pair devices response schema is invalid"))?;if devices.devices.len()>128{return Err(failure("retained durable pair devices response exceeds bound"));}Ok(devices)})();bytes.fill(0);result
+    }
+    async fn durable_pair_classification(record:&DurablePairRecord,inputs:&[(PathBuf,File,fs::Metadata)])->io::Result<&'static str> {
+        durable_original_recheck(record,inputs)?;let mut stream=tokio::time::timeout(goatr::admin::ADMIN_TIMEOUT,tokio::net::UnixStream::connect(&record.admin_socket.path)).await.map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"retained durable pair admin connect timed out"))??;let peer=stream.peer_cred()?;if peer.uid()!=uid()||peer.pid()!=Some(record.process.pid as i32){return Err(failure("retained durable pair admin peer differs from original companion"));}
+        durable_original_recheck(record,inputs)?;let devices=durable_devices(&mut stream).await?;durable_original_recheck(record,inputs)?;
+        let helper=devices.devices.iter().filter(|device|device.device_name.0==super::OWNED_STOCK_CHECKPOINT_PAIR_LABEL).count();Ok(match (helper,devices.devices.len()) {(1,1)=>"durable_phone_pair_absent",(1,2)=>"durable_new_pair_present_unacknowledged",_=>"ambiguous"})
+    }
+    /// Main runs this only in a fresh reviewed local-admin Wake unit. It observes one original
+    /// recorded Goatr admin endpoint and deliberately neither adopts nor changes it.
+    #[test]
+    #[ignore = "requires fresh local-admin Wake unit plus independently pinned retained original record/artifact"]
+    fn retained_original_durable_phone_pair_is_classified_without_adoption() {
+        let required=|name:&str|std::env::var(name).unwrap_or_else(|_|panic!("missing explicit {name}"));
+        assert_eq!(required("GOATR_RETAINED_DURABLE_PAIR_CHECK"),"1");let unit=required("GOATR_RETAINED_DURABLE_PAIR_UNIT");validate_controller_unit(&unit).unwrap();
+        let record_path=PathBuf::from(required("GOATR_RETAINED_DURABLE_PAIR_RECORD"));let record_sha=required("GOATR_RETAINED_DURABLE_PAIR_RECORD_SHA256");let artifact=PathBuf::from(required("GOATR_RETAINED_DURABLE_PAIR_GOATR"));let artifact_sha=required("GOATR_RETAINED_DURABLE_PAIR_GOATR_SHA256");let evidence=PathBuf::from(required("GOATR_RETAINED_DURABLE_PAIR_EVIDENCE"));
+        private_dir(&evidence,false).unwrap();let (record,record_input)=durable_record(&record_path,&record_sha).unwrap();let artifact_input=frozen_input(&artifact,&artifact_sha).unwrap();let config_input=frozen_input(&record.config.path,&record.config_sha256).unwrap();let inputs=vec![record_input,artifact_input,config_input];durable_fresh_observer_unit(&record.original_unit,&unit).unwrap();
+        let controller=goatr::codex_relay::prepare_current_executable(true,Some(&unit)).unwrap().expect("fresh local-admin Wake authority required");controller.serving_controller(None).unwrap();controller.recheck(None).unwrap();recheck_inputs(&inputs).unwrap();
+        let runtime=tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();let mut classification=runtime.block_on(async {match durable_pair_classification(&record,&inputs).await {Ok(classification)=>classification,Err(_)=>"unreachable_original"}});
+        if controller.recheck(None).is_err()||recheck_inputs(&inputs).is_err(){classification="unreachable_original";}let output=evidence.join("retained-original-durable-phone-pair.json");assert!(!output.exists());write_json(&output,&json!({"classification":classification})).unwrap();assert!(matches!(classification,"durable_phone_pair_absent"|"durable_new_pair_present_unacknowledged"|"ambiguous"|"unreachable_original"));
+    }
+    #[test]
+    fn retained_durable_pair_admission_requires_exact_wake_distinct_unit_config_pin_and_helper_label() {
+        let original=format!("goatr-host-wake-{}.service",Uuid::random().0);let observer=format!("goatr-host-wake-{}.service",Uuid::random().0);let cgroup=format!("0::/user.slice/user-1000.slice/user@1000.service/app.slice/{original}\n");let wake=DurableCaps {inheritable:1<<35,permitted:1<<35,effective:1<<35,ambient:1<<35,no_new_privs:true};
+        durable_record_admission(&original,&cgroup,&wake,&"1".repeat(64),super::OWNED_STOCK_CHECKPOINT_PAIR_LABEL).unwrap();durable_fresh_observer_unit(&original,&observer).unwrap();assert!(durable_fresh_observer_unit(&original,&original).is_err());
+        let zero=DurableCaps {inheritable:0,permitted:0,effective:0,ambient:0,no_new_privs:true};assert!(durable_record_admission(&original,&cgroup,&zero,&"1".repeat(64),super::OWNED_STOCK_CHECKPOINT_PAIR_LABEL).is_err());let other=DurableCaps {inheritable:1<<35,permitted:1<<35,effective:1<<35,ambient:(1<<35)|1,no_new_privs:true};assert!(durable_record_admission(&original,&cgroup,&other,&"1".repeat(64),super::OWNED_STOCK_CHECKPOINT_PAIR_LABEL).is_err());
+        assert!(durable_record_admission(&original,&cgroup.replace(&original,"daily.service"),&wake,&"1".repeat(64),super::OWNED_STOCK_CHECKPOINT_PAIR_LABEL).is_err());assert!(durable_record_admission(&original,&cgroup,&wake,&"A".repeat(64),super::OWNED_STOCK_CHECKPOINT_PAIR_LABEL).is_err());assert!(durable_record_admission(&original,&cgroup,&wake,&"1".repeat(64),"caller-chosen").is_err());assert!(durable_record_admission(&original,&cgroup,&wake,&"1".repeat(64),"Goatr transport gate").is_err());
     }
     fn prepared_fixture_package(package:&str,uid:u32,path:&str,sha:&str,pristine:bool)->Value {
         json!({"package":package,"uid":uid.to_string(),"versionCode":"1","versionName":"0.1.0","firstInstallTime":"2026-01-01 00:00:00",
@@ -4874,6 +6295,179 @@ mod tests {
             dump.replace("    firstInstallTime=2026-10-27 04:39:23\n","")] {
             assert!(package_ownership_facts(&changed,&record).is_err());
         }
+    }
+    #[test]
+    fn retained_pairing_subject_pins_reject_reinstalled_epochs_and_unpinned_test_bytes() {
+        let product=PackageOwnership {package:APP.to_owned(),uid:10541,first_install_time:"2026-10-27 04:39:23".to_owned(),data_dir:format!("/data/user/0/{APP}")};
+        let test=PackageOwnership {package:TEST.to_owned(),uid:10101,first_install_time:"2026-10-27 04:39:23".to_owned(),data_dir:format!("/data/user/0/{TEST}")};
+        let pins=RetainedSubjectPins {product:product.clone(),test:test.clone(),current_test_sha:"c".repeat(64)};
+        assert!(retained_subject_identity_matches(&pins,&product,&test));assert!(hex64(&pins.current_test_sha));
+        for changed in [PackageOwnership {uid:10542,..product.clone()},PackageOwnership {first_install_time:"2026-10-28 04:39:23".to_owned(),..product.clone()},PackageOwnership {data_dir:format!("/data/user/10/{APP}"),..product.clone()}] {assert!(!retained_subject_identity_matches(&pins,&changed,&test));}
+        for changed in [PackageOwnership {uid:10102,..test.clone()},PackageOwnership {first_install_time:"2026-10-28 04:39:23".to_owned(),..test.clone()},PackageOwnership {data_dir:format!("/data/user/10/{TEST}"),..test.clone()}] {assert!(!retained_subject_identity_matches(&pins,&product,&changed));}
+        assert_ne!(pins.current_test_sha,"d".repeat(64));
+    }
+    #[test]
+    fn retained_pairing_junit_requires_one_selected_start_finish_and_final_success() {
+        let class=PAIRING_TEST_CLASS;let method=PAIRING_TEST_METHOD;assert_eq!(PAIRING_TEST_SELECTOR,format!("{class}#{method}"));
+        for stage in ["confirm_wait_preview_identity","confirm_wait_activity_identity","confirm_wait_activity_state","confirm_wait_owner_identity","confirm_wait_owner_scene","confirm_wait_secure_state","confirm_wait_window_focus","confirm_wait_interactive","confirm_wait_keyguard","confirm_wait_active_root","confirm_wait_root_identity","confirm_wait_root_window","confirm_click","confirm_idle","confirm_postclick_wait","creation_selection","creation_admission","creation_source_admission","creation_open_new_session","creation_host_chooser","creation_form_opening","creation_server_picker","creation_project_picker","creation_exact_form_source","creation_selected_fields","creation_provider","creation_name","creation_enabled_wait","creation_final_submit_admission","creation_click","creation_idle","creation_receipt","creation_exact","creation_verify","chat_close_initial_deadline","chat_close_initial_eligibility_preview_identity","chat_close_initial_eligibility_activity_identity","chat_close_initial_eligibility_activity_state","chat_close_initial_eligibility_owner_identity","chat_close_initial_eligibility_owner_scene","chat_close_initial_eligibility_secure_state","chat_close_initial_eligibility_window_focus","chat_close_initial_eligibility_interactive","chat_close_initial_eligibility_keyguard","chat_close_initial_eligibility_active_root","chat_close_initial_eligibility_root_identity","chat_close_initial_eligibility_root_window","chat_close_initial_eligibility_eligible","chat_close_initial_window","chat_close_initial_scope","chat_close_node_query","chat_close_initial_visibility","chat_close_scroll","chat_close_enabled","chat_close_final_deadline","chat_close_final_eligibility_preview_identity","chat_close_final_eligibility_activity_identity","chat_close_final_eligibility_activity_state","chat_close_final_eligibility_owner_identity","chat_close_final_eligibility_owner_scene","chat_close_final_eligibility_secure_state","chat_close_final_eligibility_window_focus","chat_close_final_eligibility_interactive","chat_close_final_eligibility_keyguard","chat_close_final_eligibility_active_root","chat_close_final_eligibility_root_identity","chat_close_final_eligibility_root_window","chat_close_final_eligibility_eligible","chat_close_final_window","chat_close_final_scope","chat_close_click","chat_close_idle","chat_close_postclick","chat_close_final_creation_admission","chat_close_posteffect_scene","chat_close_posteffect_base_window","chat_close_posteffect_modal_absent","chat_close_posteffect_actions","chat_session_admission","chat_session_scroll","chat_session_click","chat_session_wait","chat_prompt_admission","chat_prompt_text","chat_prompt_reservation","chat_prompt_click","chat_prompt_receipt","chat_prompt_exact","chat_history","chat_observe","terminal_admission","terminal_open","terminal_popup","terminal_grid","terminal_close","terminal_posteffect","shell_admission","shell_open","shell_viewer","shell_begin","shell_confirm","shell_grid","shell_grid_missing_shell","shell_grid_selection","shell_grid_control","shell_grid_loading","shell_grid_error","shell_grid_missing_grid","shell_grid_invalid_grid","shell_grid_columns","shell_grid_rows","shell_grid_cardinality","shell_grid_terminal_grid","shell_grid_enter_displayed","shell_grid_enter_enabled","shell_enter","shell_receipt","shell_release","shell_release_node","shell_release_reveal_guard","shell_release_reveal_scroll","shell_release_reveal_idle","shell_release_reveal_deadline","shell_release_reveal_display","shell_release_reveal_enabled","shell_release_dialog","shell_release_admission","shell_release_revalidate","shell_release_click","shell_release_idle","shell_release_posteffect","shell_release_admission_ticket","shell_release_admission_current","shell_release_admission_hello","shell_release_admission_mutation","shell_release_admission_shell","shell_release_admission_owner","shell_release_admission_owner_retained","shell_release_admission_actions","shell_release_posteffect_shell","shell_release_posteffect_owner_retired","shell_release_posteffect_actions","shell_close","shell_complete","shell_interaction_admission","shell_interaction_fixture","shell_interaction_clipboard_empty","shell_interaction_clipboard_owned","shell_interaction_draft","shell_interaction_paste","shell_interaction_clipboard_clear","shell_interaction_draft_send","shell_interaction_live","shell_interaction_commit","shell_interaction_inputs","shell_interaction_output","shell_interaction_older","shell_interaction_bottom","shell_interaction_verify","retirement_selector","retirement_runner","retirement_awaiting_foreground","retirement_activity","retirement_initial","retirement_inventory","retirement_next","retirement_deadline","retirement_authority","retirement_menu","retirement_hosts","retirement_host","retirement_forget","retirement_confirm","retirement_preserve","retirement_actions","retirement_posteffect","retirement_result","retirement_finish"] {assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage));}
+        for stage in ["confirm_postclick_hello_present_screen_mismatch","confirm_postclick_hello_present_busy","confirm_postclick_error_invalid_request","confirm_postclick_error_unsupported_version","confirm_postclick_error_unsupported_method","confirm_postclick_error_unauthorized","confirm_postclick_error_pairing_failed","confirm_postclick_error_stale_host","confirm_postclick_error_stale_session","confirm_postclick_error_not_found","confirm_postclick_error_not_ready","confirm_postclick_error_invalid_answer","confirm_postclick_error_already_resolved","confirm_postclick_error_action_id_conflict","confirm_postclick_error_action_capacity","confirm_postclick_error_content_expired","confirm_postclick_error_cursor_expired","confirm_postclick_error_busy","confirm_postclick_error_resource_limit","confirm_postclick_error_rate_limited","confirm_postclick_error_timeout","confirm_postclick_error_backend_error","confirm_postclick_error_push_rejected","confirm_postclick_error_stale_registration","confirm_postclick_failure_dial_timeout","confirm_postclick_failure_dial_timeout_endpoint_setup","confirm_postclick_failure_dial_timeout_connect_admitted","confirm_postclick_failure_dial_timeout_origin_unavailable","confirm_postclick_failure_dial_known","confirm_postclick_failure_dial_protocol","confirm_postclick_failure_dial_transport","confirm_postclick_failure_dial_other","confirm_postclick_failure_open_stream_timeout","confirm_postclick_failure_open_stream_known","confirm_postclick_failure_open_stream_protocol","confirm_postclick_failure_open_stream_transport","confirm_postclick_failure_open_stream_other","confirm_postclick_failure_hello_timeout","confirm_postclick_failure_hello_known","confirm_postclick_failure_hello_protocol","confirm_postclick_failure_hello_transport","confirm_postclick_failure_hello_other","confirm_postclick_failure_snapshot_timeout","confirm_postclick_failure_snapshot_known","confirm_postclick_failure_snapshot_protocol","confirm_postclick_failure_snapshot_transport","confirm_postclick_failure_snapshot_other","confirm_postclick_failure_reader_timeout","confirm_postclick_failure_reader_known","confirm_postclick_failure_reader_protocol","confirm_postclick_failure_reader_transport","confirm_postclick_failure_reader_other","confirm_postclick_failure_recovery_timeout","confirm_postclick_failure_recovery_known","confirm_postclick_failure_recovery_protocol","confirm_postclick_failure_recovery_transport","confirm_postclick_failure_recovery_other","confirm_postclick_stored_busy_nofailure","confirm_postclick_prestore_startup_connecting","confirm_postclick_prestore_no_startup","confirm_postclick_caught_stored","confirm_postclick_caught_absent","confirm_postclick_sessions_without_hello","confirm_postclick_pairing_idle","confirm_postclick_other_model"] {assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage));}
+        for stage in ["confirm_postclick_caught_absent_error_invalid_request","confirm_postclick_caught_absent_error_unsupported_version","confirm_postclick_caught_absent_error_unsupported_method","confirm_postclick_caught_absent_error_unauthorized","confirm_postclick_caught_absent_error_pairing_failed","confirm_postclick_caught_absent_error_stale_host","confirm_postclick_caught_absent_error_stale_session","confirm_postclick_caught_absent_error_not_found","confirm_postclick_caught_absent_error_invalid_answer","confirm_postclick_caught_absent_error_already_resolved","confirm_postclick_caught_absent_error_action_id_conflict","confirm_postclick_caught_absent_error_action_capacity","confirm_postclick_caught_absent_error_content_expired","confirm_postclick_caught_absent_error_cursor_expired","confirm_postclick_caught_absent_error_busy","confirm_postclick_caught_absent_error_resource_limit","confirm_postclick_caught_absent_error_rate_limited","confirm_postclick_caught_absent_error_timeout","confirm_postclick_caught_absent_error_backend_error","confirm_postclick_caught_absent_error_push_rejected","confirm_postclick_caught_absent_error_stale_registration","confirm_postclick_caught_absent_error_not_ready_callback_owned","confirm_postclick_caught_absent_error_not_ready_callback_absent","confirm_postclick_caught_absent_protected_identity","confirm_postclick_caught_absent_generic","confirm_postclick_caught_absent_unclassified"] {assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage));}
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_confirm_postclick_caught_absent_error_not_ready"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_confirm_postclick_caught_absent_error_timeout extra"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_confirm_postclick_failure_dial_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_confirm_postclick_failure_dial_timeout_endpoint_setup_extra"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_confirm_postclick_error_timeout extra"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_release_reveal_unknown"),None);
+        for stage in ["terminal_popup_wait","terminal_popup_store"] {assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage));}
+        for suffix in ["deadline","sdk","active_root","exact_popup_window","dialog_tag","target_tag","control_tag","root_count","window_id_match","root_tree_bound","provider_count","decor","context","attach","tokens","type","secure","identity"] {let stage=format!("terminal_popup_window_{suffix}");assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage.as_str()));}
+        for cause in ["preview_identity","activity_identity","activity_state","owner_identity","owner_scene","secure_state","window_focus","interactive","keyguard","active_root","root_identity","root_window","eligible"] {let stage=format!("terminal_popup_window_eligibility_{cause}");assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage.as_str()));}
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_terminal_popup_window_unknown"),None);
+        for prefix in ["pair_begin_admission","pair_begin_node_admission","pair_begin_revalidation"] {for cause in ["preview_identity","activity_identity","activity_state","owner_identity","owner_scene","secure_state","window_focus","interactive","keyguard","active_root","root_identity","root_window","eligible"] {let stage=format!("{prefix}_{cause}");assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage.as_str()));}}
+        for stage in ["pair_begin_node_lookup","pair_begin_node_visibility","pair_begin_node_scroll","pair_begin_node_enabled","pair_begin_click","pair_begin_idle","pair_begin_postclick_wait"] {assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage));}
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_confirm_wait_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_pair_begin_admission_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_retirement_unknown"),None);
+        let class_status=format!("INSTRUMENTATION_STATUS: class={class}");let method_status=format!("INSTRUMENTATION_STATUS: test={method}");
+        let valid=[
+            class_status.as_str(),method_status.as_str(),
+            "INSTRUMENTATION_STATUS: current=1","INSTRUMENTATION_STATUS: id=AndroidJUnitRunner","INSTRUMENTATION_STATUS: numtests=1","INSTRUMENTATION_STATUS_CODE: 1",
+            class_status.as_str(),method_status.as_str(),
+            "INSTRUMENTATION_STATUS: current=1","INSTRUMENTATION_STATUS: id=AndroidJUnitRunner","INSTRUMENTATION_STATUS: numtests=1","INSTRUMENTATION_STATUS_CODE: 0","INSTRUMENTATION_CODE: -1",
+        ];
+        let parse=|records:&[&str]|->io::Result<PairingJUnit> {let mut parser=PairingJUnit::new();for record in records {if let Some(value)=record.strip_prefix("INSTRUMENTATION_STATUS: ") {if let Some((key,value))=value.split_once('='){parser.status(key,value)?;}}else if record.starts_with("INSTRUMENTATION_STATUS_CODE:"){parser.status_code(record,class,method)?;}else if record.starts_with("INSTRUMENTATION_CODE:"){parser.final_code(record)?;}}parser.eof_error()?;Ok(parser)};
+        let exact=parse(&valid).unwrap();let summary=exact.eof_summary(class,method,"success");assert_eq!(summary["pendingSelectedStatus"],false);assert_eq!(summary["selectedStart"],true);assert_eq!(summary["selectedPass"],true);assert_eq!(summary["finalCodeCardinality"],"one");assert_eq!(summary["childExit"],"success");
+        assert_eq!(parse(&[]).err().expect("expected missing-start EOF refusal").to_string(),"retained pairing JUnit EOF is missing the selected start");
+        assert_eq!(parse(&[class_status.as_str()]).err().expect("expected pending-bundle EOF refusal").to_string(),"retained pairing JUnit EOF has a pending selected status bundle");
+        let skipped=&valid[..6];assert_eq!(parse(skipped).err().expect("expected missing-pass EOF refusal").to_string(),"retained pairing JUnit EOF is missing the selected pass");
+        assert_eq!(parse(&valid[..12]).err().expect("expected missing-final EOF refusal").to_string(),"retained pairing JUnit EOF is missing the final success code");
+        let mut final_zero=valid;final_zero[12]="INSTRUMENTATION_CODE: 0";assert!(parse(&final_zero).is_err());
+        let mut duplicate=valid.to_vec();duplicate.push("INSTRUMENTATION_CODE: -1");let mut duplicate_parser=PairingJUnit::new();for record in &duplicate {if let Some(value)=record.strip_prefix("INSTRUMENTATION_STATUS: ") {if let Some((key,value))=value.split_once('='){duplicate_parser.status(key,value).unwrap();}}else if record.starts_with("INSTRUMENTATION_STATUS_CODE:"){duplicate_parser.status_code(record,class,method).unwrap();}else if record.starts_with("INSTRUMENTATION_CODE:"){duplicate_parser.final_code(record).unwrap();}}assert_eq!(duplicate_parser.eof_summary(class,method,"success")["finalCodeCardinality"],"multiple");assert_eq!(duplicate_parser.eof_error().unwrap_err().to_string(),"retained pairing JUnit EOF has multiple final codes");
+        let mut wrong_method=valid;wrong_method[7]="INSTRUMENTATION_STATUS: test=other";assert!(parse(&wrong_method).is_err());
+        let mut malformed=valid;malformed[5]="INSTRUMENTATION_STATUS_CODE: 1 extra";assert!(parse(&malformed).is_err());
+        let mut failed=valid[..6].to_vec();failed.extend([valid[6],valid[7],valid[8],valid[9],valid[10],"INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: pairing_checkpoint_initial_scene","INSTRUMENTATION_STATUS_CODE: -2"]);
+        let failure=parse(&failed).err().expect("expected closed-stage refusal");assert_eq!(failure.to_string(),"retained pairing JUnit failed at closed stage initial_scene");
+        let primary=pairing_instrumentation_terminal(Err(failure),false,false,false,false).unwrap_err();assert_eq!(primary.to_string(),"retained pairing JUnit failed at closed stage initial_scene");
+        let incomplete=pairing_instrumentation_terminal(Ok(()),true,false,true,false).unwrap_err();assert_eq!(incomplete.to_string(),"retained pairing instrumentation ended before the one admitted pairing finish; inviteIssued=true; launched=false; foreground=true; finishAcknowledged=false");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn retirement_reader_allows_one_quiet_interval_past_the_ordinary_deadline() {
+        use tokio::io::AsyncWriteExt;let (read,mut write)=tokio::io::duplex(64);let deadline=pairing_instrumentation_reader_deadline(true).unwrap();let task=tokio::spawn(async move {let mut reader=tokio::io::BufReader::new(read);let mut line=String::new();pairing_instrumentation_read_line(&mut reader,&mut line,Some(deadline)).await.map(|_|line)});tokio::task::yield_now().await;tokio::time::advance(Duration::from_secs(121)).await;write.write_all(b"ok\n").await.unwrap();assert_eq!(task.await.unwrap().unwrap(),"ok\n");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn retirement_reader_uses_one_absolute_deadline_across_lines() {
+        use tokio::io::AsyncWriteExt;let (read,mut write)=tokio::io::duplex(64);let deadline=pairing_instrumentation_reader_deadline(true).unwrap();let task=tokio::spawn(async move {let mut reader=tokio::io::BufReader::new(read);let mut first=String::new();pairing_instrumentation_read_line(&mut reader,&mut first,Some(deadline)).await?;let mut second=String::new();pairing_instrumentation_read_line(&mut reader,&mut second,Some(deadline)).await});tokio::task::yield_now().await;tokio::time::advance(Duration::from_secs(899)).await;write.write_all(b"first\n").await.unwrap();tokio::task::yield_now().await;tokio::time::advance(Duration::from_secs(1)).await;assert!(task.await.unwrap().is_err());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_pairing_reader_retains_the_one_hundred_twenty_second_timeout() {
+        let (read,_write)=tokio::io::duplex(64);let task=tokio::spawn(async move {let mut reader=tokio::io::BufReader::new(read);let mut line=String::new();pairing_instrumentation_read_line(&mut reader,&mut line,None).await});tokio::task::yield_now().await;tokio::time::advance(Duration::from_secs(120)).await;assert!(task.await.unwrap().is_err());
+    }
+    #[test]
+    fn retained_pairing_shell_interaction_stages_are_closed_and_unknown_suffixes_refuse() {
+        for stage in ["shell_interaction_admission","shell_interaction_fixture","shell_interaction_clipboard_empty","shell_interaction_clipboard_owned","shell_interaction_draft","shell_interaction_paste","shell_interaction_clipboard_clear","shell_interaction_draft_send","shell_interaction_live","shell_interaction_commit","shell_interaction_commit_wait","shell_interaction_commit_dialog","shell_interaction_commit_authority","shell_interaction_commit_direct_window","shell_interaction_commit_direct_lookup","shell_interaction_commit_direct_focus","shell_interaction_commit_direct_connection","shell_interaction_commit_direct_commit","shell_interaction_commit_receipt_wait","shell_interaction_commit_receipt_exact","shell_interaction_commit_receipt_multiple","shell_interaction_commit_receipt_paused_capacity","shell_interaction_commit_receipt_paused_source_lost","shell_interaction_commit_receipt_paused_uncertain","shell_interaction_commit_receipt_paused_refused","shell_interaction_commit_receipt_paused_limit","shell_interaction_commit_receipt_paused_unsupported","shell_interaction_commit_receipt_paused_closed","shell_interaction_commit_receipt_paused_unknown","shell_interaction_commit_receipt_unretained","shell_interaction_commit_receipt_history_blocked","shell_interaction_commit_receipt_queued","shell_interaction_commit_receipt_accepting_empty","shell_interaction_commit_receipt_not_accepting","shell_interaction_commit_receipt_metadata_binding","shell_interaction_commit_receipt_non_authoritative","shell_interaction_commit_receipt_no_receipt","shell_interaction_commit_receipt_error_invalid_request","shell_interaction_commit_receipt_error_unsupported_version","shell_interaction_commit_receipt_error_unsupported_method","shell_interaction_commit_receipt_error_unauthorized","shell_interaction_commit_receipt_error_pairing_failed","shell_interaction_commit_receipt_error_stale_host","shell_interaction_commit_receipt_error_stale_session","shell_interaction_commit_receipt_error_not_found","shell_interaction_commit_receipt_error_not_ready","shell_interaction_commit_receipt_error_invalid_answer","shell_interaction_commit_receipt_error_already_resolved","shell_interaction_commit_receipt_error_action_id_conflict","shell_interaction_commit_receipt_error_action_capacity","shell_interaction_commit_receipt_error_content_expired","shell_interaction_commit_receipt_error_cursor_expired","shell_interaction_commit_receipt_error_busy","shell_interaction_commit_receipt_error_resource_limit","shell_interaction_commit_receipt_error_rate_limited","shell_interaction_commit_receipt_error_timeout","shell_interaction_commit_receipt_error_backend_error","shell_interaction_commit_receipt_error_push_rejected","shell_interaction_commit_receipt_error_stale_registration","shell_interaction_commit_receipt_reserved","shell_interaction_commit_receipt_dispatching","shell_interaction_commit_receipt_dispatched_none","shell_interaction_commit_receipt_dispatched_dispatch_partial","shell_interaction_commit_receipt_dispatched_input_partial","shell_interaction_commit_receipt_dispatched_input_accepted","shell_interaction_commit_receipt_succeeded_none","shell_interaction_commit_receipt_succeeded_dispatch_partial","shell_interaction_commit_receipt_succeeded_dispatch_complete","shell_interaction_commit_receipt_succeeded_input_partial","shell_interaction_commit_receipt_failed_none","shell_interaction_commit_receipt_failed_dispatch","shell_interaction_commit_receipt_failed_input","shell_interaction_commit_receipt_uncertain_none","shell_interaction_commit_receipt_uncertain_dispatch","shell_interaction_commit_receipt_uncertain_input","shell_interaction_inputs","shell_interaction_output","shell_interaction_output_missing_shell","shell_interaction_output_missing_grid","shell_interaction_output_missing_scroll","shell_interaction_output_binding","shell_interaction_output_revision","shell_interaction_output_history_empty","shell_interaction_output_viewport","shell_interaction_output_not_bottom","shell_interaction_output_owner","shell_interaction_output_not_accepting","shell_interaction_older","shell_interaction_older_node","shell_interaction_older_ready","shell_interaction_older_reveal_admission","shell_interaction_older_lookup","shell_interaction_older_scroll_admission","shell_interaction_older_scroll_ready","shell_interaction_older_scroll_rail","shell_interaction_older_scroll_dialog","shell_interaction_older_scroll","shell_interaction_older_display","shell_interaction_older_enabled","shell_interaction_older_dialog","shell_interaction_older_final_admission","shell_interaction_older_authority","shell_interaction_older_click","shell_interaction_older_receipt_wait","shell_interaction_older_receipt_last_observation_base","shell_interaction_older_receipt_last_observation_settled","shell_interaction_older_receipt_last_observation_count","shell_interaction_older_receipt_last_observation_count_duplicate_current_ids","shell_interaction_older_receipt_last_observation_count_baseline_ids_missing","shell_interaction_older_receipt_last_observation_count_multiple_new_ids","shell_interaction_older_receipt_last_observation_count_no_new_id_history_unchanged_busy","shell_interaction_older_receipt_last_observation_count_no_new_id_history_unchanged_idle","shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_pending_busy","shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_pending_idle","shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_non_pending_busy","shell_interaction_older_receipt_last_observation_count_no_new_id_history_changed_non_pending_idle","shell_interaction_older_receipt_last_observation_count_inconsistent","shell_interaction_older_receipt_last_observation_selection","shell_interaction_older_receipt_last_observation_metadata","shell_interaction_older_receipt_last_observation_receipt_absent","shell_interaction_older_receipt_last_observation_pending","shell_interaction_older_receipt_last_observation_non_success","shell_interaction_older_receipt_last_observation_error","shell_interaction_older_receipt_last_observation_receipt_identity","shell_interaction_older_receipt_last_observation_scrollresult","shell_interaction_older_receipt_last_observation_offset","shell_interaction_older_receipt_last_observation_max","shell_interaction_older_receipt_last_observation_rows","shell_interaction_older_receipt_last_observation_history","shell_interaction_older_receipt_last_observation_history_absent","shell_interaction_older_receipt_last_observation_history_replaced","shell_interaction_older_receipt_last_observation_history_pending_action_busy","shell_interaction_older_receipt_last_observation_history_pending_action_idle_admitted","shell_interaction_older_receipt_last_observation_history_pending_action_idle_unadmitted","shell_interaction_older_receipt_last_observation_history_pending_other","shell_interaction_older_receipt_last_observation_history_uncertain_action","shell_interaction_older_receipt_last_observation_history_uncertain_other","shell_interaction_older_receipt_last_observation_history_live_action","shell_interaction_older_receipt_last_observation_history_live_other","shell_interaction_older_receipt_last_observation_owner","shell_interaction_older_receipt_last_observation_input","shell_interaction_older_receipt_last_observation_state_changed_or_unclassified","shell_interaction_older_receipt_exact","shell_interaction_bottom","shell_interaction_bottom_node","shell_interaction_bottom_ready","shell_interaction_bottom_reveal_admission","shell_interaction_bottom_lookup","shell_interaction_bottom_scroll_admission","shell_interaction_bottom_scroll_admission_history_absent","shell_interaction_bottom_scroll_admission_authority","shell_interaction_bottom_scroll_admission_busy","shell_interaction_bottom_scroll_admission_history_disallowed","shell_interaction_bottom_scroll_admission_mode_live","shell_interaction_bottom_scroll_admission_mode_pending","shell_interaction_bottom_scroll_admission_mode_uncertain","shell_interaction_bottom_scroll_admission_metrics_absent","shell_interaction_bottom_scroll_admission_ready","shell_interaction_bottom_scroll_ready","shell_interaction_bottom_scroll_rail","shell_interaction_bottom_scroll_dialog","shell_interaction_bottom_scroll","shell_interaction_bottom_display","shell_interaction_bottom_enabled","shell_interaction_bottom_dialog","shell_interaction_bottom_final_admission","shell_interaction_bottom_authority","shell_interaction_bottom_click","shell_interaction_bottom_receipt_wait","shell_interaction_bottom_receipt_exact","shell_interaction_verify"] {
+            assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage));
+        }
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_commit_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_commit_receipt"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_commit_receipt_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_commit_receipt_error_timeout extra"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_output_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_older_receipt_last_observation_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_older_receipt_last_observation_count_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_older_final_admission_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_older_scroll_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_bottom_final_admission_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_bottom_scroll_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_bottom_scroll_admission_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_interaction_older_receipt_last_observation_history_unknown"),None);
+        for prefix in ["shell_enter_receipt_count","shell_enter_receipt_grid"] {for suffix in ["exact","multiple","paused_capacity","paused_source_lost","paused_uncertain","paused_refused","paused_limit","paused_unsupported","paused_closed","paused_unknown","unretained","history_blocked","queued","accepting_empty","not_accepting","metadata_binding","non_authoritative","no_receipt","error_invalid_request","error_unsupported_version","error_unsupported_method","error_unauthorized","error_pairing_failed","error_stale_host","error_stale_session","error_not_found","error_not_ready","error_invalid_answer","error_already_resolved","error_action_id_conflict","error_action_capacity","error_content_expired","error_cursor_expired","error_busy","error_resource_limit","error_rate_limited","error_timeout","error_backend_error","error_push_rejected","error_stale_registration","reserved","dispatching","dispatched_none","dispatched_dispatch_partial","dispatched_input_partial","dispatched_input_accepted","succeeded_none","succeeded_dispatch_partial","succeeded_dispatch_complete","succeeded_input_partial","failed_none","failed_dispatch","failed_input","uncertain_none","uncertain_dispatch","uncertain_input"] {let stage=format!("{prefix}_{suffix}");assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage.as_str()));}}
+        for stage in ["shell_enter_receipt_count_wait","shell_enter_receipt_grid_wait","shell_enter_receipt_deadline","shell_enter_receipt_lookup","shell_enter_receipt_exact"] {assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage));}
+        for suffix in ["shell_missing","binding_changed","loading","error","grid_missing","revision_regressed","same_revision_original_grid","same_revision_replaced_grid","advanced"] {let stage=format!("shell_enter_receipt_grid_last_observation_{suffix}");assert_eq!(PairingJUnit::closed_stage(&format!("java.lang.AssertionError: pairing_checkpoint_{stage}")),Some(stage.as_str()));}
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_enter_receipt_count_unknown"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_enter_receipt_grid_error_timeout extra"),None);
+        assert_eq!(PairingJUnit::closed_stage("java.lang.AssertionError: pairing_checkpoint_shell_enter_receipt_grid_last_observation_unknown"),None);
+    }
+    #[test]
+    fn retained_pairing_shell_final_scroll_requires_latched_viewport_and_dynamic_max_bound() {
+        let viewport=Uint(3);let expected=GridScroll {offset_from_bottom:Uint(0),max_offset_from_bottom:Uint(7),viewport_rows:viewport.clone()};
+        assert!(pairing_checkpoint_shell_final_scroll(None,None).is_ok());
+        assert!(pairing_checkpoint_shell_final_scroll(None,Some(&viewport)).is_err());
+        assert!(pairing_checkpoint_shell_final_scroll(Some(expected.clone()),Some(&viewport)).is_ok());
+        let growth=GridScroll {max_offset_from_bottom:Uint(9),..expected.clone()};assert!(pairing_checkpoint_shell_final_scroll(Some(growth),Some(&viewport)).is_ok());
+        let browsing=GridScroll {offset_from_bottom:Uint(3),..expected.clone()};assert!(pairing_checkpoint_shell_final_scroll(Some(browsing),Some(&viewport)).is_err());
+        let changed_viewport=GridScroll {viewport_rows:Uint(4),..expected.clone()};assert!(pairing_checkpoint_shell_final_scroll(Some(changed_viewport),Some(&viewport)).is_err());
+        let invalid=GridScroll {offset_from_bottom:Uint(0),max_offset_from_bottom:Uint(2),viewport_rows:viewport.clone()};assert!(pairing_checkpoint_shell_final_scroll(Some(invalid),Some(&viewport)).is_err());
+    }
+    #[test]
+    fn retained_pairing_shell_interaction_receipts_require_exact_target_boot_and_delta() {
+        let boot=Uuid::random();let target=ShellTarget {shell_id:Uuid::random(),generation:Uuid::random()};
+        let input=|action_id,created|Receipt {action_id,method:ActionMethod::ShellInput,boot_id:boot.clone(),target:None,shell_target:Some(target.clone()),created_at:Uint(created),updated_at:Uint(created+1),state:ReceiptState::Dispatched,error:None,result:Some(ActionResult::ShellDispatch(ActionResultShellDispatch {progress:ShellDispatchProgress {frame_bytes:Some(5),socket_bytes_written:Some(5),frame_complete:Some(true)}})),creation:None};
+        let scroll=|action_id,offset,max,viewport,created|Receipt {action_id,method:ActionMethod::ShellScroll,boot_id:boot.clone(),target:None,shell_target:Some(target.clone()),created_at:Uint(created),updated_at:Uint(created+1),state:ReceiptState::Succeeded,error:None,result:Some(ActionResult::ShellScroll(GridScroll {offset_from_bottom:Uint(offset),max_offset_from_bottom:Uint(max),viewport_rows:Uint(viewport)})),creation:None};
+        let inputs=[input(Uuid::random(),1),input(Uuid::random(),3),input(Uuid::random(),5)];let older=scroll(Uuid::random(),2,8,3,7);let bottom=scroll(Uuid::random(),0,9,3,9);
+        pairing_checkpoint_shell_interaction_receipts(&boot,&target,&inputs,&older,&bottom,Uint(7),Uint(3)).unwrap();
+        let mut wrong_boot=inputs.clone();wrong_boot[2].boot_id=Uuid::random();assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&wrong_boot,&older,&bottom,Uint(7),Uint(3)).is_err());
+        let mut wrong_target=inputs.clone();wrong_target[1].shell_target=Some(ShellTarget {shell_id:Uuid::random(),generation:Uuid::random()});assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&wrong_target,&older,&bottom,Uint(7),Uint(3)).is_err());
+        let mut incomplete=inputs.clone();let Some(ActionResult::ShellDispatch(result))=&mut incomplete[0].result else {unreachable!()};result.progress.frame_complete=Some(false);assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&incomplete,&older,&bottom,Uint(7),Uint(3)).is_err());
+        let mut wrong_state=inputs.clone();wrong_state[1].state=ReceiptState::Uncertain;assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&wrong_state,&older,&bottom,Uint(7),Uint(3)).is_err());
+        let permuted=[inputs[1].clone(),inputs[0].clone(),inputs[2].clone()];assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&permuted,&older,&bottom,Uint(7),Uint(3)).is_err());
+        let mut duplicate=inputs.clone();duplicate[2].action_id=duplicate[1].action_id.clone();assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&duplicate,&older,&bottom,Uint(7),Uint(3)).is_err());
+        let wrong_offset=scroll(Uuid::random(),0,8,3,7);assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&inputs,&wrong_offset,&bottom,Uint(7),Uint(3)).is_err());
+        let offset_past_max=scroll(Uuid::random(),9,8,3,7);assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&inputs,&offset_past_max,&bottom,Uint(7),Uint(3)).is_err());
+        let wrong_viewport=scroll(Uuid::random(),3,8,2,7);assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&inputs,&wrong_viewport,&bottom,Uint(7),Uint(3)).is_err());
+        let max_below_viewport=scroll(Uuid::random(),3,2,3,7);assert!(pairing_checkpoint_shell_interaction_receipts(&boot,&target,&inputs,&max_below_viewport,&bottom,Uint(7),Uint(3)).is_err());
+    }
+    #[test]
+    fn retained_pairing_owned_retirement_control_latches_inventory_next_and_result() {
+        let inventory=super::ui::Control::RetirementInventory{};
+        let next=super::ui::Control::RetirementNext{};
+        let removed=super::ui::Control::RetirementResult {removed:true};
+        let finish=super::ui::Control::RetirementFinish {removed:Uint(1),already_absent:Uint(0)};
+        assert!(retirement_control_step(&removed,0,false,false,0,0,1).is_err());
+        assert!(matches!(retirement_control_step(&inventory,0,false,false,0,0,1),Ok(RetirementControlStep::Inventory)));
+        assert!(retirement_control_step(&inventory,0,true,false,0,0,1).is_err());
+        assert!(matches!(retirement_control_step(&next,0,true,false,0,0,1),Ok(RetirementControlStep::Next)));
+        assert!(retirement_control_step(&next,0,true,true,0,0,1).is_err());
+        assert!(matches!(retirement_control_step(&removed,0,true,true,0,0,1),Ok(RetirementControlStep::Result(true))));
+        assert!(retirement_control_step(&finish,0,true,false,0,0,1).is_err());
+        assert!(matches!(retirement_control_step(&finish,1,true,false,1,0,1),Ok(RetirementControlStep::Finish)));
+    }
+    #[test]
+    fn retained_pairing_owned_retirement_reverse_cleanup_preserves_primary_failure() {
+        let primary=io::Error::new(io::ErrorKind::PermissionDenied,"primary");
+        let error=retirement_cleanup_outcome::<()>(Err(primary),Err(io::Error::other("cleanup"))).unwrap_err();
+        assert_eq!(error.kind(),io::ErrorKind::PermissionDenied);
+        assert_eq!(retirement_cleanup_outcome::<()>(Ok(()),Err(io::Error::other("cleanup"))).unwrap_err().to_string(),"owned retirement reverse cleanup failed");
+    }
+    #[test]
+    fn retained_pairing_reverse_baseline_requires_lossless_rows_and_exact_own_delta() {
+        let baseline_rows=pairing_checkpoint_reverse_rows(b"UsbFfs tcp:41029 tcp:41030\n\n").unwrap();let baseline=PairingCheckpointReverseBaseline {rows:baseline_rows.clone()};assert!(baseline.port_is_absent(41031));assert!(!baseline.port_is_absent(41029));assert!(!baseline.port_is_absent(41030));
+        for malformed in [b"UsbFfs tcp:41029 tcp:41030\n\nUsbFfs tcp:41031 tcp:41032\n".as_slice(),b"UsbFfs tcp:041029 tcp:41030\n".as_slice(),b"other tcp:41029 tcp:41030\n".as_slice(),b"UsbFfs tcp:41029\n".as_slice(),b"UsbFfs tcp:0 tcp:41030\n".as_slice()] {assert!(pairing_checkpoint_reverse_rows(malformed).is_err());}
+        assert!(pairing_checkpoint_reverse_rows(b"UsbFfs tcp:41029 tcp:41030\nUsbFfs tcp:41029 tcp:41030\n").is_err());let own=PairingCheckpointReverseRow {transport:"UsbFfs".to_owned(),local:41031,remote:41031};let mut exact=baseline_rows.clone();assert!(exact.insert(own.clone()));pairing_checkpoint_reverse_expected(&baseline,Some(&own),&exact).unwrap();let mut baseline_drift=baseline_rows.clone();baseline_drift.insert(PairingCheckpointReverseRow {transport:"UsbFfs".to_owned(),local:41032,remote:41033});assert!(pairing_checkpoint_reverse_expected(&baseline,Some(&own),&baseline_drift).is_err());let mut own_drift=exact;own_drift.remove(&own);own_drift.insert(PairingCheckpointReverseRow {transport:"UsbFfs".to_owned(),local:41031,remote:41034});assert!(pairing_checkpoint_reverse_expected(&baseline,Some(&own),&own_drift).is_err());
+    }
+    #[test]
+    fn retained_pairing_device_delta_is_closed_and_exact() {
+        let first="00000000-0000-4000-8000-000000000001";let second="00000000-0000-4000-8000-000000000002";
+        let baseline=pairing_device_ids(&json!({"devices":[{"deviceId":first}]})).unwrap();
+        let after=pairing_device_ids(&json!({"devices":[{"deviceId":first},{"deviceId":second}]})).unwrap();
+        let expected=baseline.iter().cloned().chain(std::iter::once(second.to_owned())).collect::<BTreeSet<_>>();assert_eq!(after,expected);
+        for invalid in [json!({"devices":[{"deviceId":first},{"deviceId":first}]}),json!({"devices":[{"deviceId":"not-a-uuid"}]}),json!({"devices":[]}),json!({"devices":[{}]}),json!({"wrong":[]})] {
+            assert!(pairing_device_ids(&invalid).is_err());
+        }
+    }
+    #[test]
+    fn retained_pairing_provider_accepts_only_one_new_target_before_its_original_deadline() {
+        let first=Target {session_id:Uuid::random(),generation:Uuid::random()};let created=Target {session_id:Uuid::random(),generation:Uuid::random()};let extra=Target {session_id:Uuid::random(),generation:Uuid::random()};
+        assert!(!pairing_checkpoint_target_published(std::slice::from_ref(&first),&created,std::slice::from_ref(&first)).unwrap());
+        assert!(pairing_checkpoint_target_published(std::slice::from_ref(&first),&created,&[first.clone(),created.clone()]).unwrap());
+        assert!(pairing_checkpoint_target_published(std::slice::from_ref(&first),&created,&[first.clone(),extra.clone()]).is_err());
+        pairing_checkpoint_exact_target_delta(std::slice::from_ref(&first),&created,&[first.clone(),created.clone()]).unwrap();
+        assert!(pairing_checkpoint_exact_target_delta(std::slice::from_ref(&first),&created,std::slice::from_ref(&first)).is_err());
+        assert!(pairing_checkpoint_exact_target_delta(std::slice::from_ref(&first),&created,&[first.clone(),created.clone(),extra]).is_err());
+        assert!(pairing_checkpoint_exact_target_delta(std::slice::from_ref(&first),&created,&[first.clone(),created.clone(),created.clone()]).is_err());
+        assert!(pairing_checkpoint_exact_target_delta(std::slice::from_ref(&first),&created,&[created.clone(),first.clone()]).is_ok());
+        assert!(pairing_checkpoint_exact_target_delta(&[first.clone(),created.clone()],&created,&[first,created.clone()]).is_err());
+        assert!(pairing_checkpoint_deadline(Instant::now()-Duration::from_millis(1)).is_err());
+        for (provider,label) in [(Provider::Omp,"omp"),(Provider::Codex,"codex")] {let facts=pairing_checkpoint_provider_proof_projection(provider).unwrap();assert_eq!(facts["provider"],label);assert_eq!(facts["exactReadyInventory"].as_bool(),Some(true));}
     }
     #[test]
     fn host_namespace_group_accepts_owned_processes_with_distinct_nspids_and_rechecks_each_original() {

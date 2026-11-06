@@ -2,6 +2,7 @@
 package io.github.trevarj.goatr
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListScope
@@ -15,7 +16,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
@@ -25,6 +25,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 
 /** Local presentation only: none of these keys grant native session authority. */
 enum class SessionDirectoryView { Workspaces, RecentAgents }
@@ -197,35 +198,75 @@ internal fun WorkspaceDirectoryCard(
     var metadataExpanded by rememberSaveable(group.key.lazyKey) {mutableStateOf(false)}
     val tag=group.key.tag
     val title=group.workspace.label?.value ?: "Workspace ${group.workspace.number.value} · label unavailable"
-    OutlinedCard(Modifier.fillMaxWidth().testTag(tag),colors=CardDefaults.outlinedCardColors(containerColor=MaterialTheme.colorScheme.surface),border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant)) {
-        Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
-            Row(Modifier.weight(1f).testTag("${tag}_agents").combinedClickable(role=SemanticsRole.Button,onClickLabel=if(agentsExpanded) "Hide terminals" else "Show terminals",onClick={agentsExpanded=!agentsExpanded},onLongClickLabel="Workspace details",onLongClick={metadataExpanded=true}).semantics {stateDescription=if(agentsExpanded) "Terminals expanded" else "Terminals collapsed"}.heightIn(min=64.dp).padding(12.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(3.dp)) {
-                    UiText(title,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
-                    UiText("$hostName · ${group.serverName}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis)
-                    UiText("${group.agents.size} agents · ${group.shells.size} shells${if(stale) " · Stale" else ""}",style=MaterialTheme.typography.labelMedium,color=if(stale) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,maxLines=1,overflow=TextOverflow.Ellipsis)
-                }
-                GoatrIcon(MaterialGlyph.ExpandMore,null,Modifier.rotate(if(agentsExpanded) 180f else 0f))
-            }
-            IconButton(onClick={metadataExpanded=!metadataExpanded},modifier=Modifier.sizeIn(minWidth=48.dp,minHeight=48.dp).testTag("${tag}_details").semantics {stateDescription=if(metadataExpanded) "Workspace details expanded" else "Workspace details collapsed"}) {
-                GoatrIcon(MaterialGlyph.Visibility,if(metadataExpanded) "Hide workspace details" else "Show workspace details")
-            }
-        }
+    Surface(Modifier.fillMaxWidth().testTag(tag),color=MaterialTheme.colorScheme.surface,shape=MaterialTheme.shapes.medium,border=BorderStroke(Dp.Hairline,MaterialTheme.colorScheme.outlineVariant)) {
+        Column {
+            WorkspaceDirectoryHeader(
+                tag=tag,
+                title=title,
+                context="$hostName · ${group.serverName}",
+                count="${group.agents.size} agents · ${group.shells.size} shells${if(stale) " · Stale" else ""}",
+                expanded=agentsExpanded,
+                detailsExpanded=metadataExpanded,
+                stale=stale,
+                onToggleExpanded={agentsExpanded=!agentsExpanded},
+                onToggleDetails={metadataExpanded=!metadataExpanded},
+            )
         if(metadataExpanded) Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             UiText(title,style=MaterialTheme.typography.bodySmall)
             UiText("Desktop: $hostName\nServer: ${group.serverName}\nWorkspace number: ${group.workspace.number.value}\nNative status: ${group.workspace.agentStatus}\nDesktop focused: ${group.workspace.focused}",style=MaterialTheme.typography.bodySmall)
             UiText("Server ID: ${group.key.server.value}\nIncarnation: ${group.key.incarnation.value}\nWorkspace ID: ${group.key.workspace.value}",style=MaterialTheme.typography.bodySmall,fontFamily=FontFamily.Monospace)
         }
-        if(agentsExpanded) Column(Modifier.padding(start=4.dp,end=4.dp,bottom=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            if(group.agents.isEmpty() && group.shells.isEmpty()) UiText("No supported bound terminals in this workspace.",style=MaterialTheme.typography.bodySmall)
-            group.agents.forEach {summary->
-                key(summary.sessionId,summary.generation) {
-                    DirectoryAgentRow(summary,hostName,title,preferences,stale,"session_${group.key.host}_${summary.sessionId.value}_${summary.generation.value}",onOpen)
+            if(agentsExpanded) Box(Modifier.padding(start=48.dp,end=8.dp,bottom=8.dp)) {
+                Column(Modifier.fillMaxWidth().padding(start=8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    if(group.agents.isEmpty() && group.shells.isEmpty()) UiText("No supported bound terminals in this workspace.",style=MaterialTheme.typography.bodySmall)
+                    group.agents.forEach {summary->
+                        key(summary.sessionId,summary.generation) {
+                            DirectoryAgentRow(summary,hostName,title,preferences,stale,"session_${group.key.host}_${summary.sessionId.value}_${summary.generation.value}",onOpen)
+                        }
+                    }
+                    group.shells.forEach {shell->key(shell.target) {
+                        DirectoryShellRow(shell,stale,"shell_${group.key.host}_${shell.target.shellId.value}_${shell.target.generation.value}",onOpenShell)
+                    }}
+                }
+                Box(Modifier.matchParentSize()) {
+                    Box(Modifier.fillMaxHeight().width(1.dp).background(MaterialTheme.colorScheme.outlineVariant).testTag("${tag}_rail"))
                 }
             }
-            group.shells.forEach {shell->key(shell.target) {
-                DirectoryShellRow(shell,stale,"shell_${group.key.host}_${shell.target.shellId.value}_${shell.target.generation.value}",onOpenShell)
-            }}
+        }
+    }
+}
+
+@Composable
+internal fun WorkspaceDirectoryHeader(
+    tag:String,
+    title:String,
+    context:String,
+    count:String,
+    expanded:Boolean,
+    detailsExpanded:Boolean,
+    stale:Boolean,
+    onToggleExpanded:()->Unit,
+    onToggleDetails:()->Unit,
+) {
+    var menuExpanded by rememberSaveable("${tag}_menu") {mutableStateOf(false)}
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val expandedLabels=maxWidth<320.dp || LocalDensity.current.fontScale>=1.3f
+        Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).testTag("${tag}_agents").combinedClickable(role=SemanticsRole.Button,onClickLabel=if(expanded) "Hide agents and shells" else "Show agents and shells",onClick=onToggleExpanded).semantics {stateDescription=if(expanded) "Agents and shells expanded" else "Agents and shells collapsed"}.heightIn(min=56.dp).padding(horizontal=12.dp,vertical=8.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                GoatrIcon(MaterialGlyph.Folder,"Workspace")
+                Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(2.dp)) {
+                    UiText(title,modifier=Modifier.testTag("${tag}_title"),style=MaterialTheme.typography.titleMedium,maxLines=if(expandedLabels) 3 else 1,overflow=TextOverflow.Ellipsis)
+                    UiText(context,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=if(expandedLabels) 2 else 1,overflow=TextOverflow.Ellipsis)
+                    UiText(count,style=MaterialTheme.typography.labelMedium,color=if(stale) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,maxLines=if(expandedLabels) 2 else 1,overflow=TextOverflow.Ellipsis)
+                }
+            }
+            Box {
+                IconButton(onClick={menuExpanded=true},modifier=Modifier.size(48.dp).testTag("${tag}_menu")) {GoatrIcon(MaterialGlyph.MoreVert,"Workspace options")}
+                DropdownMenu(expanded=menuExpanded,onDismissRequest={menuExpanded=false}) {
+                    DropdownMenuItem(text={UiText(if(expanded) "Hide agents and shells" else "Show agents and shells")},onClick={onToggleExpanded();menuExpanded=false},modifier=Modifier.testTag("${tag}_agents_menu_item"))
+                    DropdownMenuItem(text={UiText(if(detailsExpanded) "Hide workspace details" else "Show workspace details")},onClick={onToggleDetails();menuExpanded=false},modifier=Modifier.testTag("${tag}_details").semantics {stateDescription=if(detailsExpanded) "Workspace details expanded" else "Workspace details collapsed"})
+                }
+            }
         }
     }
 }
@@ -234,11 +275,14 @@ internal fun WorkspaceDirectoryCard(
 internal fun DirectoryShellRow(shell:ShellSummary,stale:Boolean,rowTag:String,onOpen:(ShellTarget)->Unit) {
     val enabled=!stale && shell.connectivity==SessionConnectivity.Ready && shell.capabilities.read
     OutlinedCard(onClick={onOpen(shell.target)},enabled=enabled,modifier=Modifier.fillMaxWidth().heightIn(min=64.dp).testTag(rowTag)) {
-        Row(Modifier.padding(12.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            GoatrIcon(MaterialGlyph.Terminal,"Shell terminal")
-            Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                UiText(shell.title.value,style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
-                UiText(if(stale) "Stale · unavailable" else if(enabled) "Ready · shell" else "${shell.connectivity} · unavailable",style=MaterialTheme.typography.bodySmall)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val expandedLabels=maxWidth<320.dp || LocalDensity.current.fontScale>=1.3f
+            Row(Modifier.padding(12.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                GoatrIcon(MaterialGlyph.Terminal,"Shell terminal")
+                Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                    UiText(shell.title.value,style=MaterialTheme.typography.titleMedium,maxLines=if(expandedLabels) 3 else 1,overflow=TextOverflow.Ellipsis)
+                    UiText(if(stale) "Stale · unavailable" else if(enabled) "Ready · shell" else "${shell.connectivity} · unavailable",style=MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }
@@ -257,29 +301,32 @@ internal fun WorkspaceDirectoryStrip(
             selectedShell!=null && workspace.shells.any {it.target==selectedShell}
     } ?: return
     key(group.key) {
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).testTag(tag),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            group.agents.forEach {agent->
-                val target=Target(agent.sessionId,agent.generation)
-                val chosen=target==selectedAgent
-                FilterChip(selected=chosen,onClick={if(!chosen)onAgent(target)},
-                    enabled=ready && agent.connectivity==SessionConnectivity.Ready,
-                    leadingIcon={GoatrIcon(MaterialGlyph.Chat,providerLabel(agent.provider))},
-                    label={Column {
-                        UiText("${providerLabel(agent.provider)} · ${agent.title}",maxLines=1,overflow=TextOverflow.Ellipsis)
-                        UiText(sessionStatusLabel(agent.status),style=MaterialTheme.typography.labelSmall,maxLines=1)
-                    }},
-                    modifier=Modifier.heightIn(min=48.dp).widthIn(max=280.dp).testTag("${tag}_agent_${target.sessionId.value}_${target.generation.value}").semantics {selected=chosen})
-            }
-            group.shells.forEach {shell->
-                val chosen=shell.target==selectedShell
-                FilterChip(selected=chosen,onClick={if(!chosen)onShell(shell.target)},
-                    enabled=ready && shell.connectivity==SessionConnectivity.Ready && shell.capabilities.read,
-                    leadingIcon={GoatrIcon(MaterialGlyph.Terminal,"Shell terminal")},
-                    label={Column {
-                        UiText(shell.title.value,maxLines=1,overflow=TextOverflow.Ellipsis)
-                        UiText(shell.connectivity.name,style=MaterialTheme.typography.labelSmall,maxLines=1)
-                    }},
-                    modifier=Modifier.heightIn(min=48.dp).widthIn(max=280.dp).testTag("${tag}_shell_${shell.target.shellId.value}_${shell.target.generation.value}").semantics {selected=chosen})
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val expandedLabels=maxWidth<320.dp || LocalDensity.current.fontScale>=1.3f
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).testTag(tag),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                group.agents.forEach {agent->
+                    val target=Target(agent.sessionId,agent.generation)
+                    val chosen=target==selectedAgent
+                    FilterChip(selected=chosen,onClick={if(!chosen)onAgent(target)},
+                        enabled=ready && agent.connectivity==SessionConnectivity.Ready,
+                        leadingIcon={GoatrIcon(MaterialGlyph.Chat,providerLabel(agent.provider))},
+                        label={Column {
+                            UiText("${providerLabel(agent.provider)} · ${agent.title}",maxLines=if(expandedLabels) 3 else 1,overflow=TextOverflow.Ellipsis)
+                            UiText(sessionStatusLabel(agent.status),style=MaterialTheme.typography.labelSmall,maxLines=if(expandedLabels) 2 else 1,overflow=TextOverflow.Ellipsis)
+                        }},
+                        modifier=Modifier.heightIn(min=48.dp).widthIn(max=280.dp).testTag("${tag}_agent_${target.sessionId.value}_${target.generation.value}").semantics {selected=chosen})
+                }
+                group.shells.forEach {shell->
+                    val chosen=shell.target==selectedShell
+                    FilterChip(selected=chosen,onClick={if(!chosen)onShell(shell.target)},
+                        enabled=ready && shell.connectivity==SessionConnectivity.Ready && shell.capabilities.read,
+                        leadingIcon={GoatrIcon(MaterialGlyph.Terminal,"Shell terminal")},
+                        label={Column {
+                            UiText(shell.title.value,maxLines=if(expandedLabels) 3 else 1,overflow=TextOverflow.Ellipsis)
+                            UiText(shell.connectivity.name,style=MaterialTheme.typography.labelSmall,maxLines=if(expandedLabels) 2 else 1,overflow=TextOverflow.Ellipsis)
+                        }},
+                        modifier=Modifier.heightIn(min=48.dp).widthIn(max=280.dp).testTag("${tag}_shell_${shell.target.shellId.value}_${shell.target.generation.value}").semantics {selected=chosen})
+                }
             }
         }
     }
@@ -314,11 +361,11 @@ internal fun DirectoryAgentRow(
             val stacked=maxWidth<320.dp || LocalDensity.current.fontScale>=1.3f
             Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(4.dp)) {
                 Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                    if(stacked) Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                    if(stacked) {
                         ProviderPill(summary.provider,Modifier.testTag("${rowTag}_provider"))
-                        UiText(title,modifier=Modifier.weight(1f).testTag("${rowTag}_title"),style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
+                        UiText(title,modifier=Modifier.fillMaxWidth().testTag("${rowTag}_title"),style=MaterialTheme.typography.titleMedium,maxLines=3,overflow=TextOverflow.Ellipsis)
                     } else UiText(title,modifier=Modifier.testTag("${rowTag}_title"),style=MaterialTheme.typography.titleMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
-                    if(subtitle.isNotEmpty()) UiText(subtitle,modifier=Modifier.testTag("${rowTag}_subtitle"),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    if(subtitle.isNotEmpty()) UiText(subtitle,modifier=Modifier.testTag("${rowTag}_subtitle"),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=if(stacked) 2 else 1,overflow=TextOverflow.Ellipsis)
                     Row(Modifier.fillMaxWidth(),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                         if(!stacked) ProviderPill(summary.provider,Modifier.testTag("${rowTag}_provider"))
                         Box(Modifier.weight(1f).testTag("${rowTag}_status")) {

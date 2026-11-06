@@ -46,3 +46,7 @@ ring = { version = "=0.17.14", default-features = false, features = ["std"] }
 [profile.dev]
 debug = 1
 debug-assertions = true
+
+# Keep SHA-2 hashing off the inventory hot path in dev and tests.
+[profile.dev.package.sha2]
+opt-level = 3
