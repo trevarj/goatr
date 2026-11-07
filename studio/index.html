@@ -11,7 +11,7 @@
 </head>
 <body>
   <header class="masthead">
-    <div><p class="eyebrow">GOATR / STUDIO 01</p><h1>Heeler, translated carefully.</h1><p>Source-pinned Android design review · native Views · Linux companion</p></div>
+    <div><p class="eyebrow">GOATR / STUDIO 01</p><h1>Heeler, translated carefully.</h1><p>Source-pinned Android review · native Views · existing core over paired iroh</p></div>
     <a href="#contract">Rewrite contract &amp; evidence</a>
   </header>
   <p class="gate" role="note">Design review — application rewrite not implemented</p>
@@ -62,18 +62,18 @@
     </section>
     <aside class="details-panel" aria-label="Annotations and evidence">
       <section id="annotations"><h2>Design annotations</h2><ol id="annotation-list"></ol></section>
-      <section><h2>Feature scenarios</h2><p class="muted">Required future behavior — not implementation results.</p><div id="feature-list"></div></section>
+      <section><h2>Feature scenarios</h2><p class="muted">Core/device outcomes remain future work; excluded rows are historical reference, not target controls.</p><div id="feature-list"></div></section>
       <section><h2>Provenance</h2><div id="provenance"></div></section>
     </aside>
     <section id="contract" class="contract" aria-labelledby="contract-title">
       <h2 id="contract-title">The rewrite contract</h2>
-      <p>All research is static. Public source and screenshots establish intent, not observed iOS execution. These wireframes are schematic; no provider, terminal, pairing, notification or native-runtime operation is performed here.</p>
+      <p>Core-only target: native Android client → authorized paired iroh stream → exact configured existing core socket. Adopt sessions/terminals from any native hc client; preserve shared lifetimes and metadata. All research is static, not installed/runtime-qualified. Public source/screenshots establish intent, not observed execution; no depicted app action runs here.</p>
       <details open><summary>Settled decisions, architecture &amp; validation</summary><div id="decisions"></div></details>
       <details open><summary>Required checkpoint sequence</summary><ol id="milestones"></ol></details>
       <details><summary>Research and reuse qualifications</summary><div id="research"></div></details>
       <details><summary>Complete behavior inventory</summary><p id="feature-count"></p><div id="all-features"></div></details>
       <details><summary>Reference inventory &amp; licenses</summary><p>All 19 original-byte PNGs are local. Raster sizes are not logical iOS points. A screenshot does not establish later source behavior. Heeler branding appears only in cited references; Goatr retains its identity. Wireframe icons use local Google Material Icons path artwork, not a font or remote asset.</p><a href="reference/heeler/LICENSE">Heeler Apache-2.0 license</a> · <a href="reference/heeler/NOTICE.txt">Asset provenance notice</a> · <a href="vendor/material-icons-NOTICE.txt">Material Icons attribution &amp; pinned sources</a> · <a href="reference/heeler/LICENSE">Material Icons Apache-2.0 license</a> · <a href="vendor/LICENSE">Pixelmatch ISC license</a><div id="asset-inventory"></div></details>
-      <details><summary>Run and verification instructions</summary><p>From the checkout root: <code>nix develop path:. -c make studio</code>. Serve only <code>studio/</code>, loopback port 4173. If occupied, leave the listener alone and run <code>darkhttpd studio --addr 127.0.0.1 --port 4174</code> (then first free 4175–4183).</p><p>Permanent browser checks: <code>await import('/checks.js').then(m =&gt; m.run())</code>. They call the same validation, comparison, evidence and review functions as this page. Run after implementation handoff. Actual-browser picker, persistence, resize, offline, source-byte and loopback-boundary checks remain the coordinator's responsibility; this page does not claim they passed.</p></details>
+      <details><summary>Run and verification instructions</summary><p>From the checkout root: <code>nix develop -c make studio</code>. Serve only <code>studio/</code>, loopback port 4173. If occupied, leave the listener alone and run <code>darkhttpd studio --addr 127.0.0.1 --port 4174</code> (then first free 4175–4183).</p><p>Permanent browser checks: <code>await import('/checks.js').then(m =&gt; m.run())</code>. They call the same validation, comparison, evidence and review functions as this page. Actual-browser scene, picker, persistence, resize, offline, source-byte and loopback-boundary checks belong to the coordinator; this revision claims no new check result or native-runtime qualification.</p></details>
     </section>
   </main>
   <footer>Local review only · no analytics, CDN, service worker, credentials, provider calls or simulated app actions.</footer>

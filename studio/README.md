@@ -2,6 +2,49 @@
 
 A local review gate for Heeler reference screenshots, annotated Android wireframes, feature scope and implementation decisions. **Design review — application rewrite not implemented.** References, wireframes and design acceptance are not evidence of production behavior, runtime parity or a completed Android rewrite.
 
+## Core-only review target
+
+Preserve the Heeler visual/behavior reference at
+[`17e890481ae5a80e142395ab17974cee8655c6a4`](https://github.com/ZingerLittleBee/Heeler/tree/17e890481ae5a80e142395ab17974cee8655c6a4),
+the static Material artwork and all scene/variant coverage. Design revision **5**
+pivots active scope to Android native core → authorized paired iroh stream → exact
+host-configured **existing** Linux core client socket, not a second terminal protocol
+or companion PTY/runtime. No `hc connect` autostart, new SSH/public TCP or arbitrary
+mobile-selected socket destination.
+
+Goatr must adopt existing sessions/terminals from **any native hc client**, without
+private Goatr core, ownership-only filtering, mandatory labels/reporters or metadata
+rewrites. Other native clients may attach concurrently; last-active shared sizing
+applies. Mobile detach/disconnect preserves programs, session and other clients.
+Pairing must disclose full core-account command/file/terminal/server and configured
+machine authority, authorize before socket forwarding, and revoke actual peer
+streams plus corresponding socket handles. It is not a terminal/Workspace sandbox.
+
+The separate core research pin is
+[`9ce385d9c8abb041dd4437476d770365b3fb5282`](https://github.com/herdrdev/herdr-core/tree/9ce385d9c8abb041dd4437476d770365b3fb5282)
+(declared source `0.1.18`, generation `1`): **not an installed/runtime-qualified
+version choice**. Native capabilities are not finished product workflows. Five core
+structured Chats, Accounts, directory/Workspace adoption, creation/worktrees,
+read-only Changes, config Undo, encrypted background delivery and Usage stay required.
+OpenCode structured Chat remains reference-unavailable; real OpenCode terminals are
+not excluded. TUI-only reference operations are explicitly excluded historical rows;
+independent Apply to All layout copying stays active.
+
+Visible unresolved implementation work includes provider/process/transcript/binary
+file discovery; private **atomic 64 MiB staging** versus native `terminal.put`'s
+**8 MiB** direct-write limit; guarded expected-bytes/nonexistence config writes/Undo
+absent from stock `file.write/edit`; and a separate supporting Host service for
+encrypted ntfy/UnifiedPush while Android is disconnected. Core live events and a
+transparent tunnel do not deliver offline push or supply Usage/account/Git APIs.
+Use actual native file/`machine.exec`/terminal/template primitives, not invented
+workspace/tab/account/template-CRUD or extra companion APIs. Fresh reconnect
+snapshot/sequence/channels/core identity/documents never replay uncertain effects;
+JSON-RPC IDs are not durable idempotency receipts.
+
+See [the full rewrite contract](../HEELER_ANDROID_REWRITE_PLAN.md) for precise
+capability boundaries and future acceptance. No production code, installation,
+service replacement, provider call or runtime qualification is part of this review.
+
 ## Start
 
 From the checkout root, with Nix installed:

@@ -2,6 +2,11 @@
 
 ## Authority and current boundary
 
+The current rewrite contract is `HEELER_ANDROID_REWRITE_PLAN.md`; it supersedes
+conflicting historical MVP/backend restrictions below. `docs/` was intentionally
+removed and must not be restored. The studio-first gate does not authorize
+production changes or installing/replacing running native runtimes.
+
 Read `docs/README.md`, your assigned topic, its dependencies, and
 `docs/REFERENCES.md` before editing. Those documents own product
 contracts. Keep README user-facing: product overview, availability, use and
