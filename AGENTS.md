@@ -236,6 +236,8 @@ Only the signing step receives those four secrets. It decodes the keystore under
 RUNNER_TEMP with umask 077, uses `apksigner` password **environment references**
 (not password values in argv), verifies the explicit signed APK and alignment,
 and deletes the keystore via an EXIT trap plus an always-run cleanup step.
+`apksigner` launches `java` from `PATH`: validate the resolved Nix JDK executable
+and prepend its `bin` directory; `JAVA_HOME` alone does not select it.
 Builds and checks have no production signing credentials; no signing operation
 runs through Nix or Gradle. No signing material is cached or uploaded. Keep local
 `install-release` interactive-only; its password policy is intentionally separate.

@@ -143,6 +143,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          [[ -n "$JAVA_HOME" && -x "$JAVA_HOME/bin/java" ]]
+          export PATH="$JAVA_HOME/bin:$PATH"
           umask 077
           : "${KEYSTORE_BASE64:?Missing KEYSTORE_BASE64}"
           : "${KEYSTORE_PASSWORD:?Missing KEYSTORE_PASSWORD}"
