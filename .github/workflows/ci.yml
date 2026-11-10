@@ -1,4 +1,4 @@
-name: Native foundation
+name: Goatr
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-foundation-${{ github.ref }}
+  group: goatr-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,9 +21,11 @@ jobs:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - name: Rust product gates and formatting
-        run: nix develop -c make check
+        run: nix develop --cores 2 -c make check
       - name: Locked direct Rust package
-        run: nix build .#goatr --no-link
+        run: nix build --cores 2 .#goatr --no-link
+      - name: Authorized real hc bridge and revocation
+        run: nix develop --cores 2 -c cargo test --locked --manifest-path companion/Cargo.toml -j 2 --test hc_bridge real_hc_pair_stream_legacy_refusal_and_active_revocation -- --ignored --test-threads=1
 
   android-bindings:
     runs-on: ubuntu-24.04
@@ -34,6 +36,8 @@ jobs:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - name: Secure two-ABI native producer
-        run: nix build .#iroh-android --no-link
+        run: nix build --cores 2 .#iroh-android --no-link
       - name: Complete Kotlin API and Android AAR
-        run: nix develop .#android -c make android-bindings
+        run: nix develop --cores 2 .#android -c make android-bindings android-check
+      - name: Debug APK (never release signing)
+        run: nix run --cores 2 .#apk-debug

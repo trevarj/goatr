@@ -24,8 +24,14 @@ pub mod setup;
 pub mod state;
 pub mod storage;
 pub mod transport;
+mod hc_bridge;
 
 pub const ALPN: &[u8] = b"goatr/2";
+/// Pair/hello JSON frames, then an authorized hc-connect byte stream on the same stream.
+pub const HC_ALPN: &[u8] = b"goatr/hc/1";
+pub(crate) fn authorized_alpn(alpn: &[u8]) -> bool {
+    alpn == ALPN || alpn == HC_ALPN
+}
 
 /// The caller supplies its installation's retained secret, never a shared key.
 pub fn endpoint_builder(secret: SecretKey) -> Builder {

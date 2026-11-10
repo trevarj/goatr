@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<resources>
-    <style name="Theme.Goatr.Splash" parent="@style/Theme.Goatr">
-        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
-        <item name="android:windowSplashScreenBackground">@color/goatr_icon_background</item>
-    </style>
-</resources>

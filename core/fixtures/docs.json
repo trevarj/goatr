@@ -1,0 +1,174 @@
+{
+  "local": {
+    "value": {
+      "spaces": [
+        {
+          "folder": "/home/dev",
+          "id": "sp4841e7e57a021a390816abd88696e1ac",
+          "name": "",
+          "tabs": [
+            {
+              "id": "tbfda465805c4deb6febcba530cee7f11e",
+              "name": "",
+              "root": {
+                "children": [
+                  {
+                    "content": {
+                      "terminal": "t2"
+                    },
+                    "id": "p5c3005eb12f0a57b45e3bbecf83483f9",
+                    "size": {
+                      "weight": 1
+                    },
+                    "type": "block"
+                  }
+                ],
+                "id": "tbfda465805c4deb6febcba530cee7f11e",
+                "type": "row"
+              }
+            },
+            {
+              "id": "tb33fa492270ed152f7cf2323490b479c7",
+              "name": "",
+              "root": {
+                "children": [
+                  {
+                    "content": {
+                      "terminal": "t15"
+                    },
+                    "id": "p0568a8deb3d5d158a0210f73865d6f24",
+                    "type": "block"
+                  }
+                ],
+                "id": "tb33fa492270ed152f7cf2323490b479c7",
+                "type": "row"
+              }
+            }
+          ]
+        },
+        {
+          "folder": "/home/dev/Projects/herdr-app",
+          "id": "sp28196228eedbe2dc329f454b7dce0ef7",
+          "name": "",
+          "tabs": [
+            {
+              "id": "tb7661ff13518383114ef8f0277e86ea04",
+              "name": "",
+              "root": {
+                "children": [
+                  {
+                    "content": {
+                      "terminal": "t9"
+                    },
+                    "id": "p2d4288a53c99bac1a61faa4acd2c616b",
+                    "type": "block"
+                  }
+                ],
+                "id": "tb7661ff13518383114ef8f0277e86ea04",
+                "type": "row"
+              }
+            },
+            {
+              "id": "tb78bf4af480b18fb5941930a2fc314dc7",
+              "name": "",
+              "root": {
+                "children": [
+                  {
+                    "content": {
+                      "terminal": "t13"
+                    },
+                    "id": "pcf32055f83fcdad30ba170e48e37fbed",
+                    "type": "block"
+                  }
+                ],
+                "id": "tb78bf4af480b18fb5941930a2fc314dc7",
+                "type": "row"
+              }
+            },
+            {
+              "id": "tbf2755b9c6b29e5eb60cfcb000286e6b1",
+              "name": "",
+              "root": {
+                "children": [
+                  {
+                    "content": {
+                      "terminal": "t18"
+                    },
+                    "id": "p4818fe304020303333bc9afc3df486d1",
+                    "type": "block"
+                  }
+                ],
+                "id": "tbf2755b9c6b29e5eb60cfcb000286e6b1",
+                "type": "row"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "version": 44
+  },
+  "beta": {
+    "value": {
+      "spaces": [
+        {
+          "folder": "",
+          "id": "spcae1915e68e0da788a1f79297633b3c1",
+          "name": "",
+          "tabs": [
+            {
+              "id": "tb5b279e8697ab4b04e8ce1e8106ab299c",
+              "name": "",
+              "root": {
+                "children": [
+                  {
+                    "content": {
+                      "terminal": "t1"
+                    },
+                    "id": "p3db69bbdd18e4c99928ae33b30cc129b",
+                    "type": "block"
+                  }
+                ],
+                "id": "tb5b279e8697ab4b04e8ce1e8106ab299c",
+                "type": "row"
+              }
+            },
+            {
+              "id": "tbbe03a9b7721af1f1bc794e84d1fe4232",
+              "name": "",
+              "root": {
+                "children": [
+                  {
+                    "content": {
+                      "terminal": "t4"
+                    },
+                    "id": "p69415247158ea2f87629f6e7290dadd4",
+                    "type": "block"
+                  }
+                ],
+                "id": "tbbe03a9b7721af1f1bc794e84d1fe4232",
+                "type": "row"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "version": 6
+  },
+  "machines": {
+    "machines": [
+      {
+        "host": "beta",
+        "id": "89fd402c405927399b6d7af2a1cd42b6",
+        "name": "beta",
+        "session": null,
+        "state": "connected",
+        "target": "beta.local",
+        "temporary": false,
+        "version": "0.1.15",
+        "via": false
+      }
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-.PHONY: format format-check smoke rust-check audit check build native android-bindings
+.PHONY: format format-check smoke rust-check audit check build native android-bindings apk-debug apk-release-unsigned android-check
 
 format:
 	nixfmt flake.nix
@@ -16,8 +16,8 @@ smoke:
 	cargo clippy --version
 
 rust-check:
-	cargo test --locked --manifest-path companion/Cargo.toml --all-targets
-	cargo clippy --locked --manifest-path companion/Cargo.toml --all-targets -- -D warnings
+	cargo test --locked --manifest-path companion/Cargo.toml --all-targets -j 2
+	cargo clippy --locked --manifest-path companion/Cargo.toml --all-targets -j 2 -- -D warnings
 
 # The frozen RustSec DB predates the two Oct-5 Iroh GHSAs. Nix separately
 # checks every selected core/base/relay version against the source-backed pins.
@@ -29,11 +29,20 @@ audit:
 check: format-check smoke rust-check audit
 
 build:
-	nix build path:.#goatr
+	nix build --cores 2 --max-jobs 1 .#goatr
 
 native:
-	nix build path:.#iroh-android
+	nix build --cores 2 --max-jobs 1 .#iroh-android
 
 # Run inside the Android Nix shell: Gradle never fetches or builds Rust.
 android-bindings:
-	bash ./gradlew :iroh-jvm:test :iroh-android:assembleDebug --dependency-verification strict --stacktrace
+	gradle --max-workers=2 --no-parallel :iroh-jvm:test :iroh-android:assembleDebug --dependency-verification strict --stacktrace
+
+apk-debug:
+	nix run --cores 2 --max-jobs 1 .#apk-debug
+
+apk-release-unsigned:
+	nix run --cores 2 --max-jobs 1 .#apk-release-unsigned
+
+android-check:
+	gradle --max-workers=2 --no-parallel :core:jvmTest :app:testDebugUnitTest :terminal:testDebugUnitTest --dependency-verification strict

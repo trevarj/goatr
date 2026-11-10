@@ -441,6 +441,7 @@ impl Storage {
             return Err(StorageError::Corrupt);
         }
         db.execute_batch("CREATE TABLE IF NOT EXISTS attachments(peer TEXT NOT NULL,upload TEXT NOT NULL,size INTEGER NOT NULL,unfinished INTEGER NOT NULL,discarded INTEGER NOT NULL,record TEXT NOT NULL,PRIMARY KEY(peer,upload));")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS hc_grants(peer TEXT PRIMARY KEY,epoch INTEGER NOT NULL);")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS attachment_image_uses(peer TEXT NOT NULL,action TEXT NOT NULL,native_input TEXT NOT NULL UNIQUE,record TEXT NOT NULL,mac BLOB NOT NULL,PRIMARY KEY(peer,action));")?;
         // Receipt-owned negative shell admission obligations outlive receipt TTL/revocation.
         // No terminal text, paths or new remote authority is stored here.
@@ -514,6 +515,10 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
     /// Pair token consumption belongs to3's same fence; commit this before consuming the token
     /// or replying. A lost reply recovers this endpoint binding via a later authenticated hello.
     pub fn pair_device(&mut self, device: &PairedDevice) -> StoreResult<u64> {
+        self.pair_device_authority(device, false)
+    }
+    /// Only a freshly redeemed HC invitation may grant full desktop authority.
+    pub fn pair_device_authority(&mut self, device: &PairedDevice, hc: bool) -> StoreResult<u64> {
         device.device_id.validate()?;
         device.endpoint_id.validate()?;
         device.device_name.validate()?;
@@ -569,8 +574,20 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         };
         tx.execute("INSERT INTO peers(peer,epoch,paired) VALUES(?1,?2,1) ON CONFLICT(peer) DO UPDATE SET epoch=excluded.epoch,paired=1", params![device.device_id.0,sql_integer(epoch)?])?;
         tx.execute("INSERT INTO devices VALUES(?1,?2,?3) ON CONFLICT(peer) DO UPDATE SET metadata=excluded.metadata", params![device.device_id.0,device.endpoint_id.0,json(device)?])?;
+        if hc {
+            tx.execute("INSERT INTO hc_grants(peer,epoch) VALUES(?1,?2) ON CONFLICT(peer) DO UPDATE SET epoch=excluded.epoch",
+                params![device.device_id.0, sql_integer(epoch)?])?;
+        }
         tx.commit()?;
         Ok(epoch)
+    }
+    pub fn require_hc(&self, proof: &AuthenticatedPeer) -> StoreResult<()> {
+        self.recheck(proof)?;
+        let granted: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hc_grants WHERE peer=?1 AND epoch=?2)",
+            params![proof.peer.0, sql_integer(proof.epoch)?], |row| row.get(0))?;
+        if !granted { return reject(ErrorCode::Unauthorized); }
+        Ok(())
     }
     /// Local admin/security-only inventory, not a network operation.
     pub fn devices(&self) -> StoreResult<Vec<PairedDevice>> {

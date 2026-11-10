@@ -1,0 +1,35 @@
+{"jsonrpc":"2.0","method":"event","params":{"data":{"address":"t19","argv":["sh","-c","printf \"\\033]0;webapp test\\007\"; echo hi; sleep 30"],"cols":200,"created_ms":1793421683830,"cwd":"/home/dev","die_with_parent":false,"exit_code":null,"finished_ms":null,"identity":"ghostty","keep":false,"labels":{"test":"webapp-core"},"name":null,"notify":true,"parent":null,"pid":1215850,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"","turn":0},"seq":2005,"terminal":"t19","type":"created"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"title":"webapp test"},"seq":2006,"terminal":"t19","type":"title"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"argv":["sleep","30"],"cwd":"/home/dev","name":"sleep","pid":1215850},"seq":2007,"terminal":"t19","type":"foreground"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":110,"rows":40},"seq":2008,"terminal":"t2","type":"size"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"exit_code":null,"finished_ms":1793421686869,"reason":"killed","signal":1},"seq":2009,"terminal":"t19","type":"finished"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{},"seq":2010,"terminal":"t19","type":"removed"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":151,"rows":40},"seq":2011,"terminal":"t2","type":"size"}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2011}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":110,"rows":40},"seq":2012,"terminal":"t2","type":"size"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":110,"rows":40},"seq":2013,"terminal":"beta/t1","type":"size"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":151,"rows":40},"seq":2014,"terminal":"beta/t1","type":"size"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"address":"beta/t4","argv":["/bin/fish"],"cols":200,"created_ms":1793421707786,"cwd":"/home/dev/.herdr/worktrees/game/renderer","die_with_parent":false,"exit_code":null,"finished_ms":null,"identity":"ghostty","keep":true,"labels":{"herdr.space":"spcae1915e68e0da788a1f79297633b3c1","herdr.tab":"tbbe03a9b7721af1f1bc794e84d1fe4232"},"name":null,"notify":true,"parent":null,"pid":2451090,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"","turn":0},"seq":2015,"terminal":"beta/t4","type":"created"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"argv":["/bin/fish"],"cwd":"/home/dev/.herdr/worktrees/game/renderer","name":"fish","pid":2451090},"seq":2016,"terminal":"beta/t4","type":"foreground"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"name":"herdr-app","version":6},"machine":"beta","seq":2017,"type":"doc"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":120,"rows":40},"seq":2018,"terminal":"beta/t4","type":"size"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":151,"rows":40},"seq":2019,"terminal":"beta/t4","type":"size"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"labels":{"herdr.space":"spcae1915e68e0da788a1f79297633b3c1","herdr.tab":"tbbe03a9b7721af1f1bc794e84d1fe4232","where":"renderer / 2"}},"seq":2020,"terminal":"beta/t4","type":"labels"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"title":"~/.herdr/worktrees/game/renderer - fish"},"seq":2021,"terminal":"beta/t4","type":"title"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"title":"~/.herdr/worktrees/game/renderer: clear - clear"},"seq":2022,"terminal":"beta/t4","type":"title"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"title":"~/.herdr/worktrees/game/renderer - fish"},"seq":2023,"terminal":"beta/t4","type":"title"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":151,"rows":40},"seq":2024,"terminal":"t9","type":"size"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"cols":110,"rows":40},"seq":2025,"terminal":"t9","type":"size"}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2025}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"title":"fa ~/P/webapp"},"seq":2026,"terminal":"t18","type":"title"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"argv":["/usr/bin/mise","hook-not-found","-s","fish","--","fa"],"cwd":"/home/dev/Projects/webapp","name":"mise","pid":1216193},"seq":2027,"terminal":"t18","type":"foreground"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"title":"~/P/webapp"},"seq":2028,"terminal":"t18","type":"title"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"argv":["/usr/bin/fish"],"cwd":"/home/dev/Projects/webapp","name":"fish","pid":1195183},"seq":2029,"terminal":"t18","type":"foreground"}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2029}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2029}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2029}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2029}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2029}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2029}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2029}}
+{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":2029}}

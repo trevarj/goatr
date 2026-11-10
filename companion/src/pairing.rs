@@ -738,7 +738,7 @@ impl Security {
         params: PairConfirmParams,
     ) -> SecurityResult<PairConfirmResult> {
         let remote = EndpointId(connection.remote_id().to_string());
-        if connection.alpn() != crate::ALPN {
+        if !crate::authorized_alpn(connection.alpn()) {
             return Err(ErrorCode::PairingFailed);
         }
         remote.validate().map_err(|_| ErrorCode::PairingFailed)?;
@@ -753,8 +753,14 @@ impl Security {
         if !matches || !window.as_ref().is_some_and(|w| Instant::now() < w.deadline) {
             return Err(ErrorCode::PairingFailed);
         }
+        let hc = connection.alpn() == crate::HC_ALPN;
+        let existing = if hc {
+            let remote = remote.clone();
+            self.storage.call(move |s| s.current_epoch(&remote)).await
+                .map_err(|_| ErrorCode::PairingFailed)?.map(|(id, _)| id)
+        } else { None };
         let device = PairedDevice {
-            device_id: Uuid::random(),
+            device_id: existing.unwrap_or_else(Uuid::random),
             endpoint_id: remote,
             device_name: params.device_name,
             paired_at: Uint(now_ms()),
@@ -765,7 +771,7 @@ impl Security {
         // a capability whose SQLite owner may already have committed. Failed commit stays spent.
         *window = None;
         self.storage
-            .call(move |s| s.pair_device(&device))
+            .call(move |s| s.pair_device_authority(&device, hc))
             .await
             .map_err(|_| ErrorCode::PairingFailed)?;
         Ok(PairConfirmResult {
@@ -788,7 +794,7 @@ impl Security {
         params: HelloParams,
         connection: iroh::endpoint::Connection,
     ) -> SecurityResult<Authorized> {
-        if remote.0 != connection.remote_id().to_string() || connection.alpn() != crate::ALPN {
+        if remote.0 != connection.remote_id().to_string() || !crate::authorized_alpn(connection.alpn()) {
             return Err(ErrorCode::Unauthorized);
         }
         let (id, epoch) = self
@@ -802,10 +808,12 @@ impl Security {
         if fence.stopped.load(Ordering::Acquire) {
             return Err(ErrorCode::Unauthorized);
         }
+        let hc = connection.alpn() == crate::HC_ALPN;
         let proof = self
             .storage
             .call(move |s| {
                 let p = s.authenticated_hello(&id, epoch)?;
+                if hc { s.require_hc(&p)?; }
                 s.mark_seen(&p, params.device_name, now_ms())?;
                 Ok(p)
             })

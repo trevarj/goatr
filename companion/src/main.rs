@@ -64,6 +64,9 @@ fn cli() -> Command {
             Command::new("serve")
                 .about("Own retained identity and SQLite; run in the foreground")
                 .arg(Arg::new("expected-unit").long("expected-unit").hide(true).value_name("UNIT"))
+                .arg(Arg::new("hc").long("hc").action(clap::ArgAction::SetTrue)
+                    .conflicts_with_all(["config", "transport-smoke", "owned-omp-relay-fd"])
+                    .help("Enable FULL Herdr control for freshly HC-paired devices using absolute GOATR_HC; legacy peer grants do not authorize this bridge"))
                 .arg(config.clone().conflicts_with("transport-smoke"))
                 .arg(
                     Arg::new("transport-smoke")
@@ -124,6 +127,28 @@ fn cli() -> Command {
 fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
+fn stdout_viewport() -> Option<(usize, usize)> {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // TIOCGWINSZ writes only this winsize; it does not change terminal modes.
+    let result = unsafe { libc::ioctl(io::stdout().as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+    (result == 0 && size.ws_col != 0 && size.ws_row != 0)
+        .then_some((usize::from(size.ws_col), usize::from(size.ws_row)))
+}
+
+fn qr_required_viewport(qr: &qrcode::QrCode) -> (usize, usize) {
+    let columns = qr.width() + 8; // Default four-module quiet zone on each side.
+    (columns, columns.div_ceil(2) + 1) // Dense1x2 rows plus the final cursor row.
+}
+
+fn qr_fits_viewport(required: (usize, usize), viewport: Option<(usize, usize)>) -> bool {
+    viewport.is_some_and(|(columns, rows)| columns >= required.0 && rows >= required.1)
+}
+
 fn publish_hints(path: &Path, public: &goatr::transport::LocalHints) -> io::Result<()> {
     let parent = path
         .parent()
@@ -210,7 +235,13 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
         unsafe {
             libc::umask(0o077);
         }
-        let config = if sub.get_one::<String>("transport-smoke").is_some() {
+        let hc = sub.get_flag("hc");
+        if hc {
+            eprintln!("goatr HC/full-control bridge starting; intended admin socket: {socket:?}");
+            let path = PathBuf::from(std::env::var_os("GOATR_HC").ok_or("GOATR_HC is required for --hc")?);
+            if !path.is_absolute() || !path.is_file() { return Err("GOATR_HC must select an absolute compatible hc executable".into()); }
+        }
+        let config = if hc || sub.get_one::<String>("transport-smoke").is_some() {
             None
         } else {
             let path = sub
@@ -250,6 +281,7 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
         let boot = storage.boot_id.clone();
         let store = StorageOwner::new(storage)?;
         let mut builder = goatr::endpoint_builder(identity.secret.clone());
+        if hc { builder = builder.alpns(vec![goatr::HC_ALPN.to_vec()]); }
         match sub.get_one::<String>("transport-smoke").map(String::as_str) {
             Some("direct") => {
                 builder = builder
@@ -341,6 +373,19 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
                 }
             };
             tokio::pin!(admin_job, transport, topology_job);
+            if hc {
+                eprintln!("goatr listening: local admin and iroh listeners bound; relay/discovery and Herdr Core readiness not checked");
+                match explicit.as_ref() {
+                    None => eprintln!("Pair in another local terminal: nix run .#goatr -- pair"),
+                    Some(path) => match path.to_str() {
+                        Some(path) => eprintln!(
+                            "Pair in another local terminal: nix run .#goatr -- --admin-socket {} pair",
+                            quote(path)
+                        ),
+                        None => eprintln!("To pair, run goatr pair with --admin-socket matching the admin path shown above (not UTF-8)"),
+                    },
+                }
+            }
             let (selected_result, finished, winner) = tokio::select! {
                 result = &mut admin_job => (result, 1, goatr::transport::CodexTransportWinner::Admin),
                 result = &mut transport => (result, 2, goatr::transport::CodexTransportWinner::Transport),
@@ -426,20 +471,33 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
             let pair: PairOpen = serde_json::from_value(value)?;
             PairInvite::parse(&pair.uri).map_err(|_| "invalid pairing reply")?;
             println!(
-                "Pairing grants inventory, history, control and notifications for ALL supported same-user sessions on this host. Public relays/discovery observe connection metadata, not plaintext. Expires in 300 seconds."
+                "Fresh HC pairing grants FULL same-user Herdr desktop control: terminals and commands, uploads, history, notifications, and closing tabs/spaces on every reachable machine. Legacy paired peers require fresh confirmation for HC authority. Public relays/discovery observe metadata, not plaintext. Expires in 300 seconds; single use."
             );
+            println!("Paste invitation URI:\n{}", pair.uri);
             if let Ok(qr) = qrcode::QrCode::new(pair.uri.as_bytes()) {
-                println!(
-                    "{}",
-                    qr.render::<qrcode::render::unicode::Dense1x2>()
-                        .dark_color(qrcode::render::unicode::Dense1x2::Light)
-                        .light_color(qrcode::render::unicode::Dense1x2::Dark)
-                        .build()
-                );
+                let required = qr_required_viewport(&qr);
+                let viewport = stdout_viewport();
+                if qr_fits_viewport(required, viewport) {
+                    print!(
+                        "\x1b[38;2;0;0;0;48;2;255;255;255m{}\x1b[0m\n",
+                        qr.render::<qrcode::render::unicode::Dense1x2>().build()
+                    );
+                } else {
+                    match viewport {
+                        Some((columns, rows)) => println!(
+                            "QR omitted: needs {} columns and {} rows; terminal has {columns} columns and {rows} rows.",
+                            required.0, required.1
+                        ),
+                        None => println!(
+                            "QR omitted: terminal size is unknown; needs {} columns and {} rows.",
+                            required.0, required.1
+                        ),
+                    }
+                    println!("Widen/make the terminal taller or zoom out, then rerun pair; or paste the complete URI above.");
+                }
             } else {
-                println!("QR exceeds encoder capacity; paste the complete URI below.");
+                println!("QR exceeds encoder capacity; paste the complete URI above.");
             }
-            println!("{}", pair.uri);
         }
         "devices" => {
             let devices: admin::Devices = serde_json::from_value(value)?;
@@ -534,6 +592,23 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use std::{io::{Read,Write},os::{fd::{AsRawFd,FromRawFd},unix::net::UnixStream as FileWakeChannel},time::{Duration,Instant}};
+
+    #[test]
+    fn qr_viewport_includes_quiet_zone_and_final_cursor_row() {
+        let qr = qrcode::QrCode::with_version(
+            b"HELLO",
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+        )
+        .unwrap();
+        let required = qr_required_viewport(&qr);
+        assert_eq!(required, (29, 16));
+        assert!(qr_fits_viewport(required, Some((29, 16))));
+        assert!(!qr_fits_viewport(required, Some((28, 16))));
+        assert!(!qr_fits_viewport(required, Some((29, 15))));
+        assert!(!qr_fits_viewport(required, None));
+    }
+
     struct FileWakeFixtureChild(std::process::Child);
     impl FileWakeFixtureChild {
         fn exit(&mut self)->std::process::ExitStatus {

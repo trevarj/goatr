@@ -27,6 +27,9 @@ kotlin {
 }
 
 androidComponents.onVariants { variant ->
+    variant.sources.assets?.addStaticSourceDirectory(
+        rootProject.layout.buildDirectory.dir("iroh-native/share").get().asFile.path
+    )
     variant.sources.kotlin?.addStaticSourceDirectory(
         rootProject.layout.buildDirectory.dir("iroh-native/android").get().asFile.path
     )

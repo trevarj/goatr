@@ -1,17 +1,20 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+rootProject.name = "goatr"
+
 pluginManagement {
     repositories {
-        google()
-        mavenCentral()
         gradlePluginPortal()
-    }
-}
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-    repositories {
-        google()
         mavenCentral()
+        google()
     }
 }
-rootProject.name = "Goatr"
-include(":app", ":iroh-jvm", ":iroh-android")
+
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+        google()
+    }
+}
+
+include(":core", ":terminal", ":ssh", ":app")
+
+include(":iroh-android", ":iroh-jvm")

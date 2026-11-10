@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Real direct iroh transport; one bidirectional stream and one ordered state writer.
-use crate::{ALPN, pairing::*, protocol::*, storage::Reservation};
+use crate::{pairing::*, protocol::*, storage::Reservation};
 use iroh::{
     Endpoint,
     endpoint::{Connection, RecvStream, SendStream},
@@ -799,7 +799,7 @@ async fn connection_loop(
     permit: tokio::sync::OwnedSemaphorePermit,
     attempt: HandshakeAttempt<'_>,
 ) -> io::Result<()> {
-    if connection.alpn() != ALPN {
+    if !crate::authorized_alpn(connection.alpn()) {
         if let Some(capture) = &hello_capture {
             capture.report("admission", "alpn_mismatch", None, "none");
         }
@@ -982,6 +982,9 @@ async fn connection_loop(
     }
     if let Some(capture) = &hello_capture {
         capture.report("complete", "completed", None, "none");
+    }
+    if connection.alpn() == crate::HC_ALPN {
+        return crate::hc_bridge::run(&connection, security, &auth, send, recv).await;
     }
     let (tx, mut rx) = mpsc::channel(64);
     let inflight = Arc::new(Semaphore::new(64));
@@ -1899,6 +1902,7 @@ fn target_provider(state: &crate::state::State, target: &Target) -> SecurityResu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ALPN;
     #[test]
     fn hello_manager_observation_shares_the_existing_eight_line_budget() {
         let reporter = HelloCaptureReporter::new();

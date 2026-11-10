@@ -81,6 +81,7 @@ org.glassfish.jaxb:jaxb-runtime:2.3.2=classpath
 org.glassfish.jaxb:txw2:2.3.2=classpath
 org.jdom:jdom2:2.0.6=classpath
 org.jetbrains.kotlin.jvm:org.jetbrains.kotlin.jvm.gradle.plugin:2.4.20=classpath
+org.jetbrains.kotlin.multiplatform:org.jetbrains.kotlin.multiplatform.gradle.plugin:2.4.20=classpath
 org.jetbrains.kotlin.plugin.compose:org.jetbrains.kotlin.plugin.compose.gradle.plugin:2.4.20=classpath
 org.jetbrains.kotlin.plugin.serialization:org.jetbrains.kotlin.plugin.serialization.gradle.plugin:2.4.20=classpath
 org.jetbrains.kotlin:compose-compiler-gradle-plugin:2.4.20=classpath

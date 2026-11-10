@@ -51,6 +51,47 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
+          hcRelease =
+            {
+              x86_64-linux = {
+                target = "linux-x86_64";
+                sha256 = "4adcfb423d52f24c5cc4a1e2cd2fcad1f62d28bb77876ac472c29082a3eaa424";
+              };
+              aarch64-linux = {
+                target = "linux-aarch64";
+                sha256 = "f95c34fd7177ed58807d74fe4ee78bb3dc73eb37f21c69496064000a21abcb10";
+              };
+              x86_64-darwin = {
+                target = "macos-x86_64";
+                sha256 = "2f95bedae2ca1bf9f9611d61066ef3ac211c62ca08282132d48e287b6da14d08";
+              };
+              aarch64-darwin = {
+                target = "macos-aarch64";
+                sha256 = "5338d900adadb6d273b9c8e97027247db3179ccffede10a1793358f16e08d683";
+              };
+            }
+            .${system};
+          # Official, unmodified release archive; upstream HTTPS manifest is not independently signed.
+          hc = pkgs.stdenvNoCC.mkDerivation {
+            pname = "herdr-core";
+            version = "0.1.19";
+            src = pkgs.fetchurl {
+              url = "https://releases.herdr.dev/core/0.1.19/herdr-core-${hcRelease.target}.tar.gz";
+              inherit (hcRelease) sha256;
+            };
+            dontUnpack = true;
+            dontFixup = true;
+            installPhase = ''
+              tar -xzf "$src" herdr-core LICENSE THIRD-PARTY-NOTICES
+              install -Dm755 herdr-core "$out/bin/hc"
+              install -Dm644 LICENSE "$out/share/licenses/herdr-core/LICENSE"
+              install -Dm644 THIRD-PARTY-NOTICES "$out/share/licenses/herdr-core/THIRD-PARTY-NOTICES"
+            '';
+            meta = {
+              mainProgram = "hc";
+              license = lib.licenses.asl20;
+            };
+          };
           # One locked derivation serves the product and every development shell.
           readGit = pkgs.git;
           tools = [
@@ -261,6 +302,7 @@
               nativeBuildInputs = [
                 pkgs.pkg-config
                 pkgs.jq
+                pkgs.makeWrapper
               ];
               buildInputs = [ pkgs.sqlite ];
               GOATR_READ_GIT_MANIFEST = "${goatrManifest}/manifest.json";
@@ -274,6 +316,7 @@
                 cp ${./companion/Cargo.lock} ${./companion/dependencies.json} "$out/share/goatr/"
                 cp ${./LICENSE} ${./NOTICE} "$out/share/licenses/goatr/"
                 ${installLicenses companionDeps}
+                wrapProgram "$out/bin/goatr" --set-default GOATR_HC "${hc}/bin/hc"
               '';
               meta = {
                 description = "Goatr Linux desktop companion";
@@ -291,6 +334,34 @@
                   allowUnfreePredicate = pkg: (pkg.meta.homepage or "") == "https://developer.android.com/tools";
                 };
               };
+              zig = pkgs.stdenvNoCC.mkDerivation {
+                pname = "zig";
+                version = "0.17.0";
+                src = pkgs.fetchurl {
+                  url = "https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz";
+                  sha256 = "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026";
+                };
+                dontFixup = true;
+                installPhase = ''
+                  mkdir -p "$out/bin"
+                  cp -r zig lib LICENSE "$out/"
+                  ln -s "$out/zig" "$out/bin/zig"
+                '';
+                meta.license = lib.licenses.mit;
+              };
+              ghostty = pkgs.fetchzip {
+                url = "https://codeload.github.com/ghostty-org/ghostty/tar.gz/0fa3d577a5614150ff8e2c152de5fb9d5c6d2dec";
+                extension = "tar.gz";
+                hash = "sha256-XHatB+PU7Os1/inapleBdUThGCAGhRnqT0o0EWpNa3s=";
+              };
+              # Reuse upstream's generated, hash-checked complete transitive package graph.
+              zigPackages =
+                (pkgs.callPackage "${ghostty}/deps/packages.nix" {
+                  zig_0_17 = zig;
+                }).overrideAttrs
+                  (old: {
+                    buildCommand = "export NIX_BUILD_CORES=2\n" + old.buildCommand;
+                  });
               gradle = androidPkgs.gradle-packages.mkGradle {
                 version = "9.8.0";
                 hash = "sha256-uv1c6c+uoPvM/chDmhrEL71M2cidyamIIo2KJjmljmw=";
@@ -313,7 +384,10 @@
                 cmdLineToolsVersion = "21.0";
                 toolsVersion = null;
                 includeNDK = true;
-                ndkVersions = [ "28.2.13676358" ];
+                ndkVersions = [
+                  "28.2.13676358"
+                  "27.1.12297006"
+                ];
                 includeCmake = false;
                 includeSources = false;
                 includeSystemImages = false;
@@ -324,7 +398,11 @@
               };
               sdk = androidPkgs.androidenv.composeAndroidPackages sdkArgs;
               sdkRoot = "${sdk.androidsdk}/libexec/android-sdk";
-              ndkRoot = "${sdkRoot}/ndk/28.2.13676358";
+              # Keep the unchanged iroh producer independent of the terminal's NDK.
+              irohSdk = androidPkgs.androidenv.composeAndroidPackages (
+                sdkArgs // { ndkVersions = [ "28.2.13676358" ]; }
+              );
+              ndkRoot = "${irohSdk.androidsdk}/libexec/android-sdk/ndk/28.2.13676358";
               irohAndroid = androidRustPlatform.buildRustPackage {
                 pname = "goatr-iroh-android";
                 version = "1.3.0";
@@ -397,6 +475,7 @@
                     androidRust
                     androidPkgs.jdk21
                     gradle
+                    zig
                     selectedSdk.androidsdk
                   ];
                   buildInputs = [ pkgs.sqlite ];
@@ -405,14 +484,144 @@
                   ANDROID_SDK_ROOT = root;
                   ANDROID_NDK_ROOT = "${root}/ndk/28.2.13676358";
                   GOATR_IROH_ANDROID = "${irohAndroid}";
+                  GOATR_GHOSTTY_SOURCE = "${ghostty}";
+                  GOATR_ZIG_PACKAGES = "${zigPackages}";
+                  ZIG = "${zig}/bin/zig";
+                  JAVA_TOOL_OPTIONS = "-XX:ActiveProcessorCount=2";
                   GOATR_IROH_FFI_SOURCE = "${patchedSource}";
                   GOATR_ADVISORY_DB = "${advisoryDb}";
                   GOATR_READ_GIT_MANIFEST = "${goatrManifest}/manifest.json";
                   GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${root}/build-tools/36.0.0/aapt2";
                 };
+              mkApk =
+                variant: apkName:
+                pkgs.writeShellApplication {
+                  name = "goatr-apk-${variant}";
+                  runtimeInputs = [
+                    gradle
+                    androidPkgs.jdk21
+                  ];
+                  text = ''
+                    if [[ ! -f settings.gradle.kts || ! -f terminal/native/build.zig ]]; then
+                      echo "Run this command from the Goatr checkout; output belongs to that checkout." >&2
+                      exit 1
+                    fi
+                    export JAVA_HOME="${androidPkgs.jdk21}"
+                    export JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=2"
+                    export ANDROID_HOME="${sdkRoot}"
+                    export ANDROID_SDK_ROOT="${sdkRoot}"
+                    export GOATR_IROH_ANDROID="${irohAndroid}"
+                    export GOATR_GHOSTTY_SOURCE="${ghostty}"
+                    export GOATR_ZIG_PACKAGES="${zigPackages}"
+                    export ZIG="${zig}/bin/zig"
+                    export GRADLE_OPTS="-Dorg.gradle.project.android.aapt2FromMavenOverride=${sdkRoot}/build-tools/36.0.0/aapt2"
+                    ${lib.optionalString (variant == "Release") "unset GOATR_KEYSTORE GOATR_PASSWORD"}
+                    gradle --max-workers=2 --no-parallel ":app:assemble${variant}" "$@"
+                    printf '%s\n' "$PWD/app/build/outputs/apk/${lib.toLower variant}/${apkName}"
+                  '';
+                };
+              apkDebug = mkApk "Debug" "app-debug.apk";
+              apkReleaseUnsigned = mkApk "Release" "app-release-unsigned.apk";
+              mkInstall =
+                release:
+                let
+                  variant = if release then "release" else "debug";
+                  builder = if release then apkReleaseUnsigned else apkDebug;
+                  builderName = if release then "Release" else "Debug";
+                in
+                pkgs.writeShellApplication {
+                  name = "goatr-install-${variant}";
+                  runtimeInputs = [ androidPkgs.jdk21 ];
+                  text = ''
+                    usage() {
+                      echo "Usage: nix run .#install-${variant} -- ${lib.optionalString release "--keystore PATH [--key-alias ALIAS] "}[--serial SERIAL]"
+                      echo "Build from this checkout and install on one authorized physical Android device."
+                      ${lib.optionalString release ''echo "Use your existing release keystore; apksigner prompts for passwords interactively."''}
+                    }
+                    fail() { echo "install-${variant}: $*" >&2; exit 1; }
+                    if [[ $# == 1 && $1 == --help ]]; then
+                      usage
+                      exit 0
+                    fi
+                    serial=""
+                    ${lib.optionalString release ''
+                      keystore=""
+                      key_alias=""
+                    ''}
+                    while [[ $# -gt 0 ]]; do
+                      case "$1" in
+                        --serial)
+                          [[ -z "$serial" ]] || fail "duplicate --serial"
+                          [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "--serial requires a nonempty value"
+                          serial="$2"
+                          shift 2
+                          ;;
+                        ${lib.optionalString release ''
+                          --keystore)
+                            [[ -z "$keystore" ]] || fail "duplicate --keystore"
+                            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "--keystore requires a nonempty path"
+                            keystore="$2"
+                            shift 2
+                            ;;
+                          --key-alias)
+                            [[ -z "$key_alias" ]] || fail "duplicate --key-alias"
+                            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "--key-alias requires a nonempty value"
+                            key_alias="$2"
+                            shift 2
+                            ;;
+                        ''}
+                        *) fail "unknown argument: $1 (use --help)" ;;
+                      esac
+                    done
+                    ${lib.optionalString release ''
+                      [[ -n "$keystore" ]] || fail "--keystore PATH is required; no release key is generated"
+                      [[ -f "$keystore" && -r "$keystore" ]] || fail "keystore must be an existing readable file"
+                      [[ -t 0 && -t 1 ]] || fail "release signing requires interactive stdin and stdout terminals for private password prompts"
+                    ''}
+                    if [[ ! -f settings.gradle.kts || ! -f terminal/native/build.zig ]]; then
+                      fail "run from the Goatr checkout; output belongs to that checkout"
+                    fi
+                    export JAVA_HOME="${androidPkgs.jdk21}"
+                    adb="${sdkRoot}/platform-tools/adb"
+                    apksigner="${sdkRoot}/build-tools/36.0.0/apksigner"
+                    if [[ -z "$serial" ]]; then
+                      serial=$("$adb" -d get-serialno) || fail "connect exactly one USB device and authorize this computer, or use --serial"
+                      serial="''${serial//$'\r'/}"
+                    fi
+                    [[ -n "$serial" && "$serial" != unknown && "$serial" != emulator-* ]] || fail "a physical Android device serial is required"
+                    check_device() {
+                      local state qemu
+                      state=$("$adb" -s "$serial" get-state) || fail "device $serial is unavailable; check connection and USB debugging authorization"
+                      state="''${state//$'\r'/}"
+                      [[ "$state" == device ]] || fail "device $serial is not authorized and online"
+                      qemu=$("$adb" -s "$serial" shell getprop ro.kernel.qemu) || fail "cannot check whether $serial is a physical device"
+                      qemu="''${qemu//$'\r'/}"
+                      [[ -z "$qemu" || "$qemu" == 0 ]] || fail "emulator targets are not supported"
+                    }
+                    check_device
+                    "${builder}/bin/goatr-apk-${builderName}"
+                    apk="$PWD/app/build/outputs/apk/${variant}/app-${variant}.apk"
+                    ${lib.optionalString release ''
+                      unsigned_apk="$PWD/app/build/outputs/apk/release/app-release-unsigned.apk"
+                      "${sdkRoot}/build-tools/36.0.0/zipalign" -c -P 16 4 "$unsigned_apk"
+                      signing_args=(--ks "$keystore")
+                      if [[ -n "$key_alias" ]]; then
+                        signing_args+=(--ks-key-alias "$key_alias")
+                      fi
+                      "$apksigner" sign "''${signing_args[@]}" --out "$apk" "$unsigned_apk"
+                    ''}
+                    "$apksigner" verify "$apk"
+                    check_device
+                    "$adb" -s "$serial" install -r "$apk"
+                    printf 'Installed %s on %s\n' "$apk" "$serial"
+                  '';
+                };
             in
             {
               inherit irohAndroid;
+              inherit apkDebug apkReleaseUnsigned;
+              installDebug = mkInstall false;
+              installRelease = mkInstall true;
               shells = {
                 android = mkAndroidShell sdk;
                 emulator = mkAndroidShell (
@@ -438,12 +647,18 @@
             tools
             rust
             goatr
+            hc
             patchedSource
             android
             ;
           coreShell = pkgs.mkShell {
-            packages = tools ++ [ rust pkgs.zsh ];
+            packages = tools ++ [
+              rust
+              pkgs.zsh
+              hc
+            ];
             buildInputs = [ pkgs.sqlite ];
+            GOATR_HC = "${hc}/bin/hc";
             GOATR_ADVISORY_DB = "${advisoryDb}";
             GOATR_READ_GIT_MANIFEST = "${goatrManifest}/manifest.json";
           };
@@ -458,18 +673,49 @@
       packages = lib.mapAttrs (
         system: env:
         {
-          inherit (env) goatr;
+          inherit (env) goatr hc;
           default = env.goatr;
           iroh-ffi-source = env.patchedSource;
         }
         // lib.optionalAttrs (system == "x86_64-linux") { iroh-android = env.android.irohAndroid; }
       ) environments;
-      apps = lib.mapAttrs (_: env: {
-        goatr = {
-          type = "app";
-          program = "${env.goatr}/bin/goatr";
-        };
-      }) environments;
+      apps = lib.mapAttrs (
+        system: env:
+        {
+          goatr = {
+            type = "app";
+            program = "${env.goatr}/bin/goatr";
+          };
+          hc = {
+            type = "app";
+            program = "${env.hc}/bin/hc";
+          };
+          desktop = {
+            type = "app";
+            program = "${env.pkgs.writeShellScriptBin "goatr-desktop" ''
+              exec ${env.goatr}/bin/goatr serve --hc "$@"
+            ''}/bin/goatr-desktop";
+          };
+        }
+        // lib.optionalAttrs (system == "x86_64-linux") {
+          apk-debug = {
+            type = "app";
+            program = "${env.android.apkDebug}/bin/goatr-apk-Debug";
+          };
+          apk-release-unsigned = {
+            type = "app";
+            program = "${env.android.apkReleaseUnsigned}/bin/goatr-apk-Release";
+          };
+          install-debug = {
+            type = "app";
+            program = "${env.android.installDebug}/bin/goatr-install-debug";
+          };
+          install-release = {
+            type = "app";
+            program = "${env.android.installRelease}/bin/goatr-install-release";
+          };
+        }
+      ) environments;
       devShells = lib.mapAttrs (
         system: env:
         { default = env.coreShell; } // lib.optionalAttrs (system == "x86_64-linux") env.android.shells

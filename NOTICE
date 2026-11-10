@@ -204,11 +204,19 @@ license-list-data GPL-3.0-or-later text, representing GPL version 3:
 https://raw.githubusercontent.com/spdx/license-list-data/main/text/GPL-3.0-or-later.txt
 Canonical license: https://www.gnu.org/licenses/gpl-3.0.html
 
-Google Material Icons
-Copyright 2014 Google Inc.
-Apache License, Version 2.0. Official SVG path data from google/material-design-icons
-revision 49d4db35df873165d6bd6ba09b063c7dafbac2f4 was converted to Android
-VectorDrawable resources named app/src/main/res/drawable/ic_material_*.xml.
-Attribution is shipped in app/src/main/assets/material-icons-notice.txt; the
-complete Apache-2.0 text is shipped in android-third-party-notices.txt.
-Pinned source paths are recorded in docs/REFERENCES.md.
+
+Zagal import
+Copyright 2026 Osc100
+Source revision: 1e73cd24d2abc049c5859a2865c5fa4659a0f5b6
+https://github.com/osc100/zagal
+The imported app, core, ssh and terminal source is licensed under the Apache
+License, Version 2.0; see ZAGAL-LICENSE. Goatr modifies product identity,
+transport/pairing/settings and build integration. Historical upstream product
+names and copyrights are attribution, not Goatr branding.
+Third-party software, fonts, sounds and icons retain their own licenses;
+see THIRD-PARTY-NOTICES.md, app/src/main/assets/licenses and terminal/vendor/fonts.
+Independent Goatr changes remain GPL-3.0-or-later.
+
+Ghostty terminal source is pinned at 0fa3d577a5614150ff8e2c152de5fb9d5c6d2dec.
+The official unchanged Herdr Core 0.1.19 executable is packaged separately;
+its LICENSE and THIRD-PARTY-NOTICES are retained in the hc Nix output.

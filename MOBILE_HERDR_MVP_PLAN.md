@@ -1,3 +1,13 @@
+> Historical plan and evidence for the replaced Android implementation.
+> Superseded by the user-approved Zagal → Goatr cutover: README.md and AGENTS.md
+> now own the active product/build/security contracts. The old installed-only
+> native restriction, Close omission, structured-agent/ntfy scope and historical
+> runtime ownership leases below are NOT current instructions or acceptance evidence.
+> Current product uses unchanged project-pinned upstream hc 0.1.19 and fresh
+> full-control HC pairing grants. No global Herdr replacement or existing-session
+> test interaction is authorized. New builds/tests/physical acceptance remain unexecuted
+> by the cutover implementation worker; coordinator records actual results separately.
+
 # Complete the installed-Herdr mobile MVP
 
 ## Goal and settled scope

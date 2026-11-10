@@ -115,40 +115,4 @@ class SecretStore(context: Context) {
             } catch (_: Exception) { throw ProtectedKeyUnavailable() }
         }
     }
-    suspend fun endpoint(store: SessionStore): ByteArray {
-        store.open()
-        return material(ENDPOINT_ALIAS, store.state.value.hosts.isEmpty() && store.state.value.keyDeletion.none { ENDPOINT_ALIAS in it.aliases })
-    }
-    suspend fun receipt(host: String, store: SessionStore): ByteArray {
-        val alias = hostAlias(host,"receipt")
-        val retained = store.state.value.hosts.any { it.hostId == host && alias in it.keyAliases } || store.state.value.keyDeletion.any {alias in it.aliases}
-        return material(alias,!retained)
-    }
-    internal suspend fun pushSeal(host:String,generation:Uuid,bytes:ByteArray):ByteArray {
-        require(bytes.size<=16384);val key=material(hostAlias(host,"push"),false)
-        return try{val cipher=Cipher.getInstance("AES/GCM/NoPadding").apply{init(Cipher.ENCRYPT_MODE,javax.crypto.spec.SecretKeySpec(key,"AES"));updateAAD("goatr push local $host ${generation.value}".toByteArray(Charsets.UTF_8))};byteArrayOf(1)+cipher.iv+cipher.doFinal(bytes)}finally{key.fill(0)}
-    }
-    internal suspend fun pushOpen(host:String,generation:Uuid,bytes:ByteArray):ByteArray {
-        if(bytes.size !in 29..16413||bytes[0].toInt()!=1)throw ProtectedKeyUnavailable()
-        val key=material(hostAlias(host,"push"),false)
-        return try{Cipher.getInstance("AES/GCM/NoPadding").run{init(Cipher.DECRYPT_MODE,javax.crypto.spec.SecretKeySpec(key,"AES"),GCMParameterSpec(128,bytes.copyOfRange(1,13)));updateAAD("goatr push local $host ${generation.value}".toByteArray(Charsets.UTF_8));doFinal(bytes.copyOfRange(13,bytes.size))}}catch(_:Exception){throw ProtectedKeyUnavailable()}finally{key.fill(0)}
-    }
-    suspend fun delete(obligation: KeyDeletion, store: SessionStore) = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            for (alias in obligation.aliases) {
-                if (store.state.value.hosts.any {alias in it.keyAliases} || alias == ENDPOINT_ALIAS && GoatrConnection.endpointIsOwned()) throw ProtectedKeyUnavailable()
-                val base = file(alias)
-                for (path in listOf(base,File(base.path+".bak"),File(base.path+".new"))) {
-                    if (exists(path)) {checkFile(path); if (!path.delete()) throw ProtectedKeyUnavailable()}
-                }
-                if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
-                val marker=File(base.path+".initialized")
-                if(exists(marker)) {checkFile(marker);if(!marker.delete()) throw ProtectedKeyUnavailable()}
-                if (keyStore.containsAlias(alias) || exists(base) || exists(File(base.path+".bak")) || exists(File(base.path+".new")) || exists(marker)) throw ProtectedKeyUnavailable()
-            }
-            // No acknowledgement until the actual app-owned ciphertext and wrapping aliases are gone.
-            store.keysDeleted(obligation)
-        }
-    }
-    suspend fun completeDeletions(store: SessionStore) {store.open(); for (obligation in store.state.value.keyDeletion) delete(obligation,store)}
 }

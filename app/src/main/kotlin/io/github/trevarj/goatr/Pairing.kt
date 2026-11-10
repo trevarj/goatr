@@ -34,7 +34,7 @@ class PairingInvitation private constructor(val host: EndpointId, val name: Labe
 }
 
 data class PairingPreview(val host: EndpointId, val name: Label, val fingerprint: String, val expiresAt: Uint) {
-    val authority = "Pairing grants inventory, history, control and notifications for ALL supported same-user sessions on this host, not just configured projects."
+    val authority = "Pairing grants FULL same-user Herdr desktop control: terminals and commands, uploads, history, notifications, and closing tabs and spaces on every machine reachable through this desktop."
     val relayDisclosure = "Public relays and discovery observe connection metadata. Session traffic remains end-to-end encrypted."
 }
 
@@ -56,7 +56,7 @@ class PairingGate : AutoCloseable {
         val job=currentCoroutineContext()[Job]
         val candidate=synchronized(this) {
             check(alive.get() && !accepted) {"Pairing confirmation is inactive"}
-            val candidate=invite ?: throw StorePolicy(ErrorCode.InvalidRequest)
+            val candidate=invite ?: error("No invitation to confirm")
             accepted=true; confirmation=job; candidate
         }
         var completed=false
