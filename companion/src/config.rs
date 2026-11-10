@@ -32,9 +32,12 @@ pub struct Config {
     pub runtime_dir_agent: PathBuf,
     #[serde(default)]
     pub allow_scoped_shell_probe: bool,
-    #[serde(default)]pub allow_attachments:bool,
-    #[serde(default)]pub allow_terminal_control:bool,
-    #[serde(default)]pub allow_omp_controls:bool,
+    #[serde(default)]
+    pub allow_attachments: bool,
+    #[serde(default)]
+    pub allow_terminal_control: bool,
+    #[serde(default)]
+    pub allow_omp_controls: bool,
     #[serde(default)]
     pub herdr_sockets: Vec<PathBuf>,
     #[serde(default = "default_push_allowed_origins")]
@@ -46,10 +49,11 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub omp_blob_root: Option<PathBuf>,
     /// Explicit source identity for the pinned per-process OMP Skills extension.
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub omp_skills_package_root:Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omp_skills_package_root: Option<PathBuf>,
     /// Explicit document-read roots, independent of creation, attachments and controls.
-    #[serde(default)]pub skill_document_roots:Vec<PathBuf>,
+    #[serde(default)]
+    pub skill_document_roots: Vec<PathBuf>,
     pub executables: Executables,
     #[serde(default)]
     pub projects: Vec<ConfiguredProject>,
@@ -327,13 +331,15 @@ impl Config {
         });
         Ok(true)
     }
-    pub fn set_project_read_tools(&mut self,input:&Path,allow:bool)->io::Result<bool> {
-        let input=input.to_str().ok_or_else(||invalid("project permission path is not UTF-8"))?;
-        let path=setup_project(input)?;
+    pub fn set_project_read_tools(&mut self, input: &Path, allow: bool) -> io::Result<bool> {
+        let input = input
+            .to_str()
+            .ok_or_else(|| invalid("project permission path is not UTF-8"))?;
+        let path = setup_project(input)?;
         let project=self.projects.iter_mut().find(|project|project.path==path)
             .ok_or_else(||invalid("read permission requires an explicitly configured project; approve it with --project first"))?;
-        let changed=project.allow_read_tools!=allow;
-        project.allow_read_tools=allow;
+        let changed = project.allow_read_tools != allow;
+        project.allow_read_tools = allow;
         Ok(changed)
     }
     pub fn parse(text: &str) -> io::Result<Self> {
@@ -388,7 +394,8 @@ impl Config {
             return Err(invalid("unsupported configuration version"));
         }
         if let Some(name) = &self.pairing_name {
-            name.validate().map_err(|_| invalid("invalid pairing name"))?;
+            name.validate()
+                .map_err(|_| invalid("invalid pairing name"))?;
         }
         if self.projects.len() > 128
             || self.herdr_sockets.len() > 64
@@ -416,12 +423,16 @@ impl Config {
         {
             absolute(path)?;
         }
-        let mut document_roots=HashSet::new();
-        if self.skill_document_roots.iter().any(|root|!document_roots.insert(root)) {
+        let mut document_roots = HashSet::new();
+        if self
+            .skill_document_roots
+            .iter()
+            .any(|root| !document_roots.insert(root))
+        {
             return Err(invalid("duplicate Skill document root"));
         }
         let mut ids = HashSet::new();
-        let mut project_paths=HashSet::new();
+        let mut project_paths = HashSet::new();
         for project in &self.projects {
             project
                 .id
@@ -433,7 +444,9 @@ impl Config {
                 .map_err(|_| invalid("invalid project label"))?;
             absolute(&project.path)?;
             if !project_paths.insert(&project.path) {
-                return Err(invalid("duplicate canonical project paths; no project identity is discarded"));
+                return Err(invalid(
+                    "duplicate canonical project paths; no project identity is discarded",
+                ));
             }
             if !ids.insert(&project.id) {
                 return Err(invalid("duplicate project/owner UUID"));
@@ -508,12 +521,14 @@ impl Config {
     /// Read-only trust preflight. Project disappearance is reflected per project, not by erasing inventory.
     pub fn preflight(&self) -> io::Result<()> {
         self.validate_syntax()?;
-        let mut canonical_projects=HashSet::new();
+        let mut canonical_projects = HashSet::new();
         for project in &self.projects {
-            if let Ok(path)=fs::canonicalize(&project.path) {
-                if !canonical_projects.insert(path) {
-                    return Err(invalid("existing canonical project IDs conflict; no identity is discarded"));
-                }
+            if let Ok(path) = fs::canonicalize(&project.path)
+                && !canonical_projects.insert(path)
+            {
+                return Err(invalid(
+                    "existing canonical project IDs conflict; no identity is discarded",
+                ));
             }
         }
         private_dir(&self.runtime_dir, false)?;
@@ -525,7 +540,7 @@ impl Config {
         }
         for root in &self.skill_document_roots {
             // Absence disables that preview root only; existing unsafe paths still fail trust.
-            let _=optional_prerequisite(root,project_directory)?;
+            let _ = optional_prerequisite(root, project_directory)?;
         }
         Ok(())
     }

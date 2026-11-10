@@ -1,22 +1,36 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Shared examples-only actual APK inspection; never a JNI/device/provider or delivery pass.
-use goatr::{pairing::{hex,private_dir,uid},protocol::Uuid};
-use serde_json::{Value,json};
-use sha2::{Digest,Sha256};
-use std::{collections::BTreeSet,fs::{self,File},io::{self,Read},os::unix::fs::{DirBuilderExt,MetadataExt},path::{Path,PathBuf},process::{Command as Process,Stdio}};
+use goatr::{
+    pairing::{hex, private_dir, uid},
+    protocol::Uuid,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeSet,
+    fs::{self, File},
+    io::{self, Read},
+    os::unix::fs::{DirBuilderExt, MetadataExt},
+    path::{Path, PathBuf},
+    process::{Command as Process, Stdio},
+};
 
 pub(crate) struct InventoryInputs {
-    pub apk:PathBuf,
-    pub native:PathBuf,
-    pub jna:PathBuf,
-    pub camera:PathBuf,
-    pub graphics:PathBuf,
-    pub sdk:PathBuf,
-    pub retained_source:PathBuf,
-    pub scratch_parent:PathBuf,
+    pub apk: PathBuf,
+    pub native: PathBuf,
+    pub jna: PathBuf,
+    pub camera: PathBuf,
+    pub graphics: PathBuf,
+    pub sdk: PathBuf,
+    pub retained_source: PathBuf,
+    pub scratch_parent: PathBuf,
 }
-fn fail(message:&str)->io::Error {io::Error::other(message)}
-fn sdk_tool(root:&Path,name:&str)->PathBuf {root.join("build-tools/36.0.0").join(name)}
+fn fail(message: &str) -> io::Error {
+    io::Error::other(message)
+}
+fn sdk_tool(root: &Path, name: &str) -> PathBuf {
+    root.join("build-tools/36.0.0").join(name)
+}
 
 fn sha(bytes: &[u8]) -> String {
     let digest: [u8; 32] = Sha256::digest(bytes).into();
@@ -182,7 +196,7 @@ fn graph(manifest: &Value) -> io::Result<Vec<Value>> {
 }
 struct Scratch(PathBuf, u64, u64);
 impl Scratch {
-    fn new(parent:&Path) -> io::Result<Self> {
+    fn new(parent: &Path) -> io::Result<Self> {
         let p = parent.join(format!("goatr-native-{}", Uuid::random().0));
         fs::DirBuilder::new().mode(0o700).create(&p)?;
         private_dir(&p, false)?;
@@ -202,13 +216,28 @@ impl Drop for Scratch {
         }
     }
 }
-pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
-    for path in [&inputs.apk,&inputs.native,&inputs.jna,&inputs.camera,&inputs.graphics,&inputs.sdk,&inputs.retained_source,&inputs.scratch_parent] {
-        if !path.is_absolute()||fs::canonicalize(path)?!=*path {return Err(fail("inventory inputs must be explicit canonical paths"));}
+pub(crate) fn inspect(inputs: &InventoryInputs) -> io::Result<Value> {
+    for path in [
+        &inputs.apk,
+        &inputs.native,
+        &inputs.jna,
+        &inputs.camera,
+        &inputs.graphics,
+        &inputs.sdk,
+        &inputs.retained_source,
+        &inputs.scratch_parent,
+    ] {
+        if !path.is_absolute() || fs::canonicalize(path)? != *path {
+            return Err(fail("inventory inputs must be explicit canonical paths"));
+        }
     }
-    let apk=inputs.apk.as_path();let native=inputs.native.as_path();let jna=inputs.jna.as_path();
-    let camera=inputs.camera.as_path();let graphics=inputs.graphics.as_path();let sdk=inputs.sdk.as_path();
-    let apk_entries = entries(&apk)?;
+    let apk = inputs.apk.as_path();
+    let native = inputs.native.as_path();
+    let jna = inputs.jna.as_path();
+    let camera = inputs.camera.as_path();
+    let graphics = inputs.graphics.as_path();
+    let sdk = inputs.sdk.as_path();
+    let apk_entries = entries(apk)?;
     let names = [
         "libandroidx.graphics.path.so",
         "libimage_processing_util_jni.so",
@@ -239,13 +268,13 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
     }) {
         return Err(fail("desktop/JNA JAR/native resource packaged into APK"));
     }
-    let jna_entries = entries(&jna)?;
+    let jna_entries = entries(jna)?;
     if jna_entries.iter().any(|p| {
         p.ends_with(".dll") || p.ends_with(".dylib") || p.contains("linux-") || p.contains("win32-")
     }) {
         return Err(fail("JNA AAR unexpectedly contains desktop native payload"));
     }
-    if sha(&bounded(&jna, 128 * 1024 * 1024)?)
+    if sha(&bounded(jna, 128 * 1024 * 1024)?)
         != "b57125cb7d16253f0d65a80f7d3a4c3664effa711b8bdbb7f87fb572ce1624ed"
     {
         return Err(fail(
@@ -253,7 +282,7 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
         ));
     }
     let mut listing = Process::new("unzip");
-    listing.arg("-lv").arg(&apk);
+    listing.arg("-lv").arg(apk);
     let listing =
         String::from_utf8(command(listing, 4 * 1024 * 1024)?).map_err(io::Error::other)?;
     for entry in &actual {
@@ -267,9 +296,9 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
             ));
         }
     }
-    if sha(&bounded(&camera, 128 * 1024 * 1024)?)
+    if sha(&bounded(camera, 128 * 1024 * 1024)?)
         != "a36f1c323851b51215ba476640e1eb4153882b0c368c0376e9fb905e689df84a"
-        || sha(&bounded(&graphics, 128 * 1024 * 1024)?)
+        || sha(&bounded(graphics, 128 * 1024 * 1024)?)
             != "8ca4032b6d79b351f0b59ad4b580eddbb9423e1652f7c958830687f1eee2ec03"
     {
         return Err(fail(
@@ -279,8 +308,8 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
     let manifest: Value =
         serde_json::from_slice(&bounded(&native.join("manifest.json"), 1024 * 1024)?)
             .map_err(io::Error::other)?;
-    let companion: Value =
-        serde_json::from_slice(include_bytes!("../../dependencies.json")).map_err(io::Error::other)?;
+    let companion: Value = serde_json::from_slice(include_bytes!("../../dependencies.json"))
+        .map_err(io::Error::other)?;
     let ffi: Value = serde_json::from_slice(&bounded(
         &native.join("goatr-dependencies.json"),
         1024 * 1024,
@@ -298,11 +327,9 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
             "independent locks differ in exact four shared transport identities",
         ));
     }
-    let retained_source: Value = serde_json::from_slice(&bounded(
-        &inputs.retained_source,
-        1024 * 1024,
-    )?)
-    .map_err(io::Error::other)?;
+    let retained_source: Value =
+        serde_json::from_slice(&bounded(&inputs.retained_source, 1024 * 1024)?)
+            .map_err(io::Error::other)?;
     if manifest["identity"] != retained_source {
         return Err(fail(
             "native producer source/patch/lock/context/advisory identity differs from retained repository source",
@@ -330,7 +357,7 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
     for abi in abis {
         for name in names {
             let entry = format!("lib/{abi}/{name}");
-            let bytes = member(&apk, &entry)?;
+            let bytes = member(apk, &entry)?;
             let inspected = elf(&bytes, abi)?;
             let (raw, provenance) = match name {
                 "libiroh_ffi.so" => (
@@ -341,8 +368,8 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
                     json!({"producer":native,"identity":manifest["identity"]}),
                 ),
                 "libjnidispatch.so" => (
-                    member(&jna, &format!("jni/{abi}/{name}"))?,
-                    json!({"coordinate":"net.java.dev.jna:jna:5.19.1@aar","archive":jna,"archiveSha256":sha(&bounded(&jna,128*1024*1024)?)}),
+                    member(jna, &format!("jni/{abi}/{name}"))?,
+                    json!({"coordinate":"net.java.dev.jna:jna:5.19.1@aar","archive":jna,"archiveSha256":sha(&bounded(jna,128*1024*1024)?)}),
                 ),
                 _ => {
                     let archive = if name == "libandroidx.graphics.path.so" {
@@ -411,20 +438,20 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
             );
         }
     }
-    let mut zipalign = Process::new(sdk_tool(sdk,"zipalign"));
-    zipalign.args(["-c", "-P", "16", "-v", "4"]).arg(&apk);
+    let mut zipalign = Process::new(sdk_tool(sdk, "zipalign"));
+    zipalign.args(["-c", "-P", "16", "-v", "4"]).arg(apk);
     command(zipalign, 128 * 1024)?;
-    let mut signer = Process::new(sdk_tool(sdk,"apksigner"));
+    let mut signer = Process::new(sdk_tool(sdk, "apksigner"));
     signer
         .args(["verify", "--verbose", "--print-certs"])
-        .arg(&apk);
+        .arg(apk);
     let signature = String::from_utf8(command(signer, 65536)?).map_err(io::Error::other)?;
     if !signature.contains("CN=Android Debug") {
         return Err(fail(
             "checkpoint APK does not have the disclosed Android debug signer",
         ));
     }
-    let notices = String::from_utf8(member(&apk, "assets/android-third-party-notices.txt")?)
+    let notices = String::from_utf8(member(apk, "assets/android-third-party-notices.txt")?)
         .map_err(io::Error::other)?;
     for required in [
         "987b9ac",
@@ -444,6 +471,6 @@ pub(crate) fn inspect(inputs:&InventoryInputs)->io::Result<Value> {
         }
     }
     Ok(
-        json!({"gate":"native-inventory","status":"pass","apk":apk,"apkSha256":sha(&bounded(&apk,512*1024*1024)?),"members":members,"count":10,"zip":"actual zipalign -c -P16 -v4","sharedProvenance":shared,"companionFeatures":companion["directDependencies"],"advisoryEvidence":companion["advisories"],"sqlite":companion["sqlite"],"signer":signature,"noticesSha256":sha(notices.as_bytes()),"limits":["Static source/ELF/ZIP/debug-signer gate only; no JNI load or real16KiB/device/provider pass","Retained advisory DB omits both required GHSAs; exact secure selections checked, full audits remain coordinator evidence","Publisher source-input manifests are not native byte reproduction or cryptographic DSSE/GPL distribution certification"]}),
+        json!({"gate":"native-inventory","status":"pass","apk":apk,"apkSha256":sha(&bounded(apk,512*1024*1024)?),"members":members,"count":10,"zip":"actual zipalign -c -P16 -v4","sharedProvenance":shared,"companionFeatures":companion["directDependencies"],"advisoryEvidence":companion["advisories"],"sqlite":companion["sqlite"],"signer":signature,"noticesSha256":sha(notices.as_bytes()),"limits":["Static source/ELF/ZIP/debug-signer gate only; no JNI load or real16KiB/device/provider pass","Retained advisory DB omits both required GHSAs; exact secure selections checked, full audits remain coordinator evidence","Publisher source-input manifests are not native byte reproduction or cryptographic DSSE/GPL distribution certification"]}),
     )
 }

@@ -13,6 +13,7 @@ pub mod attachments;
 pub mod backends;
 pub mod codex_relay;
 pub mod config;
+mod hc_bridge;
 pub mod herdr;
 pub mod native_json;
 pub mod pairing;
@@ -24,7 +25,6 @@ pub mod setup;
 pub mod state;
 pub mod storage;
 pub mod transport;
-mod hc_bridge;
 
 pub const ALPN: &[u8] = b"goatr/2";
 /// Pair/hello JSON frames, then an authorized hc-connect byte stream on the same stream.

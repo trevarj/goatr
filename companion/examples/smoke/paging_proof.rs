@@ -107,7 +107,8 @@ impl Witness {
             // Only typed Past/Unavailable reach this wait; identity errors and
             // disconnects fail immediately. Never restart the original budget.
             tokio::time::sleep_until(
-                work.deadline.min(tokio::time::Instant::now() + Duration::from_millis(100)),
+                work.deadline
+                    .min(tokio::time::Instant::now() + Duration::from_millis(100)),
             )
             .await;
         }

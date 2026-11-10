@@ -83,20 +83,28 @@ fn summary(provider: Provider) -> SessionState {
             title: "test".into(),
             status: SessionStatus::Idle,
             connectivity: SessionConnectivity::Ready,
-            capabilities: Capabilities { controls: false, terminal_create:false,artifacts:false, attachments:false, history: true,
-            prompt: true,
-            cancel: true,
-            respond: true,
-            prompt_mode: PromptMode::SubmitOrSteer,
-            cancel_mode: if provider == Provider::Omp {
-                CancelMode::CurrentWork
-            } else {
-                CancelMode::NativeTurn
+            capabilities: Capabilities {
+                controls: false,
+                terminal_create: false,
+                artifacts: false,
+                attachments: false,
+                history: true,
+                prompt: true,
+                cancel: true,
+                respond: true,
+                prompt_mode: PromptMode::SubmitOrSteer,
+                cancel_mode: if provider == Provider::Omp {
+                    CancelMode::CurrentWork
+                } else {
+                    CancelMode::NativeTurn
+                },
+                terminal_read: false,
+                worktrees_read: false,
+                changes_read: false,
+                workspace_rename: false,
+                agent_rename: false,
+                skills_read: false,
             },
-            terminal_read: false,
-            worktrees_read: false,
-            changes_read: false,
-            workspace_rename: false, agent_rename: false, skills_read: false, },
             skills_generation: None,
             history_coverage: HistoryCoverage {
                 scope: if provider == Provider::Omp {
@@ -168,9 +176,15 @@ fn record(n: u64, source: RecordSource, text: &str) -> SafeHistory {
 fn prompt(store: &Storage, target: &Target, text: &str) -> Request {
     Request {
         id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: store.boot_id.clone(),
-        target: target.clone(),
-        text: PromptText::new(text).unwrap(), }),
+        body: RequestBody::PromptSubmit(PromptSubmitParams {
+            delivery: None,
+            native_turn_id: None,
+            images: None,
+            skill: None,
+            boot_id: store.boot_id.clone(),
+            target: target.clone(),
+            text: PromptText::new(text).unwrap(),
+        }),
     }
 }
 fn policy<T: std::fmt::Debug>(result: StoreResult<T>, code: ErrorCode) {
@@ -178,27 +192,64 @@ fn policy<T: std::fmt::Debug>(result: StoreResult<T>, code: ErrorCode) {
 }
 #[test]
 fn native_skill_selector_fingerprints_and_matching_receipts_precede_stale_admission() {
-    let mut store=Storage::memory([79;32],0).unwrap();
-    let owner=peer(&mut store,80);
-    let other=peer(&mut store,81);
-    let target=Target{session_id:Uuid::random(),generation:Uuid::random()};
-    let mut request=prompt(&store,&target,"");
-    let RequestBody::PromptSubmit(params)=&mut request.body else {unreachable!()};
-    params.skill=Some(SkillSelector{catalogue_generation:Uuid::random(),reference:Uuid::random()});
-    let Reservation::Reserved(original)=store.reserve(&owner,&request,1,|_|Ok(())).unwrap() else {panic!("new native skill intent was not reserved")};
-    let Reservation::Existing(recovered)=store.reserve(&owner,&request,2,|_|panic!("matching receipt must not re-admit an expired publication")).unwrap() else {panic!("original receipt was not returned")};
-    assert_eq!(original,recovered);
-    let mut conflict=request.clone();
-    let RequestBody::PromptSubmit(params)=&mut conflict.body else {unreachable!()};
-    params.skill.as_mut().unwrap().reference=Uuid::random();
-    policy(store.reserve(&owner,&conflict,3,|_|panic!("fingerprint conflict must win")),ErrorCode::ActionIdConflict);
-    let mut stale=request.clone();stale.id=Uuid::random();
-    policy(store.reserve(&owner,&stale,4,|_|Err(ErrorCode::StaleSession)),ErrorCode::StaleSession);
-    assert!(store.status(&owner,&stale.id,5).unwrap().is_none());
-    assert!(store.status(&other,&request.id,5).unwrap().is_none());
-    policy(store.reserve(&other,&request,6,|_|Err(ErrorCode::NotReady)),ErrorCode::NotReady);
-    store.revoke_epoch(owner.peer_id(),7).unwrap();
-    policy(store.reserve(&owner,&request,8,|_|panic!("revoked authorization must never reach native admission")),ErrorCode::Unauthorized);
+    let mut store = Storage::memory([79; 32], 0).unwrap();
+    let owner = peer(&mut store, 80);
+    let other = peer(&mut store, 81);
+    let target = Target {
+        session_id: Uuid::random(),
+        generation: Uuid::random(),
+    };
+    let mut request = prompt(&store, &target, "");
+    let RequestBody::PromptSubmit(params) = &mut request.body else {
+        unreachable!()
+    };
+    params.skill = Some(SkillSelector {
+        catalogue_generation: Uuid::random(),
+        reference: Uuid::random(),
+    });
+    let Reservation::Reserved(original) = store.reserve(&owner, &request, 1, |_| Ok(())).unwrap()
+    else {
+        panic!("new native skill intent was not reserved")
+    };
+    let Reservation::Existing(recovered) = store
+        .reserve(&owner, &request, 2, |_| {
+            panic!("matching receipt must not re-admit an expired publication")
+        })
+        .unwrap()
+    else {
+        panic!("original receipt was not returned")
+    };
+    assert_eq!(original, recovered);
+    let mut conflict = request.clone();
+    let RequestBody::PromptSubmit(params) = &mut conflict.body else {
+        unreachable!()
+    };
+    params.skill.as_mut().unwrap().reference = Uuid::random();
+    policy(
+        store.reserve(&owner, &conflict, 3, |_| {
+            panic!("fingerprint conflict must win")
+        }),
+        ErrorCode::ActionIdConflict,
+    );
+    let mut stale = request.clone();
+    stale.id = Uuid::random();
+    policy(
+        store.reserve(&owner, &stale, 4, |_| Err(ErrorCode::StaleSession)),
+        ErrorCode::StaleSession,
+    );
+    assert!(store.status(&owner, &stale.id, 5).unwrap().is_none());
+    assert!(store.status(&other, &request.id, 5).unwrap().is_none());
+    policy(
+        store.reserve(&other, &request, 6, |_| Err(ErrorCode::NotReady)),
+        ErrorCode::NotReady,
+    );
+    store.revoke_epoch(owner.peer_id(), 7).unwrap();
+    policy(
+        store.reserve(&owner, &request, 8, |_| {
+            panic!("revoked authorization must never reach native admission")
+        }),
+        ErrorCode::Unauthorized,
+    );
 }
 
 struct PrivateRoot(PathBuf);
@@ -531,49 +582,83 @@ fn ordered_output_overflow_does_not_drop_durable_events_and_self_unpair_is_only_
 }
 #[test]
 fn identical_state_suppression_keeps_activity_order_and_every_critical_authority_change() {
-    let mut storage=Storage::memory([83;32],0).unwrap();
-    let peer=peer(&mut storage,84);
-    let state=State::default();
-    let original=summary(Provider::Codex);
-    let target=target(&original);
-    install(&state,&original,vec![]);
-    let epoch=state.source_epoch(&target).unwrap();
-    let connection=state.connect(&peer);
-    review_open(&state,&connection,&target);
-    state.update(&target,SessionUpdate::State(original.clone())).unwrap();
+    let mut storage = Storage::memory([83; 32], 0).unwrap();
+    let peer = peer(&mut storage, 84);
+    let state = State::default();
+    let original = summary(Provider::Codex);
+    let target = target(&original);
+    install(&state, &original, vec![]);
+    let epoch = state.source_epoch(&target).unwrap();
+    let connection = state.connect(&peer);
+    review_open(&state, &connection, &target);
+    state
+        .update(&target, SessionUpdate::State(original.clone()))
+        .unwrap();
     assert!(state.pop_output(&connection).unwrap().0.is_none());
-    state.update(&target,SessionUpdate::Activity(Activity{state:ActivityState::Working,text:None,tool_record_id:None})).unwrap();
-    let effective=state.session_state(&target,&epoch).unwrap();
-    state.update(&target,SessionUpdate::State(effective.clone())).unwrap();
-    let Envelope::Event(activity)=decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(),None).unwrap() else {panic!("pending activity must still drain")};
-    assert_eq!(activity.seq,Uint(1));
-    assert!(matches!(activity.body,EventBody::ActivityUpdate(_)));
+    state
+        .update(
+            &target,
+            SessionUpdate::Activity(Activity {
+                state: ActivityState::Working,
+                text: None,
+                tool_record_id: None,
+            }),
+        )
+        .unwrap();
+    let effective = state.session_state(&target, &epoch).unwrap();
+    state
+        .update(&target, SessionUpdate::State(effective.clone()))
+        .unwrap();
+    let Envelope::Event(activity) =
+        decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(), None).unwrap()
+    else {
+        panic!("pending activity must still drain")
+    };
+    assert_eq!(activity.seq, Uint(1));
+    assert!(matches!(activity.body, EventBody::ActivityUpdate(_)));
     assert!(state.pop_output(&connection).unwrap().0.is_none());
-    let mut changed=effective;
+    let mut changed = effective;
     for field in 0..7 {
         match field {
-            0=>changed.summary.capabilities.prompt=false,
-            1=>{changed.summary.capabilities.skills_read=true;changed.summary.skills_generation=Some(Uuid::random());},
-            2=>changed.summary.skills_generation=Some(Uuid::random()),
-            3=>changed.native_turn_id=Some(id("native-turn")),
-            4=>changed.summary.connectivity=SessionConnectivity::Synchronizing,
-            5=>changed.summary.connectivity=SessionConnectivity::Ready,
-            6=>changed.summary.capabilities.prompt=true,
-            _=>unreachable!(),
+            0 => changed.summary.capabilities.prompt = false,
+            1 => {
+                changed.summary.capabilities.skills_read = true;
+                changed.summary.skills_generation = Some(Uuid::random());
+            }
+            2 => changed.summary.skills_generation = Some(Uuid::random()),
+            3 => changed.native_turn_id = Some(id("native-turn")),
+            4 => changed.summary.connectivity = SessionConnectivity::Synchronizing,
+            5 => changed.summary.connectivity = SessionConnectivity::Ready,
+            6 => changed.summary.capabilities.prompt = true,
+            _ => unreachable!(),
         }
-        state.update(&target,SessionUpdate::State(changed.clone())).unwrap();
-        let Envelope::Event(event)=decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(),None).unwrap() else {panic!("critical state change must be immediate")};
-        assert_eq!(event.seq,Uint(field+2));
-        let EventBody::SessionState(value)=event.body else {panic!("critical state cannot be replaced by transient activity")};
-        assert_eq!(value.state,changed);
+        state
+            .update(&target, SessionUpdate::State(changed.clone()))
+            .unwrap();
+        let Envelope::Event(event) =
+            decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(), None).unwrap()
+        else {
+            panic!("critical state change must be immediate")
+        };
+        assert_eq!(event.seq, Uint(field + 2));
+        let EventBody::SessionState(value) = event.body else {
+            panic!("critical state cannot be replaced by transient activity")
+        };
+        assert_eq!(value.state, changed);
         assert!(state.pop_output(&connection).unwrap().0.is_none());
-        state.update(&target,SessionUpdate::State(changed.clone())).unwrap();
+        state
+            .update(&target, SessionUpdate::State(changed.clone()))
+            .unwrap();
         assert!(state.pop_output(&connection).unwrap().0.is_none());
     }
     for _ in 0..2 {
-        state.update(&target,SessionUpdate::SourceGap).unwrap();
-        let Envelope::Event(event)=decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(),None).unwrap() else {panic!("source gaps are never coalesced")};
-        assert!(matches!(event.body,EventBody::SyncRequired(_)));
+        state.update(&target, SessionUpdate::SourceGap).unwrap();
+        let Envelope::Event(event) =
+            decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(), None).unwrap()
+        else {
+            panic!("source gaps are never coalesced")
+        };
+        assert!(matches!(event.body, EventBody::SyncRequired(_)));
     }
 }
 
@@ -1137,11 +1222,15 @@ fn definitive_transitions_ordered_partial_creation_and_reconciliation() {
     let a = peer(&mut storage, 11);
     let create = Request {
         id: Uuid::random(),
-        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: storage.boot_id.clone(),
-        server_id: Uuid::random(),
-        project_id: Uuid::random(),
-        provider: Provider::Codex,
-        name: Label::new("new session").unwrap(), }),
+        body: RequestBody::SessionCreate(SessionCreateParams {
+            directory_ref: None,
+            placement: None,
+            boot_id: storage.boot_id.clone(),
+            server_id: Uuid::random(),
+            project_id: Uuid::random(),
+            provider: Provider::Codex,
+            name: Label::new("new session").unwrap(),
+        }),
     };
     storage.reserve(&a, &create, 0, |_| Ok(())).unwrap();
     storage
@@ -1176,7 +1265,8 @@ fn definitive_transitions_ordered_partial_creation_and_reconciliation() {
             2,
         )
         .unwrap();
-    let resources = CreationResources { checkout: None,
+    let resources = CreationResources {
+        checkout: None,
         workspace_id: Some(id("workspace")),
         pane_id: Some(id("pane")),
         terminal_id: Some(id("terminal")),
@@ -1813,11 +1903,15 @@ fn confirmed_entered_creation_resources_survive_revocation_and_no_next_stage() {
     let a = peer(&mut storage, 21);
     let request = Request {
         id: Uuid::random(),
-        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: storage.boot_id.clone(),
-        server_id: Uuid::random(),
-        project_id: Uuid::random(),
-        provider: Provider::Codex,
-        name: Label::new("created").unwrap(), }),
+        body: RequestBody::SessionCreate(SessionCreateParams {
+            directory_ref: None,
+            placement: None,
+            boot_id: storage.boot_id.clone(),
+            server_id: Uuid::random(),
+            project_id: Uuid::random(),
+            provider: Provider::Codex,
+            name: Label::new("created").unwrap(),
+        }),
     };
     storage.reserve(&a, &request, 0, |_| Ok(())).unwrap();
     storage
@@ -1844,7 +1938,8 @@ fn confirmed_entered_creation_resources_survive_revocation_and_no_next_stage() {
         .unwrap();
     let ticket = storage.dispatch_ticket(&a, &request.id).unwrap();
     storage.revoke_epoch(a.peer_id(), 3).unwrap();
-    let resources = CreationResources { checkout: None,
+    let resources = CreationResources {
+        checkout: None,
         workspace_id: Some(id("confirmed workspace")),
         pane_id: Some(id("confirmed pane")),
         terminal_id: Some(id("confirmed terminal")),
@@ -2058,11 +2153,15 @@ fn complete_creation(provider: Provider, owner_started: bool, reconcile: bool) {
     let a = peer(&mut storage, 57);
     let request = Request {
         id: Uuid::random(),
-        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: storage.boot_id.clone(),
-        server_id: Uuid::random(),
-        project_id: Uuid::random(),
-        provider,
-        name: Label::new("complete").unwrap(), }),
+        body: RequestBody::SessionCreate(SessionCreateParams {
+            directory_ref: None,
+            placement: None,
+            boot_id: storage.boot_id.clone(),
+            server_id: Uuid::random(),
+            project_id: Uuid::random(),
+            provider,
+            name: Label::new("complete").unwrap(),
+        }),
     };
     storage.reserve(&a, &request, 0, |_| Ok(())).unwrap();
     storage
@@ -2078,7 +2177,8 @@ fn complete_creation(provider: Provider, owner_started: bool, reconcile: bool) {
             },
         )
         .unwrap();
-    let mut resources = CreationResources { checkout: None,
+    let mut resources = CreationResources {
+        checkout: None,
         workspace_id: None,
         pane_id: None,
         terminal_id: None,

@@ -198,7 +198,10 @@ fn publish_hints(path: &Path, public: &goatr::transport::LocalHints) -> io::Resu
     }
     result
 }
-async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::UnitWakePin>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(
+    matches: clap::ArgMatches,
+    profile: Option<goatr::codex_relay::UnitWakePin>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (name, sub) = matches.subcommand().expect("required command");
     if name == "codex-relay" {
         goatr::codex_relay::run(sub.get_one::<PathBuf>("binding").expect("required binding"))
@@ -223,7 +226,9 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
         }
         return Ok(());
     }
-    if let Some(pin) = &profile { pin.recheck(None)?; }
+    if let Some(pin) = &profile {
+        pin.recheck(None)?;
+    }
     let explicit = matches.get_one::<PathBuf>("admin-socket").cloned();
     let socket = explicit
         .clone()
@@ -238,8 +243,11 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
         let hc = sub.get_flag("hc");
         if hc {
             eprintln!("goatr HC/full-control bridge starting; intended admin socket: {socket:?}");
-            let path = PathBuf::from(std::env::var_os("GOATR_HC").ok_or("GOATR_HC is required for --hc")?);
-            if !path.is_absolute() || !path.is_file() { return Err("GOATR_HC must select an absolute compatible hc executable".into()); }
+            let path =
+                PathBuf::from(std::env::var_os("GOATR_HC").ok_or("GOATR_HC is required for --hc")?);
+            if !path.is_absolute() || !path.is_file() {
+                return Err("GOATR_HC must select an absolute compatible hc executable".into());
+            }
         }
         let config = if hc || sub.get_one::<String>("transport-smoke").is_some() {
             None
@@ -281,7 +289,9 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
         let boot = storage.boot_id.clone();
         let store = StorageOwner::new(storage)?;
         let mut builder = goatr::endpoint_builder(identity.secret.clone());
-        if hc { builder = builder.alpns(vec![goatr::HC_ALPN.to_vec()]); }
+        if hc {
+            builder = builder.alpns(vec![goatr::HC_ALPN.to_vec()]);
+        }
         match sub.get_one::<String>("transport-smoke").map(String::as_str) {
             Some("direct") => {
                 builder = builder
@@ -325,7 +335,9 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
             EndpointId(endpoint.id().to_string()),
             boot,
             backends,
-            config.as_ref().and_then(|config| config.pairing_name.clone()),
+            config
+                .as_ref()
+                .and_then(|config| config.pairing_name.clone()),
         );
         let topology = match config {
             Some(config) => Some(
@@ -374,7 +386,9 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
             };
             tokio::pin!(admin_job, transport, topology_job);
             if hc {
-                eprintln!("goatr listening: local admin and iroh listeners bound; relay/discovery and Herdr Core readiness not checked");
+                eprintln!(
+                    "goatr listening: local admin and iroh listeners bound; relay/discovery and Herdr Core readiness not checked"
+                );
                 match explicit.as_ref() {
                     None => eprintln!("Pair in another local terminal: nix run .#goatr -- pair"),
                     Some(path) => match path.to_str() {
@@ -382,7 +396,9 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
                             "Pair in another local terminal: nix run .#goatr -- --admin-socket {} pair",
                             quote(path)
                         ),
-                        None => eprintln!("To pair, run goatr pair with --admin-socket matching the admin path shown above (not UTF-8)"),
+                        None => eprintln!(
+                            "To pair, run goatr pair with --admin-socket matching the admin path shown above (not UTF-8)"
+                        ),
                     },
                 }
             }
@@ -399,16 +415,37 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
             let _ = stop.send(true);
             // Drain every sibling before cleanup; a selected error must not drop topology
             // while it settles the current creation receipt.
-            let admin_result = if finished == 1 { Ok(()) } else { admin_job.await };
-            let transport_result = if finished == 2 { Ok(()) } else { transport.await };
-            let topology_result = if finished == 3 { Ok(()) } else { topology_job.await };
+            let admin_result = if finished == 1 {
+                Ok(())
+            } else {
+                admin_job.await
+            };
+            let transport_result = if finished == 2 {
+                Ok(())
+            } else {
+                transport.await
+            };
+            let topology_result = if finished == 3 {
+                Ok(())
+            } else {
+                topology_job.await
+            };
             if let Some(reporter) = &codex_invalidation_reporter {
                 if finished != 1 && admin_result.is_err() {
-                    reporter.sibling_error(goatr::transport::CodexTransportWinner::Admin, &admin_result);
+                    reporter.sibling_error(
+                        goatr::transport::CodexTransportWinner::Admin,
+                        &admin_result,
+                    );
                 } else if finished != 2 && transport_result.is_err() {
-                    reporter.sibling_error(goatr::transport::CodexTransportWinner::Transport, &transport_result);
+                    reporter.sibling_error(
+                        goatr::transport::CodexTransportWinner::Transport,
+                        &transport_result,
+                    );
                 } else if finished != 3 && topology_result.is_err() {
-                    reporter.sibling_error(goatr::transport::CodexTransportWinner::Topology, &topology_result);
+                    reporter.sibling_error(
+                        goatr::transport::CodexTransportWinner::Topology,
+                        &topology_result,
+                    );
                 }
             }
             admin_result
@@ -478,8 +515,8 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
                 let required = qr_required_viewport(&qr);
                 let viewport = stdout_viewport();
                 if qr_fits_viewport(required, viewport) {
-                    print!(
-                        "\x1b[38;2;0;0;0;48;2;255;255;255m{}\x1b[0m\n",
+                    println!(
+                        "\x1b[38;2;0;0;0;48;2;255;255;255m{}\x1b[0m",
                         qr.render::<qrcode::render::unicode::Dense1x2>().build()
                     );
                 } else {
@@ -493,7 +530,9 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
                             required.0, required.1
                         ),
                     }
-                    println!("Widen/make the terminal taller or zoom out, then rerun pair; or paste the complete URI above.");
+                    println!(
+                        "Widen/make the terminal taller or zoom out, then rerun pair; or paste the complete URI above."
+                    );
                 }
             } else {
                 println!("QR exceeds encoder capacity; paste the complete URI above.");
@@ -529,13 +568,19 @@ async fn run(matches: clap::ArgMatches, profile: Option<goatr::codex_relay::Unit
     Ok(())
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StartupRole { Retain, Drop }
+enum StartupRole {
+    Retain,
+    Drop,
+}
 fn startup_role(name: &str) -> io::Result<StartupRole> {
     match name {
         "serve" | "setup" => Ok(StartupRole::Retain),
         "pair" | "devices" | "revoke" => Ok(StartupRole::Drop),
         "codex-owner" | "codex-relay" if cfg!(target_os = "linux") => Ok(StartupRole::Drop),
-        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported executable capability role")),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsupported executable capability role",
+        )),
     }
 }
 fn codex_owner_main(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
@@ -553,13 +598,21 @@ fn main() -> ExitCode {
         let role = startup_role(matches.subcommand_name().expect("required command"))?;
         // Post-exec, before record parsing, admin effects, inherited-FD proofs or Tokio workers.
         #[cfg(target_os = "linux")]
-        let executable_profile = goatr::codex_relay::prepare_current_executable(role == StartupRole::Retain,
-            matches.subcommand().and_then(|(_, sub)| sub.try_get_one::<String>("expected-unit").ok().flatten()).map(String::as_str))?;
+        let executable_profile = goatr::codex_relay::prepare_current_executable(
+            role == StartupRole::Retain,
+            matches
+                .subcommand()
+                .and_then(|(_, sub)| sub.try_get_one::<String>("expected-unit").ok().flatten())
+                .map(String::as_str),
+        )?;
         if matches.subcommand_name() == Some("serve")
             && let Some(pin) = &executable_profile
-            && pin.unit() == "goatr.service" {
+            && pin.unit() == "goatr.service"
+        {
             let (_, sub) = matches.subcommand().expect("required command");
-            let path = sub.get_one::<PathBuf>("config").ok_or("owned unit requires exact config")?;
+            let path = sub
+                .get_one::<PathBuf>("config")
+                .ok_or("owned unit requires exact config")?;
             goatr::setup::admit_owned_serve(pin, path)?;
         }
         #[cfg(not(target_os = "linux"))]
@@ -579,8 +632,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            if !is_codex_relay || !goatr::codex_relay::take_startup_diagnostic_reported()
-            {
+            if !is_codex_relay || !goatr::codex_relay::take_startup_diagnostic_reported() {
                 eprintln!("goatr: {e}");
             }
             ExitCode::FAILURE
@@ -591,16 +643,20 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::{Read,Write},os::{fd::{AsRawFd,FromRawFd},unix::net::UnixStream as FileWakeChannel},time::{Duration,Instant}};
+    use std::{
+        io::{Read, Write},
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::net::UnixStream as FileWakeChannel,
+        },
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn qr_viewport_includes_quiet_zone_and_final_cursor_row() {
-        let qr = qrcode::QrCode::with_version(
-            b"HELLO",
-            qrcode::Version::Normal(1),
-            qrcode::EcLevel::M,
-        )
-        .unwrap();
+        let qr =
+            qrcode::QrCode::with_version(b"HELLO", qrcode::Version::Normal(1), qrcode::EcLevel::M)
+                .unwrap();
         let required = qr_required_viewport(&qr);
         assert_eq!(required, (29, 16));
         assert!(qr_fits_viewport(required, Some((29, 16))));
@@ -611,51 +667,135 @@ mod tests {
 
     struct FileWakeFixtureChild(std::process::Child);
     impl FileWakeFixtureChild {
-        fn exit(&mut self)->std::process::ExitStatus {
-            let deadline=Instant::now()+Duration::from_secs(5);
-            loop{if let Some(status)=self.0.try_wait().unwrap(){return status;}assert!(Instant::now()<deadline,"owned fixture exit timed out");std::thread::sleep(Duration::from_millis(10));}
+        fn exit(&mut self) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    return status;
+                }
+                assert!(Instant::now() < deadline, "owned fixture exit timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
-    impl Drop for FileWakeFixtureChild {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
+    impl Drop for FileWakeFixtureChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
     #[test]
     fn executable_capability_roles_cover_every_cli_command_without_retention_fallback() {
-        let command=cli();
+        let command = cli();
         for sub in command.get_subcommands() {
-            let expected=match sub.get_name() {"serve"|"setup"=>StartupRole::Retain,"pair"|"devices"|"revoke"|"codex-owner"|"codex-relay"=>StartupRole::Drop,_=>panic!("new role needs an explicit capability decision")};
-            assert_eq!(startup_role(sub.get_name()).unwrap(),expected);
+            let expected = match sub.get_name() {
+                "serve" | "setup" => StartupRole::Retain,
+                "pair" | "devices" | "revoke" | "codex-owner" | "codex-relay" => StartupRole::Drop,
+                _ => panic!("new role needs an explicit capability decision"),
+            };
+            assert_eq!(startup_role(sub.get_name()).unwrap(), expected);
         }
         assert!(startup_role("unknown-future-role").is_err());
     }
     #[test]
     fn expected_unit_context_is_explicit_and_closed_to_eligible_roles() {
         for args in [
-            vec!["goatr","serve","--expected-unit=goatr.service"],
-            vec!["goatr","setup","--serve-unit","--expected-unit=goatr-host-wake-00000000-0000-4000-8000-000000000000.service"],
-        ] { assert!(cli().try_get_matches_from(args).is_ok()); }
+            vec!["goatr", "serve", "--expected-unit=goatr.service"],
+            vec![
+                "goatr",
+                "setup",
+                "--serve-unit",
+                "--expected-unit=goatr-host-wake-00000000-0000-4000-8000-000000000000.service",
+            ],
+        ] {
+            assert!(cli().try_get_matches_from(args).is_ok());
+        }
         for args in [
-            vec!["goatr","pair","--expected-unit=goatr.service"],
-            vec!["goatr","devices","--expected-unit=goatr.service"],
-            vec!["goatr","codex-relay","--binding=/private/binding","--expected-unit=goatr.service"],
-            vec!["goatr","setup","--expected-unit=goatr.service"],
-        ] { assert!(cli().try_get_matches_from(args).is_err()); }
+            vec!["goatr", "pair", "--expected-unit=goatr.service"],
+            vec!["goatr", "devices", "--expected-unit=goatr.service"],
+            vec![
+                "goatr",
+                "codex-relay",
+                "--binding=/private/binding",
+                "--expected-unit=goatr.service",
+            ],
+            vec!["goatr", "setup", "--expected-unit=goatr.service"],
+        ] {
+            assert!(cli().try_get_matches_from(args).is_err());
+        }
     }
     #[test]
     fn post_exec_drop_role_precedes_record_or_runtime_fixture() {
-        if let Some(fd)=std::env::var("GOATR_ROLE_BOUNDARY_FD").ok() {
-            let fd=fd.parse::<i32>().unwrap();assert!(fd>2);let mut channel=unsafe{FileWakeChannel::from_raw_fd(fd)};
-            channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-            let profile=goatr::codex_relay::prepare_current_executable(startup_role("codex-owner").unwrap()==StartupRole::Retain,None).unwrap();
-            assert!(profile.is_none());assert!(goatr::codex_relay::current_capabilities().unwrap().zero());
-            let error=codex_owner_main(&cli().try_get_matches_from(["goatr","codex-owner","--record","/nonexistent-owned-role-record"]).unwrap()).unwrap_err();
-            assert!(!error.to_string().is_empty());channel.write_all(b"1").unwrap();return;
+        if let Ok(fd) = std::env::var("GOATR_ROLE_BOUNDARY_FD") {
+            let fd = fd.parse::<i32>().unwrap();
+            assert!(fd > 2);
+            let mut channel = unsafe { FileWakeChannel::from_raw_fd(fd) };
+            channel
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            channel
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let profile = goatr::codex_relay::prepare_current_executable(
+                startup_role("codex-owner").unwrap() == StartupRole::Retain,
+                None,
+            )
+            .unwrap();
+            assert!(profile.is_none());
+            assert!(goatr::codex_relay::current_capabilities().unwrap().zero());
+            let error = codex_owner_main(
+                &cli()
+                    .try_get_matches_from([
+                        "goatr",
+                        "codex-owner",
+                        "--record",
+                        "/nonexistent-owned-role-record",
+                    ])
+                    .unwrap(),
+            )
+            .unwrap_err();
+            assert!(!error.to_string().is_empty());
+            channel.write_all(b"1").unwrap();
+            return;
         }
-        let test=concat!(module_path!(),"::post_exec_drop_role_precedes_record_or_runtime_fixture");
-        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
-        let (mut channel,endpoint)=FileWakeChannel::pair().unwrap();channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-        let fd=endpoint.as_raw_fd();assert!(fd>2);let mut command=Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact",test,"--test-threads=1"]).env("GOATR_ROLE_BOUNDARY_FD",fd.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        unsafe{command.pre_exec(move||{goatr::codex_relay::drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
-        let mut child=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,*b"1");
+        let test = concat!(
+            module_path!(),
+            "::post_exec_drop_role_precedes_record_or_runtime_fixture"
+        );
+        let test = test
+            .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .unwrap();
+        let (mut channel, endpoint) = FileWakeChannel::pair().unwrap();
+        channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        channel
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let fd = endpoint.as_raw_fd();
+        assert!(fd > 2);
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--test-threads=1"])
+            .env("GOATR_ROLE_BOUNDARY_FD", fd.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                goatr::codex_relay::drop_inherited_capabilities()?;
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = FileWakeFixtureChild(command.spawn().unwrap());
+        drop(endpoint);
+        let mut state = [0];
+        channel.read_exact(&mut state).unwrap();
+        assert_eq!(state, *b"1");
         assert!(child.exit().success());
     }
     use std::{

@@ -221,7 +221,7 @@ impl Display {
     }
     fn clear_cell(&mut self, index: usize) {
         let columns = usize::from(self.columns);
-        if self.cells[index].width.0 == 0 && index % columns > 0 {
+        if self.cells[index].width.0 == 0 && !index.is_multiple_of(columns) {
             self.cells[index - 1] = blank();
         }
         if self.cells[index].width.0 == 2 && index % columns + 1 < columns {

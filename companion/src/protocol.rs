@@ -107,21 +107,28 @@ fn optional_non_null<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 pub type Text = String;
 
 /// Count actual escaped JSON bytes without allocating a second catalogue/view buffer.
-fn encoded_limit(value:&impl Serialize,limit:usize)->Validation {
-    encoded_size(value,limit).map(|_|())
+fn encoded_limit(value: &impl Serialize, limit: usize) -> Validation {
+    encoded_size(value, limit).map(|_| ())
 }
-pub(crate) fn encoded_size(value:&impl Serialize,limit:usize)->Result<usize,ProtocolFailure> {
-    struct Counter {remaining:usize}
+pub(crate) fn encoded_size(value: &impl Serialize, limit: usize) -> Result<usize, ProtocolFailure> {
+    struct Counter {
+        remaining: usize,
+    }
     impl std::io::Write for Counter {
-        fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {
-            self.remaining=self.remaining.checked_sub(bytes.len()).ok_or(std::io::ErrorKind::OutOfMemory)?;
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.remaining = self
+                .remaining
+                .checked_sub(bytes.len())
+                .ok_or(std::io::ErrorKind::OutOfMemory)?;
             Ok(bytes.len())
         }
-        fn flush(&mut self)->std::io::Result<()> {Ok(())}
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    let mut counter=Counter {remaining:limit};
-    serde_json::to_writer(&mut counter,value).map_err(|_|invalid())?;
-    Ok(limit-counter.remaining)
+    let mut counter = Counter { remaining: limit };
+    serde_json::to_writer(&mut counter, value).map_err(|_| invalid())?;
+    Ok(limit - counter.remaining)
 }
 
 macro_rules! string_type {
@@ -162,7 +169,13 @@ string_type!(EndpointId, |s: &String| s
     .parse::<iroh::EndpointId>()
     .is_ok_and(|id| id.to_string() == *s));
 string_type!(Id, |s: &String| !s.is_empty() && s.len() <= 512);
-string_type!(AgentName, |s: &String| !s.is_empty() && s.len() <= 32 && s.as_bytes()[0].is_ascii_lowercase() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'));
+string_type!(AgentName, |s: &String| !s.is_empty()
+    && s.len() <= 32
+    && s.as_bytes()[0].is_ascii_lowercase()
+    && s.bytes().all(|b| b.is_ascii_lowercase()
+        || b.is_ascii_digit()
+        || b == b'_'
+        || b == b'-'));
 string_type!(Label, |s: &String| !s.is_empty()
     && s.len() <= 512
     && s.chars().count() <= 128
@@ -722,19 +735,29 @@ pub fn canonical_json_size(value: &Value) -> ValidationResult<usize> {
         }
     })
 }
-fn request_body_value(body:&RequestBody)->ValidationResult<Value> {
-    let mut value=serde_json::to_value(body).map_err(|_|invalid())?;
-    if let RequestBody::TerminalGridSubscribe(params)=body {
-        let mut fields=serde_json::Map::new();
-        fields.insert("target".into(),serde_json::to_value(&params.target).map_err(|_|invalid())?);
-        if params.ansi_observer{fields.insert("ansiObserver".into(),Value::Bool(true));}
-        value["params"]=Value::Object(fields);
+fn request_body_value(body: &RequestBody) -> ValidationResult<Value> {
+    let mut value = serde_json::to_value(body).map_err(|_| invalid())?;
+    if let RequestBody::TerminalGridSubscribe(params) = body {
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            "target".into(),
+            serde_json::to_value(&params.target).map_err(|_| invalid())?,
+        );
+        if params.ansi_observer {
+            fields.insert("ansiObserver".into(), Value::Bool(true));
+        }
+        value["params"] = Value::Object(fields);
     }
-    if let RequestBody::ShellGridSubscribe(params)=body {
-        let mut fields=serde_json::Map::new();
-        fields.insert("target".into(),serde_json::to_value(&params.target).map_err(|_|invalid())?);
-        if params.history{fields.insert("history".into(),Value::Bool(true));}
-        value["params"]=Value::Object(fields);
+    if let RequestBody::ShellGridSubscribe(params) = body {
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            "target".into(),
+            serde_json::to_value(&params.target).map_err(|_| invalid())?,
+        );
+        if params.history {
+            fields.insert("history".into(), Value::Bool(true));
+        }
+        value["params"] = Value::Object(fields);
     }
     Ok(value)
 }
@@ -840,9 +863,13 @@ pub(crate) fn host_inventory_payload(
         let server = graph["serverId"].clone();
         // An omitted native graph cannot carry actionable shell authority.
         if let Some(shells) = value["result"]["shells"].as_array_mut() {
-            for shell in shells.iter_mut().filter(|shell|shell["serverId"]==server) {
-                shell["connectivity"]=Value::from("offline");
-                shell["capabilities"]=serde_json::json!({"read":false,"create":false,"input":false,"close":false});
+            for shell in shells
+                .iter_mut()
+                .filter(|shell| shell["serverId"] == server)
+            {
+                shell["connectivity"] = Value::from("offline");
+                shell["capabilities"] =
+                    serde_json::json!({"read":false,"create":false,"input":false,"close":false});
             }
         }
     }
@@ -874,13 +901,13 @@ pub fn encode_payload(envelope: &Envelope) -> ValidationResult<Vec<u8>> {
                 }
                 Ok(result) => {
                     let result = match result {
-                        ResultBody::SessionControlsRead(x)=>value(x)?,
-                        ResultBody::SessionControlsApply(x)=>value(x)?,
-                        ResultBody::SessionQueueList(x)=>value(x)?,
-                        ResultBody::SessionQueueUpdate(x)=>value(x)?,
-                        ResultBody::SessionQueueDelete(x)=>value(x)?,
-                        ResultBody::SessionQueueReorder(x)=>value(x)?,
-                        ResultBody::SessionQueueStart(x)=>value(x)?,
+                        ResultBody::SessionControlsRead(x) => value(x)?,
+                        ResultBody::SessionControlsApply(x) => value(x)?,
+                        ResultBody::SessionQueueList(x) => value(x)?,
+                        ResultBody::SessionQueueUpdate(x) => value(x)?,
+                        ResultBody::SessionQueueDelete(x) => value(x)?,
+                        ResultBody::SessionQueueReorder(x) => value(x)?,
+                        ResultBody::SessionQueueStart(x) => value(x)?,
                         ResultBody::PairConfirm(x) => value(x)?,
                         ResultBody::Hello(x) => value(x)?,
                         ResultBody::HostSnapshot(x) => value(x)?,
@@ -888,13 +915,13 @@ pub fn encode_payload(envelope: &Envelope) -> ValidationResult<Vec<u8>> {
                         ResultBody::SessionHistory(x) => value(x)?,
                         ResultBody::SessionUnsubscribe(x) => value(x)?,
                         ResultBody::SessionCreate(x) => value(x)?,
-                        ResultBody::TerminalCreate(x)=>value(x)?,
-                        ResultBody::AttachmentsBegin(x)=>value(x)?,
-                        ResultBody::AttachmentsChunk(x)=>value(x)?,
-                        ResultBody::AttachmentsComplete(x)=>value(x)?,
-                        ResultBody::AttachmentsDiscard(x)=>value(x)?,
-                        ResultBody::CreationDirectories(x)=>value(x)?,
-                        ResultBody::AttachmentsStatus(x)=>value(x)?,
+                        ResultBody::TerminalCreate(x) => value(x)?,
+                        ResultBody::AttachmentsBegin(x) => value(x)?,
+                        ResultBody::AttachmentsChunk(x) => value(x)?,
+                        ResultBody::AttachmentsComplete(x) => value(x)?,
+                        ResultBody::AttachmentsDiscard(x) => value(x)?,
+                        ResultBody::CreationDirectories(x) => value(x)?,
+                        ResultBody::AttachmentsStatus(x) => value(x)?,
                         ResultBody::AgentRename(x) => value(x)?,
                         ResultBody::WorkspaceRename(x) => value(x)?,
                         ResultBody::PromptSubmit(x) => value(x)?,
@@ -905,18 +932,18 @@ pub fn encode_payload(envelope: &Envelope) -> ValidationResult<Vec<u8>> {
                         ResultBody::TerminalGridSubscribe(x) => value(x)?,
                         ResultBody::ShellGridSubscribe(x) => value(x)?,
                         ResultBody::ShellInput(x) => value(x)?,
-                        ResultBody::ShellResize(x)=>value(x)?,
-                        ResultBody::ShellScroll(x)=>value(x)?,
-                        ResultBody::ArtifactsList(x)=>value(x)?,
-                        ResultBody::ArtifactsOpen(x)=>value(x)?,
-                        ResultBody::ArtifactsRead(x)=>value(x)?,
-                        ResultBody::ArtifactsClose(x)=>value(x)?,
+                        ResultBody::ShellResize(x) => value(x)?,
+                        ResultBody::ShellScroll(x) => value(x)?,
+                        ResultBody::ArtifactsList(x) => value(x)?,
+                        ResultBody::ArtifactsOpen(x) => value(x)?,
+                        ResultBody::ArtifactsRead(x) => value(x)?,
+                        ResultBody::ArtifactsClose(x) => value(x)?,
                         ResultBody::WorktreesList(x) => value(x)?,
                         ResultBody::ChangesRead(x) => value(x)?,
                         ResultBody::SkillsList(x) => value(x)?,
-                        ResultBody::SkillsPreviewOpen(x)=>value(x)?,
-                        ResultBody::SkillsPreviewRead(x)=>value(x)?,
-                        ResultBody::SkillsPreviewClose(x)=>value(x)?,
+                        ResultBody::SkillsPreviewOpen(x) => value(x)?,
+                        ResultBody::SkillsPreviewRead(x) => value(x)?,
+                        ResultBody::SkillsPreviewClose(x) => value(x)?,
 
                         ResultBody::NotificationsSync(x) => value(x)?,
                         ResultBody::NotificationsRead(x) => value(x)?,

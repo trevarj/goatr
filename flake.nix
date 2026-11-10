@@ -10,7 +10,12 @@
   };
 
   outputs =
-    { nixpkgs, rust-overlay, ... }:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      ...
+    }:
     let
       inherit (nixpkgs) lib;
       systems = [
@@ -670,6 +675,7 @@
       p: if p.name == "rustls" then lib.versionAtLeast p.version "0.23.45" else p.version == "1.3.0"
     ) companionProvenance;
     {
+      nixosModules.default = import ./nix/module.nix { inherit self; };
       packages = lib.mapAttrs (
         system: env:
         {

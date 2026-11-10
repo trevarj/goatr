@@ -18,7 +18,10 @@ use std::{
     io::{self, Read, Write},
     os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -101,111 +104,227 @@ mod unit_wake {
         pub no_new_privs: bool,
     }
     impl CapabilityState {
-        pub fn zero(self) -> bool { self.inheritable == 0 && self.permitted == 0 && self.effective == 0 && self.ambient == 0 }
-        pub fn unit_wake(self) -> bool { self.inheritable == WAKE && self.permitted == WAKE && self.effective == WAKE && self.ambient == WAKE && self.no_new_privs }
+        pub fn zero(self) -> bool {
+            self.inheritable == 0 && self.permitted == 0 && self.effective == 0 && self.ambient == 0
+        }
+        pub fn unit_wake(self) -> bool {
+            self.inheritable == WAKE
+                && self.permitted == WAKE
+                && self.effective == WAKE
+                && self.ambient == WAKE
+                && self.no_new_privs
+        }
     }
     pub fn capability_state(status: &str) -> io::Result<CapabilityState> {
-        if status.len() > 65_536 { return Err(invalid("capability status exceeds bound")); }
-        let mut masks = [None; 4]; let mut nnp = None;
+        if status.len() > 65_536 {
+            return Err(invalid("capability status exceeds bound"));
+        }
+        let mut masks = [None; 4];
+        let mut nnp = None;
         for line in status.lines() {
-            let Some((key, value)) = line.split_once(':') else { continue };
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
             if key == "NoNewPrivs" {
-                if nnp.is_some() { return Err(invalid("duplicate NoNewPrivs")); }
-                nnp = Some(match value.trim() { "0" => false, "1" => true, _ => return Err(invalid("invalid NoNewPrivs")) });
+                if nnp.is_some() {
+                    return Err(invalid("duplicate NoNewPrivs"));
+                }
+                nnp = Some(match value.trim() {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err(invalid("invalid NoNewPrivs")),
+                });
                 continue;
             }
-            let index = match key { "CapInh" => 0, "CapPrm" => 1, "CapEff" => 2, "CapAmb" => 3, _ => continue };
+            let index = match key {
+                "CapInh" => 0,
+                "CapPrm" => 1,
+                "CapEff" => 2,
+                "CapAmb" => 3,
+                _ => continue,
+            };
             let value = value.trim();
-            if masks[index].is_some() || value.len() != 16 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            if masks[index].is_some()
+                || value.len() != 16
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
                 return Err(invalid("invalid capability field"));
             }
-            masks[index] = Some(u64::from_str_radix(value, 16).map_err(|_| invalid("invalid capability mask"))?);
+            masks[index] = Some(
+                u64::from_str_radix(value, 16).map_err(|_| invalid("invalid capability mask"))?,
+            );
         }
-        let [Some(inheritable), Some(permitted), Some(effective), Some(ambient)] = masks else { return Err(invalid("missing capability field")); };
-        Ok(CapabilityState { inheritable, permitted, effective, ambient, no_new_privs: nnp.ok_or_else(|| invalid("missing NoNewPrivs"))? })
+        let [
+            Some(inheritable),
+            Some(permitted),
+            Some(effective),
+            Some(ambient),
+        ] = masks
+        else {
+            return Err(invalid("missing capability field"));
+        };
+        Ok(CapabilityState {
+            inheritable,
+            permitted,
+            effective,
+            ambient,
+            no_new_privs: nnp.ok_or_else(|| invalid("missing NoNewPrivs"))?,
+        })
     }
     pub fn current_capabilities() -> io::Result<CapabilityState> {
         let mut status = String::new();
-        File::open("/proc/self/status")?.take(65_537).read_to_string(&mut status)?;
-        if status.len() > 65_536 { return Err(invalid("capability status exceeds bound")); }
+        File::open("/proc/self/status")?
+            .take(65_537)
+            .read_to_string(&mut status)?;
+        if status.len() > 65_536 {
+            return Err(invalid("capability status exceeds bound"));
+        }
         capability_state(&status)
     }
     pub fn unit_cgroup<'a>(text: &'a str, expected: &str) -> io::Result<&'a str> {
-        if expected.is_empty() || expected.len() > 255 || !expected.ends_with(".service")
-            || !expected.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-            || text.len() > 8192 || text.contains('\r') {
+        if expected.is_empty()
+            || expected.len() > 255
+            || !expected.ends_with(".service")
+            || !expected
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            || text.len() > 8192
+            || text.contains('\r')
+        {
             return Err(invalid("invalid expected unit or unified cgroup"));
         }
         let mut lines = text.lines();
-        let path = lines.next().and_then(|line| line.strip_prefix("0::")).ok_or_else(|| invalid("missing unified cgroup"))?;
-        if lines.next().is_some() || !path.starts_with('/') || path.len() > 4096 || path.contains(':')
+        let path = lines
+            .next()
+            .and_then(|line| line.strip_prefix("0::"))
+            .ok_or_else(|| invalid("missing unified cgroup"))?;
+        if lines.next().is_some()
+            || !path.starts_with('/')
+            || path.len() > 4096
+            || path.contains(':')
             || path.chars().any(|c| c.is_control() || c.is_whitespace())
-            || path.split('/').skip(1).any(|part| matches!(part, "" | "." | ".."))
-            || path.rsplit('/').next() != Some(expected) {
+            || path
+                .split('/')
+                .skip(1)
+                .any(|part| matches!(part, "" | "." | ".."))
+            || path.rsplit('/').next() != Some(expected)
+        {
             return Err(invalid("not the sole canonical full expected unit cgroup"));
         }
         Ok(path)
     }
     fn bounded_proc(pid: u32, name: &str) -> io::Result<String> {
         let mut text = String::new();
-        File::open(format!("/proc/{pid}/{name}"))?.take(65_537).read_to_string(&mut text)?;
-        if text.len() > 65_536 { return Err(invalid("process observation exceeds bound")); }
+        File::open(format!("/proc/{pid}/{name}"))?
+            .take(65_537)
+            .read_to_string(&mut text)?;
+        if text.len() > 65_536 {
+            return Err(invalid("process observation exceeds bound"));
+        }
         Ok(text)
     }
     fn dumpable() -> io::Result<bool> {
         let value = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
-        if value < 0 { return Err(io::Error::last_os_error()); }
+        if value < 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(value == 1)
     }
     fn require_inspectable(pid: u32) -> io::Result<()> {
         if pid == std::process::id() && !dumpable()? {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied,"original current unit process became uninspectable"));
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "original current unit process became uninspectable",
+            ));
         }
         Ok(())
     }
     fn before_deadline(deadline: Option<Instant>) -> io::Result<()> {
-        if deadline.is_some_and(|deadline|Instant::now() >= deadline) {
-            return Err(io::Error::new(io::ErrorKind::TimedOut,"original unit qualification deadline"));
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "original unit qualification deadline",
+            ));
         }
         Ok(())
     }
     fn command_deadline(original: Option<Instant>, now: Instant) -> io::Result<Instant> {
-        let limit=now+Duration::from_secs(5);
-        let deadline=original.map_or(limit,|original|original.min(limit));
-        if now>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original manager command deadline"));}
+        let limit = now + Duration::from_secs(5);
+        let deadline = original.map_or(limit, |original| original.min(limit));
+        if now >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "original manager command deadline",
+            ));
+        }
         Ok(deadline)
     }
-    fn manager_command_output(command: &mut std::process::Command, original: Option<Instant>) -> io::Result<String> {
-        let deadline=command_deadline(original,Instant::now())?;
+    fn manager_command_output(
+        command: &mut std::process::Command,
+        original: Option<Instant>,
+    ) -> io::Result<String> {
+        let deadline = command_deadline(original, Instant::now())?;
         before_deadline(Some(deadline))?;
-        let mut child=command.spawn()?;
-        let result=(|| {
-            let mut pipe=child.stdout.take().ok_or_else(||invalid("manager helper pipe unavailable"))?;
-            let fd=pipe.as_raw_fd();let flags=unsafe{libc::fcntl(fd,libc::F_GETFL)};
-            if flags<0||unsafe{libc::fcntl(fd,libc::F_SETFL,flags|libc::O_NONBLOCK)}<0{return Err(io::Error::last_os_error());}
-            let mut bytes=Vec::new();let mut buffer=[0;4096];
+        let mut child = command.spawn()?;
+        let result = (|| {
+            let mut pipe = child
+                .stdout
+                .take()
+                .ok_or_else(|| invalid("manager helper pipe unavailable"))?;
+            let fd = pipe.as_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 4096];
             loop {
                 before_deadline(Some(deadline))?;
                 match pipe.read(&mut buffer) {
-                    Ok(0)=>if let Some(status)=child.try_wait()? {
-                        if !status.success(){return Err(invalid("manager helper refused"));}
-                        break;
-                    },
-                    Ok(n)=>{bytes.extend_from_slice(&buffer[..n]);if bytes.len()>65_536{return Err(invalid("manager reply exceeds bound"));}},
-                    Err(error) if error.kind()==io::ErrorKind::WouldBlock=>{},
-                    Err(error)=>return Err(error),
+                    Ok(0) => {
+                        if let Some(status) = child.try_wait()? {
+                            if !status.success() {
+                                return Err(invalid("manager helper refused"));
+                            }
+                            break;
+                        }
+                    }
+                    Ok(n) => {
+                        bytes.extend_from_slice(&buffer[..n]);
+                        if bytes.len() > 65_536 {
+                            return Err(invalid("manager reply exceeds bound"));
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
                 }
-                std::thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())));
+                std::thread::sleep(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
-            let text=String::from_utf8(bytes).map_err(io::Error::other)?;
-            before_deadline(Some(deadline))?;Ok(text)
+            let text = String::from_utf8(bytes).map_err(io::Error::other)?;
+            before_deadline(Some(deadline))?;
+            Ok(text)
         })();
-        if result.is_err(){let _=child.kill();child.wait()?;}
+        if result.is_err() {
+            let _ = child.kill();
+            child.wait()?;
+        }
         result
     }
     fn sticky_result<T>(failed: &AtomicBool, result: io::Result<T>) -> io::Result<T> {
-        if failed.load(Ordering::Acquire) { return Err(invalid("original unit Wake profile was permanently invalidated")); }
-        if result.is_err() { failed.store(true, Ordering::Release); }
+        if failed.load(Ordering::Acquire) {
+            return Err(invalid(
+                "original unit Wake profile was permanently invalidated",
+            ));
+        }
+        if result.is_err() {
+            failed.store(true, Ordering::Release);
+        }
         result
     }
     /// The private socket's original peer, not a unit name or environment marker.
@@ -219,232 +338,570 @@ mod unit_wake {
     impl UnitManager {
         fn capture(deadline: Option<Instant>) -> io::Result<Self> {
             before_deadline(deadline)?;
-            let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| invalid("user runtime unavailable"))?);
+            let runtime = PathBuf::from(
+                std::env::var_os("XDG_RUNTIME_DIR")
+                    .ok_or_else(|| invalid("user runtime unavailable"))?,
+            );
             let expected_runtime = format!("/run/user/{}", pairing::uid());
-            if runtime.as_os_str() != std::ffi::OsStr::new(&expected_runtime) { return Err(invalid("not the original user runtime")); }
+            if runtime.as_os_str() != std::ffi::OsStr::new(&expected_runtime) {
+                return Err(invalid("not the original user runtime"));
+            }
             pairing::private_dir(&runtime, false)?;
             let path = runtime.join("systemd/private");
             let before = fs::symlink_metadata(&path)?;
-            if !before.file_type().is_socket() || before.uid() != pairing::uid() || before.mode() & 0o777 != 0o700 {
+            if !before.file_type().is_socket()
+                || before.uid() != pairing::uid()
+                || before.mode() & 0o777 != 0o700
+            {
                 return Err(invalid("unqualified user manager socket"));
             }
-            let raw=unsafe{libc::socket(libc::AF_UNIX,libc::SOCK_STREAM|libc::SOCK_CLOEXEC|libc::SOCK_NONBLOCK,0)};
-            if raw<0{return Err(io::Error::last_os_error());}
-            let socket=unsafe{std::os::unix::net::UnixStream::from_raw_fd(raw)};
-            let bytes=path.as_os_str().as_encoded_bytes();
-            let mut address:libc::sockaddr_un=unsafe{std::mem::zeroed()};
-            if bytes.len()>=address.sun_path.len(){return Err(invalid("manager socket path exceeds bound"));}
-            address.sun_family=libc::AF_UNIX as libc::sa_family_t;
-            for (out,byte) in address.sun_path.iter_mut().zip(bytes){*out=*byte as libc::c_char;}
-            let length=(std::mem::offset_of!(libc::sockaddr_un,sun_path)+bytes.len()+1) as libc::socklen_t;
-            if unsafe{libc::connect(raw,(&address as *const libc::sockaddr_un).cast(),length)}!=0{return Err(io::Error::last_os_error());}
+            let raw = unsafe {
+                libc::socket(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                    0,
+                )
+            };
+            if raw < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) };
+            let bytes = path.as_os_str().as_encoded_bytes();
+            let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+            if bytes.len() >= address.sun_path.len() {
+                return Err(invalid("manager socket path exceeds bound"));
+            }
+            address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            for (out, byte) in address.sun_path.iter_mut().zip(bytes) {
+                *out = *byte as libc::c_char;
+            }
+            let length = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+                as libc::socklen_t;
+            if unsafe { libc::connect(raw, (&address as *const libc::sockaddr_un).cast(), length) }
+                != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
             let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
             let mut length = std::mem::size_of_val(&peer) as libc::socklen_t;
-            if unsafe { libc::getsockopt(socket.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut peer as *mut libc::ucred).cast(), &mut length) } != 0 { return Err(io::Error::last_os_error()); }
-            if peer.uid != pairing::uid() || peer.pid <= 0 { return Err(invalid("wrong user manager peer")); }
+            if unsafe {
+                libc::getsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERCRED,
+                    (&mut peer as *mut libc::ucred).cast(),
+                    &mut length,
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if peer.uid != pairing::uid() || peer.pid <= 0 {
+                return Err(invalid("wrong user manager peer"));
+            }
             let process = herdr::process_evidence(peer.pid as u32)?;
             let caller = herdr::process_evidence(std::process::id())?;
-            if process.linux_boot_id != caller.linux_boot_id || process.namespaces.pid != caller.namespaces.pid
-                || process.namespaces.mount != caller.namespaces.mount || process.namespaces.user != caller.namespaces.user
-                || process.namespaces.nspids.len() != caller.namespaces.nspids.len() {
+            if process.linux_boot_id != caller.linux_boot_id
+                || process.namespaces.pid != caller.namespaces.pid
+                || process.namespaces.mount != caller.namespaces.mount
+                || process.namespaces.user != caller.namespaces.user
+                || process.namespaces.nspids.len() != caller.namespaces.nspids.len()
+            {
                 return Err(invalid("user manager is outside original namespaces"));
             }
             let exe = fs::read_link(format!("/proc/{}/exe", process.pid))?;
             crate::config::executable(&exe)?;
-            if exe.file_name().and_then(|s| s.to_str()) != Some("systemd") { return Err(invalid("user manager is not direct systemd")); }
-            let pin = Self { socket, path, object: (before.dev(), before.ino(), before.uid(), before.mode()),
-                executable: executable_stamp(&fs::metadata(format!("/proc/{}/exe", process.pid))?), process };
-            pin.recheck()?;before_deadline(deadline)?;Ok(pin)
+            if exe.file_name().and_then(|s| s.to_str()) != Some("systemd") {
+                return Err(invalid("user manager is not direct systemd"));
+            }
+            let pin = Self {
+                socket,
+                path,
+                object: (before.dev(), before.ino(), before.uid(), before.mode()),
+                executable: executable_stamp(&fs::metadata(format!("/proc/{}/exe", process.pid))?),
+                process,
+            };
+            pin.recheck()?;
+            before_deadline(deadline)?;
+            Ok(pin)
         }
         fn recheck(&self) -> io::Result<()> {
             let now = fs::symlink_metadata(&self.path)?;
             let _ = self.socket.as_raw_fd();
             if (now.dev(), now.ino(), now.uid(), now.mode()) != self.object
                 || herdr::process_evidence(self.process.pid)? != self.process
-                || executable_stamp(&fs::metadata(format!("/proc/{}/exe", self.process.pid))?) != self.executable {
+                || executable_stamp(&fs::metadata(format!("/proc/{}/exe", self.process.pid))?)
+                    != self.executable
+            {
                 return Err(invalid("original manager/socket/executable changed"));
             }
             Ok(())
         }
-        fn output(&self, name: &str, args: &[&str], deadline: Option<Instant>) -> io::Result<String> {
+        fn output(
+            &self,
+            name: &str,
+            args: &[&str],
+            deadline: Option<Instant>,
+        ) -> io::Result<String> {
             use std::os::unix::process::CommandExt;
-            before_deadline(deadline)?;self.recheck()?;
-            let binary = std::env::split_paths(&std::env::var_os("PATH").ok_or_else(|| invalid("manager helper PATH unavailable"))?)
-                .map(|p| p.join(name)).find(|p| crate::config::executable(p).is_ok()).ok_or_else(|| invalid("protected manager helper unavailable"))?;
+            before_deadline(deadline)?;
+            self.recheck()?;
+            let binary = std::env::split_paths(
+                &std::env::var_os("PATH")
+                    .ok_or_else(|| invalid("manager helper PATH unavailable"))?,
+            )
+            .map(|p| p.join(name))
+            .find(|p| crate::config::executable(p).is_ok())
+            .ok_or_else(|| invalid("protected manager helper unavailable"))?;
             let address = format!("unix:path={}", self.path.display());
             let mut command = std::process::Command::new(binary);
-            command.args(args).env("DBUS_SESSION_BUS_ADDRESS", &address).env_remove("SYSTEMD_BUS_ADDRESS")
-                .env_remove("SYSTEMD_HOST").env_remove("SYSTEMD_MACHINE")
-                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
-            unsafe { command.pre_exec(drop_inherited_capabilities); }
-            let result=manager_command_output(&mut command,deadline);
-            self.recheck()?;before_deadline(deadline)?;result
+            command
+                .args(args)
+                .env("DBUS_SESSION_BUS_ADDRESS", &address)
+                .env_remove("SYSTEMD_BUS_ADDRESS")
+                .env_remove("SYSTEMD_HOST")
+                .env_remove("SYSTEMD_MACHINE")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            unsafe {
+                command.pre_exec(drop_inherited_capabilities);
+            }
+            let result = manager_command_output(&mut command, deadline);
+            self.recheck()?;
+            before_deadline(deadline)?;
+            result
         }
-        fn properties(&self, unit: &str, deadline: Option<Instant>) -> io::Result<std::collections::HashMap<String, String>> {
+        fn properties(
+            &self,
+            unit: &str,
+            deadline: Option<Instant>,
+        ) -> io::Result<std::collections::HashMap<String, String>> {
             let text = self.output("systemctl", &["--user", "show", unit, "--all", "--no-pager",
                 "--property=LoadState,MainPID,ControlGroup,Type,UMask,Restart,PrivateUsers,AmbientCapabilities,NoNewPrivileges,KillMode,Transient,PartOf,BindsTo,DropInPaths"],deadline)?;
             let mut properties = std::collections::HashMap::new();
             for line in text.lines() {
-                let (key, value) = line.split_once('=').ok_or_else(|| invalid("malformed unit properties"))?;
-                if properties.insert(key.to_owned(), value.to_owned()).is_some() { return Err(invalid("duplicate unit property")); }
+                let (key, value) = line
+                    .split_once('=')
+                    .ok_or_else(|| invalid("malformed unit properties"))?;
+                if properties
+                    .insert(key.to_owned(), value.to_owned())
+                    .is_some()
+                {
+                    return Err(invalid("duplicate unit property"));
+                }
             }
             Ok(properties)
         }
-        fn argv(&self, unit: &str, expected: &[String], legacy: Option<&[String]>, deadline: Option<Instant>) -> io::Result<()> {
+        fn argv(
+            &self,
+            unit: &str,
+            expected: &[String],
+            legacy: Option<&[String]>,
+            deadline: Option<Instant>,
+        ) -> io::Result<()> {
             // Address the original manager's UNIQUE bus owner, joined to the private peer PID.
-            let bus = self.path.parent().and_then(Path::parent).ok_or_else(|| invalid("manager runtime parent missing"))?.join("bus");
+            let bus = self
+                .path
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| invalid("manager runtime parent missing"))?
+                .join("bus");
             let socket = fs::symlink_metadata(&bus)?;
-            if !socket.file_type().is_socket() || socket.uid() != pairing::uid() { return Err(invalid("user bus socket is not owned")); }
+            if !socket.file_type().is_socket() || socket.uid() != pairing::uid() {
+                return Err(invalid("user bus socket is not owned"));
+            }
             let address = format!("--address=unix:path={}", bus.display());
-            let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
-                "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner", "s", "org.freedesktop.systemd1"],deadline)?;
+            let text = self.output(
+                "busctl",
+                &[
+                    &address,
+                    "--json=short",
+                    "--auto-start=no",
+                    "--allow-interactive-authorization=no",
+                    "--timeout=5s",
+                    "call",
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "GetNameOwner",
+                    "s",
+                    "org.freedesktop.systemd1",
+                ],
+                deadline,
+            )?;
             let reply = native_json::parse(text.as_bytes(), REGISTRY)?;
-            if reply["type"] != "s" { return Err(invalid("manager unique bus owner type differs")); }
-            let owner = reply["data"][0].as_str().filter(|s|s.starts_with(':') && s.len() <= 255).ok_or_else(|| invalid("manager unique bus owner unavailable"))?;
-            let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
-                "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", owner],deadline)?;
+            if reply["type"] != "s" {
+                return Err(invalid("manager unique bus owner type differs"));
+            }
+            let owner = reply["data"][0]
+                .as_str()
+                .filter(|s| s.starts_with(':') && s.len() <= 255)
+                .ok_or_else(|| invalid("manager unique bus owner unavailable"))?;
+            let text = self.output(
+                "busctl",
+                &[
+                    &address,
+                    "--json=short",
+                    "--auto-start=no",
+                    "--allow-interactive-authorization=no",
+                    "--timeout=5s",
+                    "call",
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "GetConnectionUnixProcessID",
+                    "s",
+                    owner,
+                ],
+                deadline,
+            )?;
             let identity = native_json::parse(text.as_bytes(), REGISTRY)?;
-            if identity["type"] != "u" || identity["data"][0].as_u64() != Some(u64::from(self.process.pid)) { return Err(invalid("unit bus owner is not the original qualified manager")); }
-            let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
-                "call", owner, "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "GetUnit", "s", unit],deadline)?;
+            if identity["type"] != "u"
+                || identity["data"][0].as_u64() != Some(u64::from(self.process.pid))
+            {
+                return Err(invalid(
+                    "unit bus owner is not the original qualified manager",
+                ));
+            }
+            let text = self.output(
+                "busctl",
+                &[
+                    &address,
+                    "--json=short",
+                    "--auto-start=no",
+                    "--allow-interactive-authorization=no",
+                    "--timeout=5s",
+                    "call",
+                    owner,
+                    "/org/freedesktop/systemd1",
+                    "org.freedesktop.systemd1.Manager",
+                    "GetUnit",
+                    "s",
+                    unit,
+                ],
+                deadline,
+            )?;
             let reply = native_json::parse(text.as_bytes(), REGISTRY)?;
-            if reply["type"] != "o" { return Err(invalid("manager GetUnit type differs")); }
-            let path = reply["data"][0].as_str().ok_or_else(|| invalid("manager unit object unavailable"))?;
-            for hook in ["ExecCondition","ExecStartPre","ExecStartPost","ExecReload","ExecStop","ExecStopPost"] {
-                let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
-                    "get-property", owner, path, "org.freedesktop.systemd1.Service", hook],deadline)?;
+            if reply["type"] != "o" {
+                return Err(invalid("manager GetUnit type differs"));
+            }
+            let path = reply["data"][0]
+                .as_str()
+                .ok_or_else(|| invalid("manager unit object unavailable"))?;
+            for hook in [
+                "ExecCondition",
+                "ExecStartPre",
+                "ExecStartPost",
+                "ExecReload",
+                "ExecStop",
+                "ExecStopPost",
+            ] {
+                let text = self.output(
+                    "busctl",
+                    &[
+                        &address,
+                        "--json=short",
+                        "--auto-start=no",
+                        "--allow-interactive-authorization=no",
+                        "--timeout=5s",
+                        "get-property",
+                        owner,
+                        path,
+                        "org.freedesktop.systemd1.Service",
+                        hook,
+                    ],
+                    deadline,
+                )?;
                 let hook = native_json::parse(text.as_bytes(), REGISTRY)?;
                 empty_execution_hooks(&hook)?;
             }
-            let text = self.output("busctl", &[&address, "--json=short", "--auto-start=no", "--allow-interactive-authorization=no", "--timeout=5s",
-                "get-property", owner, path, "org.freedesktop.systemd1.Service", "ExecStart"],deadline)?;
+            let text = self.output(
+                "busctl",
+                &[
+                    &address,
+                    "--json=short",
+                    "--auto-start=no",
+                    "--allow-interactive-authorization=no",
+                    "--timeout=5s",
+                    "get-property",
+                    owner,
+                    path,
+                    "org.freedesktop.systemd1.Service",
+                    "ExecStart",
+                ],
+                deadline,
+            )?;
             let reply = native_json::parse(text.as_bytes(), REGISTRY)?;
             if crate::backends::codex::exact_service_argv(&reply, expected).is_ok()
-                || legacy.is_some_and(|legacy|crate::backends::codex::exact_service_argv(&reply, legacy).is_ok()) {
+                || legacy.is_some_and(|legacy| {
+                    crate::backends::codex::exact_service_argv(&reply, legacy).is_ok()
+                })
+            {
                 Ok(())
-            } else { Err(invalid("manager direct ExecStart differs from original owned argv")) }
+            } else {
+                Err(invalid(
+                    "manager direct ExecStart differs from original owned argv",
+                ))
+            }
         }
     }
     fn empty_execution_hooks(property: &serde_json::Value) -> io::Result<()> {
-        if property["type"] != "a(sasbttttuii)" || property["data"].as_array().is_none_or(|commands| !commands.is_empty()) {
+        if property["type"] != "a(sasbttttuii)"
+            || property["data"]
+                .as_array()
+                .is_none_or(|commands| !commands.is_empty())
+        {
             return Err(invalid("unit has unowned execution hooks"));
         }
         Ok(())
     }
-    fn qualified_properties(properties: &std::collections::HashMap<String, String>, group: &str, pid: u32, retained: bool) -> io::Result<()> {
-        for (key, expected) in [("LoadState","loaded"),("Type","exec"),("UMask","0077"),("Restart","no"),("PrivateUsers","no"),
-            ("AmbientCapabilities","cap_wake_alarm"),("NoNewPrivileges","yes"),("PartOf",""),("BindsTo",""),("DropInPaths","")] {
-            if properties.get(key).map(String::as_str) != Some(expected) { return Err(invalid("unit service authority property differs")); }
+    fn qualified_properties(
+        properties: &std::collections::HashMap<String, String>,
+        group: &str,
+        pid: u32,
+        retained: bool,
+    ) -> io::Result<()> {
+        for (key, expected) in [
+            ("LoadState", "loaded"),
+            ("Type", "exec"),
+            ("UMask", "0077"),
+            ("Restart", "no"),
+            ("PrivateUsers", "no"),
+            ("AmbientCapabilities", "cap_wake_alarm"),
+            ("NoNewPrivileges", "yes"),
+            ("PartOf", ""),
+            ("BindsTo", ""),
+            ("DropInPaths", ""),
+        ] {
+            if properties.get(key).map(String::as_str) != Some(expected) {
+                return Err(invalid("unit service authority property differs"));
+            }
         }
-        if properties.get("MainPID").and_then(|p| p.parse::<u32>().ok()) != Some(pid)
+        if properties
+            .get("MainPID")
+            .and_then(|p| p.parse::<u32>().ok())
+            != Some(pid)
             || properties.get("ControlGroup").map(String::as_str) != Some(group)
-            || retained && (properties.get("KillMode").map(String::as_str) != Some("process") || properties.get("Transient").map(String::as_str) != Some("yes")) {
-            return Err(invalid("unit controller epoch/group/lifetime policy differs"));
+            || retained
+                && (properties.get("KillMode").map(String::as_str) != Some("process")
+                    || properties.get("Transient").map(String::as_str) != Some("yes"))
+        {
+            return Err(invalid(
+                "unit controller epoch/group/lifetime policy differs",
+            ));
         }
         Ok(())
     }
     fn direct_child(status: &str, controller: u32) -> bool {
         let mut parents = status.lines().filter_map(|s| s.strip_prefix("PPid:"));
-        parents.next().and_then(|p|p.trim().parse::<u32>().ok()) == Some(controller) && parents.next().is_none()
+        parents.next().and_then(|p| p.trim().parse::<u32>().ok()) == Some(controller)
+            && parents.next().is_none()
     }
     /// Runtime identity only. Artifact hashes stay with the caller's existing held descriptors.
     pub struct UnitWakePin {
-        process: ProcessEvidence, executable: File, stamp: ExecutableStamp,
-        unit: String, group: String, manager: UnitManager,
-        controller: ProcessEvidence, controller_executable: ExecutableStamp, argv: Vec<String>,
-        retained: bool, failed: AtomicBool,
+        process: ProcessEvidence,
+        executable: File,
+        stamp: ExecutableStamp,
+        unit: String,
+        group: String,
+        manager: UnitManager,
+        controller: ProcessEvidence,
+        controller_executable: ExecutableStamp,
+        argv: Vec<String>,
+        retained: bool,
+        failed: AtomicBool,
     }
     impl UnitWakePin {
-        pub fn capture(process: ProcessEvidence, executable: &File, expected_unit: &str, deadline: Option<Instant>) -> io::Result<Self> {
+        pub fn capture(
+            process: ProcessEvidence,
+            executable: &File,
+            expected_unit: &str,
+            deadline: Option<Instant>,
+        ) -> io::Result<Self> {
             before_deadline(deadline)?;
-            if herdr::process_evidence(process.pid)? != process { return Err(invalid("unit process differs from original evidence before observation")); }
-            let group = unit_cgroup(&bounded_proc(process.pid, "cgroup")?, expected_unit)?.to_owned();
+            if herdr::process_evidence(process.pid)? != process {
+                return Err(invalid(
+                    "unit process differs from original evidence before observation",
+                ));
+            }
+            let group =
+                unit_cgroup(&bounded_proc(process.pid, "cgroup")?, expected_unit)?.to_owned();
             let manager = UnitManager::capture(deadline)?;
-            let properties = manager.properties(expected_unit,deadline)?;
-            let pid = properties.get("MainPID").and_then(|s| s.parse::<u32>().ok()).filter(|p| *p > 0).ok_or_else(|| invalid("unit MainPID unavailable"))?;
+            let properties = manager.properties(expected_unit, deadline)?;
+            let pid = properties
+                .get("MainPID")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|p| *p > 0)
+                .ok_or_else(|| invalid("unit MainPID unavailable"))?;
             let controller = herdr::process_evidence(pid)?;
             let argv = process_arguments(&controller)?;
             let retained = pid != process.pid || argv.iter().any(|s| s == "--physical-mvp");
-            if expected_unit != "goatr.service" && properties.get("Transient").map(String::as_str) != Some("yes") {
-                return Err(invalid("non-durable unit context requires a fresh manager-owned transient service"));
+            if expected_unit != "goatr.service"
+                && properties.get("Transient").map(String::as_str) != Some("yes")
+            {
+                return Err(invalid(
+                    "non-durable unit context requires a fresh manager-owned transient service",
+                ));
             }
             if pid != process.pid {
                 let status = bounded_proc(process.pid, "status")?;
-                if !direct_child(&status,pid) {
-                    return Err(invalid("inherited serving process is not the original full controller's direct child"));
+                if !direct_child(&status, pid) {
+                    return Err(invalid(
+                        "inherited serving process is not the original full controller's direct child",
+                    ));
                 }
             }
-            manager.argv(expected_unit, &argv, None,deadline)?;
+            manager.argv(expected_unit, &argv, None, deadline)?;
             qualified_properties(&properties, &group, pid, retained)?;
-            let pin = Self { stamp: executable_stamp(&executable.metadata()?), executable: executable.try_clone()?, process,
-                unit: expected_unit.to_owned(), group, manager,
-                controller_executable: executable_stamp(&fs::metadata(format!("/proc/{pid}/exe"))?), controller, argv,
-                retained, failed: AtomicBool::new(false) };
-            pin.recheck(deadline)?;Ok(pin)
+            let pin = Self {
+                stamp: executable_stamp(&executable.metadata()?),
+                executable: executable.try_clone()?,
+                process,
+                unit: expected_unit.to_owned(),
+                group,
+                manager,
+                controller_executable: executable_stamp(&fs::metadata(format!("/proc/{pid}/exe"))?),
+                controller,
+                argv,
+                retained,
+                failed: AtomicBool::new(false),
+            };
+            pin.recheck(deadline)?;
+            Ok(pin)
         }
-        pub fn unit(&self) -> &str { &self.unit }
-        pub fn cgroup(&self) -> &str { &self.group }
-        pub fn manager(&self) -> &ProcessEvidence { &self.manager.process }
-        pub fn process(&self) -> &ProcessEvidence { &self.process }
-        pub fn failed(&self) -> bool { self.failed.load(Ordering::Acquire) }
-        pub fn observe<T>(&self, result: io::Result<T>) -> io::Result<T> { sticky_result(&self.failed, result) }
+        pub fn unit(&self) -> &str {
+            &self.unit
+        }
+        pub fn cgroup(&self) -> &str {
+            &self.group
+        }
+        pub fn manager(&self) -> &ProcessEvidence {
+            &self.manager.process
+        }
+        pub fn process(&self) -> &ProcessEvidence {
+            &self.process
+        }
+        pub fn failed(&self) -> bool {
+            self.failed.load(Ordering::Acquire)
+        }
+        pub fn observe<T>(&self, result: io::Result<T>) -> io::Result<T> {
+            sticky_result(&self.failed, result)
+        }
         pub fn manager_output(&self, args: &[&str]) -> io::Result<String> {
-            sticky_result(&self.failed, self.manager.output("systemctl", args,None))
+            sticky_result(&self.failed, self.manager.output("systemctl", args, None))
         }
-        pub(crate) fn owned_serve_argv(&self, current: &[String], legacy: &[String]) -> io::Result<()> {
-            sticky_result(&self.failed, self.manager.argv("goatr.service", current, Some(legacy),None))
+        pub(crate) fn owned_serve_argv(
+            &self,
+            current: &[String],
+            legacy: &[String],
+        ) -> io::Result<()> {
+            sticky_result(
+                &self.failed,
+                self.manager
+                    .argv("goatr.service", current, Some(legacy), None),
+            )
         }
         pub fn serving_controller(&self, deadline: Option<Instant>) -> io::Result<()> {
             let result = (|| {
                 self.recheck(deadline)?;
-                if self.process != self.controller { return Err(invalid("serving retention requires the original manager MainPID controller")); }
-                qualified_properties(&self.manager.properties(&self.unit,deadline)?, &self.group, self.controller.pid, true)?;
+                if self.process != self.controller {
+                    return Err(invalid(
+                        "serving retention requires the original manager MainPID controller",
+                    ));
+                }
+                qualified_properties(
+                    &self.manager.properties(&self.unit, deadline)?,
+                    &self.group,
+                    self.controller.pid,
+                    true,
+                )?;
                 before_deadline(deadline)
             })();
             sticky_result(&self.failed, result)
         }
-        pub fn capture_child(&self, process: ProcessEvidence, executable: &File, deadline: Instant) -> io::Result<Self> {
+        pub fn capture_child(
+            &self,
+            process: ProcessEvidence,
+            executable: &File,
+            deadline: Instant,
+        ) -> io::Result<Self> {
             let result = (|| {
                 self.serving_controller(Some(deadline))?;
-                let child = Self::capture(process, executable, &self.unit,Some(deadline))?;
-                if child.group != self.group || child.controller != self.controller || child.manager.process != self.manager.process {
-                    return Err(invalid("serving child differs from already qualified controller/manager/full path"));
+                let child = Self::capture(process, executable, &self.unit, Some(deadline))?;
+                if child.group != self.group
+                    || child.controller != self.controller
+                    || child.manager.process != self.manager.process
+                {
+                    return Err(invalid(
+                        "serving child differs from already qualified controller/manager/full path",
+                    ));
                 }
-                self.recheck(Some(deadline))?;Ok(child)
+                self.recheck(Some(deadline))?;
+                Ok(child)
             })();
             sticky_result(&self.failed, result)
         }
         pub fn recheck(&self, deadline: Option<Instant>) -> io::Result<CapabilityState> {
-            if self.failed() { return Err(invalid("original unit Wake profile was permanently invalidated")); }
+            if self.failed() {
+                return Err(invalid(
+                    "original unit Wake profile was permanently invalidated",
+                ));
+            }
             let result = (|| {
                 before_deadline(deadline)?;
-                require_inspectable(self.process.pid)?;require_inspectable(self.controller.pid)?;
-                if herdr::process_evidence(self.process.pid)? != self.process || herdr::process_evidence(self.controller.pid)? != self.controller
+                require_inspectable(self.process.pid)?;
+                require_inspectable(self.controller.pid)?;
+                if herdr::process_evidence(self.process.pid)? != self.process
+                    || herdr::process_evidence(self.controller.pid)? != self.controller
                     || executable_stamp(&self.executable.metadata()?) != self.stamp
-                    || executable_stamp(&fs::metadata(format!("/proc/{}/exe", self.process.pid))?) != self.stamp
-                    || executable_stamp(&fs::metadata(format!("/proc/{}/exe", self.controller.pid))?) != self.controller_executable
-                    || process_arguments(&self.controller)? != self.argv {
-                    return Err(invalid("original unit process/controller/executable changed"));
+                    || executable_stamp(&fs::metadata(format!("/proc/{}/exe", self.process.pid))?)
+                        != self.stamp
+                    || executable_stamp(&fs::metadata(format!(
+                        "/proc/{}/exe",
+                        self.controller.pid
+                    ))?) != self.controller_executable
+                    || process_arguments(&self.controller)? != self.argv
+                {
+                    return Err(invalid(
+                        "original unit process/controller/executable changed",
+                    ));
                 }
                 for process in [&self.process, &self.controller] {
                     if unit_cgroup(&bounded_proc(process.pid, "cgroup")?, &self.unit)? != self.group
-                        || !capability_state(&bounded_proc(process.pid, "status")?)?.unit_wake() {
-                        return Err(invalid("original unit full path/caps/NNP/inspectability changed"));
+                        || !capability_state(&bounded_proc(process.pid, "status")?)?.unit_wake()
+                    {
+                        return Err(invalid(
+                            "original unit full path/caps/NNP/inspectability changed",
+                        ));
                     }
                 }
-                qualified_properties(&self.manager.properties(&self.unit,deadline)?, &self.group, self.controller.pid, self.retained)?;
-                self.manager.argv(&self.unit, &self.argv, None,deadline)?;
-                if herdr::process_evidence(self.process.pid)? != self.process || herdr::process_evidence(self.controller.pid)? != self.controller {
+                qualified_properties(
+                    &self.manager.properties(&self.unit, deadline)?,
+                    &self.group,
+                    self.controller.pid,
+                    self.retained,
+                )?;
+                self.manager.argv(&self.unit, &self.argv, None, deadline)?;
+                if herdr::process_evidence(self.process.pid)? != self.process
+                    || herdr::process_evidence(self.controller.pid)? != self.controller
+                {
                     return Err(invalid("original unit epoch changed across observation"));
                 }
                 let state = capability_state(&bounded_proc(self.process.pid, "status")?)?;
-                if !state.unit_wake() || unit_cgroup(&bounded_proc(self.process.pid, "cgroup")?, &self.unit)? != self.group
+                if !state.unit_wake()
+                    || unit_cgroup(&bounded_proc(self.process.pid, "cgroup")?, &self.unit)?
+                        != self.group
                     || !capability_state(&bounded_proc(self.controller.pid, "status")?)?.unit_wake()
-                    || unit_cgroup(&bounded_proc(self.controller.pid, "cgroup")?, &self.unit)? != self.group
-                    || herdr::process_evidence(self.process.pid)? != self.process || herdr::process_evidence(self.controller.pid)? != self.controller {
+                    || unit_cgroup(&bounded_proc(self.controller.pid, "cgroup")?, &self.unit)?
+                        != self.group
+                    || herdr::process_evidence(self.process.pid)? != self.process
+                    || herdr::process_evidence(self.controller.pid)? != self.controller
+                {
                     return Err(invalid("final original unit profile/epoch changed"));
                 }
-                require_inspectable(self.process.pid)?;require_inspectable(self.controller.pid)?;
+                require_inspectable(self.process.pid)?;
+                require_inspectable(self.controller.pid)?;
                 before_deadline(deadline)?;
                 Ok(state)
             })();
@@ -452,47 +909,84 @@ mod unit_wake {
         }
     }
     /// Called synchronously before records, admin effects and worker construction.
-    pub fn prepare_current_executable(retain: bool, expected_unit: Option<&str>) -> io::Result<Option<UnitWakePin>> {
+    pub fn prepare_current_executable(
+        retain: bool,
+        expected_unit: Option<&str>,
+    ) -> io::Result<Option<UnitWakePin>> {
         if !retain {
             drop_inherited_capabilities()?;
-            if !current_capabilities()?.zero() { return Err(invalid("drop role retained capabilities")); }
-            if expected_unit.is_some() { return Err(invalid("drop role cannot request unit authority")); }
+            if !current_capabilities()?.zero() {
+                return Err(invalid("drop role retained capabilities"));
+            }
+            if expected_unit.is_some() {
+                return Err(invalid("drop role cannot request unit authority"));
+            }
             return Ok(None);
         }
         match expected_unit {
             Some(unit) => {
                 let process = herdr::process_evidence(std::process::id())?;
                 let executable = File::open("/proc/self/exe")?;
-                UnitWakePin::capture(process, &executable, unit,None).map(Some)
+                UnitWakePin::capture(process, &executable, unit, None).map(Some)
             }
             None => {
                 let state = current_capabilities()?;
                 if state.permitted != 0 || state.effective != 0 || state.ambient != 0 {
-                    return Err(invalid("active retained capability requires explicit qualified expected-unit context"));
+                    return Err(invalid(
+                        "active retained capability requires explicit qualified expected-unit context",
+                    ));
                 }
                 // Inheritable-only manager residue is discarded, never treated as authority.
-                if !state.zero() { drop_inherited_capabilities()?; }
-                if !current_capabilities()?.zero() { return Err(invalid("ordinary role is not capability-free")); }
+                if !state.zero() {
+                    drop_inherited_capabilities()?;
+                }
+                if !current_capabilities()?.zero() {
+                    return Err(invalid("ordinary role is not capability-free"));
+                }
                 Ok(None)
             }
         }
     }
 
     /// Public epoch only, retained before the FIRST protected process proof. Never publication authority.
-    pub struct ProcessStart { caller: ProcessEvidence, pid: u32, start: u64, boot: Uuid }
+    pub struct ProcessStart {
+        caller: ProcessEvidence,
+        pid: u32,
+        start: u64,
+        boot: Uuid,
+    }
     impl ProcessStart {
         pub fn capture(pid: u32) -> io::Result<Self> {
             let caller = herdr::process_evidence(std::process::id())?;
-            let stat = fs::read_to_string("/proc/self/stat")?; let status = fs::read_to_string("/proc/self/status")?;
+            let stat = fs::read_to_string("/proc/self/stat")?;
+            let status = fs::read_to_string("/proc/self/status")?;
             herdr::validate_procfs_view(&stat, &status, std::process::id())?;
-            let start = herdr::process_start_ticks(&fs::read_to_string(format!("/proc/{pid}/stat"))?, pid)?;
-            let boot = Uuid::new(fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim()).map_err(|_| invalid("boot identity unavailable"))?;
-            let pin = Self { caller, pid, start, boot }; pin.check(pid)?; Ok(pin)
+            let start =
+                herdr::process_start_ticks(&fs::read_to_string(format!("/proc/{pid}/stat"))?, pid)?;
+            let boot = Uuid::new(fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim())
+                .map_err(|_| invalid("boot identity unavailable"))?;
+            let pin = Self {
+                caller,
+                pid,
+                start,
+                boot,
+            };
+            pin.check(pid)?;
+            Ok(pin)
         }
         pub fn check(&self, pid: u32) -> io::Result<()> {
-            if self.caller.pid != std::process::id() || pid != self.pid || herdr::process_evidence(self.caller.pid)? != self.caller
-                || herdr::process_start_ticks(&fs::read_to_string(format!("/proc/{pid}/stat"))?, pid)? != self.start
-                || Uuid::new(fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim()).ok().as_ref() != Some(&self.boot) {
+            if self.caller.pid != std::process::id()
+                || pid != self.pid
+                || herdr::process_evidence(self.caller.pid)? != self.caller
+                || herdr::process_start_ticks(
+                    &fs::read_to_string(format!("/proc/{pid}/stat"))?,
+                    pid,
+                )? != self.start
+                || Uuid::new(fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim())
+                    .ok()
+                    .as_ref()
+                    != Some(&self.boot)
+            {
                 return Err(invalid("pending original process/public epoch changed"));
             }
             Ok(())
@@ -500,158 +994,390 @@ mod unit_wake {
         pub fn evidence(&self, pid: u32) -> io::Result<ProcessEvidence> {
             self.check(pid)?;
             let proof = herdr::process_evidence(pid)?;
-            if proof.pid != self.pid || proof.start_ticks != self.start || proof.linux_boot_id != self.boot { return Err(invalid("first process proof differs from original public epoch")); }
-            self.check(pid)?; Ok(proof)
+            if proof.pid != self.pid
+                || proof.start_ticks != self.start
+                || proof.linux_boot_id != self.boot
+            {
+                return Err(invalid(
+                    "first process proof differs from original public epoch",
+                ));
+            }
+            self.check(pid)?;
+            Ok(proof)
         }
     }
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::{os::{fd::{AsRawFd,FromRawFd},unix::{net::UnixStream as TestChannel,process::CommandExt}},process::{Command,Stdio}};
+        use std::{
+            os::{
+                fd::{AsRawFd, FromRawFd},
+                unix::{net::UnixStream as TestChannel, process::CommandExt},
+            },
+            process::{Command, Stdio},
+        };
         struct FileWakeFixtureChild(std::process::Child);
         impl FileWakeFixtureChild {
-            fn exit(&mut self)->std::process::ExitStatus {
-                let deadline=std::time::Instant::now()+Duration::from_secs(5);
-                loop {if let Some(status)=self.0.try_wait().unwrap(){return status;}assert!(std::time::Instant::now()<deadline,"owned fixture exit timed out");std::thread::sleep(Duration::from_millis(10));}
+            fn exit(&mut self) -> std::process::ExitStatus {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    if let Some(status) = self.0.try_wait().unwrap() {
+                        return status;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "owned fixture exit timed out"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
         }
-        impl Drop for FileWakeFixtureChild {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        fn fixture_endpoint(key:&str)->Option<TestChannel> {
-            let fd=std::env::var(key).ok()?.parse::<i32>().unwrap();assert!(fd>2);
-            let channel=unsafe{TestChannel::from_raw_fd(fd)};
-            channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();Some(channel)
+        impl Drop for FileWakeFixtureChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
         }
-        fn spawn_fixture(mut command:Command,endpoint:&TestChannel,key:&str)->FileWakeFixtureChild {
-            let fd=endpoint.as_raw_fd();assert!(fd>2);command.env(key,fd.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-            unsafe{command.pre_exec(move||{drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
+        fn fixture_endpoint(key: &str) -> Option<TestChannel> {
+            let fd = std::env::var(key).ok()?.parse::<i32>().unwrap();
+            assert!(fd > 2);
+            let channel = unsafe { TestChannel::from_raw_fd(fd) };
+            channel
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            channel
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            Some(channel)
+        }
+        fn spawn_fixture(
+            mut command: Command,
+            endpoint: &TestChannel,
+            key: &str,
+        ) -> FileWakeFixtureChild {
+            let fd = endpoint.as_raw_fd();
+            assert!(fd > 2);
+            command
+                .env(key, fd.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            unsafe {
+                command.pre_exec(move || {
+                    drop_inherited_capabilities()?;
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
             FileWakeFixtureChild(command.spawn().unwrap())
         }
-        fn fixture_state(channel:&mut TestChannel,expected:u8) {let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,[expected]);}
-        fn status(i:u64,p:u64,e:u64,a:u64,n:bool)->String {
-            format!("Name:\tPRIVATE\nCapInh:\t{i:016x}\nCapPrm:\t{p:016x}\nCapEff:\t{e:016x}\nCapAmb:\t{a:016x}\nNoNewPrivs:\t{}\n",u8::from(n))
+        fn fixture_state(channel: &mut TestChannel, expected: u8) {
+            let mut state = [0];
+            channel.read_exact(&mut state).unwrap();
+            assert_eq!(state, [expected]);
+        }
+        fn status(i: u64, p: u64, e: u64, a: u64, n: bool) -> String {
+            format!(
+                "Name:\tPRIVATE\nCapInh:\t{i:016x}\nCapPrm:\t{p:016x}\nCapEff:\t{e:016x}\nCapAmb:\t{a:016x}\nNoNewPrivs:\t{}\n",
+                u8::from(n)
+            )
         }
         #[test]
         fn manager_queries_share_the_original_deadline_and_reap_the_owned_helper() {
-            if let Some(mut channel)=fixture_endpoint("GOATR_MANAGER_DEADLINE_TEST_FD") {
+            if let Some(mut channel) = fixture_endpoint("GOATR_MANAGER_DEADLINE_TEST_FD") {
                 assert!(current_capabilities().unwrap().zero());
-                channel.write_all(&std::process::id().to_be_bytes()).unwrap();
-                let mut hold=[0];let _=channel.read_exact(&mut hold);return;
+                channel
+                    .write_all(&std::process::id().to_be_bytes())
+                    .unwrap();
+                let mut hold = [0];
+                let _ = channel.read_exact(&mut hold);
+                return;
             }
-            let start=Instant::now();let original=start+Duration::from_secs(20);
-            assert_eq!(command_deadline(Some(original),start).unwrap(),start+Duration::from_secs(5));
-            assert_eq!(command_deadline(Some(original),start+Duration::from_secs(18)).unwrap(),original);
-            for observed in [original,original+Duration::from_secs(1)] {
-                assert_eq!(command_deadline(Some(original),observed).unwrap_err().kind(),io::ErrorKind::TimedOut);
+            let start = Instant::now();
+            let original = start + Duration::from_secs(20);
+            assert_eq!(
+                command_deadline(Some(original), start).unwrap(),
+                start + Duration::from_secs(5)
+            );
+            assert_eq!(
+                command_deadline(Some(original), start + Duration::from_secs(18)).unwrap(),
+                original
+            );
+            for observed in [original, original + Duration::from_secs(1)] {
+                assert_eq!(
+                    command_deadline(Some(original), observed)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::TimedOut
+                );
             }
-            let mut absent=Command::new("/nonexistent-goatr-manager-deadline-helper");
-            assert_eq!(manager_command_output(&mut absent,Some(Instant::now())).unwrap_err().kind(),io::ErrorKind::TimedOut);
-            let test=concat!(module_path!(),"::manager_queries_share_the_original_deadline_and_reap_the_owned_helper");
-            let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
-            let (mut channel,endpoint)=TestChannel::pair().unwrap();
-            channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-            let fd=endpoint.as_raw_fd();assert!(fd>2);
-            let mut command=Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact",test,"--test-threads=1"]).env("GOATR_MANAGER_DEADLINE_TEST_FD",fd.to_string())
-                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-            unsafe{command.pre_exec(move||{drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
-            let deadline=Instant::now()+Duration::from_secs(3);
+            let mut absent = Command::new("/nonexistent-goatr-manager-deadline-helper");
+            assert_eq!(
+                manager_command_output(&mut absent, Some(Instant::now()))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::TimedOut
+            );
+            let test = concat!(
+                module_path!(),
+                "::manager_queries_share_the_original_deadline_and_reap_the_owned_helper"
+            );
+            let test = test
+                .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+                .unwrap();
+            let (mut channel, endpoint) = TestChannel::pair().unwrap();
+            channel
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            channel
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let fd = endpoint.as_raw_fd();
+            assert!(fd > 2);
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", test, "--test-threads=1"])
+                .env("GOATR_MANAGER_DEADLINE_TEST_FD", fd.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            unsafe {
+                command.pre_exec(move || {
+                    drop_inherited_capabilities()?;
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let deadline = Instant::now() + Duration::from_secs(3);
             std::thread::scope(|scope| {
-                let worker=scope.spawn(move||manager_command_output(&mut command,Some(deadline)));
+                let worker =
+                    scope.spawn(move || manager_command_output(&mut command, Some(deadline)));
                 // Retain the parent endpoint until spawn; only fixed IPC, never libtest/stdout markers.
-                let mut bytes=[0;4];channel.read_exact(&mut bytes).unwrap();drop(endpoint);
-                let pid=u32::from_be_bytes(bytes);let original=ProcessStart::capture(pid).unwrap();
+                let mut bytes = [0; 4];
+                channel.read_exact(&mut bytes).unwrap();
+                drop(endpoint);
+                let pid = u32::from_be_bytes(bytes);
+                let original = ProcessStart::capture(pid).unwrap();
                 original.evidence(pid).unwrap();
-                assert_eq!(worker.join().unwrap().unwrap_err().kind(),io::ErrorKind::TimedOut);
-                assert_eq!(fs::symlink_metadata(format!("/proc/{pid}")).unwrap_err().kind(),io::ErrorKind::NotFound);
-                assert_eq!(unsafe{libc::waitpid(pid as i32,std::ptr::null_mut(),libc::WNOHANG)},-1);
-                assert_eq!(io::Error::last_os_error().raw_os_error(),Some(libc::ECHILD));
+                assert_eq!(
+                    worker.join().unwrap().unwrap_err().kind(),
+                    io::ErrorKind::TimedOut
+                );
+                assert_eq!(
+                    fs::symlink_metadata(format!("/proc/{pid}"))
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::NotFound
+                );
+                assert_eq!(
+                    unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) },
+                    -1
+                );
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ECHILD)
+                );
                 // A second command cannot acquire a fresh budget after the shared deadline.
-                assert_eq!(manager_command_output(&mut absent,Some(deadline)).unwrap_err().kind(),io::ErrorKind::TimedOut);
+                assert_eq!(
+                    manager_command_output(&mut absent, Some(deadline))
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::TimedOut
+                );
             });
         }
         #[test]
         fn unit_profile_requires_all_four_exact_masks_and_nnp() {
-            assert!(capability_state(&status(WAKE,WAKE,WAKE,WAKE,true)).unwrap().unit_wake());
-            for (i,p,e,a,n) in [(0,WAKE,WAKE,WAKE,true),(WAKE,0,WAKE,WAKE,true),(WAKE,WAKE,0,WAKE,true),
-                (WAKE,WAKE,WAKE,0,true),(WAKE,WAKE,WAKE,WAKE,false),(WAKE|1,WAKE,WAKE,WAKE,true),(0,WAKE,WAKE,0,false)] {
-                assert!(!capability_state(&status(i,p,e,a,n)).unwrap().unit_wake());
+            assert!(
+                capability_state(&status(WAKE, WAKE, WAKE, WAKE, true))
+                    .unwrap()
+                    .unit_wake()
+            );
+            for (i, p, e, a, n) in [
+                (0, WAKE, WAKE, WAKE, true),
+                (WAKE, 0, WAKE, WAKE, true),
+                (WAKE, WAKE, 0, WAKE, true),
+                (WAKE, WAKE, WAKE, 0, true),
+                (WAKE, WAKE, WAKE, WAKE, false),
+                (WAKE | 1, WAKE, WAKE, WAKE, true),
+                (0, WAKE, WAKE, 0, false),
+            ] {
+                assert!(
+                    !capability_state(&status(i, p, e, a, n))
+                        .unwrap()
+                        .unit_wake()
+                );
             }
-            let valid=status(0,0,0,0,false);
-            for bad in [format!("{valid}CapEff:\t0000000000000000\n"),valid.replace("NoNewPrivs:\t0\n",""),
-                valid.replace("NoNewPrivs:\t0","NoNewPrivs:\t2"),"x".repeat(65_537)] { assert!(capability_state(&bad).is_err()); }
+            let valid = status(0, 0, 0, 0, false);
+            for bad in [
+                format!("{valid}CapEff:\t0000000000000000\n"),
+                valid.replace("NoNewPrivs:\t0\n", ""),
+                valid.replace("NoNewPrivs:\t0", "NoNewPrivs:\t2"),
+                "x".repeat(65_537),
+            ] {
+                assert!(capability_state(&bad).is_err());
+            }
         }
         #[test]
         fn execution_hooks_require_typed_empty_commands_and_latch_invalid_observations() {
-            let empty=serde_json::json!({"type":"a(sasbttttuii)","data":[]});
+            let empty = serde_json::json!({"type":"a(sasbttttuii)","data":[]});
             empty_execution_hooks(&empty).unwrap();
             for property in [
-                serde_json::json!({}),serde_json::json!({"type":"a(sasbttttuii)"}),serde_json::json!({"data":[]}),
-                serde_json::json!({"type":"as","data":[]}),serde_json::json!({"type":"a(sasbttttuii)","data":null}),
+                serde_json::json!({}),
+                serde_json::json!({"type":"a(sasbttttuii)"}),
+                serde_json::json!({"data":[]}),
+                serde_json::json!({"type":"as","data":[]}),
+                serde_json::json!({"type":"a(sasbttttuii)","data":null}),
                 serde_json::json!({"type":"a(sasbttttuii)","data":{}}),
                 serde_json::json!({"type":"a(sasbttttuii)","data":[["/foreign/helper",["/foreign/helper"],false,0,0,0,0,123,0,0]]}),
             ] {
-                let failed=AtomicBool::new(false);
-                assert!(sticky_result(&failed,empty_execution_hooks(&property)).is_err());
-                assert!(sticky_result(&failed,empty_execution_hooks(&empty)).is_err());
+                let failed = AtomicBool::new(false);
+                assert!(sticky_result(&failed, empty_execution_hooks(&property)).is_err());
+                assert!(sticky_result(&failed, empty_execution_hooks(&empty)).is_err());
             }
         }
         #[test]
         fn canonical_full_cgroup_and_manager_join_cannot_be_rebased() {
-            let unit="goatr-owned.service"; let path="/user.slice/user-1000.slice/user@1000.service/app.slice/goatr-owned.service";
-            let text=format!("0::{path}\n"); assert_eq!(unit_cgroup(&text,unit).unwrap(),path);
-            for bad in [format!("{text}\n"),format!("{text}{text}"),text.replace("app.slice/","app.slice/../"),
-                text.replace("app.slice/","app.slice//"),text.replace("0::","1::"),text.replace(".service\n",".service/child\n")] {
-                assert!(unit_cgroup(&bad,unit).is_err());
+            let unit = "goatr-owned.service";
+            let path =
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/goatr-owned.service";
+            let text = format!("0::{path}\n");
+            assert_eq!(unit_cgroup(&text, unit).unwrap(), path);
+            for bad in [
+                format!("{text}\n"),
+                format!("{text}{text}"),
+                text.replace("app.slice/", "app.slice/../"),
+                text.replace("app.slice/", "app.slice//"),
+                text.replace("0::", "1::"),
+                text.replace(".service\n", ".service/child\n"),
+            ] {
+                assert!(unit_cgroup(&bad, unit).is_err());
             }
-            let mut properties=std::collections::HashMap::new();
-            for (k,v) in [("LoadState","loaded"),("Type","exec"),("UMask","0077"),("Restart","no"),("PrivateUsers","no"),
-                ("AmbientCapabilities","cap_wake_alarm"),("NoNewPrivileges","yes"),("PartOf",""),("BindsTo",""),("DropInPaths",""),
-                ("MainPID","123"),("ControlGroup",path),("KillMode","process"),("Transient","yes")] { properties.insert(k.into(),v.into()); }
-            qualified_properties(&properties,path,123,true).unwrap();
-            let status=bounded_proc(std::process::id(),"status").unwrap();
-            let parent=status.lines().find_map(|line|line.strip_prefix("PPid:")).unwrap().trim().parse::<u32>().unwrap();
-            assert!(direct_child(&status,parent));assert!(!direct_child(&status,parent.saturating_add(1)));
-            assert!(!direct_child(&format!("{status}PPid:\t{parent}\n"),parent));
-            for (key,value) in [("MainPID","124"),("ControlGroup","/foreign/goatr-owned.service"),("KillMode","control-group"),("NoNewPrivileges","no"),
-                ("DropInPaths","/foreign/override.conf")] {
-                let mut bad=properties.clone();bad.insert(key.into(),value.into());
-                let failed=AtomicBool::new(false);assert!(sticky_result(&failed,qualified_properties(&bad,path,123,true)).is_err());
-                assert!(sticky_result(&failed,qualified_properties(&properties,path,123,true)).is_err());
+            let mut properties = std::collections::HashMap::new();
+            for (k, v) in [
+                ("LoadState", "loaded"),
+                ("Type", "exec"),
+                ("UMask", "0077"),
+                ("Restart", "no"),
+                ("PrivateUsers", "no"),
+                ("AmbientCapabilities", "cap_wake_alarm"),
+                ("NoNewPrivileges", "yes"),
+                ("PartOf", ""),
+                ("BindsTo", ""),
+                ("DropInPaths", ""),
+                ("MainPID", "123"),
+                ("ControlGroup", path),
+                ("KillMode", "process"),
+                ("Transient", "yes"),
+            ] {
+                properties.insert(k.into(), v.into());
+            }
+            qualified_properties(&properties, path, 123, true).unwrap();
+            let status = bounded_proc(std::process::id(), "status").unwrap();
+            let parent = status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:"))
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            assert!(direct_child(&status, parent));
+            assert!(!direct_child(&status, parent.saturating_add(1)));
+            assert!(!direct_child(&format!("{status}PPid:\t{parent}\n"), parent));
+            for (key, value) in [
+                ("MainPID", "124"),
+                ("ControlGroup", "/foreign/goatr-owned.service"),
+                ("KillMode", "control-group"),
+                ("NoNewPrivileges", "no"),
+                ("DropInPaths", "/foreign/override.conf"),
+            ] {
+                let mut bad = properties.clone();
+                bad.insert(key.into(), value.into());
+                let failed = AtomicBool::new(false);
+                assert!(
+                    sticky_result(&failed, qualified_properties(&bad, path, 123, true)).is_err()
+                );
+                assert!(
+                    sticky_result(&failed, qualified_properties(&properties, path, 123, true))
+                        .is_err()
+                );
             }
         }
         #[test]
         fn owned_dumpability_restore_preserves_public_epoch_and_no_file_roles_do_not_toggle() {
-            if let Some(mut channel)=fixture_endpoint("GOATR_DUMPABILITY_TEST_FD") {
+            if let Some(mut channel) = fixture_endpoint("GOATR_DUMPABILITY_TEST_FD") {
                 drop_inherited_capabilities().unwrap();
-                assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);assert!(!dumpable().unwrap());
-                assert!(prepare_current_executable(true,None).unwrap().is_none());assert!(!dumpable().unwrap());
-                assert!(prepare_current_executable(false,None).unwrap().is_none());assert!(!dumpable().unwrap());assert!(current_capabilities().unwrap().zero());
-                let failed=AtomicBool::new(false);
-                assert!(sticky_result(&failed,require_inspectable(std::process::id())).is_err());
-                channel.write_all(b"0").unwrap();fixture_state(&mut channel,b'1');
-                assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,1,0,0,0)},0);
-                assert!(require_inspectable(std::process::id()).is_ok());assert!(sticky_result(&failed,Ok(())).is_err());
-                channel.write_all(b"1").unwrap();fixture_state(&mut channel,b'2');return;
+                assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) }, 0);
+                assert!(!dumpable().unwrap());
+                assert!(prepare_current_executable(true, None).unwrap().is_none());
+                assert!(!dumpable().unwrap());
+                assert!(prepare_current_executable(false, None).unwrap().is_none());
+                assert!(!dumpable().unwrap());
+                assert!(current_capabilities().unwrap().zero());
+                let failed = AtomicBool::new(false);
+                assert!(sticky_result(&failed, require_inspectable(std::process::id())).is_err());
+                channel.write_all(b"0").unwrap();
+                fixture_state(&mut channel, b'1');
+                assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) }, 0);
+                assert!(require_inspectable(std::process::id()).is_ok());
+                assert!(sticky_result(&failed, Ok(())).is_err());
+                channel.write_all(b"1").unwrap();
+                fixture_state(&mut channel, b'2');
+                return;
             }
-            let test=concat!(module_path!(),"::owned_dumpability_restore_preserves_public_epoch_and_no_file_roles_do_not_toggle");
-            let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
-            let (mut channel,endpoint)=TestChannel::pair().unwrap();channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-            let mut command=Command::new(std::env::current_exe().unwrap());command.args(["--exact",test,"--test-threads=1"]);
-            let mut child=spawn_fixture(command,&endpoint,"GOATR_DUMPABILITY_TEST_FD");drop(endpoint);fixture_state(&mut channel,b'0');
-            let pin=ProcessStart::capture(child.0.id()).unwrap();let failed=AtomicBool::new(false);
-            let denied=pin.evidence(child.0.id());assert_eq!(denied.as_ref().unwrap_err().kind(),io::ErrorKind::PermissionDenied);
-            assert!(sticky_result(&failed,denied).is_err());
-            channel.write_all(b"1").unwrap();fixture_state(&mut channel,b'1');
-            let proof=pin.evidence(child.0.id()).unwrap();assert_eq!(proof.pid,child.0.id());assert!(pin.check(std::process::id()).is_err());
-            assert!(sticky_result(&failed,Ok(proof.clone())).is_err());
-            let mut wrong=ProcessStart::capture(child.0.id()).unwrap();wrong.start+=1;assert!(wrong.evidence(child.0.id()).is_err());
-            channel.write_all(b"2").unwrap();assert!(child.exit().success());assert!(pin.evidence(proof.pid).is_err());
+            let test = concat!(
+                module_path!(),
+                "::owned_dumpability_restore_preserves_public_epoch_and_no_file_roles_do_not_toggle"
+            );
+            let test = test
+                .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+                .unwrap();
+            let (mut channel, endpoint) = TestChannel::pair().unwrap();
+            channel
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            channel
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", test, "--test-threads=1"]);
+            let mut child = spawn_fixture(command, &endpoint, "GOATR_DUMPABILITY_TEST_FD");
+            drop(endpoint);
+            fixture_state(&mut channel, b'0');
+            let pin = ProcessStart::capture(child.0.id()).unwrap();
+            let failed = AtomicBool::new(false);
+            let denied = pin.evidence(child.0.id());
+            assert_eq!(
+                denied.as_ref().unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert!(sticky_result(&failed, denied).is_err());
+            channel.write_all(b"1").unwrap();
+            fixture_state(&mut channel, b'1');
+            let proof = pin.evidence(child.0.id()).unwrap();
+            assert_eq!(proof.pid, child.0.id());
+            assert!(pin.check(std::process::id()).is_err());
+            assert!(sticky_result(&failed, Ok(proof.clone())).is_err());
+            let mut wrong = ProcessStart::capture(child.0.id()).unwrap();
+            wrong.start += 1;
+            assert!(wrong.evidence(child.0.id()).is_err());
+            channel.write_all(b"2").unwrap();
+            assert!(child.exit().success());
+            assert!(pin.evidence(proof.pid).is_err());
         }
     }
 }
 #[cfg(target_os = "linux")]
-pub use unit_wake::{CapabilityState, UnitWakePin, ProcessStart, capability_state, current_capabilities,
-    prepare_current_executable, unit_cgroup};
+pub use unit_wake::{
+    CapabilityState, ProcessStart, UnitWakePin, capability_state, current_capabilities,
+    prepare_current_executable, unit_cgroup,
+};
 
 // Stock 0.162.1 app-server-client remote.rs uses this finite ceiling for both.
 pub const FRAME_BYTES: usize = 128 * 1024 * 1024;
@@ -1625,22 +2351,31 @@ async fn startup_owner_stream(
     let host = manifest.upstream_host.clone();
     let agent = manifest.upstream_agent.clone();
     let epoch = manifest.owner_epoch.clone();
-    let process = capture.observe("owner_epoch", startup_blocking_proof(deadline, move || epoch.validate(&host, &agent)).await)?;
+    let process = capture.observe(
+        "owner_epoch",
+        startup_blocking_proof(deadline, move || epoch.validate(&host, &agent)).await,
+    )?;
     let host = manifest.upstream_host.clone();
     let agent = manifest.upstream_agent.clone();
     let epoch = manifest.owner_epoch.clone();
     let captured = process.clone();
-    let observed = capture.observe("owner_socket", startup_blocking_proof(deadline, move || {
-        let observed = OwnerSocket::capture_process(&captured, &host, &agent)?;
-        observed.check_epoch(&epoch)?;
-        Ok(observed)
-    })
-    .await)?;
-    let observed = capture.observe("owner_revalidation", startup_blocking_proof(deadline, move || {
-        observed.recheck()?;
-        Ok(observed)
-    })
-    .await)?;
+    let observed = capture.observe(
+        "owner_socket",
+        startup_blocking_proof(deadline, move || {
+            let observed = OwnerSocket::capture_process(&captured, &host, &agent)?;
+            observed.check_epoch(&epoch)?;
+            Ok(observed)
+        })
+        .await,
+    )?;
+    let observed = capture.observe(
+        "owner_revalidation",
+        startup_blocking_proof(deadline, move || {
+            observed.recheck()?;
+            Ok(observed)
+        })
+        .await,
+    )?;
     let path = format!("/proc/self/fd/{}", observed.file.as_raw_fd());
     capture.observe("owner_socket", config::socket_path(Path::new(&path)))?;
     capture.observe("owner_connect", ensure_startup_live(deadline))?;
@@ -1654,7 +2389,8 @@ async fn startup_owner_stream(
         },
         UnixStream::connect(path),
     )
-    .await {
+    .await
+    {
         Ok(result) => result,
         Err(error) => Err(if startup_bounds_connect {
             startup_timeout()
@@ -1663,23 +2399,32 @@ async fn startup_owner_stream(
         }),
     };
     let stream = capture.observe("owner_connect", stream)?;
-    let observed = capture.observe("owner_revalidation", startup_blocking_proof(deadline, move || {
-        observed.recheck()?;
-        Ok(observed)
-    })
-    .await)?;
+    let observed = capture.observe(
+        "owner_revalidation",
+        startup_blocking_proof(deadline, move || {
+            observed.recheck()?;
+            Ok(observed)
+        })
+        .await,
+    )?;
     let credentials = capture.observe("owner_credentials", stream.peer_cred())?;
     if credentials.uid() != pairing::uid()
         || credentials.pid().and_then(|pid| u32::try_from(pid).ok()) != Some(process.pid)
     {
-        return capture.observe("owner_credentials", Err(invalid("native socket peer is not the proven owner")));
+        return capture.observe(
+            "owner_credentials",
+            Err(invalid("native socket peer is not the proven owner")),
+        );
     }
     let checked = process.clone();
-    let observed = capture.observe("owner_revalidation", startup_blocking_proof(deadline, move || {
-        observed.check_process(&checked)?;
-        Ok(observed)
-    })
-    .await)?;
+    let observed = capture.observe(
+        "owner_revalidation",
+        startup_blocking_proof(deadline, move || {
+            observed.check_process(&checked)?;
+            Ok(observed)
+        })
+        .await,
+    )?;
     capture.observe("owner_handshake", ensure_startup_live(deadline))?;
     let handshake_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let startup_bounds_handshake = deadline <= handshake_deadline;
@@ -1695,7 +2440,8 @@ async fn startup_owner_stream(
             Some(websocket_config(FRAME_BYTES, QUEUE_BYTES)),
         ),
     )
-    .await {
+    .await
+    {
         Ok(result) => result
             .map(|(socket, _)| socket)
             .map_err(|_| invalid("Codex Unix WebSocket handshake failed")),
@@ -1707,16 +2453,26 @@ async fn startup_owner_stream(
     };
     let socket = capture.observe("owner_handshake", socket)?;
     let checked = process.clone();
-    let _observed = capture.observe("owner_revalidation", startup_blocking_proof(deadline, move || {
-        observed.check_process(&checked)?;
-        Ok(observed)
-    })
-    .await)?;
+    let _observed = capture.observe(
+        "owner_revalidation",
+        startup_blocking_proof(deadline, move || {
+            observed.check_process(&checked)?;
+            Ok(observed)
+        })
+        .await,
+    )?;
     let host = manifest.upstream_host.clone();
     let agent = manifest.upstream_agent.clone();
     let epoch = manifest.owner_epoch.clone();
-    if capture.observe("owner_epoch", startup_blocking_proof(deadline, move || epoch.validate(&host, &agent)).await)? != process {
-        return capture.observe("owner_epoch", Err(invalid("Codex owner changed during handshake")));
+    if capture.observe(
+        "owner_epoch",
+        startup_blocking_proof(deadline, move || epoch.validate(&host, &agent)).await,
+    )? != process
+    {
+        return capture.observe(
+            "owner_epoch",
+            Err(invalid("Codex owner changed during handshake")),
+        );
     }
     Ok((socket, process))
 }
@@ -2098,15 +2854,13 @@ impl ForwardClose {
             Self::TuiClose => "Codex relay closed source=tui_read closed=tui_close",
             Self::OwnerEof => "Codex relay closed source=owner_read closed=owner_eof",
             Self::OwnerClose => "Codex relay closed source=owner_read closed=owner_close",
-            Self::OwnerQueueDrained => {
-                "Codex relay closed source=owner_queue closed=queue_drained"
-            }
+            Self::OwnerQueueDrained => "Codex relay closed source=owner_queue closed=queue_drained",
             Self::TuiQueueDrained => "Codex relay closed source=tui_queue closed=queue_drained",
         }
     }
 }
-const CLOSED_CAPTURE_MAX_BYTES: usize =
-    "Codex relay closed source=owner_queue closed=queue_drained".len()
+const CLOSED_CAPTURE_MAX_BYTES: usize = "Codex relay closed source=owner_queue closed=queue_drained"
+    .len()
     + " lookup_seen=1".len()
     + " lookup_send_completed=1".len()
     + " lookup_reply=invalid_shape".len()
@@ -2619,7 +3373,9 @@ impl DiagnosticCapture {
             QueuedCapture::LookupReply => self.reply_send_completed = true,
             QueuedCapture::AccountSend => self.account_send_completed = true,
             QueuedCapture::AccountReply => self.account_reply_send_completed = true,
-            QueuedCapture::BootstrapRequest(rpc) => self.bootstrap_mark(rpc, BOOTSTRAP_REQUEST_SENT),
+            QueuedCapture::BootstrapRequest(rpc) => {
+                self.bootstrap_mark(rpc, BOOTSTRAP_REQUEST_SENT)
+            }
             QueuedCapture::BootstrapReply(rpc) => self.bootstrap_mark(rpc, BOOTSTRAP_REPLY_SENT),
         }
     }
@@ -2723,7 +3479,10 @@ impl Observer {
             ..Self::default()
         }
     }
-    fn for_capturing_thread(expected_thread: Id, diagnostic: Arc<StdMutex<DiagnosticCapture>>) -> Self {
+    fn for_capturing_thread(
+        expected_thread: Id,
+        diagnostic: Arc<StdMutex<DiagnosticCapture>>,
+    ) -> Self {
         Self {
             expected_thread: Some(expected_thread),
             diagnostic: Some(diagnostic),
@@ -2813,14 +3572,17 @@ impl Observer {
         };
         let mut lookup = self.diagnostic.is_some()
             && method == "thread/read"
-            && v
-                .params
+            && v.params
                 .and_then(|params| metadata_object(params.get()).ok())
                 .and_then(|params| {
-                    let thread = params.thread_id.and_then(|value| metadata_string(value).ok())?;
+                    let thread = params
+                        .thread_id
+                        .and_then(|value| metadata_string(value).ok())?;
                     let thread = Id(thread.into_owned());
                     thread.validate().ok()?;
-                    (params.include_turns.is_none_or(|value| value.get() == "false")
+                    (params
+                        .include_turns
+                        .is_none_or(|value| value.get() == "false")
                         && self.expected_thread.as_ref() == Some(&thread))
                     .then_some(())
                 })
@@ -2835,7 +3597,8 @@ impl Observer {
             }
         }
         let account_request = self.diagnostic.is_some() && method == "account/read";
-        if method == "thread/resume" && thread.as_ref() == self.expected_thread.as_ref()
+        if method == "thread/resume"
+            && thread.as_ref() == self.expected_thread.as_ref()
             && let Some(capture) = &self.diagnostic
         {
             capture.lock().expect("diagnostic capture mutex").resume();
@@ -2965,7 +3728,10 @@ impl Observer {
             }
             if pending.lookup {
                 if let Some(capture) = &self.diagnostic {
-                    capture.lock().expect("diagnostic capture mutex").reply(LookupReply::Error);
+                    capture
+                        .lock()
+                        .expect("diagnostic capture mutex")
+                        .reply(LookupReply::Error);
                 }
                 self.queued_capture = Some(QueuedCapture::LookupReply);
             }
@@ -2991,7 +3757,9 @@ impl Observer {
             if let Some(capture) = &self.diagnostic {
                 let family = match pending.bootstrap {
                     Some(BootstrapRpc::ModelList) => FirstErrorFamily::BootstrapModelList,
-                    Some(BootstrapRpc::ConfigRequirementsRead) => FirstErrorFamily::BootstrapConfigRequirementsRead,
+                    Some(BootstrapRpc::ConfigRequirementsRead) => {
+                        FirstErrorFamily::BootstrapConfigRequirementsRead
+                    }
                     None => match pending.method.as_str() {
                         "initialize" => FirstErrorFamily::Initialize,
                         "thread/read" => FirstErrorFamily::ThreadRead,
@@ -2999,7 +3767,10 @@ impl Observer {
                         _ => FirstErrorFamily::OtherRpc,
                     },
                 };
-                capture.lock().expect("diagnostic capture mutex").first_error(family);
+                capture
+                    .lock()
+                    .expect("diagnostic capture mutex")
+                    .first_error(family);
             }
             if self.first_error.is_none() {
                 let method = match pending.method.as_str() {
@@ -3032,7 +3803,10 @@ impl Observer {
         if pending.lookup {
             if let Some(capture) = &self.diagnostic {
                 let reply = self.lookup_result(Some(r));
-                capture.lock().expect("diagnostic capture mutex").reply(reply);
+                capture
+                    .lock()
+                    .expect("diagnostic capture mutex")
+                    .reply(reply);
             }
             self.queued_capture = Some(QueuedCapture::LookupReply);
         }
@@ -3299,7 +4073,11 @@ impl Publication {
             self.pending_terminal_capture = Some((terminal_error, capture));
         }
     }
-    fn retain_terminal_annotation(&mut self, terminal_error: &'static str, annotation: SafeMessage) {
+    fn retain_terminal_annotation(
+        &mut self,
+        terminal_error: &'static str,
+        annotation: SafeMessage,
+    ) {
         if self.terminal_capture && self.presence.error.is_none() {
             self.pending_terminal_annotation = Some((terminal_error, annotation));
         }
@@ -3653,9 +4431,9 @@ async fn forward(
         Ok::<_, &'static str>(ForwardClose::OwnerQueueDrained)
     });
     let observed = diagnostic.clone();
-    jobs.spawn(async move {
-        forward_owner_to_tui_observed(&mut tw, &mut tui_queue, observed).await
-    });
+    jobs.spawn(
+        async move { forward_owner_to_tui_observed(&mut tw, &mut tui_queue, observed).await },
+    );
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let result = async {
         loop {
@@ -3843,12 +4621,16 @@ pub async fn run(path: &Path) -> io::Result<()> {
     }
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let (mut upstream, _) = startup_owner_stream(&manifest, startup_deadline, &capture).await?;
-    let upstream_close = match tokio::time::timeout_at(startup_deadline, upstream.close(None)).await {
+    let upstream_close = match tokio::time::timeout_at(startup_deadline, upstream.close(None)).await
+    {
         Ok(result) => result.map_err(|_| invalid("upstream reachability close failed")),
         Err(_) => Err(startup_timeout()),
     };
     capture.observe("upstream_close", upstream_close)?;
-    capture.observe("manifest_revalidation", ensure_startup_live(startup_deadline))?;
+    capture.observe(
+        "manifest_revalidation",
+        ensure_startup_live(startup_deadline),
+    )?;
     let manifest_for_proof = manifest.clone();
     capture.observe(
         "manifest_revalidation",
@@ -3896,10 +4678,10 @@ pub async fn run(path: &Path) -> io::Result<()> {
         pending_terminal_capture: None,
         pending_terminal_annotation: None,
     }));
-    let mut startup_visible=false;
-    let mut startup_object=None;
-    let mut startup_complete=false;
-    let mut initial_ready_completed_at_ms=None;
+    let mut startup_visible = false;
+    let mut startup_object = None;
+    let mut startup_complete = false;
+    let mut initial_ready_completed_at_ms = None;
     let result=async {
         let initial = async {
             ensure_startup_live(startup_deadline)?;
@@ -4039,16 +4821,17 @@ pub async fn run(path: &Path) -> io::Result<()> {
     if result.is_err()
         && (startup_complete
             || (startup_visible
-                && startup_object.is_some_and(|object| exact_private_object(&presence_path(path),object))))
+                && startup_object
+                    .is_some_and(|object| exact_private_object(&presence_path(path), object))))
     {
-        let terminal_error="Relay identity, transport or bounded admission failed; explicit reconciliation required";
-        let mut publication=publication.lock().await;
-        if let Some(initial_ready_completed_at_ms)=initial_ready_completed_at_ms {
+        let terminal_error = "Relay identity, transport or bounded admission failed; explicit reconciliation required";
+        let mut publication = publication.lock().await;
+        if let Some(initial_ready_completed_at_ms) = initial_ready_completed_at_ms {
             publication.retain_terminal_annotation(terminal_error,SafeMessage(format!(
                 "{terminal_error} initial_ready=completed initial_ready_completed_at_ms={initial_ready_completed_at_ms}"
             )));
         }
-        let _=publication.clear(PresenceState::Failed,Some(terminal_error));
+        let _ = publication.clear(PresenceState::Failed, Some(terminal_error));
     }
     listener.cleanup()?;
     result

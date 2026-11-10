@@ -548,15 +548,14 @@ pub(super) fn apply_numstat(
                 tracked.worktree
             };
             let expected_original = renamed_or_copied(state)
-                .then(|| tracked.original_path.as_deref())
+                .then_some(tracked.original_path.as_deref())
                 .flatten();
             let expected_path = tracked.path.as_str();
             if expected_path == observation.path
                 && expected_original == observation.original_path.as_deref()
+                && matched.replace(index).is_some()
             {
-                if matched.replace(index).is_some() {
-                    return Err(ErrorCode::NotReady);
-                }
+                return Err(ErrorCode::NotReady);
             }
         }
         let Some(index) = matched else {

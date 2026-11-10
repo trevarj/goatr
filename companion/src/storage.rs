@@ -186,10 +186,10 @@ pub struct ShellProbeMetadata {
 pub struct StageMetadata {
     #[serde(default)]
     pub execution_checkout: Option<crate::herdr::ExecutionCheckout>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub created_tab_id:Option<Id>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub placement_workspace_id:Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_tab_id: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_workspace_id: Option<Id>,
     pub socket_epoch: Option<Uuid>,
     pub linux_boot_id: Option<Uuid>,
     pub pid: Option<u32>,
@@ -235,23 +235,65 @@ pub struct StableSessionKey {
 }
 /// The existing finite mapping owner serves two explicitly separated resource kinds.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag="kind",content="key",rename_all="snake_case",deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    content = "key",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum StableResourceKey {
     Agent(StableSessionKey),
-    Shell {host_id:EndpointId,server_id:Uuid,server_incarnation:Uuid,terminal_id:Id},
+    Shell {
+        host_id: EndpointId,
+        server_id: Uuid,
+        server_incarnation: Uuid,
+        terminal_id: Id,
+    },
 }
 impl StableResourceKey {
-    fn kind(&self)->&'static str {match self {Self::Agent(_)=>"agent",Self::Shell {..}=>"shell"}}
-    pub(crate) fn server(&self)->&Uuid {match self {Self::Agent(key)=>&key.server_id,Self::Shell {server_id,..}=>server_id}}
-    fn validate_key(&self)->StoreResult<()> {
+    fn kind(&self) -> &'static str {
         match self {
-            Self::Agent(key)=>{key.host_id.validate()?;key.server_id.validate()?;key.server_incarnation.validate()?;key.terminal_id.validate()?;key.provider_owner_identity.validate()?;key.native_conversation_id.validate()?;}
-            Self::Shell {host_id,server_id,server_incarnation,terminal_id}=>{host_id.validate()?;server_id.validate()?;server_incarnation.validate()?;terminal_id.validate()?;}
-        }Ok(())
+            Self::Agent(_) => "agent",
+            Self::Shell { .. } => "shell",
+        }
+    }
+    pub(crate) fn server(&self) -> &Uuid {
+        match self {
+            Self::Agent(key) => &key.server_id,
+            Self::Shell { server_id, .. } => server_id,
+        }
+    }
+    fn validate_key(&self) -> StoreResult<()> {
+        match self {
+            Self::Agent(key) => {
+                key.host_id.validate()?;
+                key.server_id.validate()?;
+                key.server_incarnation.validate()?;
+                key.terminal_id.validate()?;
+                key.provider_owner_identity.validate()?;
+                key.native_conversation_id.validate()?;
+            }
+            Self::Shell {
+                host_id,
+                server_id,
+                server_incarnation,
+                terminal_id,
+            } => {
+                host_id.validate()?;
+                server_id.validate()?;
+                server_incarnation.validate()?;
+                terminal_id.validate()?;
+            }
+        }
+        Ok(())
     }
 }
-#[derive(Clone,Debug)]
-pub struct PersistedShell {pub key:StableResourceKey,pub target:ShellTarget,pub proof:crate::herdr::ShellProof}
+#[derive(Clone, Debug)]
+pub struct PersistedShell {
+    pub key: StableResourceKey,
+    pub target: ShellTarget,
+    pub proof: crate::herdr::ShellProof,
+}
 #[derive(Clone, Debug)]
 pub struct ServerIdentity {
     pub server_id: Uuid,
@@ -285,10 +327,10 @@ pub struct Storage {
     db: Connection,
     receipt_key: [u8; 32],
     pub boot_id: Uuid,
-    image_reads:Vec<std::sync::Arc<crate::attachments::ImageReadObligation>>,
-    image_budget:std::sync::Arc<parking_lot::Mutex<crate::attachments::ImageBudget>>,
-    image_reads_restored:bool,
-    image_reads_fault:bool,
+    image_reads: Vec<std::sync::Arc<crate::attachments::ImageReadObligation>>,
+    image_budget: std::sync::Arc<parking_lot::Mutex<crate::attachments::ImageBudget>>,
+    image_reads_restored: bool,
+    image_reads_fault: bool,
 }
 type StorageJob = Box<dyn FnOnce(&mut Storage) + Send>;
 /// Bounded blocking owner: transport tasks await completion without running SQLite on their
@@ -441,7 +483,9 @@ impl Storage {
             return Err(StorageError::Corrupt);
         }
         db.execute_batch("CREATE TABLE IF NOT EXISTS attachments(peer TEXT NOT NULL,upload TEXT NOT NULL,size INTEGER NOT NULL,unfinished INTEGER NOT NULL,discarded INTEGER NOT NULL,record TEXT NOT NULL,PRIMARY KEY(peer,upload));")?;
-        db.execute_batch("CREATE TABLE IF NOT EXISTS hc_grants(peer TEXT PRIMARY KEY,epoch INTEGER NOT NULL);")?;
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS hc_grants(peer TEXT PRIMARY KEY,epoch INTEGER NOT NULL);",
+        )?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS attachment_image_uses(peer TEXT NOT NULL,action TEXT NOT NULL,native_input TEXT NOT NULL UNIQUE,record TEXT NOT NULL,mac BLOB NOT NULL,PRIMARY KEY(peer,action));")?;
         // Receipt-owned negative shell admission obligations outlive receipt TTL/revocation.
         // No terminal text, paths or new remote authority is stored here.
@@ -461,14 +505,17 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         )?;
         migrate_resource_mappings(&mut db)?;
         // A process restart cannot resume a prior observed live OMP cycle.
-        db.execute("UPDATE attention_omp_cycles SET active=NULL",[])?;
+        db.execute("UPDATE attention_omp_cycles SET active=NULL", [])?;
         let mut store = Self {
             db,
             receipt_key,
             boot_id: Uuid::random(),
-            image_reads:Vec::with_capacity(crate::attachments::IMAGE_ACTIONS_PER_HOST),
-            image_budget:std::sync::Arc::new(parking_lot::Mutex::new(crate::attachments::ImageBudget::default())),
-            image_reads_restored:false,image_reads_fault:false,
+            image_reads: Vec::with_capacity(crate::attachments::IMAGE_ACTIONS_PER_HOST),
+            image_budget: std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::attachments::ImageBudget::default(),
+            )),
+            image_reads_restored: false,
+            image_reads_fault: false,
         };
         let tx = store
             .db
@@ -482,13 +529,21 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
             let mut receipt: Receipt = decode(&data)?;
             // Durable Reserved precedes native intent. A crashed pre-entry job cannot
             // leave a negative unknown-pane fence; its historical receipt stays Uncertain.
-            if receipt.state==ReceiptState::Reserved {
-                tx.execute("DELETE FROM creation_shell_fences WHERE peer=?1 AND action=?2",params![peer,action])?;
+            if receipt.state == ReceiptState::Reserved {
+                tx.execute(
+                    "DELETE FROM creation_shell_fences WHERE peer=?1 AND action=?2",
+                    params![peer, action],
+                )?;
             }
-            let complete_input=receipt.state==ReceiptState::Dispatching&&receipt.method==ActionMethod::ShellInput
-                &&matches!(&receipt.result,Some(ActionResult::ShellDispatch(result)) if result.progress.complete())
-                &&receipt.validate().is_ok();
-            receipt.state=if complete_input{ReceiptState::Dispatched}else{ReceiptState::Uncertain};
+            let complete_input = receipt.state == ReceiptState::Dispatching
+                && receipt.method == ActionMethod::ShellInput
+                && matches!(&receipt.result,Some(ActionResult::ShellDispatch(result)) if result.progress.complete())
+                && receipt.validate().is_ok();
+            receipt.state = if complete_input {
+                ReceiptState::Dispatched
+            } else {
+                ReceiptState::Uncertain
+            };
             receipt.updated_at = timestamp(now)?;
             if let Some(creation) = &mut receipt.creation
                 && creation.stage_state == StageState::Dispatching
@@ -509,7 +564,7 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         }
         prune_all(&tx, now)?;
         tx.commit()?;
-        store.attachment_maintenance(now,true)?;
+        store.attachment_maintenance(now, true)?;
         Ok(store)
     }
     /// Pair token consumption belongs to3's same fence; commit this before consuming the token
@@ -585,8 +640,12 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         self.recheck(proof)?;
         let granted: bool = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM hc_grants WHERE peer=?1 AND epoch=?2)",
-            params![proof.peer.0, sql_integer(proof.epoch)?], |row| row.get(0))?;
-        if !granted { return reject(ErrorCode::Unauthorized); }
+            params![proof.peer.0, sql_integer(proof.epoch)?],
+            |row| row.get(0),
+        )?;
+        if !granted {
+            return reject(ErrorCode::Unauthorized);
+        }
         Ok(())
     }
     /// Local admin/security-only inventory, not a network operation.
@@ -902,12 +961,41 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
             canonical.clear();
             validate_mutation_boot(request, &self.boot_id)?;
             let (method, boot_id, target, creation) = match &request.body {
-                body if body.attachment_action().is_some()=>{let (method,boot,target,_)=body.attachment_action().ok_or(StorageError::Corrupt)?;(method,boot.clone(),Some(target.clone()),None)},
-                RequestBody::SessionControlsApply(p)=>(ActionMethod::SessionControlsApply,p.boot_id.clone(),Some(p.target.clone()),None),
-                RequestBody::SessionQueueUpdate(p)=>(ActionMethod::SessionQueueUpdate,p.boot_id.clone(),Some(p.target.clone()),None),
-                RequestBody::SessionQueueDelete(p)=>(ActionMethod::SessionQueueDelete,p.boot_id.clone(),Some(p.target.clone()),None),
-                RequestBody::SessionQueueReorder(p)=>(ActionMethod::SessionQueueReorder,p.boot_id.clone(),Some(p.target.clone()),None),
-                RequestBody::SessionQueueStart(p)=>(ActionMethod::SessionQueueStart,p.boot_id.clone(),Some(p.target.clone()),None),
+                body if body.attachment_action().is_some() => {
+                    let (method, boot, target, _) =
+                        body.attachment_action().ok_or(StorageError::Corrupt)?;
+                    (method, boot.clone(), Some(target.clone()), None)
+                }
+                RequestBody::SessionControlsApply(p) => (
+                    ActionMethod::SessionControlsApply,
+                    p.boot_id.clone(),
+                    Some(p.target.clone()),
+                    None,
+                ),
+                RequestBody::SessionQueueUpdate(p) => (
+                    ActionMethod::SessionQueueUpdate,
+                    p.boot_id.clone(),
+                    Some(p.target.clone()),
+                    None,
+                ),
+                RequestBody::SessionQueueDelete(p) => (
+                    ActionMethod::SessionQueueDelete,
+                    p.boot_id.clone(),
+                    Some(p.target.clone()),
+                    None,
+                ),
+                RequestBody::SessionQueueReorder(p) => (
+                    ActionMethod::SessionQueueReorder,
+                    p.boot_id.clone(),
+                    Some(p.target.clone()),
+                    None,
+                ),
+                RequestBody::SessionQueueStart(p) => (
+                    ActionMethod::SessionQueueStart,
+                    p.boot_id.clone(),
+                    Some(p.target.clone()),
+                    None,
+                ),
                 RequestBody::PromptSubmit(p) => (
                     ActionMethod::PromptSubmit,
                     p.boot_id.clone(),
@@ -926,23 +1014,39 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
                     Some(p.target.clone()),
                     None,
                 ),
-                RequestBody::TerminalCreate(p)=>(ActionMethod::TerminalCreate,p.boot_id.clone(),None,None),
-                RequestBody::AgentRename(p) => (ActionMethod::AgentRename,p.boot_id.clone(),Some(p.target.clone()),None),
+                RequestBody::TerminalCreate(p) => {
+                    (ActionMethod::TerminalCreate, p.boot_id.clone(), None, None)
+                }
+                RequestBody::AgentRename(p) => (
+                    ActionMethod::AgentRename,
+                    p.boot_id.clone(),
+                    Some(p.target.clone()),
+                    None,
+                ),
                 RequestBody::WorkspaceRename(p) => (
                     ActionMethod::WorkspaceRename,
                     p.boot_id.clone(),
                     Some(p.target.clone()),
                     None,
                 ),
-                RequestBody::ShellInput(p) => (ActionMethod::ShellInput,p.boot_id.clone(),None,None),
-                RequestBody::ShellResize(p)=>(ActionMethod::ShellResize,p.boot_id.clone(),None,None),
-                RequestBody::ShellScroll(p)=>(ActionMethod::ShellScroll,p.boot_id.clone(),None,None),
+                RequestBody::ShellInput(p) => {
+                    (ActionMethod::ShellInput, p.boot_id.clone(), None, None)
+                }
+                RequestBody::ShellResize(p) => {
+                    (ActionMethod::ShellResize, p.boot_id.clone(), None, None)
+                }
+                RequestBody::ShellScroll(p) => {
+                    (ActionMethod::ShellScroll, p.boot_id.clone(), None, None)
+                }
                 RequestBody::SessionCreate(p) => (
                     ActionMethod::SessionCreate,
                     p.boot_id.clone(),
                     None,
                     Some(Box::new(CreationProgress {
-                        source_target: p.placement.as_ref().map(|placement|placement.source_target.clone()),
+                        source_target: p
+                            .placement
+                            .as_ref()
+                            .map(|placement| placement.source_target.clone()),
                         server_id: p.server_id.clone(),
                         project_id: p.project_id.clone(),
                         provider: p.provider,
@@ -975,7 +1079,12 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
             }
             let receipt = Receipt {
                 action_id: request.id.clone(),
-                shell_target:match &request.body {RequestBody::ShellInput(params)=>Some(params.target.clone()),RequestBody::ShellResize(params)=>Some(params.target.clone()),RequestBody::ShellScroll(params)=>Some(params.target.clone()),_=>None},
+                shell_target: match &request.body {
+                    RequestBody::ShellInput(params) => Some(params.target.clone()),
+                    RequestBody::ShellResize(params) => Some(params.target.clone()),
+                    RequestBody::ShellScroll(params) => Some(params.target.clone()),
+                    _ => None,
+                },
                 method,
                 boot_id,
                 target,
@@ -1125,13 +1234,33 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         Ok(())
     }
     /// Entered facts survive cancellation even if their queued checkpoint did not commit yet.
-    pub(crate) fn settle_creation_lost(&mut self,ticket:DispatchTicket,resources:CreationResources,metadata:StageMetadata,at:u64)->StoreResult<()> {
-        let receipt=ticket_receipt(&self.db,&ticket)?;
-        let progress=receipt.creation.as_ref().ok_or(StorageError::Corrupt)?;
-        let records=stages(&self.db,&ticket.proof,&ticket.action)?;
-        let last=records.last().ok_or(StorageError::Corrupt)?;
-        retain_creation_facts(&progress.resources,last.result.as_ref().unwrap_or(&last.intent),&resources,&metadata)?;
-        self.settle_creation_stage(ticket,CreationOutcome {resources,metadata,state:StageState::Uncertain,definitive:None,at:at.max(receipt.updated_at.0)})
+    pub(crate) fn settle_creation_lost(
+        &mut self,
+        ticket: DispatchTicket,
+        resources: CreationResources,
+        metadata: StageMetadata,
+        at: u64,
+    ) -> StoreResult<()> {
+        let receipt = ticket_receipt(&self.db, &ticket)?;
+        let progress = receipt.creation.as_ref().ok_or(StorageError::Corrupt)?;
+        let records = stages(&self.db, &ticket.proof, &ticket.action)?;
+        let last = records.last().ok_or(StorageError::Corrupt)?;
+        retain_creation_facts(
+            &progress.resources,
+            last.result.as_ref().unwrap_or(&last.intent),
+            &resources,
+            &metadata,
+        )?;
+        self.settle_creation_stage(
+            ticket,
+            CreationOutcome {
+                resources,
+                metadata,
+                state: StageState::Uncertain,
+                definitive: None,
+                at: at.max(receipt.updated_at.0),
+            },
+        )
     }
     /// An already-entered bounded write may settle after revoke. This consumes its local
     /// ticket, cannot start a write/reconcile/replay, and deliberately returns no receipt.
@@ -1561,13 +1690,25 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
     }
     pub fn persisted_sessions(&self) -> StoreResult<Vec<PersistedSession>> {
         let mut statement=self.db.prepare("SELECT s.resource_key,s.session,s.generation,d.state FROM sessions s LEFT JOIN topology_session_display d ON d.session=s.session WHERE s.kind='agent' ORDER BY s.session")?;
-        let mut rows=statement.query([])?;let mut result=Vec::new();
-        while let Some(row)=rows.next()? {
-            if result.len()==512 {return reject(ErrorCode::ResourceLimit)}
-            let resource:StableResourceKey=decode(&row.get::<_,String>(0)?)?;resource.validate_key()?;
-            let StableResourceKey::Agent(key)=resource else {return Err(StorageError::Corrupt)};
-            let target=Target {session_id:Uuid::new(row.get::<_,String>(1)?)?,generation:Uuid::new(row.get::<_,String>(2)?)?};
-            let mut display:Option<SessionState>=row.get::<_,Option<String>>(3)?.map(|s|decode(&s)).transpose()?;
+        let mut rows = statement.query([])?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next()? {
+            if result.len() == 512 {
+                return reject(ErrorCode::ResourceLimit);
+            }
+            let resource: StableResourceKey = decode(&row.get::<_, String>(0)?)?;
+            resource.validate_key()?;
+            let StableResourceKey::Agent(key) = resource else {
+                return Err(StorageError::Corrupt);
+            };
+            let target = Target {
+                session_id: Uuid::new(row.get::<_, String>(1)?)?,
+                generation: Uuid::new(row.get::<_, String>(2)?)?,
+            };
+            let mut display: Option<SessionState> = row
+                .get::<_, Option<String>>(3)?
+                .map(|s| decode(&s))
+                .transpose()?;
             if let Some(state) = &mut display {
                 if state.summary.session_id != target.session_id
                     || state.summary.server_id != key.server_id
@@ -1605,7 +1746,8 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         state: &SessionState,
     ) -> StoreResult<()> {
         state.validate()?;
-        let resource=StableResourceKey::Agent(key.clone());resource.validate_key()?;
+        let resource = StableResourceKey::Agent(key.clone());
+        resource.validate_key()?;
         let matches:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE kind='agent' AND resource_key=?1 AND session=?2 AND generation=?3)",params![json(&resource)?,state.summary.session_id.0,state.summary.generation.0],|row|row.get(0))?;
         if !matches {
             let exists: bool = self.db.query_row(
@@ -1648,7 +1790,13 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
             return Ok(false);
         }
         // Provider retirement must never consume a shell mapping or its obligations.
-        if !self.db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE session=?1 AND kind='agent')", [&session.0], |row| row.get::<_,bool>(0))? { return Ok(false); }
+        if !self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE session=?1 AND kind='agent')",
+            [&session.0],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Ok(false);
+        }
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1660,7 +1808,10 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         )?;
         tx.execute("DELETE FROM checkpoint WHERE session=?1", [&session.0])?;
         tx.execute("DELETE FROM transitions WHERE session=?1", [&session.0])?;
-        let removed = tx.execute("DELETE FROM sessions WHERE session=?1 AND kind='agent'", [&session.0])? != 0;
+        let removed = tx.execute(
+            "DELETE FROM sessions WHERE session=?1 AND kind='agent'",
+            [&session.0],
+        )? != 0;
         tx.commit()?;
         Ok(removed)
     }
@@ -1685,10 +1836,18 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         let Some(server) = server else {
             return Ok(false);
         };
-        let mapped_keys:Vec<String>={let mut statement=tx.prepare("SELECT resource_key FROM sessions")?;let rows=statement.query_map([],|row|row.get(0))?;rows.collect::<Result<_,_>>()?};
-        let has_mapping=mapped_keys.iter().map(|data|decode::<StableResourceKey>(data)).collect::<StoreResult<Vec<_>>>()?.iter().any(|key|key.server().0==server);
-        if has_mapping || mapping_receipt_required(&tx,None,Some(&Uuid::new(&server)?))?
-        {
+        let mapped_keys: Vec<String> = {
+            let mut statement = tx.prepare("SELECT resource_key FROM sessions")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let has_mapping = mapped_keys
+            .iter()
+            .map(|data| decode::<StableResourceKey>(data))
+            .collect::<StoreResult<Vec<_>>>()?
+            .iter()
+            .any(|key| key.server().0 == server);
+        if has_mapping || mapping_receipt_required(&tx, None, Some(&Uuid::new(&server)?))? {
             return Ok(false);
         }
         tx.execute(
@@ -1758,39 +1917,108 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         proven: &StableSessionKey,
         reconnect: bool,
     ) -> StoreResult<Target> {
-        let (id,generation)=self.resource_identity(&StableResourceKey::Agent(proven.clone()),None,reconnect)?;
-        Ok(Target {session_id:id,generation})
+        let (id, generation) =
+            self.resource_identity(&StableResourceKey::Agent(proven.clone()), None, reconnect)?;
+        Ok(Target {
+            session_id: id,
+            generation,
+        })
     }
-    fn resource_identity(&mut self,key:&StableResourceKey,proof:Option<&crate::herdr::ShellProof>,reconnect:bool)->StoreResult<(Uuid,Uuid)> {
+    fn resource_identity(
+        &mut self,
+        key: &StableResourceKey,
+        proof: Option<&crate::herdr::ShellProof>,
+        reconnect: bool,
+    ) -> StoreResult<(Uuid, Uuid)> {
         key.validate_key()?;
-        if (key.kind()=="shell")!=proof.is_some() {return Err(StorageError::Corrupt)}
-        if let Some(proof)=proof {proof.validate_for(key).map_err(|_|StorageError::Corrupt)?;}
-        let key_data=json(key)?;let proof_data=proof.map(json).transpose()?;
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let old:Option<(String,String,Option<String>)>=tx.query_row("SELECT session,generation,proof FROM sessions WHERE kind=?1 AND resource_key=?2",params![key.kind(),key_data],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
-        let (id,generation)=if let Some((id,generation,old_proof))=old {
-            let changed=match (old_proof.as_deref(),proof) {(None,None)=>false,(Some(old),Some(current))=>{let old:crate::herdr::ShellProof=decode(old)?;old.validate_for(key).map_err(|_|StorageError::Corrupt)?;!old.same_authority(current)},_=>return Err(StorageError::Corrupt)};
-            (Uuid::new(id)?,if reconnect || changed {Uuid::random()}else{Uuid::new(generation)?})
-        }else{
-            if tx.query_row("SELECT count(*) FROM sessions",[],|row|row.get::<_,i64>(0))?>=512 {return reject(ErrorCode::ResourceLimit)}
-            (Uuid::random(),Uuid::random())
+        if (key.kind() == "shell") != proof.is_some() {
+            return Err(StorageError::Corrupt);
+        }
+        if let Some(proof) = proof {
+            proof.validate_for(key).map_err(|_| StorageError::Corrupt)?;
+        }
+        let key_data = json(key)?;
+        let proof_data = proof.map(json).transpose()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let old: Option<(String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT session,generation,proof FROM sessions WHERE kind=?1 AND resource_key=?2",
+                params![key.kind(), key_data],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (id, generation) = if let Some((id, generation, old_proof)) = old {
+            let changed = match (old_proof.as_deref(), proof) {
+                (None, None) => false,
+                (Some(old), Some(current)) => {
+                    let old: crate::herdr::ShellProof = decode(old)?;
+                    old.validate_for(key).map_err(|_| StorageError::Corrupt)?;
+                    !old.same_authority(current)
+                }
+                _ => return Err(StorageError::Corrupt),
+            };
+            (
+                Uuid::new(id)?,
+                if reconnect || changed {
+                    Uuid::random()
+                } else {
+                    Uuid::new(generation)?
+                },
+            )
+        } else {
+            if tx.query_row("SELECT count(*) FROM sessions", [], |row| {
+                row.get::<_, i64>(0)
+            })? >= 512
+            {
+                return reject(ErrorCode::ResourceLimit);
+            }
+            (Uuid::random(), Uuid::random())
         };
         tx.execute("INSERT INTO sessions(session,generation,kind,resource_key,proof) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(kind,resource_key) DO UPDATE SET generation=excluded.generation,proof=excluded.proof",params![id.0,generation.0,key.kind(),key_data,proof_data])?;
-        tx.commit()?;Ok((id,generation))
+        tx.commit()?;
+        Ok((id, generation))
     }
-    pub fn shell_identity(&mut self,key:&StableResourceKey,proof:&crate::herdr::ShellProof,reconnect:bool)->StoreResult<ShellTarget> {
-        if !matches!(key,StableResourceKey::Shell {..}) {return Err(StorageError::Corrupt)}
-        let (shell_id,generation)=self.resource_identity(key,Some(proof),reconnect)?;Ok(ShellTarget {shell_id,generation})
+    pub fn shell_identity(
+        &mut self,
+        key: &StableResourceKey,
+        proof: &crate::herdr::ShellProof,
+        reconnect: bool,
+    ) -> StoreResult<ShellTarget> {
+        if !matches!(key, StableResourceKey::Shell { .. }) {
+            return Err(StorageError::Corrupt);
+        }
+        let (shell_id, generation) = self.resource_identity(key, Some(proof), reconnect)?;
+        Ok(ShellTarget {
+            shell_id,
+            generation,
+        })
     }
-    pub fn persisted_shells(&self)->StoreResult<Vec<PersistedShell>> {
+    pub fn persisted_shells(&self) -> StoreResult<Vec<PersistedShell>> {
         let mut statement=self.db.prepare("SELECT resource_key,session,generation,proof FROM sessions WHERE kind='shell' ORDER BY session")?;
-        let mut rows=statement.query([])?;let mut shells=Vec::new();
-        while let Some(row)=rows.next()? {
-            if shells.len()>=512 {return reject(ErrorCode::ResourceLimit)}
-            let key:StableResourceKey=decode(&row.get::<_,String>(0)?)?;key.validate_key()?;
-            let proof:crate::herdr::ShellProof=decode(&row.get::<_,String>(3)?)?;proof.validate_for(&key).map_err(|_|StorageError::Corrupt)?;
-            shells.push(PersistedShell {key,target:ShellTarget {shell_id:Uuid::new(row.get::<_,String>(1)?)?,generation:Uuid::new(row.get::<_,String>(2)?)?},proof});
-        }Ok(shells)
+        let mut rows = statement.query([])?;
+        let mut shells = Vec::new();
+        while let Some(row) = rows.next()? {
+            if shells.len() >= 512 {
+                return reject(ErrorCode::ResourceLimit);
+            }
+            let key: StableResourceKey = decode(&row.get::<_, String>(0)?)?;
+            key.validate_key()?;
+            let proof: crate::herdr::ShellProof = decode(&row.get::<_, String>(3)?)?;
+            proof
+                .validate_for(&key)
+                .map_err(|_| StorageError::Corrupt)?;
+            shells.push(PersistedShell {
+                key,
+                target: ShellTarget {
+                    shell_id: Uuid::new(row.get::<_, String>(1)?)?,
+                    generation: Uuid::new(row.get::<_, String>(2)?)?,
+                },
+                proof,
+            });
+        }
+        Ok(shells)
     }
 
     /// Snapshot installation updates checkpoint only. Native correlation and all per-peer event
@@ -1805,7 +2033,7 @@ CREATE INDEX IF NOT EXISTS push_jobs_expiry ON push_jobs(expires);")?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let events=attention_transition_tx(&tx,change,now)?;
+        let events = attention_transition_tx(&tx, change, now)?;
         tx.commit()?;
         Ok(events)
     }
@@ -2087,20 +2315,22 @@ fn lookup_matching_receipt(
 }
 fn validate_mutation_boot(request: &Request, current: &Uuid) -> StoreResult<()> {
     let boot = match &request.body {
-        RequestBody::SessionControlsApply(p)=>&p.boot_id,
-        RequestBody::SessionQueueUpdate(p)=>&p.boot_id,
-        RequestBody::SessionQueueDelete(p)=>&p.boot_id,
-        RequestBody::SessionQueueReorder(p)=>&p.boot_id,
-        RequestBody::SessionQueueStart(p)=>&p.boot_id,
+        RequestBody::SessionControlsApply(p) => &p.boot_id,
+        RequestBody::SessionQueueUpdate(p) => &p.boot_id,
+        RequestBody::SessionQueueDelete(p) => &p.boot_id,
+        RequestBody::SessionQueueReorder(p) => &p.boot_id,
+        RequestBody::SessionQueueStart(p) => &p.boot_id,
         RequestBody::PromptSubmit(p) => &p.boot_id,
         RequestBody::TurnCancel(p) => &p.boot_id,
         RequestBody::RequestRespond(p) => &p.boot_id,
         RequestBody::SessionCreate(p) => &p.boot_id,
         RequestBody::ShellInput(p) => &p.boot_id,
-        RequestBody::ShellResize(p)=>&p.boot_id,
-        RequestBody::ShellScroll(p)=>&p.boot_id,
-        body if body.attachment_action().is_some()=>body.attachment_action().ok_or(StorageError::Corrupt)?.1,
-        RequestBody::TerminalCreate(p)=>&p.boot_id,
+        RequestBody::ShellResize(p) => &p.boot_id,
+        RequestBody::ShellScroll(p) => &p.boot_id,
+        body if body.attachment_action().is_some() => {
+            body.attachment_action().ok_or(StorageError::Corrupt)?.1
+        }
+        RequestBody::TerminalCreate(p) => &p.boot_id,
         RequestBody::AgentRename(p) => &p.boot_id,
         RequestBody::WorkspaceRename(p) => &p.boot_id,
         _ => return reject(ErrorCode::InvalidRequest),
@@ -2196,22 +2426,48 @@ fn stages(
     )?;
     decode(&data)
 }
-pub(crate) fn retain_creation_facts(old:&CreationResources,old_metadata:&StageMetadata,new:&CreationResources,new_metadata:&StageMetadata)->StoreResult<()> {
-    retain_resources(old,new)?;
-    if old_metadata.workspace_operation!=new_metadata.workspace_operation || old_metadata.shell_probe!=new_metadata.shell_probe
-        || old_metadata.placement_workspace_id!=new_metadata.placement_workspace_id
-        || old_metadata.created_tab_id.as_ref().is_some_and(|tab|new_metadata.created_tab_id.as_ref()!=Some(tab))
-        || match (&old_metadata.execution_checkout,&new_metadata.execution_checkout) {
-            (Some(old),Some(new))=>!new.retains(old), (None,None)=>false, _=>true,
-        } {return reject(ErrorCode::InvalidRequest)}
+pub(crate) fn retain_creation_facts(
+    old: &CreationResources,
+    old_metadata: &StageMetadata,
+    new: &CreationResources,
+    new_metadata: &StageMetadata,
+) -> StoreResult<()> {
+    retain_resources(old, new)?;
+    if old_metadata.workspace_operation != new_metadata.workspace_operation
+        || old_metadata.shell_probe != new_metadata.shell_probe
+        || old_metadata.placement_workspace_id != new_metadata.placement_workspace_id
+        || old_metadata
+            .created_tab_id
+            .as_ref()
+            .is_some_and(|tab| new_metadata.created_tab_id.as_ref() != Some(tab))
+        || match (
+            &old_metadata.execution_checkout,
+            &new_metadata.execution_checkout,
+        ) {
+            (Some(old), Some(new)) => !new.retains(old),
+            (None, None) => false,
+            _ => true,
+        }
+    {
+        return reject(ErrorCode::InvalidRequest);
+    }
     Ok(())
 }
 fn retain_resources(old: &CreationResources, new: &CreationResources) -> StoreResult<()> {
     macro_rules! keep { ($($field:ident),*) => { $(if old.$field.is_some() && old.$field != new.$field { return reject(ErrorCode::InvalidRequest); })* }; }
     if let Some(old_checkout) = &old.checkout {
-        let next = new.checkout.as_ref().ok_or(StorageError::Policy(ErrorCode::InvalidRequest))?;
-        if old_checkout.kind != next.kind || old_checkout.branch != next.branch || old_checkout.requested_base != next.requested_base
-            || old_checkout.resolved_commit.as_ref().is_some_and(|commit| next.resolved_commit.as_ref() != Some(commit)) {
+        let next = new
+            .checkout
+            .as_ref()
+            .ok_or(StorageError::Policy(ErrorCode::InvalidRequest))?;
+        if old_checkout.kind != next.kind
+            || old_checkout.branch != next.branch
+            || old_checkout.requested_base != next.requested_base
+            || old_checkout
+                .resolved_commit
+                .as_ref()
+                .is_some_and(|commit| next.resolved_commit.as_ref() != Some(commit))
+        {
             return reject(ErrorCode::InvalidRequest);
         }
     }
@@ -2335,8 +2591,16 @@ fn apply_transition(receipt: &mut Receipt, change: ReceiptTransition) -> StoreRe
             TransitionProof::ReconciledNoEffect(_)
         )
     );
-    let allowed=allowed||receipt.method==ActionMethod::SessionControlsApply
-        &&matches!((receipt.state,next,&evidence),(ReceiptState::Dispatching|ReceiptState::Dispatched,ReceiptState::Succeeded,TransitionProof::NativeEffectiveState(_)));
+    let allowed = allowed
+        || receipt.method == ActionMethod::SessionControlsApply
+            && matches!(
+                (receipt.state, next, &evidence),
+                (
+                    ReceiptState::Dispatching | ReceiptState::Dispatched,
+                    ReceiptState::Succeeded,
+                    TransitionProof::NativeEffectiveState(_)
+                )
+            );
     if !allowed {
         return reject(ErrorCode::InvalidRequest);
     }
@@ -2430,17 +2694,26 @@ fn apply_creation_outcome(
         || last.state != StageState::Dispatching
         || metadata.workspace_operation != last.intent.workspace_operation
         || metadata.shell_probe != last.intent.shell_probe
-        || metadata.placement_workspace_id!=last.intent.placement_workspace_id
-        || last.intent.created_tab_id.as_ref().is_some_and(|tab|metadata.created_tab_id.as_ref()!=Some(tab))
-        || match (&last.intent.execution_checkout,&metadata.execution_checkout) {
-            (Some(old),Some(current)) => !current.retains(old),
-            (None,None) => false,
+        || metadata.placement_workspace_id != last.intent.placement_workspace_id
+        || last
+            .intent
+            .created_tab_id
+            .as_ref()
+            .is_some_and(|tab| metadata.created_tab_id.as_ref() != Some(tab))
+        || match (
+            &last.intent.execution_checkout,
+            &metadata.execution_checkout,
+        ) {
+            (Some(old), Some(current)) => !current.retains(old),
+            (None, None) => false,
             _ => true,
         }
     {
         return reject(ErrorCode::InvalidRequest);
     }
-    if let Some(previous)=last.result.as_ref() {retain_creation_facts(&p.resources,previous,&resources,&metadata)?;}
+    if let Some(previous) = last.result.as_ref() {
+        retain_creation_facts(&p.resources, previous, &resources, &metadata)?;
+    }
     if stage_state == StageState::Dispatching
         && (!intermediate_creation_stage(p.provider, p.stage, last.intent.workspace_operation)
             || !stage_resources(CreationStage::Workspace, p.provider, &resources)
@@ -2532,795 +2805,2097 @@ fn prune_all(tx: &Transaction<'_>, now: u64) -> StoreResult<()> {
     Ok(())
 }
 
-type LegacySessionRow = (String,String,String,String,String,String,String,String);
+type LegacySessionRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 /// Startup-only schema migration. Do not rename the old table: SQLite can rewrite
 /// unrelated foreign keys to that temporary name. No FK cascade may erase data.
-fn migrate_resource_mappings(db:&mut Connection)->StoreResult<()> {
-    let columns:Vec<(String,i64)>={let mut statement=db.prepare("PRAGMA table_info(sessions)")?;let rows=statement.query_map([],|row|Ok((row.get(1)?,row.get(5)?)))?;rows.collect::<Result<_,_>>()?};
-    let marker:Option<Vec<u8>>=db.query_row("SELECT value FROM meta WHERE key='resource_mapping_schema'",[],|row|row.get(0)).optional()?;
-    let legacy=["host","server","incarnation","terminal","owner","native","session","generation"];
-    let current=["session","generation","kind","resource_key","proof"];
-    let names:Vec<_>=columns.iter().map(|(name,_)|name.as_str()).collect();
+fn migrate_resource_mappings(db: &mut Connection) -> StoreResult<()> {
+    let columns: Vec<(String, i64)> = {
+        let mut statement = db.prepare("PRAGMA table_info(sessions)")?;
+        let rows = statement.query_map([], |row| Ok((row.get(1)?, row.get(5)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let marker: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT value FROM meta WHERE key='resource_mapping_schema'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let legacy = [
+        "host",
+        "server",
+        "incarnation",
+        "terminal",
+        "owner",
+        "native",
+        "session",
+        "generation",
+    ];
+    let current = ["session", "generation", "kind", "resource_key", "proof"];
+    let names: Vec<_> = columns.iter().map(|(name, _)| name.as_str()).collect();
     // Unknown DDL, triggers or explicit indexes are not silently discarded.
-    let ddl:String=db.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'",[],|row|row.get(0))?;
-    let normalize=|sql:&str|sql.chars().filter(|ch|!ch.is_whitespace() && *ch!='\"' && *ch!=';').flat_map(char::to_lowercase).collect::<String>();
-    let expected=if marker.as_deref()==Some(b"2") {"CREATE TABLE sessions(session TEXT PRIMARY KEY,generation TEXT NOT NULL,kind TEXT NOT NULL,resource_key TEXT NOT NULL,proof TEXT,UNIQUE(kind,resource_key))"}else{"CREATE TABLE sessions(host TEXT NOT NULL,server TEXT NOT NULL,incarnation TEXT NOT NULL,terminal TEXT NOT NULL,owner TEXT NOT NULL,native TEXT NOT NULL,session TEXT NOT NULL UNIQUE,generation TEXT NOT NULL,PRIMARY KEY(host,server,incarnation,terminal,owner,native))"};
+    let ddl: String = db.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'",
+        [],
+        |row| row.get(0),
+    )?;
+    let normalize = |sql: &str| {
+        sql.chars()
+            .filter(|ch| !ch.is_whitespace() && *ch != '\"' && *ch != ';')
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let expected = if marker.as_deref() == Some(b"2") {
+        "CREATE TABLE sessions(session TEXT PRIMARY KEY,generation TEXT NOT NULL,kind TEXT NOT NULL,resource_key TEXT NOT NULL,proof TEXT,UNIQUE(kind,resource_key))"
+    } else {
+        "CREATE TABLE sessions(host TEXT NOT NULL,server TEXT NOT NULL,incarnation TEXT NOT NULL,terminal TEXT NOT NULL,owner TEXT NOT NULL,native TEXT NOT NULL,session TEXT NOT NULL UNIQUE,generation TEXT NOT NULL,PRIMARY KEY(host,server,incarnation,terminal,owner,native))"
+    };
     if normalize(&ddl)!=normalize(expected) || db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE tbl_name='sessions' AND type IN ('trigger','index') AND sql IS NOT NULL)",[],|row|row.get::<_,bool>(0))? {return Err(StorageError::Corrupt)}
-    if db.query_row("SELECT count(*) FROM sessions",[],|row|row.get::<_,i64>(0))?>512 {return Err(StorageError::Corrupt)}
-    if marker.as_deref()==Some(b"2") {
-        if names!=current || columns.first().map(|column|column.1)!=Some(1) {return Err(StorageError::Corrupt)}
-        let mut statement=db.prepare("SELECT session,generation,kind,resource_key,proof FROM sessions")?;
-        let mut rows=statement.query([])?;let mut identities=std::collections::HashSet::new();
-        while let Some(row)=rows.next()? {
-            Uuid::new(row.get::<_,String>(0)?)?;Uuid::new(row.get::<_,String>(1)?)?;
-            let kind:String=row.get(2)?;let data:String=row.get(3)?;let key:StableResourceKey=decode(&data)?;key.validate_key()?;
-            if kind!=key.kind() || json(&key)?!=data || !identities.insert((kind.clone(),data)) {return Err(StorageError::Corrupt)}
-            let proof:Option<String>=row.get(4)?;
-            match (key.kind(),proof) {
-                ("agent",None)=>{},
-                ("shell",Some(data))=>decode::<crate::herdr::ShellProof>(&data)?.validate_for(&key).map_err(|_|StorageError::Corrupt)?,
-                _=>return Err(StorageError::Corrupt),
-            }
-        }return Ok(())
+    if db.query_row("SELECT count(*) FROM sessions", [], |row| {
+        row.get::<_, i64>(0)
+    })? > 512
+    {
+        return Err(StorageError::Corrupt);
     }
-    if marker.is_some() || names!=legacy {return Err(StorageError::Corrupt)}
+    if marker.as_deref() == Some(b"2") {
+        if names != current || columns.first().map(|column| column.1) != Some(1) {
+            return Err(StorageError::Corrupt);
+        }
+        let mut statement =
+            db.prepare("SELECT session,generation,kind,resource_key,proof FROM sessions")?;
+        let mut rows = statement.query([])?;
+        let mut identities = std::collections::HashSet::new();
+        while let Some(row) = rows.next()? {
+            Uuid::new(row.get::<_, String>(0)?)?;
+            Uuid::new(row.get::<_, String>(1)?)?;
+            let kind: String = row.get(2)?;
+            let data: String = row.get(3)?;
+            let key: StableResourceKey = decode(&data)?;
+            key.validate_key()?;
+            if kind != key.kind() || json(&key)? != data || !identities.insert((kind.clone(), data))
+            {
+                return Err(StorageError::Corrupt);
+            }
+            let proof: Option<String> = row.get(4)?;
+            match (key.kind(), proof) {
+                ("agent", None) => {}
+                ("shell", Some(data)) => decode::<crate::herdr::ShellProof>(&data)?
+                    .validate_for(&key)
+                    .map_err(|_| StorageError::Corrupt)?,
+                _ => return Err(StorageError::Corrupt),
+            }
+        }
+        return Ok(());
+    }
+    if marker.is_some() || names != legacy {
+        return Err(StorageError::Corrupt);
+    }
     // Connection-local, before BEGIN; restored on either result. No other storage
     // job can run while this owner is still being initialized.
     db.execute_batch("PRAGMA foreign_keys=OFF")?;
-    if db.query_row("PRAGMA foreign_keys",[],|row|row.get::<_,i64>(0))?!=0 {return Err(StorageError::Corrupt)}
-    let migration=(||->StoreResult<()> {
-        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if db.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))? != 0 {
+        return Err(StorageError::Corrupt);
+    }
+    let migration = (|| -> StoreResult<()> {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch("CREATE TABLE sessions_resource_v2(session TEXT PRIMARY KEY,generation TEXT NOT NULL,kind TEXT NOT NULL,resource_key TEXT NOT NULL,proof TEXT,UNIQUE(kind,resource_key));")?;
-        let legacy_rows:Vec<LegacySessionRow>={let mut statement=tx.prepare("SELECT host,server,incarnation,terminal,owner,native,session,generation FROM sessions")?;let rows=statement.query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?)))?;rows.collect::<Result<_,_>>()?};
-        if legacy_rows.len()>512 {return Err(StorageError::Corrupt)}
-        for (host,server,incarnation,terminal,owner,native,id,generation) in &legacy_rows {
-            let key=StableResourceKey::Agent(StableSessionKey {host_id:EndpointId::new(host.clone())?,server_id:Uuid::new(server.clone())?,server_incarnation:Uuid::new(incarnation.clone())?,terminal_id:Id::new(terminal.clone())?,provider_owner_identity:Id::new(owner.clone())?,native_conversation_id:Id::new(native.clone())?});
-            key.validate_key()?;Uuid::new(id.clone())?;Uuid::new(generation.clone())?;
+        let legacy_rows: Vec<LegacySessionRow> = {
+            let mut statement=tx.prepare("SELECT host,server,incarnation,terminal,owner,native,session,generation FROM sessions")?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+        if legacy_rows.len() > 512 {
+            return Err(StorageError::Corrupt);
+        }
+        for (host, server, incarnation, terminal, owner, native, id, generation) in &legacy_rows {
+            let key = StableResourceKey::Agent(StableSessionKey {
+                host_id: EndpointId::new(host.clone())?,
+                server_id: Uuid::new(server.clone())?,
+                server_incarnation: Uuid::new(incarnation.clone())?,
+                terminal_id: Id::new(terminal.clone())?,
+                provider_owner_identity: Id::new(owner.clone())?,
+                native_conversation_id: Id::new(native.clone())?,
+            });
+            key.validate_key()?;
+            Uuid::new(id.clone())?;
+            Uuid::new(generation.clone())?;
             tx.execute("INSERT INTO sessions_resource_v2(session,generation,kind,resource_key,proof) VALUES(?1,?2,'agent',?3,NULL)",params![id,generation,json(&key)?])?;
         }
-        if tx.query_row("SELECT count(*) FROM sessions_resource_v2",[],|row|row.get::<_,i64>(0))?!=legacy_rows.len() as i64 {return Err(StorageError::Corrupt)}
-        tx.execute_batch("DROP TABLE sessions; ALTER TABLE sessions_resource_v2 RENAME TO sessions;")?;
+        if tx.query_row("SELECT count(*) FROM sessions_resource_v2", [], |row| {
+            row.get::<_, i64>(0)
+        })? != legacy_rows.len() as i64
+        {
+            return Err(StorageError::Corrupt);
+        }
+        tx.execute_batch(
+            "DROP TABLE sessions; ALTER TABLE sessions_resource_v2 RENAME TO sessions;",
+        )?;
         // Existing displays/checkpoints/receipts/attention/readwater are untouched.
         // Incompatible historical FKs fail and roll back the entire replacement.
-        let violation:bool={let mut statement=tx.prepare("PRAGMA foreign_key_check")?;let mut rows=statement.query([])?;rows.next()?.is_some()};
-        if violation {return Err(StorageError::Corrupt)}
-        tx.execute("INSERT INTO meta(key,value) VALUES('resource_mapping_schema',?1)",[b"2".as_slice()])?;
-        tx.commit()?;Ok(())
+        let violation: bool = {
+            let mut statement = tx.prepare("PRAGMA foreign_key_check")?;
+            let mut rows = statement.query([])?;
+            rows.next()?.is_some()
+        };
+        if violation {
+            return Err(StorageError::Corrupt);
+        }
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES('resource_mapping_schema',?1)",
+            [b"2".as_slice()],
+        )?;
+        tx.commit()?;
+        Ok(())
     })();
     db.execute_batch("PRAGMA foreign_keys=ON")?;
-    if db.query_row("PRAGMA foreign_keys",[],|row|row.get::<_,i64>(0))?!=1 {return Err(StorageError::Corrupt)}
+    if db.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))? != 1 {
+        return Err(StorageError::Corrupt);
+    }
     migration
 }
 
-pub(crate) fn retain_shell_facts(old:&ShellCreationResources,new:&ShellCreationResources)->StoreResult<()> {
-    old.validate()?;new.validate()?;
-    macro_rules! keep {($field:ident)=>{if old.$field.as_ref().is_some_and(|known|new.$field.as_ref()!=Some(known)){return Err(StorageError::Corrupt)}};}
-    keep!(server_id);keep!(workspace_id);keep!(tab_id);keep!(pane_id);keep!(terminal_id);keep!(created_target);Ok(())
+pub(crate) fn retain_shell_facts(
+    old: &ShellCreationResources,
+    new: &ShellCreationResources,
+) -> StoreResult<()> {
+    old.validate()?;
+    new.validate()?;
+    macro_rules! keep {
+        ($field:ident) => {
+            if old
+                .$field
+                .as_ref()
+                .is_some_and(|known| new.$field.as_ref() != Some(known))
+            {
+                return Err(StorageError::Corrupt);
+            }
+        };
+    }
+    keep!(server_id);
+    keep!(workspace_id);
+    keep!(tab_id);
+    keep!(pane_id);
+    keep!(terminal_id);
+    keep!(created_target);
+    Ok(())
 }
-fn shell_facts(receipt:&Receipt)->StoreResult<ShellCreationResources> {
-    if receipt.creation.is_some() || match receipt.method {ActionMethod::ShellCreate=>receipt.shell_target.is_none()||receipt.target.is_some(),ActionMethod::TerminalCreate=>receipt.shell_target.is_some(),_=>true}{return Err(StorageError::Corrupt)}
-    match &receipt.result {None=>Ok(ShellCreationResources::default()),Some(ActionResult::ShellCreation(result))=>Ok(result.resources.clone()),_=>Err(StorageError::Corrupt)}
+fn shell_facts(receipt: &Receipt) -> StoreResult<ShellCreationResources> {
+    if receipt.creation.is_some()
+        || match receipt.method {
+            ActionMethod::ShellCreate => receipt.shell_target.is_none() || receipt.target.is_some(),
+            ActionMethod::TerminalCreate => receipt.shell_target.is_some(),
+            _ => true,
+        }
+    {
+        return Err(StorageError::Corrupt);
+    }
+    match &receipt.result {
+        None => Ok(ShellCreationResources::default()),
+        Some(ActionResult::ShellCreation(result)) => Ok(result.resources.clone()),
+        _ => Err(StorageError::Corrupt),
+    }
 }
 impl Storage {
-    pub(crate) fn checkpoint_shell_facts(&mut self,ticket:&DispatchTicket,resources:ShellCreationResources,at:u64)->StoreResult<()> {
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;authorize(&tx,&ticket.proof)?;
-        let mut receipt=ticket_receipt(&tx,ticket)?;
-        if ticket.stage.is_some() || receipt.state!=ReceiptState::Dispatching {return reject(ErrorCode::NotReady)}
-        retain_shell_facts(&shell_facts(&receipt)?,&resources)?;
-        receipt.result=Some(ActionResult::ShellCreation(ActionResultShellCreation {resources}));receipt.updated_at=timestamp(at.max(receipt.updated_at.0))?;
-        write_receipt(&tx,&ticket.proof.peer.0,&ticket.action.0,&receipt)?;tx.commit()?;Ok(())
+    pub(crate) fn checkpoint_shell_facts(
+        &mut self,
+        ticket: &DispatchTicket,
+        resources: ShellCreationResources,
+        at: u64,
+    ) -> StoreResult<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        authorize(&tx, &ticket.proof)?;
+        let mut receipt = ticket_receipt(&tx, ticket)?;
+        if ticket.stage.is_some() || receipt.state != ReceiptState::Dispatching {
+            return reject(ErrorCode::NotReady);
+        }
+        retain_shell_facts(&shell_facts(&receipt)?, &resources)?;
+        receipt.result = Some(ActionResult::ShellCreation(ActionResultShellCreation {
+            resources,
+        }));
+        receipt.updated_at = timestamp(at.max(receipt.updated_at.0))?;
+        write_receipt(&tx, &ticket.proof.peer.0, &ticket.action.0, &receipt)?;
+        tx.commit()?;
+        Ok(())
     }
     /// Final same-original source/root/kernel-cwd proof guards the actual receipt commit.
     /// Acquire SQLite before this short proof, never await while holding either owner.
     pub(crate) fn settle_terminal_creation_dispatch(
-        &mut self,ticket:DispatchTicket,mut outcome:ReceiptTransition,resources:ShellCreationResources,
-        acknowledge:impl FnOnce(&ShellCreationResources,&mut dyn FnMut()->Result<(),ErrorCode>)->Result<(),ErrorCode>,
-    )->StoreResult<()> {
-        if ticket.stage.is_some(){return reject(ErrorCode::InvalidRequest)}
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let receipt=ticket_receipt(&tx,&ticket)?;
-        if receipt.method!=ActionMethod::TerminalCreate{return reject(ErrorCode::InvalidRequest)}
-        retain_shell_facts(&shell_facts(&receipt)?,&resources)?;
-        match &outcome.result {
-            Some(ActionResult::ShellCreation(result))=>retain_shell_facts(&resources,&result.resources)?,
-            None=>outcome.result=Some(ActionResult::ShellCreation(ActionResultShellCreation {resources:resources.clone()})),
-            Some(_)=>return reject(ErrorCode::InvalidRequest),
+        &mut self,
+        ticket: DispatchTicket,
+        mut outcome: ReceiptTransition,
+        resources: ShellCreationResources,
+        acknowledge: impl FnOnce(
+            &ShellCreationResources,
+            &mut dyn FnMut() -> Result<(), ErrorCode>,
+        ) -> Result<(), ErrorCode>,
+    ) -> StoreResult<()> {
+        if ticket.stage.is_some() {
+            return reject(ErrorCode::InvalidRequest);
         }
-        let known_effect=resources.workspace_id.is_some()||resources.tab_id.is_some()||resources.pane_id.is_some()||resources.terminal_id.is_some()||resources.created_target.is_some();
-        if outcome.state==ReceiptState::Failed&&known_effect{outcome.state=ReceiptState::Uncertain;outcome.proof=TransitionProof::LostOutcome;outcome.error=None;}
-        let peer_current=match authorize(&tx,&ticket.proof){Ok(())=>true,Err(StorageError::Policy(_))=>false,Err(error)=>return Err(error)};
-        let mut pending=Some((tx,receipt,outcome));let mut committed=None;
-        if peer_current&&pending.as_ref().is_some_and(|(_,_,outcome)|outcome.state==ReceiptState::Succeeded){
-            let _guard_result=acknowledge(&resources,&mut ||{
-                let Some((tx,mut receipt,outcome))=pending.take()else{return Err(ErrorCode::InvalidRequest)};
-                committed=Some((||{
-                    apply_transition(&mut receipt,outcome)?;
-                    write_receipt(&tx,&ticket.proof.peer.0,&ticket.action.0,&receipt)?;
-                    tx.execute("DELETE FROM creation_shell_fences WHERE peer=?1 AND action=?2",params![ticket.proof.peer.0,ticket.action.0])?;
-                    tx.commit()?;Ok(())
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let receipt = ticket_receipt(&tx, &ticket)?;
+        if receipt.method != ActionMethod::TerminalCreate {
+            return reject(ErrorCode::InvalidRequest);
+        }
+        retain_shell_facts(&shell_facts(&receipt)?, &resources)?;
+        match &outcome.result {
+            Some(ActionResult::ShellCreation(result)) => {
+                retain_shell_facts(&resources, &result.resources)?
+            }
+            None => {
+                outcome.result = Some(ActionResult::ShellCreation(ActionResultShellCreation {
+                    resources: resources.clone(),
+                }))
+            }
+            Some(_) => return reject(ErrorCode::InvalidRequest),
+        }
+        let known_effect = resources.workspace_id.is_some()
+            || resources.tab_id.is_some()
+            || resources.pane_id.is_some()
+            || resources.terminal_id.is_some()
+            || resources.created_target.is_some();
+        if outcome.state == ReceiptState::Failed && known_effect {
+            outcome.state = ReceiptState::Uncertain;
+            outcome.proof = TransitionProof::LostOutcome;
+            outcome.error = None;
+        }
+        let peer_current = match authorize(&tx, &ticket.proof) {
+            Ok(()) => true,
+            Err(StorageError::Policy(_)) => false,
+            Err(error) => return Err(error),
+        };
+        let mut pending = Some((tx, receipt, outcome));
+        let mut committed = None;
+        if peer_current
+            && pending
+                .as_ref()
+                .is_some_and(|(_, _, outcome)| outcome.state == ReceiptState::Succeeded)
+        {
+            let _guard_result = acknowledge(&resources, &mut || {
+                let Some((tx, mut receipt, outcome)) = pending.take() else {
+                    return Err(ErrorCode::InvalidRequest);
+                };
+                committed = Some((|| {
+                    apply_transition(&mut receipt, outcome)?;
+                    write_receipt(&tx, &ticket.proof.peer.0, &ticket.action.0, &receipt)?;
+                    tx.execute(
+                        "DELETE FROM creation_shell_fences WHERE peer=?1 AND action=?2",
+                        params![ticket.proof.peer.0, ticket.action.0],
+                    )?;
+                    tx.commit()?;
+                    Ok(())
                 })());
                 match committed.as_ref() {
-                    Some(Ok(()))=>Ok(()),
-                    Some(Err(StorageError::Policy(code)))=>Err(*code),
-                    _=>Err(ErrorCode::NotReady),
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(StorageError::Policy(code))) => Err(*code),
+                    _ => Err(ErrorCode::NotReady),
                 }
             });
         }
-        if let Some(result)=committed{return result}
-        let Some((tx,mut receipt,mut outcome))=pending else{return Err(StorageError::Corrupt)};
+        if let Some(result) = committed {
+            return result;
+        }
+        let Some((tx, mut receipt, mut outcome)) = pending else {
+            return Err(StorageError::Corrupt);
+        };
         // Missing original acknowledgement authority cannot be substituted by
         // the earlier successful reply. Keep every known resource fact.
-        if outcome.state==ReceiptState::Succeeded{outcome.state=ReceiptState::Uncertain;outcome.proof=TransitionProof::LostOutcome;outcome.error=None;}
-        apply_transition(&mut receipt,outcome)?;write_receipt(&tx,&ticket.proof.peer.0,&ticket.action.0,&receipt)?;tx.commit()?;Ok(())
+        if outcome.state == ReceiptState::Succeeded {
+            outcome.state = ReceiptState::Uncertain;
+            outcome.proof = TransitionProof::LostOutcome;
+            outcome.error = None;
+        }
+        apply_transition(&mut receipt, outcome)?;
+        write_receipt(&tx, &ticket.proof.peer.0, &ticket.action.0, &receipt)?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
-pub(crate) fn retain_shell_input_facts(old:&ShellDispatchProgress,new:&ShellDispatchProgress)->StoreResult<()> {
-    old.validate()?;new.validate()?;if !new.retains(old){return Err(StorageError::Corrupt)}Ok(())
+pub(crate) fn retain_shell_input_facts(
+    old: &ShellDispatchProgress,
+    new: &ShellDispatchProgress,
+) -> StoreResult<()> {
+    old.validate()?;
+    new.validate()?;
+    if !new.retains(old) {
+        return Err(StorageError::Corrupt);
+    }
+    Ok(())
 }
-fn shell_input_facts(receipt:&Receipt)->StoreResult<ShellDispatchProgress> {
-    if receipt.method!=ActionMethod::ShellInput||receipt.shell_target.is_none()||receipt.target.is_some()||receipt.creation.is_some(){return Err(StorageError::Corrupt)}
-    match &receipt.result {None=>Ok(ShellDispatchProgress::default()),Some(ActionResult::ShellDispatch(result))=>Ok(result.progress.clone()),_=>Err(StorageError::Corrupt)}
+fn shell_input_facts(receipt: &Receipt) -> StoreResult<ShellDispatchProgress> {
+    if receipt.method != ActionMethod::ShellInput
+        || receipt.shell_target.is_none()
+        || receipt.target.is_some()
+        || receipt.creation.is_some()
+    {
+        return Err(StorageError::Corrupt);
+    }
+    match &receipt.result {
+        None => Ok(ShellDispatchProgress::default()),
+        Some(ActionResult::ShellDispatch(result)) => Ok(result.progress.clone()),
+        _ => Err(StorageError::Corrupt),
+    }
 }
 impl Storage {
-    pub(crate) fn checkpoint_shell_input_facts(&mut self,ticket:&DispatchTicket,progress:ShellDispatchProgress,at:u64)->StoreResult<()> {
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;authorize(&tx,&ticket.proof)?;
-        let mut receipt=ticket_receipt(&tx,ticket)?;
-        if ticket.stage.is_some() || receipt.state!=ReceiptState::Dispatching {return reject(ErrorCode::NotReady)}
-        retain_shell_input_facts(&shell_input_facts(&receipt)?,&progress)?;
-        receipt.result=Some(ActionResult::ShellDispatch(ActionResultShellDispatch {progress}));receipt.updated_at=timestamp(at.max(receipt.updated_at.0))?;
-        write_receipt(&tx,&ticket.proof.peer.0,&ticket.action.0,&receipt)?;tx.commit()?;Ok(())
-    }
-    pub(crate) fn settle_shell_input_dispatch(&mut self,ticket:DispatchTicket,mut outcome:ReceiptTransition,progress:ShellDispatchProgress)->StoreResult<()> {
-        if ticket.stage.is_some() {return reject(ErrorCode::InvalidRequest)}
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut receipt=ticket_receipt(&tx,&ticket)?;
-        retain_shell_input_facts(&shell_input_facts(&receipt)?,&progress)?;
-        match &outcome.result {
-            Some(ActionResult::ShellDispatch(result))=>retain_shell_input_facts(&progress,&result.progress)?,
-            None=>outcome.result=Some(ActionResult::ShellDispatch(ActionResultShellDispatch {progress:progress.clone()})),
-            Some(_)=>return reject(ErrorCode::InvalidRequest),
+    pub(crate) fn checkpoint_shell_input_facts(
+        &mut self,
+        ticket: &DispatchTicket,
+        progress: ShellDispatchProgress,
+        at: u64,
+    ) -> StoreResult<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        authorize(&tx, &ticket.proof)?;
+        let mut receipt = ticket_receipt(&tx, ticket)?;
+        if ticket.stage.is_some() || receipt.state != ReceiptState::Dispatching {
+            return reject(ErrorCode::NotReady);
         }
-        let known_effect=progress.socket_bytes_written.is_some_and(|n|n>0)||progress.frame_complete==Some(true);
-        let complete=matches!(&outcome.result,Some(ActionResult::ShellDispatch(result)) if result.progress.complete());
+        retain_shell_input_facts(&shell_input_facts(&receipt)?, &progress)?;
+        receipt.result = Some(ActionResult::ShellDispatch(ActionResultShellDispatch {
+            progress,
+        }));
+        receipt.updated_at = timestamp(at.max(receipt.updated_at.0))?;
+        write_receipt(&tx, &ticket.proof.peer.0, &ticket.action.0, &receipt)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub(crate) fn settle_shell_input_dispatch(
+        &mut self,
+        ticket: DispatchTicket,
+        mut outcome: ReceiptTransition,
+        progress: ShellDispatchProgress,
+    ) -> StoreResult<()> {
+        if ticket.stage.is_some() {
+            return reject(ErrorCode::InvalidRequest);
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut receipt = ticket_receipt(&tx, &ticket)?;
+        retain_shell_input_facts(&shell_input_facts(&receipt)?, &progress)?;
+        match &outcome.result {
+            Some(ActionResult::ShellDispatch(result)) => {
+                retain_shell_input_facts(&progress, &result.progress)?
+            }
+            None => {
+                outcome.result = Some(ActionResult::ShellDispatch(ActionResultShellDispatch {
+                    progress: progress.clone(),
+                }))
+            }
+            Some(_) => return reject(ErrorCode::InvalidRequest),
+        }
+        let known_effect = progress.socket_bytes_written.is_some_and(|n| n > 0)
+            || progress.frame_complete == Some(true);
+        let complete = matches!(&outcome.result,Some(ActionResult::ShellDispatch(result)) if result.progress.complete());
         if complete {
             // A lost waiter/source cannot undo a positively observed complete socket frame.
-            outcome.state=ReceiptState::Dispatched;outcome.proof=TransitionProof::WriteCompleted;outcome.error=None;
-        }else if outcome.state==ReceiptState::Failed&&known_effect {
-            outcome.state=ReceiptState::Uncertain;outcome.proof=TransitionProof::LostOutcome;outcome.error=None;
+            outcome.state = ReceiptState::Dispatched;
+            outcome.proof = TransitionProof::WriteCompleted;
+            outcome.error = None;
+        } else if outcome.state == ReceiptState::Failed && known_effect {
+            outcome.state = ReceiptState::Uncertain;
+            outcome.proof = TransitionProof::LostOutcome;
+            outcome.error = None;
         }
-        apply_transition(&mut receipt,outcome)?;
-        write_receipt(&tx,&ticket.proof.peer.0,&ticket.action.0,&receipt)?;tx.commit()?;Ok(())
+        apply_transition(&mut receipt, outcome)?;
+        write_receipt(&tx, &ticket.proof.peer.0, &ticket.action.0, &receipt)?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
-fn retained_creation_shell_fence(receipt:&Receipt,stages:Option<&[CreationStageRecord]>)->Option<crate::herdr::shells::CreationShellFence> {
-    let (server,pane,terminal)=if receipt.method==ActionMethod::SessionCreate&&receipt.state!=ReceiptState::Succeeded {
-        let creation=receipt.creation.as_ref()?;
-        (creation.server_id.clone(),creation.resources.pane_id.clone()?,creation.resources.terminal_id.clone()?)
-    }else if matches!(receipt.method,ActionMethod::ShellCreate|ActionMethod::TerminalCreate)&&receipt.state!=ReceiptState::Succeeded {
-        let ActionResult::ShellCreation(result)=receipt.result.as_ref()? else{return None};
-        (result.resources.server_id.clone()?,result.resources.pane_id.clone()?,result.resources.terminal_id.clone()?)
-    }else{return None};
-    let incarnation=stages.and_then(|records|records.iter().find(|record|record.stage==CreationStage::Workspace&&record.intent.workspace_operation==WorkspaceOperation::Create))
-        .and_then(|record|record.result.as_ref().and_then(|metadata|metadata.socket_epoch.clone()).or_else(||record.intent.socket_epoch.clone()));
-    Some(crate::herdr::shells::CreationShellFence{server,incarnation,baseline:Default::default(),created:Some((pane,terminal))})
+fn retained_creation_shell_fence(
+    receipt: &Receipt,
+    stages: Option<&[CreationStageRecord]>,
+) -> Option<crate::herdr::shells::CreationShellFence> {
+    let (server, pane, terminal) = if receipt.method == ActionMethod::SessionCreate
+        && receipt.state != ReceiptState::Succeeded
+    {
+        let creation = receipt.creation.as_ref()?;
+        (
+            creation.server_id.clone(),
+            creation.resources.pane_id.clone()?,
+            creation.resources.terminal_id.clone()?,
+        )
+    } else if matches!(
+        receipt.method,
+        ActionMethod::ShellCreate | ActionMethod::TerminalCreate
+    ) && receipt.state != ReceiptState::Succeeded
+    {
+        let ActionResult::ShellCreation(result) = receipt.result.as_ref()? else {
+            return None;
+        };
+        (
+            result.resources.server_id.clone()?,
+            result.resources.pane_id.clone()?,
+            result.resources.terminal_id.clone()?,
+        )
+    } else {
+        return None;
+    };
+    let incarnation = stages
+        .and_then(|records| {
+            records.iter().find(|record| {
+                record.stage == CreationStage::Workspace
+                    && record.intent.workspace_operation == WorkspaceOperation::Create
+            })
+        })
+        .and_then(|record| {
+            record
+                .result
+                .as_ref()
+                .and_then(|metadata| metadata.socket_epoch.clone())
+                .or_else(|| record.intent.socket_epoch.clone())
+        });
+    Some(crate::herdr::shells::CreationShellFence {
+        server,
+        incarnation,
+        baseline: Default::default(),
+        created: Some((pane, terminal)),
+    })
 }
 
+type RetainedCreationShellFences = (
+    Vec<(Uuid, Uuid, crate::herdr::shells::CreationShellFence)>,
+    std::collections::HashSet<Uuid>,
+);
 impl Storage {
-    pub(crate) fn creation_shell_fences(&self)->StoreResult<(Vec<(Uuid,Uuid,crate::herdr::shells::CreationShellFence)>,std::collections::HashSet<Uuid>)> {
-        let mut statement=self.db.prepare("SELECT peer,action,fence FROM creation_shell_fences LIMIT 513")?;
-        let rows=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?;
-        let mut result=Vec::new();let mut unproved=std::collections::HashSet::new();
+    pub(crate) fn creation_shell_fences(&self) -> StoreResult<RetainedCreationShellFences> {
+        let mut statement = self
+            .db
+            .prepare("SELECT peer,action,fence FROM creation_shell_fences LIMIT 513")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        let mut unproved = std::collections::HashSet::new();
         for row in rows {
-            let (peer,action,json)=row?;
-            let fence:crate::herdr::shells::CreationShellFence=serde_json::from_str(&json).map_err(|_|StorageError::Corrupt)?;
-            fence.validate()?;result.push((Uuid::new(peer)?,Uuid::new(action)?,fence));
-            if result.len()>512{return Err(StorageError::Corrupt);}
+            let (peer, action, json) = row?;
+            let fence: crate::herdr::shells::CreationShellFence =
+                serde_json::from_str(&json).map_err(|_| StorageError::Corrupt)?;
+            fence.validate()?;
+            result.push((Uuid::new(peer)?, Uuid::new(action)?, fence));
+            if result.len() > 512 {
+                return Err(StorageError::Corrupt);
+            }
         }
         // Retained bootstrap roots are negative facts, never ordinary-terminal authority.
         // Missing historical incarnation data can only deny this exact pane/terminal pair.
         let mut statement=self.db.prepare("SELECT r.peer,r.action,r.receipt,c.stages FROM receipts r LEFT JOIN creation c ON c.peer=r.peer AND c.action=r.action WHERE NOT EXISTS (SELECT 1 FROM creation_shell_fences f WHERE f.peer=r.peer AND f.action=r.action)")?;
-        let rows=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?)))?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
         for row in rows {
-            let (peer,action,json,stages)=row?;
-            let receipt:Receipt=decode(&json)?;
-            let stages:Option<Vec<CreationStageRecord>>=stages.as_deref().map(decode).transpose()?;
-            if let Some(fence)=retained_creation_shell_fence(&receipt,stages.as_deref()) {
-                fence.validate()?;result.push((Uuid::new(peer)?,Uuid::new(action)?,fence));
-                if result.len()>512{return reject(ErrorCode::ResourceLimit);}
-            }else if !matches!(receipt.state,ReceiptState::Succeeded|ReceiptState::Failed) {
-                if let Some(creation)=&receipt.creation {
-                    if creation.resources.workspace_id.is_some()||creation.stage_state==StageState::Uncertain
-                        &&matches!(creation.stage,CreationStage::Workspace|CreationStage::Launch|CreationStage::Ready)
-                    {unproved.insert(creation.server_id.clone());}
-                }else if matches!(receipt.method,ActionMethod::ShellCreate|ActionMethod::TerminalCreate) {
-                    let resources=match &receipt.result {Some(ActionResult::ShellCreation(result))=>Some(&result.resources),_=>None};
-                    let source=receipt.target.as_ref().map(|target|&target.session_id).or_else(||receipt.shell_target.as_ref().map(|target|&target.shell_id));
-                    if let Some(server)=resources.and_then(|resources|resources.server_id.as_ref()){unproved.insert(server.clone());}
-                    else if let Some(source)=source {
-                        let key:Option<String>=self.db.query_row("SELECT resource_key FROM sessions WHERE session=?1",[&source.0],|row|row.get(0)).optional()?;
-                        let key:StableResourceKey=decode(&key.ok_or(StorageError::Policy(ErrorCode::NotReady))?)?;
+            let (peer, action, json, stages) = row?;
+            let receipt: Receipt = decode(&json)?;
+            let stages: Option<Vec<CreationStageRecord>> =
+                stages.as_deref().map(decode).transpose()?;
+            if let Some(fence) = retained_creation_shell_fence(&receipt, stages.as_deref()) {
+                fence.validate()?;
+                result.push((Uuid::new(peer)?, Uuid::new(action)?, fence));
+                if result.len() > 512 {
+                    return reject(ErrorCode::ResourceLimit);
+                }
+            } else if !matches!(
+                receipt.state,
+                ReceiptState::Succeeded | ReceiptState::Failed
+            ) {
+                if let Some(creation) = &receipt.creation {
+                    if creation.resources.workspace_id.is_some()
+                        || creation.stage_state == StageState::Uncertain
+                            && matches!(
+                                creation.stage,
+                                CreationStage::Workspace
+                                    | CreationStage::Launch
+                                    | CreationStage::Ready
+                            )
+                    {
+                        unproved.insert(creation.server_id.clone());
+                    }
+                } else if matches!(
+                    receipt.method,
+                    ActionMethod::ShellCreate | ActionMethod::TerminalCreate
+                ) {
+                    let resources = match &receipt.result {
+                        Some(ActionResult::ShellCreation(result)) => Some(&result.resources),
+                        _ => None,
+                    };
+                    let source = receipt
+                        .target
+                        .as_ref()
+                        .map(|target| &target.session_id)
+                        .or_else(|| receipt.shell_target.as_ref().map(|target| &target.shell_id));
+                    if let Some(server) =
+                        resources.and_then(|resources| resources.server_id.as_ref())
+                    {
+                        unproved.insert(server.clone());
+                    } else if let Some(source) = source {
+                        let key: Option<String> = self
+                            .db
+                            .query_row(
+                                "SELECT resource_key FROM sessions WHERE session=?1",
+                                [&source.0],
+                                |row| row.get(0),
+                            )
+                            .optional()?;
+                        let key: StableResourceKey =
+                            decode(&key.ok_or(StorageError::Policy(ErrorCode::NotReady))?)?;
                         unproved.insert(key.server().clone());
-                    }else if resources.is_some(){return reject(ErrorCode::NotReady);}
+                    } else if resources.is_some() {
+                        return reject(ErrorCode::NotReady);
+                    }
                 }
             }
-        }Ok((result,unproved))
+        }
+        Ok((result, unproved))
     }
-    pub(crate) fn retire_confirmed_creation_shell_fences(&mut self,server:&Uuid,incarnation:&Uuid,snapshot:&crate::herdr::Snapshot)->StoreResult<Vec<(Uuid,Uuid)>> {
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let removed={
+    pub(crate) fn retire_confirmed_creation_shell_fences(
+        &mut self,
+        server: &Uuid,
+        incarnation: &Uuid,
+        snapshot: &crate::herdr::Snapshot,
+    ) -> StoreResult<Vec<(Uuid, Uuid)>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = {
             let mut statement=tx.prepare("SELECT f.peer,f.action,f.fence,r.receipt FROM creation_shell_fences f JOIN receipts r ON r.peer=f.peer AND r.action=f.action WHERE r.state='succeeded'")?;
-            let rows=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?)))?;
-            let mut removed=Vec::new();
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            let mut removed = Vec::new();
             for row in rows {
-                let (peer,action,json,receipt)=row?;
-                let fence:crate::herdr::shells::CreationShellFence=decode(&json)?;fence.validate()?;
-                let receipt:Receipt=decode(&receipt)?;receipt.validate()?;
-                if &fence.server!=server||receipt.method!=ActionMethod::SessionCreate{continue;}
-                let creation=receipt.creation.as_ref().ok_or(StorageError::Corrupt)?;
-                let pane=creation.resources.pane_id.as_ref().ok_or(StorageError::Corrupt)?;
-                let terminal=creation.resources.terminal_id.as_ref().ok_or(StorageError::Corrupt)?;
-                if creation.server_id!=fence.server||fence.created.as_ref().is_some_and(|known|known.0!=*pane||known.1!=*terminal){return Err(StorageError::Corrupt);}
-                let observed=fence.incarnation.as_ref().is_some_and(|original|original!=incarnation)
-                    ||snapshot.pane(pane).map_or(true,|current|current.terminal_id!=*terminal||current.agent.is_some()||current.agent_session.is_some()
-                        ||snapshot.agents.iter().any(|agent|agent.pane_id==*pane||agent.terminal_id==*terminal));
-                if observed{removed.push((Uuid::new(peer)?,Uuid::new(action)?));}
-            }removed
+                let (peer, action, json, receipt) = row?;
+                let fence: crate::herdr::shells::CreationShellFence = decode(&json)?;
+                fence.validate()?;
+                let receipt: Receipt = decode(&receipt)?;
+                receipt.validate()?;
+                if &fence.server != server || receipt.method != ActionMethod::SessionCreate {
+                    continue;
+                }
+                let creation = receipt.creation.as_ref().ok_or(StorageError::Corrupt)?;
+                let pane = creation
+                    .resources
+                    .pane_id
+                    .as_ref()
+                    .ok_or(StorageError::Corrupt)?;
+                let terminal = creation
+                    .resources
+                    .terminal_id
+                    .as_ref()
+                    .ok_or(StorageError::Corrupt)?;
+                if creation.server_id != fence.server
+                    || fence
+                        .created
+                        .as_ref()
+                        .is_some_and(|known| known.0 != *pane || known.1 != *terminal)
+                {
+                    return Err(StorageError::Corrupt);
+                }
+                let observed = fence
+                    .incarnation
+                    .as_ref()
+                    .is_some_and(|original| original != incarnation)
+                    || snapshot.pane(pane).map_or(true, |current| {
+                        current.terminal_id != *terminal
+                            || current.agent.is_some()
+                            || current.agent_session.is_some()
+                            || snapshot.agents.iter().any(|agent| {
+                                agent.pane_id == *pane || agent.terminal_id == *terminal
+                            })
+                    });
+                if observed {
+                    removed.push((Uuid::new(peer)?, Uuid::new(action)?));
+                }
+            }
+            removed
         };
-        for (peer,action) in &removed {tx.execute("DELETE FROM creation_shell_fences WHERE peer=?1 AND action=?2",params![peer.0,action.0])?;}
-        tx.commit()?;Ok(removed)
+        for (peer, action) in &removed {
+            tx.execute(
+                "DELETE FROM creation_shell_fences WHERE peer=?1 AND action=?2",
+                params![peer.0, action.0],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
     }
-    pub(crate) fn retain_creation_shell_fence(&mut self,proof:&AuthenticatedPeer,action:&Uuid,fence:crate::herdr::shells::CreationShellFence)->StoreResult<()> {
+    pub(crate) fn retain_creation_shell_fence(
+        &mut self,
+        proof: &AuthenticatedPeer,
+        action: &Uuid,
+        fence: crate::herdr::shells::CreationShellFence,
+    ) -> StoreResult<()> {
         fence.validate()?;
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;authorize(&tx,proof)?;
-        let receipt=get_receipt(&tx,proof,action)?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
-        if !matches!(receipt.method,ActionMethod::SessionCreate|ActionMethod::TerminalCreate){return reject(ErrorCode::InvalidRequest);}
-        let old:Option<String>=tx.query_row("SELECT fence FROM creation_shell_fences WHERE peer=?1 AND action=?2",params![proof.peer.0,action.0],|row|row.get(0)).optional()?;
-        if let Some(old)=old {
-            let old:crate::herdr::shells::CreationShellFence=serde_json::from_str(&old).map_err(|_|StorageError::Corrupt)?;
-            if old.server!=fence.server||old.incarnation!=fence.incarnation||(old.baseline!=fence.baseline&&!(fence.created.is_some()&&fence.baseline.is_empty()))
-                ||old.created.as_ref().is_some_and(|known|fence.created.as_ref()!=Some(known)){return Err(StorageError::Corrupt);}
-        }else{
-            let count:i64=tx.query_row("SELECT count(*) FROM creation_shell_fences",[],|row|row.get(0))?;
-            if count>=512{return reject(ErrorCode::ResourceLimit);}
-            if receipt.state!=ReceiptState::Reserved{return reject(ErrorCode::NotReady);}
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        authorize(&tx, proof)?;
+        let receipt =
+            get_receipt(&tx, proof, action)?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
+        if !matches!(
+            receipt.method,
+            ActionMethod::SessionCreate | ActionMethod::TerminalCreate
+        ) {
+            return reject(ErrorCode::InvalidRequest);
+        }
+        let old: Option<String> = tx
+            .query_row(
+                "SELECT fence FROM creation_shell_fences WHERE peer=?1 AND action=?2",
+                params![proof.peer.0, action.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(old) = old {
+            let old: crate::herdr::shells::CreationShellFence =
+                serde_json::from_str(&old).map_err(|_| StorageError::Corrupt)?;
+            if old.server != fence.server
+                || old.incarnation != fence.incarnation
+                || (old.baseline != fence.baseline
+                    && !(fence.created.is_some() && fence.baseline.is_empty()))
+                || old
+                    .created
+                    .as_ref()
+                    .is_some_and(|known| fence.created.as_ref() != Some(known))
+            {
+                return Err(StorageError::Corrupt);
+            }
+        } else {
+            let count: i64 =
+                tx.query_row("SELECT count(*) FROM creation_shell_fences", [], |row| {
+                    row.get(0)
+                })?;
+            if count >= 512 {
+                return reject(ErrorCode::ResourceLimit);
+            }
+            if receipt.state != ReceiptState::Reserved {
+                return reject(ErrorCode::NotReady);
+            }
         }
         tx.execute("INSERT INTO creation_shell_fences(peer,action,fence) VALUES(?1,?2,?3) ON CONFLICT(peer,action) DO UPDATE SET fence=excluded.fence",
             params![proof.peer.0,action.0,serde_json::to_string(&fence).map_err(|_|StorageError::Corrupt)?])?;
-        tx.commit()?;Ok(())
+        tx.commit()?;
+        Ok(())
     }
-    pub(crate) fn narrow_creation_shell_fence(&mut self,proof:&AuthenticatedPeer,action:&Uuid,pane:&Id,terminal:&Id)->StoreResult<crate::herdr::shells::CreationShellFence> {
-        authorize(&self.db,proof)?;
-        let receipt=get_receipt(&self.db,proof,action)?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
-        let matches=receipt.creation.as_ref().is_some_and(|creation|creation.resources.pane_id.as_ref()==Some(pane)&&creation.resources.terminal_id.as_ref()==Some(terminal))
-            ||matches!(&receipt.result,Some(ActionResult::ShellCreation(result)) if result.resources.complete()&&result.resources.pane_id.as_ref()==Some(pane)&&result.resources.terminal_id.as_ref()==Some(terminal));
-        if !matches{return reject(ErrorCode::NotReady);}
-        let value:String=self.db.query_row("SELECT fence FROM creation_shell_fences WHERE peer=?1 AND action=?2",params![proof.peer.0,action.0],|row|row.get(0))?;
-        let mut fence:crate::herdr::shells::CreationShellFence=decode(&value)?;
-        fence.created=Some((pane.clone(),terminal.clone()));
+    pub(crate) fn narrow_creation_shell_fence(
+        &mut self,
+        proof: &AuthenticatedPeer,
+        action: &Uuid,
+        pane: &Id,
+        terminal: &Id,
+    ) -> StoreResult<crate::herdr::shells::CreationShellFence> {
+        authorize(&self.db, proof)?;
+        let receipt = get_receipt(&self.db, proof, action)?
+            .ok_or(StorageError::Policy(ErrorCode::NotFound))?;
+        let matches = receipt.creation.as_ref().is_some_and(|creation| {
+            creation.resources.pane_id.as_ref() == Some(pane)
+                && creation.resources.terminal_id.as_ref() == Some(terminal)
+        }) || matches!(&receipt.result,Some(ActionResult::ShellCreation(result)) if result.resources.complete()&&result.resources.pane_id.as_ref()==Some(pane)&&result.resources.terminal_id.as_ref()==Some(terminal));
+        if !matches {
+            return reject(ErrorCode::NotReady);
+        }
+        let value: String = self.db.query_row(
+            "SELECT fence FROM creation_shell_fences WHERE peer=?1 AND action=?2",
+            params![proof.peer.0, action.0],
+            |row| row.get(0),
+        )?;
+        let mut fence: crate::herdr::shells::CreationShellFence = decode(&value)?;
+        fence.created = Some((pane.clone(), terminal.clone()));
         fence.baseline.clear();
-        self.retain_creation_shell_fence(proof,action,fence.clone())?;Ok(fence)
+        self.retain_creation_shell_fence(proof, action, fence.clone())?;
+        Ok(fence)
     }
-    pub(crate) fn release_creation_shell_fence(&mut self,proof:&AuthenticatedPeer,action:&Uuid)->StoreResult<()> {
+    pub(crate) fn release_creation_shell_fence(
+        &mut self,
+        proof: &AuthenticatedPeer,
+        action: &Uuid,
+    ) -> StoreResult<()> {
         // Original-job no-effect cleanup only; revocation must not strand an unentered
         // denial. This grants no read/write authority and never removes native resources.
-        let epoch:i64=self.db.query_row("SELECT epoch FROM receipts WHERE peer=?1 AND action=?2",params![proof.peer.0,action.0],|row|row.get(0))?;
-        if stored_u64(epoch)?!=proof.epoch(){return reject(ErrorCode::Unauthorized);}
-        let receipt=get_receipt(&self.db,proof,action)?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
+        let epoch: i64 = self.db.query_row(
+            "SELECT epoch FROM receipts WHERE peer=?1 AND action=?2",
+            params![proof.peer.0, action.0],
+            |row| row.get(0),
+        )?;
+        if stored_u64(epoch)? != proof.epoch() {
+            return reject(ErrorCode::Unauthorized);
+        }
+        let receipt = get_receipt(&self.db, proof, action)?
+            .ok_or(StorageError::Policy(ErrorCode::NotFound))?;
         if !matches!(receipt.method,ActionMethod::SessionCreate|ActionMethod::TerminalCreate)
             ||!matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Failed)
             ||receipt.creation.as_ref().is_some_and(|creation|creation.resources.workspace_id.is_some()||creation.resources.pane_id.is_some()||creation.resources.terminal_id.is_some())
             ||receipt.result.as_ref().is_some_and(|result|!matches!(result,ActionResult::ShellCreation(result) if result.resources.workspace_id.is_none()&&result.resources.tab_id.is_none()&&result.resources.pane_id.is_none()&&result.resources.terminal_id.is_none()))
         {return reject(ErrorCode::NotReady);}
-        self.db.execute("DELETE FROM creation_shell_fences WHERE peer=?1 AND action=?2",params![proof.peer.0,action.0])?;Ok(())
+        self.db.execute(
+            "DELETE FROM creation_shell_fences WHERE peer=?1 AND action=?2",
+            params![proof.peer.0, action.0],
+        )?;
+        Ok(())
     }
 }
 
-fn validate_alias_facts(receipt:&Receipt,result:&Option<ActionResultAgentRenamed>)->StoreResult<()> {
-    if receipt.method!=ActionMethod::AgentRename || receipt.target.is_none() || receipt.shell_target.is_some() || receipt.creation.is_some() {return Err(StorageError::Corrupt)}
-    if let Some(result)=result {result.validate()?;if Some(&result.target)!=receipt.target.as_ref() {return Err(StorageError::Corrupt)}}
-    match &receipt.result {None=>Ok(()),Some(ActionResult::AgentRenamed(old)) if result.as_ref()==Some(old)=>Ok(()),_=>Err(StorageError::Corrupt)}
-}
-impl Storage {
-    pub(crate) fn checkpoint_agent_alias_facts(&mut self,ticket:&DispatchTicket,result:ActionResultAgentRenamed,at:u64)->StoreResult<()> {
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;authorize(&tx,&ticket.proof)?;
-        let mut receipt=ticket_receipt(&tx,ticket)?;
-        if ticket.stage.is_some() || receipt.state!=ReceiptState::Dispatching {return reject(ErrorCode::NotReady)}
-        validate_alias_facts(&receipt,&Some(result.clone()))?;
-        receipt.result=Some(ActionResult::AgentRenamed(result));receipt.updated_at=timestamp(at.max(receipt.updated_at.0))?;
-        write_receipt(&tx,&ticket.proof.peer.0,&ticket.action.0,&receipt)?;tx.commit()?;Ok(())
+fn validate_alias_facts(
+    receipt: &Receipt,
+    result: &Option<ActionResultAgentRenamed>,
+) -> StoreResult<()> {
+    if receipt.method != ActionMethod::AgentRename
+        || receipt.target.is_none()
+        || receipt.shell_target.is_some()
+        || receipt.creation.is_some()
+    {
+        return Err(StorageError::Corrupt);
     }
-    pub(crate) fn settle_agent_alias_dispatch(&mut self,ticket:DispatchTicket,mut outcome:ReceiptTransition,result:Option<ActionResultAgentRenamed>)->StoreResult<()> {
-        if ticket.stage.is_some() {return reject(ErrorCode::InvalidRequest)}
-        let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;let mut receipt=ticket_receipt(&tx,&ticket)?;
-        validate_alias_facts(&receipt,&result)?;
-        match &outcome.result {Some(ActionResult::AgentRenamed(value)) if result.as_ref()==Some(value)=>{},None=>outcome.result=result.clone().map(ActionResult::AgentRenamed),_=>return Err(StorageError::Corrupt)}
-        if outcome.state==ReceiptState::Failed && result.is_some() {outcome.state=ReceiptState::Uncertain;outcome.proof=TransitionProof::LostOutcome;outcome.error=None;}
-        apply_transition(&mut receipt,outcome)?;write_receipt(&tx,&ticket.proof.peer.0,&ticket.action.0,&receipt)?;tx.commit()?;Ok(())
-    }
-}
-
-
-impl Storage {
-    pub(crate) fn attachment_load(&self,peer:&Uuid,upload:&Uuid)->StoreResult<Option<crate::attachments::Record>> {
-        let value:Option<(i64,bool,bool,String)>=self.db.query_row("SELECT size,unfinished,discarded,record FROM attachments WHERE peer=?1 AND upload=?2",params![peer.0,upload.0],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
-        value.map(|(size,unfinished,discarded,value)|{let size=u64::try_from(size).map_err(|_|StorageError::Corrupt)?;if value.len()>16384{return Err(StorageError::Corrupt)}let record:crate::attachments::Record=decode(&value)?;record.validate()?;if record.peer!=*peer||record.upload!=*upload||record.size!=size||unfinished!=(!record.published&&!record.discarded)||discarded!=record.discarded{return Err(StorageError::Corrupt)}Ok(record)}).transpose()
-    }
-    pub(crate) fn attachment_save(&mut self,record:&crate::attachments::Record,new:bool)->StoreResult<()> {
-        record.validate()?;
-        let size=i64::try_from(record.size).map_err(|_|StorageError::Corrupt)?;
-        let changed=if new {self.db.execute("INSERT INTO attachments(peer,upload,size,unfinished,discarded,record) VALUES(?1,?2,?3,?4,?5,?6)",params![record.peer.0,record.upload.0,size,!record.published&&!record.discarded,record.discarded,json(record)?])?}
-        else {self.db.execute("UPDATE attachments SET unfinished=?3,discarded=?4,record=?5 WHERE peer=?1 AND upload=?2 AND size=?6",params![record.peer.0,record.upload.0,!record.published&&!record.discarded,record.discarded,json(record)?,size])?};
-        if changed!=1{return Err(StorageError::Corrupt)}Ok(())
-    }
-    pub(crate) fn attachment_capacity(&self,peer:&Uuid,size:u64)->StoreResult<()> {
-        let (count,unfinished,bytes):(i64,i64,i64)=self.db.query_row("SELECT COUNT(*),COALESCE(SUM(unfinished),0),COALESCE(SUM(size),0) FROM attachments WHERE peer=?1 AND discarded=0",params![peer.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-        let (count,unfinished,bytes)=(u64::try_from(count).map_err(|_|StorageError::Corrupt)?,u64::try_from(unfinished).map_err(|_|StorageError::Corrupt)?,u64::try_from(bytes).map_err(|_|StorageError::Corrupt)?);
-        let all:i64=self.db.query_row("SELECT COALESCE(SUM(size),0) FROM attachments WHERE discarded=0",[],|r|r.get(0))?;
-        let all=u64::try_from(all).map_err(|_|StorageError::Corrupt)?;
-        let consumed:i64=self.db.query_row("SELECT COUNT(*) FROM attachments WHERE peer=?1",params![peer.0],|r|r.get(0))?;
-        let consumed=u64::try_from(consumed).map_err(|_|StorageError::Corrupt)?;
-        let peer_bytes=bytes.checked_add(size).ok_or(StorageError::Policy(ErrorCode::ResourceLimit))?;
-        let host_bytes=all.checked_add(size).ok_or(StorageError::Policy(ErrorCode::ResourceLimit))?;
-        if consumed>=4096||count>=32||unfinished>=4||peer_bytes>64*1024*1024||host_bytes>256*1024*1024{return reject(ErrorCode::ResourceLimit)}Ok(())
-    }
-    pub(crate) fn checkpoint_attachment_facts(&mut self,ticket:&DispatchTicket,result:ActionResultAttachment,at:u64)->StoreResult<()> {
-        result.validate()?;let tx=self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;authorize(&tx,&ticket.proof)?;
-        let mut receipt=ticket_receipt(&tx,ticket)?;
-        if ticket.stage.is_some()||receipt.state!=ReceiptState::Dispatching||receipt.target.as_ref()!=Some(&result.target){return reject(ErrorCode::NotReady)}
-        if let Some(known)=&receipt.result {let ActionResult::Attachment(known)=known else{return Err(StorageError::Corrupt)};if !result.progress.retains(&known.progress){return Err(StorageError::Corrupt)}}
-        receipt.result=Some(ActionResult::Attachment(result));receipt.updated_at=timestamp(at.max(receipt.updated_at.0))?;write_receipt(&tx,&ticket.proof.peer.0,&ticket.action.0,&receipt)?;tx.commit()?;Ok(())
-    }
-    pub(crate) fn settle_attachment_dispatch(&mut self,ticket:DispatchTicket,mut outcome:ReceiptTransition,result:ActionResultAttachment)->StoreResult<()> {
+    if let Some(result) = result {
         result.validate()?;
-        if let Some(ActionResult::Attachment(known))=&outcome.result {if known.target!=result.target||!known.progress.retains(&result.progress){return Err(StorageError::Corrupt)}}else if outcome.result.is_none(){outcome.result=Some(ActionResult::Attachment(result.clone()))}else{return Err(StorageError::Corrupt)}
-        // An entered local file effect is never projected as a definitive absence.
-        if outcome.state==ReceiptState::Failed {outcome.state=ReceiptState::Uncertain;outcome.proof=TransitionProof::LostOutcome;outcome.error=None;}
-        self.settle_dispatch(ticket,outcome)
-    }
-}
-impl Storage {
-    pub(crate) fn attachment_cleanup_context(&self,proof:&AuthenticatedPeer,params:&AttachmentsDiscardParams)->StoreResult<crate::attachments::CleanupContext> {
-        authorize(&self.db,proof)?;
-        let record=self.attachment_load(proof.peer_id(),&params.upload_id)?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
-        let context=crate::attachments::CleanupContext::from_owned(record,proof.peer_id(),&params.target,&params.upload_id)?;
-        match self.image_upload_pinned(proof.peer_id(),&params.upload_id) {
-            Ok(false)=>Ok(context),Ok(true)=>reject(ErrorCode::Busy),Err(_)=>reject(ErrorCode::NotReady),
+        if Some(&result.target) != receipt.target.as_ref() {
+            return Err(StorageError::Corrupt);
         }
     }
-    pub(crate) fn authorized_attachment_status(&mut self,proof:&AuthenticatedPeer,params:&AttachmentsStatusParams,context:Option<&crate::attachments::ProviderContext>)->StoreResult<(AttachmentsStatusResult,crate::attachments::Record)> {
-        authorize(&self.db,proof)?;
-        let mut result=self.attachment_status(proof.peer_id(),&params.target,&params.upload_id)?;
-        let record=self.attachment_load(proof.peer_id(),&params.upload_id)?.ok_or(StorageError::Corrupt)?;
-        result.insertion_ready=context.is_some_and(|context|record.insertion_ready(context));
-        if context.is_some_and(|context|context.epoch!=record.source) {self.retire_image_source(&record.target,&record.source);}
-        result.native_preparation=self.image_preparation_status(proof.peer_id(),&params.upload_id);
-        Ok((result,record))
+    match &receipt.result {
+        None => Ok(()),
+        Some(ActionResult::AgentRenamed(old)) if result.as_ref() == Some(old) => Ok(()),
+        _ => Err(StorageError::Corrupt),
     }
 }
 impl Storage {
-    pub(crate) fn attachment_maintenance(&mut self,now:u64,recover:bool)->StoreResult<()> {
-        for peer in self.attachment_peers()? {self.attachment_maintenance_peer_mode(&peer,&[],now,recover)?;}Ok(())
-    }}
-impl Storage {
-    pub(crate) fn attachment_peers(&self)->StoreResult<Vec<Uuid>> {let mut statement=self.db.prepare("SELECT DISTINCT peer FROM attachments ORDER BY peer LIMIT 10001")?;let rows:Vec<String>=statement.query_map([],|row|row.get(0))?.collect::<Result<_,_>>()?;if rows.len()>PEER_CAPACITY{return Err(StorageError::Corrupt)}rows.into_iter().map(|id|Uuid::new(id).map_err(Into::into)).collect()}
-    pub(crate) fn attachment_maintenance_peer(&mut self,peer:&Uuid,busy:&[Uuid],now:u64)->StoreResult<()> {self.attachment_maintenance_peer_mode(peer,busy,now,false)}
-    fn attachment_maintenance_peer_mode(&mut self,peer:&Uuid,busy:&[Uuid],now:u64,recover:bool)->StoreResult<()> {
-        self.ensure_image_reads();
-        let records:Vec<String>={let mut statement=self.db.prepare("SELECT record FROM attachments WHERE peer=?1 LIMIT 4097")?;statement.query_map(params![peer.0],|row|row.get(0))?.collect::<Result<_,_>>()?};
-        if records.len()>4096{return Err(StorageError::Corrupt)}
-        for data in records {if data.len()>16384{return Err(StorageError::Corrupt)}let decoded:crate::attachments::Record=decode(&data)?;let mut record=self.attachment_load(peer,&decoded.upload)?.ok_or(StorageError::Corrupt)?;record.validate()?;if record.peer!=*peer{return Err(StorageError::Corrupt)}
-        if busy.contains(&record.upload){continue}
-            // Only entered native readers retain a bounded negative obligation
-            // beyond ordinary upload/receipt TTL. Unknown ownership never unlinks.
-            match self.image_upload_pinned(peer,&record.upload) {Ok(false)=>{},Ok(true)|Err(_)=>continue}
-            if recover&&record.recover().is_err(){continue}
-            if record.discarded {if record.tombstone_until<=now {self.db.execute("DELETE FROM attachments WHERE peer=?1 AND upload=?2 AND discarded=1",params![record.peer.0,record.upload.0])?;}continue}
-            if record.expire(now).is_err(){continue}self.attachment_save(&record,false)?;
-        }Ok(())
+    pub(crate) fn checkpoint_agent_alias_facts(
+        &mut self,
+        ticket: &DispatchTicket,
+        result: ActionResultAgentRenamed,
+        at: u64,
+    ) -> StoreResult<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        authorize(&tx, &ticket.proof)?;
+        let mut receipt = ticket_receipt(&tx, ticket)?;
+        if ticket.stage.is_some() || receipt.state != ReceiptState::Dispatching {
+            return reject(ErrorCode::NotReady);
+        }
+        validate_alias_facts(&receipt, &Some(result.clone()))?;
+        receipt.result = Some(ActionResult::AgentRenamed(result));
+        receipt.updated_at = timestamp(at.max(receipt.updated_at.0))?;
+        write_receipt(&tx, &ticket.proof.peer.0, &ticket.action.0, &receipt)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub(crate) fn settle_agent_alias_dispatch(
+        &mut self,
+        ticket: DispatchTicket,
+        mut outcome: ReceiptTransition,
+        result: Option<ActionResultAgentRenamed>,
+    ) -> StoreResult<()> {
+        if ticket.stage.is_some() {
+            return reject(ErrorCode::InvalidRequest);
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut receipt = ticket_receipt(&tx, &ticket)?;
+        validate_alias_facts(&receipt, &result)?;
+        match &outcome.result {
+            Some(ActionResult::AgentRenamed(value)) if result.as_ref() == Some(value) => {}
+            None => outcome.result = result.clone().map(ActionResult::AgentRenamed),
+            _ => return Err(StorageError::Corrupt),
+        }
+        if outcome.state == ReceiptState::Failed && result.is_some() {
+            outcome.state = ReceiptState::Uncertain;
+            outcome.proof = TransitionProof::LostOutcome;
+            outcome.error = None;
+        }
+        apply_transition(&mut receipt, outcome)?;
+        write_receipt(&tx, &ticket.proof.peer.0, &ticket.action.0, &receipt)?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
-struct ImageUseSqlRow {peer:String,action:String,input:String,record:String,mac:Vec<u8>}
-fn image_use_row(row:&rusqlite::Row<'_>)->rusqlite::Result<ImageUseSqlRow> {
-    let text=|index,limit|->rusqlite::Result<String> {
-        let rusqlite::types::ValueRef::Text(bytes)=row.get_ref(index)? else {return Err(rusqlite::Error::InvalidQuery)};
-        if bytes.len()>limit {return Err(rusqlite::Error::InvalidQuery)}
-        std::str::from_utf8(bytes).map(str::to_owned).map_err(|_|rusqlite::Error::InvalidQuery)
-    };
-    let rusqlite::types::ValueRef::Blob(mac)=row.get_ref(4)? else {return Err(rusqlite::Error::InvalidQuery)};
-    if mac.len()!=32 {return Err(rusqlite::Error::InvalidQuery)}
-    Ok(ImageUseSqlRow {peer:text(0,36)?,action:text(1,36)?,input:text(2,36)?,record:text(3,8192)?,mac:mac.to_vec()})
+impl Storage {
+    pub(crate) fn attachment_load(
+        &self,
+        peer: &Uuid,
+        upload: &Uuid,
+    ) -> StoreResult<Option<crate::attachments::Record>> {
+        let value:Option<(i64,bool,bool,String)>=self.db.query_row("SELECT size,unfinished,discarded,record FROM attachments WHERE peer=?1 AND upload=?2",params![peer.0,upload.0],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+        value
+            .map(|(size, unfinished, discarded, value)| {
+                let size = u64::try_from(size).map_err(|_| StorageError::Corrupt)?;
+                if value.len() > 16384 {
+                    return Err(StorageError::Corrupt);
+                }
+                let record: crate::attachments::Record = decode(&value)?;
+                record.validate()?;
+                if record.peer != *peer
+                    || record.upload != *upload
+                    || record.size != size
+                    || unfinished != (!record.published && !record.discarded)
+                    || discarded != record.discarded
+                {
+                    return Err(StorageError::Corrupt);
+                }
+                Ok(record)
+            })
+            .transpose()
+    }
+    pub(crate) fn attachment_save(
+        &mut self,
+        record: &crate::attachments::Record,
+        new: bool,
+    ) -> StoreResult<()> {
+        record.validate()?;
+        let size = i64::try_from(record.size).map_err(|_| StorageError::Corrupt)?;
+        let changed = if new {
+            self.db.execute("INSERT INTO attachments(peer,upload,size,unfinished,discarded,record) VALUES(?1,?2,?3,?4,?5,?6)",params![record.peer.0,record.upload.0,size,!record.published&&!record.discarded,record.discarded,json(record)?])?
+        } else {
+            self.db.execute("UPDATE attachments SET unfinished=?3,discarded=?4,record=?5 WHERE peer=?1 AND upload=?2 AND size=?6",params![record.peer.0,record.upload.0,!record.published&&!record.discarded,record.discarded,json(record)?,size])?
+        };
+        if changed != 1 {
+            return Err(StorageError::Corrupt);
+        }
+        Ok(())
+    }
+    pub(crate) fn attachment_capacity(&self, peer: &Uuid, size: u64) -> StoreResult<()> {
+        let (count,unfinished,bytes):(i64,i64,i64)=self.db.query_row("SELECT COUNT(*),COALESCE(SUM(unfinished),0),COALESCE(SUM(size),0) FROM attachments WHERE peer=?1 AND discarded=0",params![peer.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let (count, unfinished, bytes) = (
+            u64::try_from(count).map_err(|_| StorageError::Corrupt)?,
+            u64::try_from(unfinished).map_err(|_| StorageError::Corrupt)?,
+            u64::try_from(bytes).map_err(|_| StorageError::Corrupt)?,
+        );
+        let all: i64 = self.db.query_row(
+            "SELECT COALESCE(SUM(size),0) FROM attachments WHERE discarded=0",
+            [],
+            |r| r.get(0),
+        )?;
+        let all = u64::try_from(all).map_err(|_| StorageError::Corrupt)?;
+        let consumed: i64 = self.db.query_row(
+            "SELECT COUNT(*) FROM attachments WHERE peer=?1",
+            params![peer.0],
+            |r| r.get(0),
+        )?;
+        let consumed = u64::try_from(consumed).map_err(|_| StorageError::Corrupt)?;
+        let peer_bytes = bytes
+            .checked_add(size)
+            .ok_or(StorageError::Policy(ErrorCode::ResourceLimit))?;
+        let host_bytes = all
+            .checked_add(size)
+            .ok_or(StorageError::Policy(ErrorCode::ResourceLimit))?;
+        if consumed >= 4096
+            || count >= 32
+            || unfinished >= 4
+            || peer_bytes > 64 * 1024 * 1024
+            || host_bytes > 256 * 1024 * 1024
+        {
+            return reject(ErrorCode::ResourceLimit);
+        }
+        Ok(())
+    }
+    pub(crate) fn checkpoint_attachment_facts(
+        &mut self,
+        ticket: &DispatchTicket,
+        result: ActionResultAttachment,
+        at: u64,
+    ) -> StoreResult<()> {
+        result.validate()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        authorize(&tx, &ticket.proof)?;
+        let mut receipt = ticket_receipt(&tx, ticket)?;
+        if ticket.stage.is_some()
+            || receipt.state != ReceiptState::Dispatching
+            || receipt.target.as_ref() != Some(&result.target)
+        {
+            return reject(ErrorCode::NotReady);
+        }
+        if let Some(known) = &receipt.result {
+            let ActionResult::Attachment(known) = known else {
+                return Err(StorageError::Corrupt);
+            };
+            if !result.progress.retains(&known.progress) {
+                return Err(StorageError::Corrupt);
+            }
+        }
+        receipt.result = Some(ActionResult::Attachment(result));
+        receipt.updated_at = timestamp(at.max(receipt.updated_at.0))?;
+        write_receipt(&tx, &ticket.proof.peer.0, &ticket.action.0, &receipt)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub(crate) fn settle_attachment_dispatch(
+        &mut self,
+        ticket: DispatchTicket,
+        mut outcome: ReceiptTransition,
+        result: ActionResultAttachment,
+    ) -> StoreResult<()> {
+        result.validate()?;
+        if let Some(ActionResult::Attachment(known)) = &outcome.result {
+            if known.target != result.target || !known.progress.retains(&result.progress) {
+                return Err(StorageError::Corrupt);
+            }
+        } else if outcome.result.is_none() {
+            outcome.result = Some(ActionResult::Attachment(result.clone()))
+        } else {
+            return Err(StorageError::Corrupt);
+        }
+        // An entered local file effect is never projected as a definitive absence.
+        if outcome.state == ReceiptState::Failed {
+            outcome.state = ReceiptState::Uncertain;
+            outcome.proof = TransitionProof::LostOutcome;
+            outcome.error = None;
+        }
+        self.settle_dispatch(ticket, outcome)
+    }
 }
-fn decode_image_use(key:&[u8;32],row:ImageUseSqlRow)->StoreResult<crate::attachments::ImageUseRecord> {
-    if row.record.len()>8192||row.mac.len()!=32||!verify_hmac_sha256(key,row.record.as_bytes(),&row.mac) {return Err(StorageError::Corrupt)}
-    let record:crate::attachments::ImageUseRecord=decode(&row.record)?;record.facts.validate()?;
-    if record.facts.peer.0!=row.peer||record.facts.action.0!=row.action||record.facts.input.0!=row.input {return Err(StorageError::Corrupt)}
+impl Storage {
+    pub(crate) fn attachment_cleanup_context(
+        &self,
+        proof: &AuthenticatedPeer,
+        params: &AttachmentsDiscardParams,
+    ) -> StoreResult<crate::attachments::CleanupContext> {
+        authorize(&self.db, proof)?;
+        let record = self
+            .attachment_load(proof.peer_id(), &params.upload_id)?
+            .ok_or(StorageError::Policy(ErrorCode::NotFound))?;
+        let context = crate::attachments::CleanupContext::from_owned(
+            record,
+            proof.peer_id(),
+            &params.target,
+            &params.upload_id,
+        )?;
+        match self.image_upload_pinned(proof.peer_id(), &params.upload_id) {
+            Ok(false) => Ok(context),
+            Ok(true) => reject(ErrorCode::Busy),
+            Err(_) => reject(ErrorCode::NotReady),
+        }
+    }
+    pub(crate) fn authorized_attachment_status(
+        &mut self,
+        proof: &AuthenticatedPeer,
+        params: &AttachmentsStatusParams,
+        context: Option<&crate::attachments::ProviderContext>,
+    ) -> StoreResult<(AttachmentsStatusResult, crate::attachments::Record)> {
+        authorize(&self.db, proof)?;
+        let mut result =
+            self.attachment_status(proof.peer_id(), &params.target, &params.upload_id)?;
+        let record = self
+            .attachment_load(proof.peer_id(), &params.upload_id)?
+            .ok_or(StorageError::Corrupt)?;
+        result.insertion_ready = context.is_some_and(|context| record.insertion_ready(context));
+        if context.is_some_and(|context| context.epoch != record.source) {
+            self.retire_image_source(&record.target, &record.source);
+        }
+        result.native_preparation =
+            self.image_preparation_status(proof.peer_id(), &params.upload_id);
+        Ok((result, record))
+    }
+}
+impl Storage {
+    pub(crate) fn attachment_maintenance(&mut self, now: u64, recover: bool) -> StoreResult<()> {
+        for peer in self.attachment_peers()? {
+            self.attachment_maintenance_peer_mode(&peer, &[], now, recover)?;
+        }
+        Ok(())
+    }
+}
+impl Storage {
+    pub(crate) fn attachment_peers(&self) -> StoreResult<Vec<Uuid>> {
+        let mut statement = self
+            .db
+            .prepare("SELECT DISTINCT peer FROM attachments ORDER BY peer LIMIT 10001")?;
+        let rows: Vec<String> = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        if rows.len() > PEER_CAPACITY {
+            return Err(StorageError::Corrupt);
+        }
+        rows.into_iter()
+            .map(|id| Uuid::new(id).map_err(Into::into))
+            .collect()
+    }
+    pub(crate) fn attachment_maintenance_peer(
+        &mut self,
+        peer: &Uuid,
+        busy: &[Uuid],
+        now: u64,
+    ) -> StoreResult<()> {
+        self.attachment_maintenance_peer_mode(peer, busy, now, false)
+    }
+    fn attachment_maintenance_peer_mode(
+        &mut self,
+        peer: &Uuid,
+        busy: &[Uuid],
+        now: u64,
+        recover: bool,
+    ) -> StoreResult<()> {
+        self.ensure_image_reads();
+        let records: Vec<String> = {
+            let mut statement = self
+                .db
+                .prepare("SELECT record FROM attachments WHERE peer=?1 LIMIT 4097")?;
+            statement
+                .query_map(params![peer.0], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        if records.len() > 4096 {
+            return Err(StorageError::Corrupt);
+        }
+        for data in records {
+            if data.len() > 16384 {
+                return Err(StorageError::Corrupt);
+            }
+            let decoded: crate::attachments::Record = decode(&data)?;
+            let mut record = self
+                .attachment_load(peer, &decoded.upload)?
+                .ok_or(StorageError::Corrupt)?;
+            record.validate()?;
+            if record.peer != *peer {
+                return Err(StorageError::Corrupt);
+            }
+            if busy.contains(&record.upload) {
+                continue;
+            }
+            // Only entered native readers retain a bounded negative obligation
+            // beyond ordinary upload/receipt TTL. Unknown ownership never unlinks.
+            match self.image_upload_pinned(peer, &record.upload) {
+                Ok(false) => {}
+                Ok(true) | Err(_) => continue,
+            }
+            if recover && record.recover().is_err() {
+                continue;
+            }
+            if record.discarded {
+                if record.tombstone_until <= now {
+                    self.db.execute(
+                        "DELETE FROM attachments WHERE peer=?1 AND upload=?2 AND discarded=1",
+                        params![record.peer.0, record.upload.0],
+                    )?;
+                }
+                continue;
+            }
+            if record.expire(now).is_err() {
+                continue;
+            }
+            self.attachment_save(&record, false)?;
+        }
+        Ok(())
+    }
+}
+
+struct ImageUseSqlRow {
+    peer: String,
+    action: String,
+    input: String,
+    record: String,
+    mac: Vec<u8>,
+}
+fn image_use_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageUseSqlRow> {
+    let text = |index, limit| -> rusqlite::Result<String> {
+        let rusqlite::types::ValueRef::Text(bytes) = row.get_ref(index)? else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        if bytes.len() > limit {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| rusqlite::Error::InvalidQuery)
+    };
+    let rusqlite::types::ValueRef::Blob(mac) = row.get_ref(4)? else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    if mac.len() != 32 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(ImageUseSqlRow {
+        peer: text(0, 36)?,
+        action: text(1, 36)?,
+        input: text(2, 36)?,
+        record: text(3, 8192)?,
+        mac: mac.to_vec(),
+    })
+}
+fn decode_image_use(
+    key: &[u8; 32],
+    row: ImageUseSqlRow,
+) -> StoreResult<crate::attachments::ImageUseRecord> {
+    if row.record.len() > 8192
+        || row.mac.len() != 32
+        || !verify_hmac_sha256(key, row.record.as_bytes(), &row.mac)
+    {
+        return Err(StorageError::Corrupt);
+    }
+    let record: crate::attachments::ImageUseRecord = decode(&row.record)?;
+    record.facts.validate()?;
+    if record.facts.peer.0 != row.peer
+        || record.facts.action.0 != row.action
+        || record.facts.input.0 != row.input
+    {
+        return Err(StorageError::Corrupt);
+    }
     Ok(record)
 }
 impl Storage {
-    pub(crate) fn reserve_image_capacity(&self,facts:&crate::attachments::ImageUseFacts)->StoreResult<crate::attachments::ImageReservation> {
-        crate::attachments::reserve_image_owner(&self.image_budget,facts)
+    pub(crate) fn reserve_image_capacity(
+        &self,
+        facts: &crate::attachments::ImageUseFacts,
+    ) -> StoreResult<crate::attachments::ImageReservation> {
+        crate::attachments::reserve_image_owner(&self.image_budget, facts)
     }
-    pub(crate) fn hold_image_read(&mut self,owner:std::sync::Arc<crate::attachments::ImageReadObligation>)->StoreResult<()> {
-        if self.image_reads.len()>=crate::attachments::IMAGE_ACTIONS_PER_HOST||self.image_reads.iter().any(|known|known.facts.input==owner.facts.input) {return Err(StorageError::Corrupt)}
-        self.image_reads.push(owner);Ok(())
+    pub(crate) fn hold_image_read(
+        &mut self,
+        owner: std::sync::Arc<crate::attachments::ImageReadObligation>,
+    ) -> StoreResult<()> {
+        if self.image_reads.len() >= crate::attachments::IMAGE_ACTIONS_PER_HOST
+            || self
+                .image_reads
+                .iter()
+                .any(|known| known.facts.input == owner.facts.input)
+        {
+            return Err(StorageError::Corrupt);
+        }
+        self.image_reads.push(owner);
+        Ok(())
     }
-    pub(crate) fn ensure_image_reads(&mut self)->bool {
-        if self.image_reads_restored {return !self.image_reads_fault}
-        self.image_reads_restored=true;
-        let records=match self.image_uses() {Ok(records)=>records,Err(_)=>{self.image_reads_fault=true;return false}};
+    pub(crate) fn ensure_image_reads(&mut self) -> bool {
+        if self.image_reads_restored {
+            return !self.image_reads_fault;
+        }
+        self.image_reads_restored = true;
+        let records = match self.image_uses() {
+            Ok(records) => records,
+            Err(_) => {
+                self.image_reads_fault = true;
+                return false;
+            }
+        };
         for record in records {
             if !record.entered {
                 // The authenticated durable mark must precede every native byte.
                 // A pre-entry crash restores no positive authority and wrote no input.
-                if self.image_use_release(&record.facts).is_err() {self.image_reads_fault=true;return false}
+                if self.image_use_release(&record.facts).is_err() {
+                    self.image_reads_fault = true;
+                    return false;
+                }
                 continue;
             }
             match self.restore_image_read(record.facts) {
-                Ok(owner)=>if self.hold_image_read(owner).is_err() {self.image_reads_fault=true;return false},
-                Err(_)=>{self.image_reads_fault=true;return false},
+                Ok(owner) => {
+                    if self.hold_image_read(owner).is_err() {
+                        self.image_reads_fault = true;
+                        return false;
+                    }
+                }
+                Err(_) => {
+                    self.image_reads_fault = true;
+                    return false;
+                }
             }
         }
         true
     }
-    pub(crate) fn image_preparation_status(&mut self,peer:&Uuid,upload:&Uuid)->Option<NativeImagePreparation> {
-        let ready=self.ensure_image_reads();let (peer_count,host_count)=self.image_budget.lock().counts(peer);
-        let owners:Vec<_>=self.image_reads.iter().filter(|owner|&owner.facts.peer==peer&&owner.facts.uploads.contains(upload)).collect();
-        let mut actions:Vec<_>=owners.iter().map(|owner|owner.facts.action.clone()).collect();
-        if !ready {return Some(NativeImagePreparation {reason:ImagePreparationReason::OwnershipProofUnavailable,actions,peer_owners:None,host_owners:None})}
-        let reason=if owners.is_empty() {
-            if peer_count<crate::attachments::IMAGE_ACTIONS_PER_PEER&&host_count<crate::attachments::IMAGE_ACTIONS_PER_HOST {return None}
-            actions=self.image_reads.iter().filter(|owner|&owner.facts.peer==peer).map(|owner|owner.facts.action.clone()).collect();
-            ImagePreparationReason::CapacityInUse
-        } else if owners.iter().any(|owner|*owner.reason.lock()==ImagePreparationReason::OwnershipProofUnavailable) {ImagePreparationReason::OwnershipProofUnavailable}
-        else if owners.iter().any(|owner|*owner.reason.lock()==ImagePreparationReason::OriginalSourceUnavailable) {ImagePreparationReason::OriginalSourceUnavailable}
-        else {ImagePreparationReason::PendingOriginalRead};
-        Some(NativeImagePreparation {reason,actions,peer_owners:Some(Uint(peer_count as u64)),host_owners:Some(Uint(host_count as u64))})
+    pub(crate) fn image_preparation_status(
+        &mut self,
+        peer: &Uuid,
+        upload: &Uuid,
+    ) -> Option<NativeImagePreparation> {
+        let ready = self.ensure_image_reads();
+        let (peer_count, host_count) = self.image_budget.lock().counts(peer);
+        let owners: Vec<_> = self
+            .image_reads
+            .iter()
+            .filter(|owner| &owner.facts.peer == peer && owner.facts.uploads.contains(upload))
+            .collect();
+        let mut actions: Vec<_> = owners
+            .iter()
+            .map(|owner| owner.facts.action.clone())
+            .collect();
+        if !ready {
+            return Some(NativeImagePreparation {
+                reason: ImagePreparationReason::OwnershipProofUnavailable,
+                actions,
+                peer_owners: None,
+                host_owners: None,
+            });
+        }
+        let reason =
+            if owners.is_empty() {
+                if peer_count < crate::attachments::IMAGE_ACTIONS_PER_PEER
+                    && host_count < crate::attachments::IMAGE_ACTIONS_PER_HOST
+                {
+                    return None;
+                }
+                actions = self
+                    .image_reads
+                    .iter()
+                    .filter(|owner| &owner.facts.peer == peer)
+                    .map(|owner| owner.facts.action.clone())
+                    .collect();
+                ImagePreparationReason::CapacityInUse
+            } else if owners.iter().any(|owner| {
+                *owner.reason.lock() == ImagePreparationReason::OwnershipProofUnavailable
+            }) {
+                ImagePreparationReason::OwnershipProofUnavailable
+            } else if owners.iter().any(|owner| {
+                *owner.reason.lock() == ImagePreparationReason::OriginalSourceUnavailable
+            }) {
+                ImagePreparationReason::OriginalSourceUnavailable
+            } else {
+                ImagePreparationReason::PendingOriginalRead
+            };
+        Some(NativeImagePreparation {
+            reason,
+            actions,
+            peer_owners: Some(Uint(peer_count as u64)),
+            host_owners: Some(Uint(host_count as u64)),
+        })
     }
-    pub(crate) fn retire_image_source(&mut self,target:&Target,source:&Uuid) {
+    pub(crate) fn retire_image_source(&mut self, target: &Target, source: &Uuid) {
         for owner in &self.image_reads {
-            if &owner.facts.target==target&&&owner.facts.source==source {*owner.reason.lock()=ImagePreparationReason::OriginalSourceUnavailable;}
+            if &owner.facts.target == target && &owner.facts.source == source {
+                *owner.reason.lock() = ImagePreparationReason::OriginalSourceUnavailable;
+            }
         }
     }
-    pub(crate) fn image_read_prepared(&mut self,original:&crate::backends::OriginalContext,input:&Uuid)->StoreResult<bool> {
-        if !self.ensure_image_reads() {return Ok(false)}
-        let Some(owner)=self.image_reads.iter().find(|owner|&owner.facts.input==input).cloned() else {return Ok(false)};
-        if !owner.entered.load(std::sync::atomic::Ordering::Acquire)||!owner.matches(original) {return Ok(false)}
-        if original.recheck().is_err()||owner.recheck().is_err() {
-            *owner.reason.lock()=ImagePreparationReason::OwnershipProofUnavailable;return Ok(false)
+    pub(crate) fn image_read_prepared(
+        &mut self,
+        original: &crate::backends::OriginalContext,
+        input: &Uuid,
+    ) -> StoreResult<bool> {
+        if !self.ensure_image_reads() {
+            return Ok(false);
         }
-        self.release_image_owner(&owner)?;Ok(true)
+        let Some(owner) = self
+            .image_reads
+            .iter()
+            .find(|owner| &owner.facts.input == input)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if !owner.entered.load(std::sync::atomic::Ordering::Acquire) || !owner.matches(original) {
+            return Ok(false);
+        }
+        if original.recheck().is_err() || owner.recheck().is_err() {
+            *owner.reason.lock() = ImagePreparationReason::OwnershipProofUnavailable;
+            return Ok(false);
+        }
+        self.release_image_owner(&owner)?;
+        Ok(true)
     }
-    pub(crate) fn release_image_owner(&mut self,owner:&std::sync::Arc<crate::attachments::ImageReadObligation>)->StoreResult<()> {
-        if let Err(error)=self.image_use_release(&owner.facts) {
-            self.image_reads_fault=true;*owner.reason.lock()=ImagePreparationReason::OwnershipProofUnavailable;return Err(error)
+    pub(crate) fn release_image_owner(
+        &mut self,
+        owner: &std::sync::Arc<crate::attachments::ImageReadObligation>,
+    ) -> StoreResult<()> {
+        if let Err(error) = self.image_use_release(&owner.facts) {
+            self.image_reads_fault = true;
+            *owner.reason.lock() = ImagePreparationReason::OwnershipProofUnavailable;
+            return Err(error);
         }
-        self.image_reads.retain(|known|!std::sync::Arc::ptr_eq(known,owner));
+        self.image_reads
+            .retain(|known| !std::sync::Arc::ptr_eq(known, owner));
         Ok(())
     }
-    fn image_use_key(&self)->[u8;32] {hmac_sha256(&self.receipt_key,b"goatr native image read obligation key v1")}
-    pub(crate) fn image_uses(&self)->StoreResult<Vec<crate::attachments::ImageUseRecord>> {
-        let mut statement=self.db.prepare("SELECT peer,action,native_input,record,mac FROM attachment_image_uses LIMIT ?1")?;
-        let rows=statement.query_map([crate::attachments::IMAGE_ACTIONS_PER_HOST as i64+1],image_use_row)?.collect::<Result<Vec<_>,_>>()?;
-        if rows.len()>crate::attachments::IMAGE_ACTIONS_PER_HOST {return Err(StorageError::Corrupt)}
-        let key=self.image_use_key();let mut counts=HashMap::new();
-        rows.into_iter().map(|row|{
-            let record=decode_image_use(&key,row)?;
-            let epoch:Option<i64>=self.db.query_row("SELECT epoch FROM peers WHERE peer=?1",[&record.facts.peer.0],|row|row.get(0)).optional()?;
-            if epoch.and_then(|epoch|u64::try_from(epoch).ok()).is_none_or(|epoch|epoch<record.facts.peer_epoch) {return Err(StorageError::Corrupt)}
-            let count=counts.entry(record.facts.peer.clone()).or_insert(0usize);*count+=1;
-            if *count>crate::attachments::IMAGE_ACTIONS_PER_PEER {return Err(StorageError::Corrupt)}Ok(record)
-        }).collect()
+    fn image_use_key(&self) -> [u8; 32] {
+        hmac_sha256(
+            &self.receipt_key,
+            b"goatr native image read obligation key v1",
+        )
     }
-    pub(crate) fn image_use_for_input(&self,input:&Uuid)->StoreResult<Option<crate::attachments::ImageUseRecord>> {
-        let row=self.db.query_row("SELECT peer,action,native_input,record,mac FROM attachment_image_uses WHERE native_input=?1",[&input.0],image_use_row).optional()?;
-        row.map(|row|decode_image_use(&self.image_use_key(),row)).transpose()
-    }
-    fn image_use_for_action(&self,peer:&Uuid,action:&Uuid)->StoreResult<Option<crate::attachments::ImageUseRecord>> {
-        let row=self.db.query_row("SELECT peer,action,native_input,record,mac FROM attachment_image_uses WHERE peer=?1 AND action=?2",params![peer.0,action.0],image_use_row).optional()?;
-        row.map(|row|decode_image_use(&self.image_use_key(),row)).transpose()
-    }
-    pub(crate) fn image_use_reserve(&mut self,proof:&AuthenticatedPeer,facts:&crate::attachments::ImageUseFacts)->StoreResult<()> {
-        authorize(&self.db,proof)?;facts.validate()?;
-        if facts.peer!=*proof.peer_id()||facts.peer_epoch!=proof.epoch() {return reject(ErrorCode::Unauthorized)}
-        let receipt=get_receipt(&self.db,proof,&facts.action)?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
-        if receipt.state!=ReceiptState::Reserved||receipt.method!=ActionMethod::PromptSubmit||receipt.target.as_ref()!=Some(&facts.target)||receipt.boot_id!=facts.boot {return reject(ErrorCode::NotReady)}
-        let known=self.image_uses()?;
-        if known.len()>=crate::attachments::IMAGE_ACTIONS_PER_HOST||known.iter().filter(|known|known.facts.peer==facts.peer).count()>=crate::attachments::IMAGE_ACTIONS_PER_PEER {return reject(ErrorCode::ResourceLimit)}
-        for upload in &facts.uploads {
-            let record=self.attachment_load(&facts.peer,upload)?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
-            if !record.matches_image_source(facts)||!record.published||record.discarded {return reject(ErrorCode::StaleSession)}
+    pub(crate) fn image_uses(&self) -> StoreResult<Vec<crate::attachments::ImageUseRecord>> {
+        let mut statement = self.db.prepare(
+            "SELECT peer,action,native_input,record,mac FROM attachment_image_uses LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map(
+                [crate::attachments::IMAGE_ACTIONS_PER_HOST as i64 + 1],
+                image_use_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        if rows.len() > crate::attachments::IMAGE_ACTIONS_PER_HOST {
+            return Err(StorageError::Corrupt);
         }
-        let record=json(&crate::attachments::ImageUseRecord {facts:facts.clone(),entered:false})?;
-        if record.len()>8192 {return Err(StorageError::Corrupt)}
-        let mac=hmac_sha256(&self.image_use_key(),record.as_bytes());
+        let key = self.image_use_key();
+        let mut counts = HashMap::new();
+        rows.into_iter()
+            .map(|row| {
+                let record = decode_image_use(&key, row)?;
+                let epoch: Option<i64> = self
+                    .db
+                    .query_row(
+                        "SELECT epoch FROM peers WHERE peer=?1",
+                        [&record.facts.peer.0],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if epoch
+                    .and_then(|epoch| u64::try_from(epoch).ok())
+                    .is_none_or(|epoch| epoch < record.facts.peer_epoch)
+                {
+                    return Err(StorageError::Corrupt);
+                }
+                let count = counts.entry(record.facts.peer.clone()).or_insert(0usize);
+                *count += 1;
+                if *count > crate::attachments::IMAGE_ACTIONS_PER_PEER {
+                    return Err(StorageError::Corrupt);
+                }
+                Ok(record)
+            })
+            .collect()
+    }
+    pub(crate) fn image_use_for_input(
+        &self,
+        input: &Uuid,
+    ) -> StoreResult<Option<crate::attachments::ImageUseRecord>> {
+        let row=self.db.query_row("SELECT peer,action,native_input,record,mac FROM attachment_image_uses WHERE native_input=?1",[&input.0],image_use_row).optional()?;
+        row.map(|row| decode_image_use(&self.image_use_key(), row))
+            .transpose()
+    }
+    fn image_use_for_action(
+        &self,
+        peer: &Uuid,
+        action: &Uuid,
+    ) -> StoreResult<Option<crate::attachments::ImageUseRecord>> {
+        let row=self.db.query_row("SELECT peer,action,native_input,record,mac FROM attachment_image_uses WHERE peer=?1 AND action=?2",params![peer.0,action.0],image_use_row).optional()?;
+        row.map(|row| decode_image_use(&self.image_use_key(), row))
+            .transpose()
+    }
+    pub(crate) fn image_use_reserve(
+        &mut self,
+        proof: &AuthenticatedPeer,
+        facts: &crate::attachments::ImageUseFacts,
+    ) -> StoreResult<()> {
+        authorize(&self.db, proof)?;
+        facts.validate()?;
+        if facts.peer != *proof.peer_id() || facts.peer_epoch != proof.epoch() {
+            return reject(ErrorCode::Unauthorized);
+        }
+        let receipt = get_receipt(&self.db, proof, &facts.action)?
+            .ok_or(StorageError::Policy(ErrorCode::NotFound))?;
+        if receipt.state != ReceiptState::Reserved
+            || receipt.method != ActionMethod::PromptSubmit
+            || receipt.target.as_ref() != Some(&facts.target)
+            || receipt.boot_id != facts.boot
+        {
+            return reject(ErrorCode::NotReady);
+        }
+        let known = self.image_uses()?;
+        if known.len() >= crate::attachments::IMAGE_ACTIONS_PER_HOST
+            || known
+                .iter()
+                .filter(|known| known.facts.peer == facts.peer)
+                .count()
+                >= crate::attachments::IMAGE_ACTIONS_PER_PEER
+        {
+            return reject(ErrorCode::ResourceLimit);
+        }
+        for upload in &facts.uploads {
+            let record = self
+                .attachment_load(&facts.peer, upload)?
+                .ok_or(StorageError::Policy(ErrorCode::NotFound))?;
+            if !record.matches_image_source(facts) || !record.published || record.discarded {
+                return reject(ErrorCode::StaleSession);
+            }
+        }
+        let record = json(&crate::attachments::ImageUseRecord {
+            facts: facts.clone(),
+            entered: false,
+        })?;
+        if record.len() > 8192 {
+            return Err(StorageError::Corrupt);
+        }
+        let mac = hmac_sha256(&self.image_use_key(), record.as_bytes());
         self.db.execute("INSERT INTO attachment_image_uses(peer,action,native_input,record,mac) VALUES(?1,?2,?3,?4,?5)",params![facts.peer.0,facts.action.0,facts.input.0,record,mac.as_slice()])?;
         Ok(())
     }
-    pub(crate) fn image_use_enter(&mut self,ticket:&DispatchTicket,facts:&crate::attachments::ImageUseFacts)->StoreResult<()> {
-        let receipt=ticket_receipt(&self.db,ticket)?;
-        if ticket.stage.is_some()||ticket.action!=facts.action||ticket.proof.peer_id()!=&facts.peer||ticket.proof.epoch()!=facts.peer_epoch
-            ||receipt.method!=ActionMethod::PromptSubmit||receipt.state!=ReceiptState::Dispatching||receipt.target.as_ref()!=Some(&facts.target)||receipt.boot_id!=facts.boot {return reject(ErrorCode::NotReady)}
-        let mut known=self.image_use_for_action(&facts.peer,&facts.action)?.ok_or(StorageError::Corrupt)?;
-        if known.entered||known.facts!=*facts {return reject(ErrorCode::NotReady)}
-        known.entered=true;let record=json(&known)?;let mac=hmac_sha256(&self.image_use_key(),record.as_bytes());
-        if self.db.execute("UPDATE attachment_image_uses SET record=?3,mac=?4 WHERE peer=?1 AND action=?2",params![facts.peer.0,facts.action.0,record,mac.as_slice()])?!=1 {return Err(StorageError::Corrupt)}Ok(())
+    pub(crate) fn image_use_enter(
+        &mut self,
+        ticket: &DispatchTicket,
+        facts: &crate::attachments::ImageUseFacts,
+    ) -> StoreResult<()> {
+        let receipt = ticket_receipt(&self.db, ticket)?;
+        if ticket.stage.is_some()
+            || ticket.action != facts.action
+            || ticket.proof.peer_id() != &facts.peer
+            || ticket.proof.epoch() != facts.peer_epoch
+            || receipt.method != ActionMethod::PromptSubmit
+            || receipt.state != ReceiptState::Dispatching
+            || receipt.target.as_ref() != Some(&facts.target)
+            || receipt.boot_id != facts.boot
+        {
+            return reject(ErrorCode::NotReady);
+        }
+        let mut known = self
+            .image_use_for_action(&facts.peer, &facts.action)?
+            .ok_or(StorageError::Corrupt)?;
+        if known.entered || known.facts != *facts {
+            return reject(ErrorCode::NotReady);
+        }
+        known.entered = true;
+        let record = json(&known)?;
+        let mac = hmac_sha256(&self.image_use_key(), record.as_bytes());
+        if self.db.execute(
+            "UPDATE attachment_image_uses SET record=?3,mac=?4 WHERE peer=?1 AND action=?2",
+            params![facts.peer.0, facts.action.0, record, mac.as_slice()],
+        )? != 1
+        {
+            return Err(StorageError::Corrupt);
+        }
+        Ok(())
     }
-    pub(crate) fn image_use_release(&mut self,facts:&crate::attachments::ImageUseFacts)->StoreResult<()> {
-        let Some(known)=self.image_use_for_action(&facts.peer,&facts.action)? else {return Ok(())};
-        if known.facts!=*facts {return Err(StorageError::Corrupt)}
-        self.db.execute("DELETE FROM attachment_image_uses WHERE peer=?1 AND action=?2 AND native_input=?3",params![facts.peer.0,facts.action.0,facts.input.0])?;Ok(())
+    pub(crate) fn image_use_release(
+        &mut self,
+        facts: &crate::attachments::ImageUseFacts,
+    ) -> StoreResult<()> {
+        let Some(known) = self.image_use_for_action(&facts.peer, &facts.action)? else {
+            return Ok(());
+        };
+        if known.facts != *facts {
+            return Err(StorageError::Corrupt);
+        }
+        self.db.execute(
+            "DELETE FROM attachment_image_uses WHERE peer=?1 AND action=?2 AND native_input=?3",
+            params![facts.peer.0, facts.action.0, facts.input.0],
+        )?;
+        Ok(())
     }
-    pub(crate) fn image_upload_pinned(&self,peer:&Uuid,upload:&Uuid)->StoreResult<bool> {
-        Ok(self.image_uses()?.iter().any(|record|record.entered&&&record.facts.peer==peer&&record.facts.uploads.contains(upload)))
+    pub(crate) fn image_upload_pinned(&self, peer: &Uuid, upload: &Uuid) -> StoreResult<bool> {
+        Ok(self.image_uses()?.iter().any(|record| {
+            record.entered && &record.facts.peer == peer && record.facts.uploads.contains(upload)
+        }))
     }
 }
 
-fn attention_transition_tx(tx:&Transaction<'_>,change:&AttentionTransition,now:u64)->StoreResult<Vec<(Uuid,AttentionEvent)>> {
-        let old: Option<(String, String)> = tx
-            .query_row(
-                "SELECT generation,status FROM checkpoint WHERE session=?1",
-                [&change.target.session_id.0],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let category = if change.snapshot {
-            None
-        } else if change.new_actionable
-            || (change.current == SessionStatus::Attention
-                && change.previous != SessionStatus::Attention)
-        {
-            Some(AttentionCategory::Attention)
-        } else if change.previous == SessionStatus::Working
-            && change.current == SessionStatus::Idle
-            && old.as_ref().is_some_and(|(generation, status)| {
-                generation == &change.target.generation.0
-                    && decode::<SessionStatus>(status).ok() == Some(SessionStatus::Working)
-            })
-        {
-            Some(AttentionCategory::Completed)
-        } else {
-            None
-        };
-        tx.execute("INSERT INTO checkpoint VALUES(?1,?2,?3) ON CONFLICT(session) DO UPDATE SET generation=excluded.generation,status=excluded.status", params![change.target.session_id.0, change.target.generation.0, json(&change.current)?])?;
-        let duplicate: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM transitions WHERE session=?1 AND correlation=?2)",
-            params![change.target.session_id.0, change.correlation.0],
-            |r| r.get(0),
+fn attention_transition_tx(
+    tx: &Transaction<'_>,
+    change: &AttentionTransition,
+    now: u64,
+) -> StoreResult<Vec<(Uuid, AttentionEvent)>> {
+    let old: Option<(String, String)> = tx
+        .query_row(
+            "SELECT generation,status FROM checkpoint WHERE session=?1",
+            [&change.target.session_id.0],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let category = if change.snapshot {
+        None
+    } else if change.new_actionable
+        || (change.current == SessionStatus::Attention
+            && change.previous != SessionStatus::Attention)
+    {
+        Some(AttentionCategory::Attention)
+    } else if change.previous == SessionStatus::Working
+        && change.current == SessionStatus::Idle
+        && old.as_ref().is_some_and(|(generation, status)| {
+            generation == &change.target.generation.0
+                && decode::<SessionStatus>(status).ok() == Some(SessionStatus::Working)
+        })
+    {
+        Some(AttentionCategory::Completed)
+    } else {
+        None
+    };
+    tx.execute("INSERT INTO checkpoint VALUES(?1,?2,?3) ON CONFLICT(session) DO UPDATE SET generation=excluded.generation,status=excluded.status", params![change.target.session_id.0, change.target.generation.0, json(&change.current)?])?;
+    let duplicate: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM transitions WHERE session=?1 AND correlation=?2)",
+        params![change.target.session_id.0, change.correlation.0],
+        |r| r.get(0),
+    )?;
+    let mut events = vec![];
+    if let Some(category) = category.filter(|_| !duplicate) {
+        tx.execute(
+            "INSERT INTO transitions VALUES(?1,?2,?3)",
+            params![
+                change.target.session_id.0,
+                change.correlation.0,
+                sql_integer(now)?
+            ],
         )?;
-        let mut events = vec![];
-        if let Some(category) = category.filter(|_| !duplicate) {
+        let peers: Vec<(String, i64)> = {
+            let mut s = tx.prepare("SELECT peer,highwater FROM peers WHERE paired=1")?;
+            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?
+        };
+        for (peer, highwater) in peers {
+            let highwater = stored_uint(highwater)?;
+            if highwater >= UINT_MAX - 1 {
+                return reject(ErrorCode::ResourceLimit);
+            }
+            prune_attention(tx, &peer, now)?;
+            let event = AttentionEvent {
+                event_id: Uuid::random(),
+                sequence: Uint(highwater + 1),
+                session_id: change.target.session_id.clone(),
+                generation: change.target.generation.clone(),
+                category,
+                created_at: timestamp(now)?,
+            };
             tx.execute(
-                "INSERT INTO transitions VALUES(?1,?2,?3)",
+                "INSERT INTO attention(peer,sequence,event,session,at) VALUES(?1,?2,?3,?4,?5)",
                 params![
-                    change.target.session_id.0,
-                    change.correlation.0,
+                    peer,
+                    sql_integer(event.sequence.0)?,
+                    json(&event)?,
+                    event.session_id.0,
                     sql_integer(now)?
                 ],
             )?;
-            let peers: Vec<(String, i64)> = {
-                let mut s = tx.prepare("SELECT peer,highwater FROM peers WHERE paired=1")?;
-                s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<Result<_, _>>()?
-            };
-            for (peer, highwater) in peers {
-                let highwater = stored_uint(highwater)?;
-                if highwater >= UINT_MAX - 1 {
-                    return reject(ErrorCode::ResourceLimit);
-                }
-                prune_attention(tx, &peer, now)?;
-                let event = AttentionEvent {
-                    event_id: Uuid::random(),
-                    sequence: Uint(highwater + 1),
-                    session_id: change.target.session_id.clone(),
-                    generation: change.target.generation.clone(),
-                    category,
-                    created_at: timestamp(now)?,
-                };
-                tx.execute(
-                    "INSERT INTO attention(peer,sequence,event,session,at) VALUES(?1,?2,?3,?4,?5)",
-                    params![
-                        peer,
-                        sql_integer(event.sequence.0)?,
-                        json(&event)?,
-                        event.session_id.0,
-                        sql_integer(now)?
-                    ],
-                )?;
-                tx.execute(
-                    "UPDATE peers SET highwater=?1 WHERE peer=?2",
-                    params![sql_integer(event.sequence.0)?, peer],
-                )?;
-                tx.execute(
-                    "UPDATE readwater SET last_event=?1 WHERE peer=?2 AND session=?3",
-                    params![sql_integer(now)?, peer, event.session_id.0],
-                )?;
-                prune_attention(tx, &peer, now)?;
-                push::enqueue_event(tx,&peer,&event,now)?;
-                events.push((Uuid::new(peer)?, event));
-            }
-        }
-        // Native replay must be installed as a snapshot, not declared a new transition by5.
-        // The correlation ledger shares the attention dedup age/count policy.
-        if now >= RETENTION_MS {
             tx.execute(
-                "DELETE FROM transitions WHERE at<=?1",
-                [sql_integer(now - RETENTION_MS)?],
+                "UPDATE peers SET highwater=?1 WHERE peer=?2",
+                params![sql_integer(event.sequence.0)?, peer],
             )?;
+            tx.execute(
+                "UPDATE readwater SET last_event=?1 WHERE peer=?2 AND session=?3",
+                params![sql_integer(now)?, peer, event.session_id.0],
+            )?;
+            prune_attention(tx, &peer, now)?;
+            push::enqueue_event(tx, &peer, &event, now)?;
+            events.push((Uuid::new(peer)?, event));
         }
-        tx.execute("DELETE FROM transitions WHERE rowid IN (SELECT rowid FROM transitions ORDER BY at DESC,rowid DESC LIMIT -1 OFFSET ?1)",[sql_integer(PEER_CAPACITY)?])?;
+    }
+    // Native replay must be installed as a snapshot, not declared a new transition by5.
+    // The correlation ledger shares the attention dedup age/count policy.
+    if now >= RETENTION_MS {
+        tx.execute(
+            "DELETE FROM transitions WHERE at<=?1",
+            [sql_integer(now - RETENTION_MS)?],
+        )?;
+    }
+    tx.execute("DELETE FROM transitions WHERE rowid IN (SELECT rowid FROM transitions ORDER BY at DESC,rowid DESC LIMIT -1 OFFSET ?1)",[sql_integer(PEER_CAPACITY)?])?;
 
- Ok(events)
+    Ok(events)
 }
 
 #[cfg(test)]
 mod terminal_fact_tests {
     use super::*;
-    fn owner()->(Storage,AuthenticatedPeer) {
-        let mut store=Storage::memory([1;32],0).unwrap();
-        let device=PairedDevice{device_id:Uuid::random(),endpoint_id:EndpointId::new(iroh::SecretKey::from_bytes(&[52;32]).public().to_string()).unwrap(),
-            device_name:Label::new("terminal fact owner").unwrap(),paired_at:Uint(0),last_seen_at:None};
-        let epoch=store.pair_device(&device).unwrap();
-        let proof=store.authenticated_hello(&device.device_id,epoch).unwrap();
-        (store,proof)
+    fn owner() -> (Storage, AuthenticatedPeer) {
+        let mut store = Storage::memory([1; 32], 0).unwrap();
+        let device = PairedDevice {
+            device_id: Uuid::random(),
+            endpoint_id: EndpointId::new(
+                iroh::SecretKey::from_bytes(&[52; 32]).public().to_string(),
+            )
+            .unwrap(),
+            device_name: Label::new("terminal fact owner").unwrap(),
+            paired_at: Uint(0),
+            last_seen_at: None,
+        };
+        let epoch = store.pair_device(&device).unwrap();
+        let proof = store.authenticated_hello(&device.device_id, epoch).unwrap();
+        (store, proof)
     }
     #[test]
-    fn corrupt_image_obligation_fails_image_restore_closed_without_blocking_other_receipt_reservation() {
-        let (mut store,proof)=owner();let action=Uuid::random();let input=Uuid::random();
+    fn corrupt_image_obligation_fails_image_restore_closed_without_blocking_other_receipt_reservation()
+     {
+        let (mut store, proof) = owner();
+        let action = Uuid::random();
+        let input = Uuid::random();
         store.db.execute("INSERT INTO attachment_image_uses(peer,action,native_input,record,mac) VALUES(?1,?2,?3,?4,?5)",
             params![proof.peer_id().0,action.0,input.0,"invalid private metadata",&[0u8;32][..]]).unwrap();
         assert!(!store.ensure_image_reads());
-        let status=store.image_preparation_status(proof.peer_id(),&Uuid::random()).unwrap();
-        assert_eq!(status.reason,ImagePreparationReason::OwnershipProofUnavailable);assert!(status.actions.is_empty());
-        assert!(status.peer_owners.is_none()&&status.host_owners.is_none());
-        let request=Request{id:Uuid::random(),body:RequestBody::PromptSubmit(PromptSubmitParams {
-            boot_id:store.boot_id.clone(),target:Target{session_id:Uuid::random(),generation:Uuid::random()},
-            text:PromptText::new("independent text receipt").unwrap(),skill:None,delivery:None,native_turn_id:None,images:None,
-        })};
-        assert!(matches!(store.reserve(&proof,&request,1,|_|Ok(())).unwrap(),Reservation::Reserved(_)));
+        let status = store
+            .image_preparation_status(proof.peer_id(), &Uuid::random())
+            .unwrap();
+        assert_eq!(
+            status.reason,
+            ImagePreparationReason::OwnershipProofUnavailable
+        );
+        assert!(status.actions.is_empty());
+        assert!(status.peer_owners.is_none() && status.host_owners.is_none());
+        let request = Request {
+            id: Uuid::random(),
+            body: RequestBody::PromptSubmit(PromptSubmitParams {
+                boot_id: store.boot_id.clone(),
+                target: Target {
+                    session_id: Uuid::random(),
+                    generation: Uuid::random(),
+                },
+                text: PromptText::new("independent text receipt").unwrap(),
+                skill: None,
+                delivery: None,
+                native_turn_id: None,
+                images: None,
+            }),
+        };
+        assert!(matches!(
+            store.reserve(&proof, &request, 1, |_| Ok(())).unwrap(),
+            Reservation::Reserved(_)
+        ));
     }
     #[test]
     fn restart_preserves_only_valid_complete_new_input_checkpoints_as_dispatched() {
         for kind in 0..4 {
-            let (mut store,proof)=owner();
-            let request=Request{id:Uuid::random(),body:RequestBody::ShellInput(ShellInputParams{boot_id:store.boot_id.clone(),
-                target:ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()},subscription:Uuid::random(),input:ShellInput::Text{text:"x".into()}})};
-            store.reserve(&proof,&request,1,|_|Ok(())).unwrap();
-            if kind!=3 {store.transition(&proof,&request.id,ReceiptTransition{state:ReceiptState::Dispatching,proof:TransitionProof::Intent,result:None,error:None,at:2}).unwrap();}
-            let result=if kind==2 {
-                serde_json::from_value::<ActionResult>(serde_json::json!({"kind":"shell_input","progress":{"encodedBytes":19,"writtenBytes":19,"flushCompleted":true}})).unwrap()
-            }else{ActionResult::ShellDispatch(ActionResultShellDispatch{progress:ShellDispatchProgress{frame_bytes:Some(19),socket_bytes_written:Some(if kind==1{7}else{19}),frame_complete:Some(kind!=1)}})};
-            if kind<2 {
-                let ticket=store.dispatch_ticket(&proof,&request.id).unwrap();
-                let ActionResult::ShellDispatch(dispatch)=&result else{panic!()};
-                store.checkpoint_shell_input_facts(&ticket,dispatch.progress.clone(),3).unwrap();
-            }else{
-                let mut receipt=store.status(&proof,&request.id,3).unwrap().unwrap();receipt.result=Some(result.clone());
-                let tx=store.db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();write_receipt(&tx,&proof.peer.0,&request.id.0,&receipt).unwrap();tx.commit().unwrap();
+            let (mut store, proof) = owner();
+            let request = Request {
+                id: Uuid::random(),
+                body: RequestBody::ShellInput(ShellInputParams {
+                    boot_id: store.boot_id.clone(),
+                    target: ShellTarget {
+                        shell_id: Uuid::random(),
+                        generation: Uuid::random(),
+                    },
+                    subscription: Uuid::random(),
+                    input: ShellInput::Text { text: "x".into() },
+                }),
+            };
+            store.reserve(&proof, &request, 1, |_| Ok(())).unwrap();
+            if kind != 3 {
+                store
+                    .transition(
+                        &proof,
+                        &request.id,
+                        ReceiptTransition {
+                            state: ReceiptState::Dispatching,
+                            proof: TransitionProof::Intent,
+                            result: None,
+                            error: None,
+                            at: 2,
+                        },
+                    )
+                    .unwrap();
             }
-            let db=std::mem::replace(&mut store.db,Connection::open_in_memory().unwrap());drop(store);
-            let mut reopened=Storage::initialize(db,[1;32],4).unwrap();
-            let recovered=reopened.status(&proof,&request.id,5).unwrap().unwrap();
-            assert_eq!(recovered.state,if kind==0{ReceiptState::Dispatched}else{ReceiptState::Uncertain});
-            assert_eq!(recovered.result,Some(result));
+            let result = if kind == 2 {
+                serde_json::from_value::<ActionResult>(serde_json::json!({"kind":"shell_input","progress":{"encodedBytes":19,"writtenBytes":19,"flushCompleted":true}})).unwrap()
+            } else {
+                ActionResult::ShellDispatch(ActionResultShellDispatch {
+                    progress: ShellDispatchProgress {
+                        frame_bytes: Some(19),
+                        socket_bytes_written: Some(if kind == 1 { 7 } else { 19 }),
+                        frame_complete: Some(kind != 1),
+                    },
+                })
+            };
+            if kind < 2 {
+                let ticket = store.dispatch_ticket(&proof, &request.id).unwrap();
+                let ActionResult::ShellDispatch(dispatch) = &result else {
+                    panic!()
+                };
+                store
+                    .checkpoint_shell_input_facts(&ticket, dispatch.progress.clone(), 3)
+                    .unwrap();
+            } else {
+                let mut receipt = store.status(&proof, &request.id, 3).unwrap().unwrap();
+                receipt.result = Some(result.clone());
+                let tx = store
+                    .db
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                write_receipt(&tx, &proof.peer.0, &request.id.0, &receipt).unwrap();
+                tx.commit().unwrap();
+            }
+            let db = std::mem::replace(&mut store.db, Connection::open_in_memory().unwrap());
+            drop(store);
+            let mut reopened = Storage::initialize(db, [1; 32], 4).unwrap();
+            let recovered = reopened.status(&proof, &request.id, 5).unwrap().unwrap();
+            assert_eq!(
+                recovered.state,
+                if kind == 0 {
+                    ReceiptState::Dispatched
+                } else {
+                    ReceiptState::Uncertain
+                }
+            );
+            assert_eq!(recovered.result, Some(result));
         }
     }
 
     #[test]
     fn strongest_frame_facts_survive_lost_waiters_and_matching_receipts_need_no_new_lease() {
-        for written in [0,7,19] {
-            let (mut store,proof)=owner();
-            let request=Request{id:Uuid::random(),body:RequestBody::ShellInput(ShellInputParams{boot_id:store.boot_id.clone(),
-                target:ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()},subscription:Uuid::random(),
-                input:ShellInput::Text{text:"memory-only terminal commit".into()}})};
-            assert!(matches!(store.reserve(&proof,&request,1,|_|Ok(())).unwrap(),Reservation::Reserved(_)));
-            store.transition(&proof,&request.id,ReceiptTransition{state:ReceiptState::Dispatching,proof:TransitionProof::Intent,result:None,error:None,at:2}).unwrap();
-            let ticket=store.dispatch_ticket(&proof,&request.id).unwrap();
-            let progress=ShellDispatchProgress{frame_bytes:Some(19),socket_bytes_written:Some(written),frame_complete:Some(written==19)};
-            store.checkpoint_shell_input_facts(&ticket,progress.clone(),3).unwrap();
-            store.settle_shell_input_dispatch(ticket,ReceiptTransition{state:ReceiptState::Uncertain,proof:TransitionProof::LostOutcome,result:None,error:None,at:4},progress.clone()).unwrap();
-            let receipt=store.status(&proof,&request.id,5).unwrap().unwrap();
-            assert_eq!(receipt.state,if written==19{ReceiptState::Dispatched}else{ReceiptState::Uncertain});
-            assert_eq!(receipt.result,Some(ActionResult::ShellDispatch(ActionResultShellDispatch{progress})));
-            assert!(!serde_json::to_string(&receipt).unwrap().contains("memory-only terminal commit"));
-            let existing=store.reserve(&proof,&request,6,|_|panic!("a matching receipt must precede a retired lease/capacity check")).unwrap();
+        for written in [0, 7, 19] {
+            let (mut store, proof) = owner();
+            let request = Request {
+                id: Uuid::random(),
+                body: RequestBody::ShellInput(ShellInputParams {
+                    boot_id: store.boot_id.clone(),
+                    target: ShellTarget {
+                        shell_id: Uuid::random(),
+                        generation: Uuid::random(),
+                    },
+                    subscription: Uuid::random(),
+                    input: ShellInput::Text {
+                        text: "memory-only terminal commit".into(),
+                    },
+                }),
+            };
+            assert!(matches!(
+                store.reserve(&proof, &request, 1, |_| Ok(())).unwrap(),
+                Reservation::Reserved(_)
+            ));
+            store
+                .transition(
+                    &proof,
+                    &request.id,
+                    ReceiptTransition {
+                        state: ReceiptState::Dispatching,
+                        proof: TransitionProof::Intent,
+                        result: None,
+                        error: None,
+                        at: 2,
+                    },
+                )
+                .unwrap();
+            let ticket = store.dispatch_ticket(&proof, &request.id).unwrap();
+            let progress = ShellDispatchProgress {
+                frame_bytes: Some(19),
+                socket_bytes_written: Some(written),
+                frame_complete: Some(written == 19),
+            };
+            store
+                .checkpoint_shell_input_facts(&ticket, progress.clone(), 3)
+                .unwrap();
+            store
+                .settle_shell_input_dispatch(
+                    ticket,
+                    ReceiptTransition {
+                        state: ReceiptState::Uncertain,
+                        proof: TransitionProof::LostOutcome,
+                        result: None,
+                        error: None,
+                        at: 4,
+                    },
+                    progress.clone(),
+                )
+                .unwrap();
+            let receipt = store.status(&proof, &request.id, 5).unwrap().unwrap();
+            assert_eq!(
+                receipt.state,
+                if written == 19 {
+                    ReceiptState::Dispatched
+                } else {
+                    ReceiptState::Uncertain
+                }
+            );
+            assert_eq!(
+                receipt.result,
+                Some(ActionResult::ShellDispatch(ActionResultShellDispatch {
+                    progress
+                }))
+            );
+            assert!(
+                !serde_json::to_string(&receipt)
+                    .unwrap()
+                    .contains("memory-only terminal commit")
+            );
+            let existing = store
+                .reserve(&proof, &request, 6, |_| {
+                    panic!("a matching receipt must precede a retired lease/capacity check")
+                })
+                .unwrap();
             assert!(matches!(existing,Reservation::Existing(known) if known==receipt));
-            let mut changed=request.clone();
-            if let RequestBody::ShellInput(params)=&mut changed.body {params.subscription=Uuid::random();}
-            assert!(matches!(store.reserve(&proof,&changed,7,|_|panic!("conflicts cannot enter a new effect")),Err(StorageError::Policy(ErrorCode::ActionIdConflict))));
+            let mut changed = request.clone();
+            if let RequestBody::ShellInput(params) = &mut changed.body {
+                params.subscription = Uuid::random();
+            }
+            assert!(matches!(
+                store.reserve(&proof, &changed, 7, |_| panic!(
+                    "conflicts cannot enter a new effect"
+                )),
+                Err(StorageError::Policy(ErrorCode::ActionIdConflict))
+            ));
         }
     }
     #[test]
     fn queued_creation_denies_only_new_roots_then_narrows_without_inventing_a_native_epoch() {
         use crate::herdr::shells::CreationShellFence;
-        let server=Uuid::random();let incarnation=Uuid::random();
-        let old=(Id::new("w1:p1").unwrap(),Id::new("old-terminal").unwrap());
-        let new=(Id::new("w1:p2").unwrap(),Id::new("new-terminal").unwrap());
-        let mut fence=CreationShellFence{server:server.clone(),incarnation:Some(incarnation.clone()),
-            baseline:std::collections::HashMap::from([old.clone()]),created:None};
+        let server = Uuid::random();
+        let incarnation = Uuid::random();
+        let old = (Id::new("w1:p1").unwrap(), Id::new("old-terminal").unwrap());
+        let new = (Id::new("w1:p2").unwrap(), Id::new("new-terminal").unwrap());
+        let mut fence = CreationShellFence {
+            server: server.clone(),
+            incarnation: Some(incarnation.clone()),
+            baseline: std::collections::HashMap::from([old.clone()]),
+            created: None,
+        };
         fence.validate().unwrap();
-        assert!(!fence.blocks(&server,&incarnation,&old.0,&old.1));
-        assert!(fence.blocks(&server,&incarnation,&new.0,&new.1));
-        assert!(fence.blocks(&server,&incarnation,&old.0,&new.1));
-        assert!(!fence.blocks(&server,&Uuid::random(),&new.0,&new.1));
-        fence.created=Some(new.clone());fence.baseline.clear();
-        assert!(fence.blocks(&server,&incarnation,&new.0,&new.1));
-        assert!(!fence.blocks(&server,&incarnation,&old.0,&old.1));
-        fence.incarnation=None;fence.validate().unwrap();
-        assert!(fence.blocks(&server,&Uuid::random(),&new.0,&new.1));
-        assert!(!fence.blocks(&Uuid::random(),&incarnation,&new.0,&new.1));
+        assert!(!fence.blocks(&server, &incarnation, &old.0, &old.1));
+        assert!(fence.blocks(&server, &incarnation, &new.0, &new.1));
+        assert!(fence.blocks(&server, &incarnation, &old.0, &new.1));
+        assert!(!fence.blocks(&server, &Uuid::random(), &new.0, &new.1));
+        fence.created = Some(new.clone());
+        fence.baseline.clear();
+        assert!(fence.blocks(&server, &incarnation, &new.0, &new.1));
+        assert!(!fence.blocks(&server, &incarnation, &old.0, &old.1));
+        fence.incarnation = None;
+        fence.validate().unwrap();
+        assert!(fence.blocks(&server, &Uuid::random(), &new.0, &new.1));
+        assert!(!fence.blocks(&Uuid::random(), &incarnation, &new.0, &new.1));
     }
     #[test]
-    fn legacy_entered_missing_roots_are_source_scoped_but_owner_only_and_unentered_new_factories_are_not() {
-        let (mut store,proof)=owner();let missing=Uuid::random();let manager_only=Uuid::random();
-        for (server,stage) in [(&missing,CreationStage::Workspace),(&manager_only,CreationStage::Owner)] {
-            let request=Request{id:Uuid::random(),body:RequestBody::SessionCreate(SessionCreateParams{boot_id:store.boot_id.clone(),server_id:server.clone(),
-                project_id:Uuid::random(),provider:Provider::Codex,name:Label::new("retained uncertainty").unwrap(),directory_ref:None,placement:None})};
-            let Reservation::Reserved(mut receipt)=store.reserve(&proof,&request,1,|_|Ok(())).unwrap() else{panic!()};
-            receipt.state=ReceiptState::Uncertain;let creation=receipt.creation.as_mut().unwrap();creation.stage=stage;creation.stage_state=StageState::Uncertain;
-            let tx=store.db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();write_receipt(&tx,&proof.peer.0,&request.id.0,&receipt).unwrap();tx.commit().unwrap();
+    fn legacy_entered_missing_roots_are_source_scoped_but_owner_only_and_unentered_new_factories_are_not()
+     {
+        let (mut store, proof) = owner();
+        let missing = Uuid::random();
+        let manager_only = Uuid::random();
+        for (server, stage) in [
+            (&missing, CreationStage::Workspace),
+            (&manager_only, CreationStage::Owner),
+        ] {
+            let request = Request {
+                id: Uuid::random(),
+                body: RequestBody::SessionCreate(SessionCreateParams {
+                    boot_id: store.boot_id.clone(),
+                    server_id: server.clone(),
+                    project_id: Uuid::random(),
+                    provider: Provider::Codex,
+                    name: Label::new("retained uncertainty").unwrap(),
+                    directory_ref: None,
+                    placement: None,
+                }),
+            };
+            let Reservation::Reserved(mut receipt) =
+                store.reserve(&proof, &request, 1, |_| Ok(())).unwrap()
+            else {
+                panic!()
+            };
+            receipt.state = ReceiptState::Uncertain;
+            let creation = receipt.creation.as_mut().unwrap();
+            creation.stage = stage;
+            creation.stage_state = StageState::Uncertain;
+            let tx = store
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            write_receipt(&tx, &proof.peer.0, &request.id.0, &receipt).unwrap();
+            tx.commit().unwrap();
         }
-        let request=Request{id:Uuid::random(),body:RequestBody::TerminalCreate(TerminalCreateParams{boot_id:store.boot_id.clone(),server_id:Uuid::random(),
-            workspace_id:Id("w".into()),project_id:Uuid::random(),directory_ref:None,source:None})};
-        store.reserve(&proof,&request,1,|_|Ok(())).unwrap();
-        store.transition(&proof,&request.id,ReceiptTransition{state:ReceiptState::Uncertain,proof:TransitionProof::LostOutcome,result:None,error:None,at:2}).unwrap();
-        let (fences,unproved)=store.creation_shell_fences().unwrap();
-        assert!(fences.is_empty());assert_eq!(unproved,std::collections::HashSet::from([missing]));
+        let request = Request {
+            id: Uuid::random(),
+            body: RequestBody::TerminalCreate(TerminalCreateParams {
+                boot_id: store.boot_id.clone(),
+                server_id: Uuid::random(),
+                workspace_id: Id("w".into()),
+                project_id: Uuid::random(),
+                directory_ref: None,
+                source: None,
+            }),
+        };
+        store.reserve(&proof, &request, 1, |_| Ok(())).unwrap();
+        store
+            .transition(
+                &proof,
+                &request.id,
+                ReceiptTransition {
+                    state: ReceiptState::Uncertain,
+                    proof: TransitionProof::LostOutcome,
+                    result: None,
+                    error: None,
+                    at: 2,
+                },
+            )
+            .unwrap();
+        let (fences, unproved) = store.creation_shell_fences().unwrap();
+        assert!(fences.is_empty());
+        assert_eq!(unproved, std::collections::HashSet::from([missing]));
     }
     #[test]
-    fn completed_bootstrap_negative_retires_only_after_observed_agent_or_loss_and_never_erases_uncertainty() {
+    fn completed_bootstrap_negative_retires_only_after_observed_agent_or_loss_and_never_erases_uncertainty()
+     {
         use crate::herdr::shells::CreationShellFence;
-        let (mut store,proof)=owner();let server=Uuid::random();let incarnation=Uuid::random();let mut actions=Vec::new();
-        for (index,(pane,terminal)) in [("p1","n1"),("p2","n2")].into_iter().enumerate() {
-            let request=Request{id:Uuid::random(),body:RequestBody::SessionCreate(SessionCreateParams{boot_id:store.boot_id.clone(),server_id:server.clone(),
-                project_id:Uuid::random(),provider:Provider::Omp,name:Label::new("stored original facts").unwrap(),directory_ref:None,placement:None})};
-            let Reservation::Reserved(mut receipt)=store.reserve(&proof,&request,1,|_|Ok(())).unwrap() else{panic!()};
-            store.retain_creation_shell_fence(&proof,&request.id,CreationShellFence{server:server.clone(),incarnation:Some(incarnation.clone()),baseline:Default::default(),created:None}).unwrap();
-            let creation=receipt.creation.as_mut().unwrap();
-            creation.resources.workspace_id=Some(Id("w".into()));creation.resources.pane_id=Some(Id(pane.into()));creation.resources.terminal_id=Some(Id(terminal.into()));
-            if index==0 {
-                let target=Target{session_id:Uuid::random(),generation:Uuid::random()};
-                creation.resources.native_id=Some(Id("native-original".into()));creation.resources.session_id=Some(target.session_id.clone());creation.resources.generation=Some(target.generation.clone());
-                creation.stage=CreationStage::Ready;creation.stage_state=StageState::Confirmed;receipt.state=ReceiptState::Succeeded;
-                receipt.result=Some(ActionResult::Created(Box::new(ActionResultCreated{target,workspace_id:Id("w".into()),pane_id:Id(pane.into()),terminal_id:Id(terminal.into()),native_id:Id("native-original".into()),binding_id:None})));
-            }else{creation.stage_state=StageState::Uncertain;receipt.state=ReceiptState::Uncertain;}
+        let (mut store, proof) = owner();
+        let server = Uuid::random();
+        let incarnation = Uuid::random();
+        let mut actions = Vec::new();
+        for (index, (pane, terminal)) in [("p1", "n1"), ("p2", "n2")].into_iter().enumerate() {
+            let request = Request {
+                id: Uuid::random(),
+                body: RequestBody::SessionCreate(SessionCreateParams {
+                    boot_id: store.boot_id.clone(),
+                    server_id: server.clone(),
+                    project_id: Uuid::random(),
+                    provider: Provider::Omp,
+                    name: Label::new("stored original facts").unwrap(),
+                    directory_ref: None,
+                    placement: None,
+                }),
+            };
+            let Reservation::Reserved(mut receipt) =
+                store.reserve(&proof, &request, 1, |_| Ok(())).unwrap()
+            else {
+                panic!()
+            };
+            store
+                .retain_creation_shell_fence(
+                    &proof,
+                    &request.id,
+                    CreationShellFence {
+                        server: server.clone(),
+                        incarnation: Some(incarnation.clone()),
+                        baseline: Default::default(),
+                        created: None,
+                    },
+                )
+                .unwrap();
+            let creation = receipt.creation.as_mut().unwrap();
+            creation.resources.workspace_id = Some(Id("w".into()));
+            creation.resources.pane_id = Some(Id(pane.into()));
+            creation.resources.terminal_id = Some(Id(terminal.into()));
+            if index == 0 {
+                let target = Target {
+                    session_id: Uuid::random(),
+                    generation: Uuid::random(),
+                };
+                creation.resources.native_id = Some(Id("native-original".into()));
+                creation.resources.session_id = Some(target.session_id.clone());
+                creation.resources.generation = Some(target.generation.clone());
+                creation.stage = CreationStage::Ready;
+                creation.stage_state = StageState::Confirmed;
+                receipt.state = ReceiptState::Succeeded;
+                receipt.result = Some(ActionResult::Created(Box::new(ActionResultCreated {
+                    target,
+                    workspace_id: Id("w".into()),
+                    pane_id: Id(pane.into()),
+                    terminal_id: Id(terminal.into()),
+                    native_id: Id("native-original".into()),
+                    binding_id: None,
+                })));
+            } else {
+                creation.stage_state = StageState::Uncertain;
+                receipt.state = ReceiptState::Uncertain;
+            }
             // Fixture-only authoritative journal facts; no native provider effect is claimed.
-            let tx=store.db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();write_receipt(&tx,&proof.peer.0,&request.id.0,&receipt).unwrap();tx.commit().unwrap();
-            store.narrow_creation_shell_fence(&proof,&request.id,&Id(pane.into()),&Id(terminal.into())).unwrap();
-            actions.push((request.id,receipt));
+            let tx = store
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            write_receipt(&tx, &proof.peer.0, &request.id.0, &receipt).unwrap();
+            tx.commit().unwrap();
+            store
+                .narrow_creation_shell_fence(
+                    &proof,
+                    &request.id,
+                    &Id(pane.into()),
+                    &Id(terminal.into()),
+                )
+                .unwrap();
+            actions.push((request.id, receipt));
         }
         let mut snapshot:crate::herdr::Snapshot=serde_json::from_value(serde_json::json!({"version":"0.9.1","protocol":22,"focused_workspace_id":"w",
             "workspaces":[{"workspace_id":"w","number":1,"label":"fixture","focused":true,"active_tab_id":"t","agent_status":"idle"}],
             "tabs":[{"tab_id":"t","workspace_id":"w","number":1,"label":"fixture","focused":true,"agent_status":"idle"}],
             "panes":[{"pane_id":"p1","terminal_id":"n1","workspace_id":"w","tab_id":"t","focused":true,"agent_status":"idle"},
                 {"pane_id":"p2","terminal_id":"n2","workspace_id":"w","tab_id":"t","focused":false,"agent_status":"idle"}],"agents":[]})).unwrap();
-        assert!(store.retire_confirmed_creation_shell_fences(&server,&incarnation,&snapshot).unwrap().is_empty());
-        snapshot.panes[0].agent=Some("omp".into());snapshot.panes[1].agent=Some("omp".into());
-        assert_eq!(store.retire_confirmed_creation_shell_fences(&server,&incarnation,&snapshot).unwrap(),vec![(proof.peer.clone(),actions[0].0.clone())]);
-        let (fences,unproved)=store.creation_shell_fences().unwrap();
-        assert!(unproved.is_empty());assert_eq!(fences.len(),1);assert_eq!(fences[0].1,actions[1].0);
-        for(action,receipt)in actions {assert_eq!(store.status(&proof,&action,2).unwrap(),Some(receipt));}
+        assert!(
+            store
+                .retire_confirmed_creation_shell_fences(&server, &incarnation, &snapshot)
+                .unwrap()
+                .is_empty()
+        );
+        snapshot.panes[0].agent = Some("omp".into());
+        snapshot.panes[1].agent = Some("omp".into());
+        assert_eq!(
+            store
+                .retire_confirmed_creation_shell_fences(&server, &incarnation, &snapshot)
+                .unwrap(),
+            vec![(proof.peer.clone(), actions[0].0.clone())]
+        );
+        let (fences, unproved) = store.creation_shell_fences().unwrap();
+        assert!(unproved.is_empty());
+        assert_eq!(fences.len(), 1);
+        assert_eq!(fences[0].1, actions[1].0);
+        for (action, receipt) in actions {
+            assert_eq!(store.status(&proof, &action, 2).unwrap(), Some(receipt));
+        }
     }
 
     #[test]
     fn retained_agent_bootstraps_never_turn_into_an_ordinary_terminal_after_restart() {
-        let (mut store,proof)=owner();let server=Uuid::random();let incarnation=Uuid::random();
-        let request=Request{id:Uuid::random(),body:RequestBody::SessionCreate(SessionCreateParams{boot_id:store.boot_id.clone(),server_id:server.clone(),
-            project_id:Uuid::random(),provider:Provider::Omp,name:Label::new("owned bootstrap").unwrap(),directory_ref:None,placement:None})};
-        let Reservation::Reserved(mut receipt)=store.reserve(&proof,&request,1,|_|Ok(())).unwrap() else{panic!()};
-        let creation=receipt.creation.as_mut().unwrap();
-        creation.resources.pane_id=Some(Id::new("w2:p1").unwrap());creation.resources.terminal_id=Some(Id::new("bootstrap-terminal").unwrap());
-        receipt.state=ReceiptState::Uncertain;
-        let stage=CreationStageRecord{stage:CreationStage::Workspace,intent:StageMetadata{socket_epoch:Some(incarnation.clone()),..StageMetadata::default()},
-            result:None,state:StageState::Uncertain,proof:None};
-        let fence=retained_creation_shell_fence(&receipt,Some(&[stage])).unwrap();
-        assert_eq!(fence.incarnation,Some(incarnation.clone()));
-        assert!(fence.blocks(&server,&incarnation,&Id::new("w2:p1").unwrap(),&Id::new("bootstrap-terminal").unwrap()));
-        assert!(!fence.blocks(&server,&incarnation,&Id::new("w1:p1").unwrap(),&Id::new("ordinary-terminal").unwrap()));
-        let legacy=retained_creation_shell_fence(&receipt,None).unwrap();
-        assert_eq!(legacy.incarnation,None);
-        assert!(legacy.blocks(&server,&Uuid::random(),&Id::new("w2:p1").unwrap(),&Id::new("bootstrap-terminal").unwrap()));
+        let (mut store, proof) = owner();
+        let server = Uuid::random();
+        let incarnation = Uuid::random();
+        let request = Request {
+            id: Uuid::random(),
+            body: RequestBody::SessionCreate(SessionCreateParams {
+                boot_id: store.boot_id.clone(),
+                server_id: server.clone(),
+                project_id: Uuid::random(),
+                provider: Provider::Omp,
+                name: Label::new("owned bootstrap").unwrap(),
+                directory_ref: None,
+                placement: None,
+            }),
+        };
+        let Reservation::Reserved(mut receipt) =
+            store.reserve(&proof, &request, 1, |_| Ok(())).unwrap()
+        else {
+            panic!()
+        };
+        let creation = receipt.creation.as_mut().unwrap();
+        creation.resources.pane_id = Some(Id::new("w2:p1").unwrap());
+        creation.resources.terminal_id = Some(Id::new("bootstrap-terminal").unwrap());
+        receipt.state = ReceiptState::Uncertain;
+        let stage = CreationStageRecord {
+            stage: CreationStage::Workspace,
+            intent: StageMetadata {
+                socket_epoch: Some(incarnation.clone()),
+                ..StageMetadata::default()
+            },
+            result: None,
+            state: StageState::Uncertain,
+            proof: None,
+        };
+        let fence = retained_creation_shell_fence(&receipt, Some(&[stage])).unwrap();
+        assert_eq!(fence.incarnation, Some(incarnation.clone()));
+        assert!(fence.blocks(
+            &server,
+            &incarnation,
+            &Id::new("w2:p1").unwrap(),
+            &Id::new("bootstrap-terminal").unwrap()
+        ));
+        assert!(!fence.blocks(
+            &server,
+            &incarnation,
+            &Id::new("w1:p1").unwrap(),
+            &Id::new("ordinary-terminal").unwrap()
+        ));
+        let legacy = retained_creation_shell_fence(&receipt, None).unwrap();
+        assert_eq!(legacy.incarnation, None);
+        assert!(legacy.blocks(
+            &server,
+            &Uuid::random(),
+            &Id::new("w2:p1").unwrap(),
+            &Id::new("bootstrap-terminal").unwrap()
+        ));
     }
 }

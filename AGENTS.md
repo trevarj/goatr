@@ -188,6 +188,56 @@ wrapper defaults `GOATR_HC` to that exact output; an override must be an absolut
 locally chosen compatible executable. HC_SOCKET/HC_SESSION select the native target
 locally and must match the intended upstream Herdr session.
 
+The flake exports `nixosModules.default` with `services.goatr.enable` and
+`services.goatr.package` (default: this flake's host-system Goatr package).
+Enabling installs the CLI and manual-only `systemd.user.services.goatr-companion`:
+packaged `goatr serve --hc`, `Restart=on-failure`, `RestartSec=5`, `UMask=0077`.
+No wanted/required targets, native core startup, root/capabilities, adoption or
+manager-owned RuntimeDirectory/StateDirectory. Preserve that separation from
+legacy `goatr.service`; use native unit environment overrides for HC_SOCKET and
+HC_SESSION rather than adding a second configuration interface.
+
+## Release CI and signing safety
+
+`.github/workflows/ci.yml` retains the ordinary push/PR core and Android gates.
+Signing additionally requires both jobs to succeed, and runs only in
+`trevarj/goatr` for manual dispatch on `refs/heads/main` or pushed `v*` tags.
+Before secrets are available, it verifies the checked-out commit is an ancestor
+of canonical `main`, builds the pinned unsigned release with strict verification,
+checks 16-KiB ZIP alignment and reads the actual APK version metadata. A tag must
+equal `v` plus the APK versionName; versionCode must be positive. Current app
+metadata is versionName `0.2.0`, versionCode `2`; update app metadata before
+choosing another release tag. Core/native/Android gate failures block signing;
+never skip or suppress a gate to publish.
+
+The owner must independently generate and back up a **new Goatr release key**,
+not reuse MOTD's key. The intended private file is
+`~/secrets/goatr-release.jks`, alias `goatr`; it must never enter Git or the Nix
+store. Configure repository Actions secrets `KEYSTORE_BASE64`,
+`KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` out of band, without displaying
+them. Missing secrets fail signing closed. Restrict `main` changes and `v*` tag
+creation to trusted maintainers; workflow source is part of the signing trust
+boundary. This workflow's trust check is not a substitute for repository rules.
+
+Only the signing step receives those four secrets. It decodes the keystore under
+RUNNER_TEMP with umask 077, uses `apksigner` password **environment references**
+(not password values in argv), verifies the explicit signed APK and alignment,
+and deletes the keystore via an EXIT trap plus an always-run cleanup step.
+Builds and checks have no production signing credentials; no signing operation
+runs through Nix or Gradle. No signing material is cached or uploaded. Keep local
+`install-release` interactive-only; its password policy is intentionally separate.
+
+Manual-main runs upload only the verified signed APK, checksums and license/notices
+as `goatr-signed-COMMIT` Actions artifacts. Tag runs publish those exact assets
+after artifact checksum verification in a separate `contents: write` job with no
+production secrets or source execution. All other jobs retain `contents: read`;
+PRs, forks and other manual refs cannot sign. Never upload an unsigned fallback.
+Do not dispatch signing, create/push a release tag or publish a release without
+explicit authorization. Existing core/native/Android CI is the runnable release
+gate; a local unsigned build alone is not release validation.
+
+## Dependency maintenance
+
 All Gradle modules enforce strict dependency locks and retained SHA-256 verification.
 For intentional dependency changes, the root build registers `resolveDependencies`
 in every project; unqualified task selection resolves them all. Use pinned Nix

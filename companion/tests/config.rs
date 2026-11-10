@@ -78,7 +78,12 @@ fn pairing_name_is_optional_bounded_and_validated_during_parse_and_serialization
     assert_eq!(roundtrip.pairing_name, Some(Label::new(label).unwrap()));
     assert_eq!(roundtrip.version, default.version);
     assert_eq!(roundtrip.executables.herdr, default.executables.herdr);
-    for invalid in ["".to_owned(), "a".repeat(129), "bad\nname".to_owned(), "bad\u{7f}name".to_owned()] {
+    for invalid in [
+        "".to_owned(),
+        "a".repeat(129),
+        "bad\nname".to_owned(),
+        "bad\u{7f}name".to_owned(),
+    ] {
         let quoted = serde_json::to_string(&invalid).unwrap();
         assert!(Config::parse(&format!("pairing_name={quoted}\n{text}")).is_err());
         let mut forged = Config::parse(&text).unwrap();
@@ -390,21 +395,52 @@ fn unavailable_unselected_owner_is_not_selected_creation_or_an_inventory_allowli
 
 #[test]
 fn read_review_grants_are_explicit_canonical_and_independent_of_creation_or_terminal_control() {
-    let root=Root::new();let text=root.text();let mut config=Config::parse(&text).unwrap();
-    let id=config.projects[0].id.clone();let label=config.projects[0].label.clone();
-    assert!(!config.projects[0].allow_read_tools);assert!(!config.allow_terminal_control);
+    let root = Root::new();
+    let text = root.text();
+    let mut config = Config::parse(&text).unwrap();
+    let id = config.projects[0].id.clone();
+    let label = config.projects[0].label.clone();
+    assert!(!config.projects[0].allow_read_tools);
+    assert!(!config.allow_terminal_control);
     assert!(config.projects()[0].available);
-    assert!(config.set_project_read_tools(&root.0,true).unwrap());assert!(!config.set_project_read_tools(&root.0,true).unwrap());
-    assert!(config.projects[0].allow_read_tools);assert!(!config.allow_terminal_control);
-    assert_eq!(config.projects[0].id,id);assert_eq!(config.projects[0].label,label);assert_eq!(config.projects[0].path,root.0);
-    assert!(!config.approve_project(root.0.to_str().unwrap()).unwrap());assert!(config.projects[0].allow_read_tools);
-    let unconfigured=root.0.join("unconfigured");fs::create_dir(&unconfigured).unwrap();
-    assert!(config.set_project_read_tools(&unconfigured,true).is_err());assert_eq!(config.projects.len(),1);
-    assert!(config.set_project_read_tools(&root.0,false).unwrap());assert!(config.projects()[0].available);
-    let explicit=Config::parse(&text.replace("label=\"project\"","label=\"project\"\nallow_read_tools=true")).unwrap();assert!(explicit.projects[0].allow_read_tools);
-    assert!(Config::parse(&text.replace("label=\"project\"","label=\"project\"\nallow_read_tools=\"true\"")).is_err());
-    let alias=root.0.join("root-alias");std::os::unix::fs::symlink(&root.0,&alias).unwrap();
-    let duplicate=format!("{text}\n[[projects]]\nid={:?}\nlabel=\"same canonical object\"\npath={:?}\n",Uuid::random().0,alias);
-    assert!(Config::parse(&duplicate).and_then(|config|config.preflight()).is_err());
+    assert!(config.set_project_read_tools(&root.0, true).unwrap());
+    assert!(!config.set_project_read_tools(&root.0, true).unwrap());
+    assert!(config.projects[0].allow_read_tools);
+    assert!(!config.allow_terminal_control);
+    assert_eq!(config.projects[0].id, id);
+    assert_eq!(config.projects[0].label, label);
+    assert_eq!(config.projects[0].path, root.0);
+    assert!(!config.approve_project(root.0.to_str().unwrap()).unwrap());
+    assert!(config.projects[0].allow_read_tools);
+    let unconfigured = root.0.join("unconfigured");
+    fs::create_dir(&unconfigured).unwrap();
+    assert!(config.set_project_read_tools(&unconfigured, true).is_err());
+    assert_eq!(config.projects.len(), 1);
+    assert!(config.set_project_read_tools(&root.0, false).unwrap());
+    assert!(config.projects()[0].available);
+    let explicit = Config::parse(&text.replace(
+        "label=\"project\"",
+        "label=\"project\"\nallow_read_tools=true",
+    ))
+    .unwrap();
+    assert!(explicit.projects[0].allow_read_tools);
+    assert!(
+        Config::parse(&text.replace(
+            "label=\"project\"",
+            "label=\"project\"\nallow_read_tools=\"true\""
+        ))
+        .is_err()
+    );
+    let alias = root.0.join("root-alias");
+    std::os::unix::fs::symlink(&root.0, &alias).unwrap();
+    let duplicate = format!(
+        "{text}\n[[projects]]\nid={:?}\nlabel=\"same canonical object\"\npath={:?}\n",
+        Uuid::random().0,
+        alias
+    );
+    assert!(
+        Config::parse(&duplicate)
+            .and_then(|config| config.preflight())
+            .is_err()
+    );
 }
-

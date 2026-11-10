@@ -40,6 +40,13 @@ impl SafeHistory {
     }
 }
 
+pub struct NativeInventory {
+    pub servers: Vec<Server>,
+    pub projects: Vec<Project>,
+    pub shells: Vec<(ShellSummary, Uuid)>,
+    pub unbound: Vec<UnboundRow>,
+    pub hierarchy: Vec<NativeHierarchy>,
+}
 #[derive(Clone)]
 pub struct ProviderSnapshot {
     pub state: SessionState,
@@ -296,8 +303,8 @@ struct Connection {
     peer: Uuid,
     epoch: u64,
     skills: Option<Arc<crate::backends::SkillsPublication>>,
-    controls_catalogue:Option<Arc<crate::backends::ControlsPublication>>,
-    queue_view:Option<Arc<crate::backends::QueuePublication>>,
+    controls_catalogue: Option<Arc<crate::backends::ControlsPublication>>,
+    queue_view: Option<Arc<crate::backends::QueuePublication>>,
     subscriptions: HashMap<Uuid, Subscription>,
     queue: VecDeque<Queued>,
     bytes: usize,
@@ -473,12 +480,12 @@ struct Inner {
     browse: HashMap<Uuid, browse::BrowseNode>,
     adapter_history_bytes: HashMap<Uuid, (Uuid, usize)>,
     sessions: HashMap<Uuid, Session>,
-    shells: HashMap<Uuid,(ShellSummary,Uuid)>,
-    creation_shell_fences:HashMap<(Uuid,Uuid),crate::herdr::shells::CreationShellFence>,
+    shells: HashMap<Uuid, (ShellSummary, Uuid)>,
+    creation_shell_fences: HashMap<(Uuid, Uuid), crate::herdr::shells::CreationShellFence>,
     connections: HashMap<Uuid, Connection>,
     skills_publications: Option<Arc<AtomicUsize>>,
-    controls_publications:Option<Arc<AtomicUsize>>,
-    queue_publications:Option<Arc<AtomicUsize>>,
+    controls_publications: Option<Arc<AtomicUsize>>,
+    queue_publications: Option<Arc<AtomicUsize>>,
     servers: Vec<Server>,
     projects: Vec<Project>,
     unbound: Vec<UnboundRow>,
@@ -494,7 +501,7 @@ struct Inner {
 #[derive(Default)]
 pub struct State {
     inner: Mutex<Inner>,
-    pub(crate) creation_directories:Arc<crate::herdr::creation_directories::Leases>,
+    pub(crate) creation_directories: Arc<crate::herdr::creation_directories::Leases>,
 }
 #[path = "state_browse.rs"]
 mod browse;
@@ -510,36 +517,85 @@ fn inventory_sessions(i: &Inner) -> Vec<SessionSummary> {
     sessions
 }
 
-fn creation_context_valid(i:&Inner,context:&crate::herdr::creation_directories::DirectoryContext,publication:bool)->StateResult<()> {
-    if std::time::Instant::now()>=context.expires{return Err(ErrorCode::CursorExpired)}
-    let connection=i.connections.get(&context.connection).ok_or(ErrorCode::Unauthorized)?;
-    if connection.closed||connection.peer!=context.peer||connection.epoch!=context.peer_epoch{return Err(ErrorCode::Unauthorized)}
-    let hierarchy=i.hierarchy.iter().find(|hierarchy|hierarchy.server_id==context.physical.server_id
-        &&hierarchy.server_incarnation==context.physical.incarnation
-        &&if publication {hierarchy.freshness==NativeFreshness::Current}else{hierarchy.freshness!=NativeFreshness::Unavailable}).ok_or(ErrorCode::NotReady)?;
-    let published_routes=publication||hierarchy.freshness==NativeFreshness::Current;
-    if let Some(origin)=&context.origin {
-        let pane=hierarchy.panes.iter().find(|pane|pane.pane_id==origin.pane
-            &&pane.terminal_id==origin.terminal&&pane.workspace_id==origin.workspace&&pane.tab_id==origin.tab).ok_or(ErrorCode::StaleSession)?;
+fn creation_context_valid(
+    i: &Inner,
+    context: &crate::herdr::creation_directories::DirectoryContext,
+    publication: bool,
+) -> StateResult<()> {
+    if std::time::Instant::now() >= context.expires {
+        return Err(ErrorCode::CursorExpired);
+    }
+    let connection = i
+        .connections
+        .get(&context.connection)
+        .ok_or(ErrorCode::Unauthorized)?;
+    if connection.closed
+        || connection.peer != context.peer
+        || connection.epoch != context.peer_epoch
+    {
+        return Err(ErrorCode::Unauthorized);
+    }
+    let hierarchy = i
+        .hierarchy
+        .iter()
+        .find(|hierarchy| {
+            hierarchy.server_id == context.physical.server_id
+                && hierarchy.server_incarnation == context.physical.incarnation
+                && if publication {
+                    hierarchy.freshness == NativeFreshness::Current
+                } else {
+                    hierarchy.freshness != NativeFreshness::Unavailable
+                }
+        })
+        .ok_or(ErrorCode::NotReady)?;
+    let published_routes = publication || hierarchy.freshness == NativeFreshness::Current;
+    if let Some(origin) = &context.origin {
+        let pane = hierarchy
+            .panes
+            .iter()
+            .find(|pane| {
+                pane.pane_id == origin.pane
+                    && pane.terminal_id == origin.terminal
+                    && pane.workspace_id == origin.workspace
+                    && pane.tab_id == origin.tab
+            })
+            .ok_or(ErrorCode::StaleSession)?;
         match &origin.source {
-            ArtifactSource::Session{target}=>{
-                let session=current(i,target)?;
-                if session.source!=origin.epoch||session.installing||session.install_failed
-                    ||!(session.state.summary.connectivity==SessionConnectivity::Ready
-                        ||(!publication&&session.state.summary.connectivity==SessionConnectivity::Synchronizing))
-                    ||session.state.summary.server_id!=context.physical.server_id
-                    ||session.state.summary.pane_id!=origin.pane||session.state.summary.terminal_id!=origin.terminal
-                    ||session.state.summary.workspace_id!=origin.workspace||(published_routes&&pane.target.as_ref()!=Some(target)) {
+            ArtifactSource::Session { target } => {
+                let session = current(i, target)?;
+                if session.source != origin.epoch
+                    || session.installing
+                    || session.install_failed
+                    || !(session.state.summary.connectivity == SessionConnectivity::Ready
+                        || (!publication
+                            && session.state.summary.connectivity
+                                == SessionConnectivity::Synchronizing))
+                    || session.state.summary.server_id != context.physical.server_id
+                    || session.state.summary.pane_id != origin.pane
+                    || session.state.summary.terminal_id != origin.terminal
+                    || session.state.summary.workspace_id != origin.workspace
+                    || (published_routes && pane.target.as_ref() != Some(target))
+                {
                     return Err(ErrorCode::StaleSession);
                 }
             }
-            ArtifactSource::Shell{target}=>{
-                let (shell,epoch)=i.shells.get(&target.shell_id).ok_or(ErrorCode::StaleSession)?;
-                if &shell.target!=target||epoch!=&origin.epoch
-                    ||!(shell.connectivity==SessionConnectivity::Ready||(!publication&&shell.connectivity==SessionConnectivity::Synchronizing))
-                    ||shell.server_id!=context.physical.server_id||shell.pane_id!=origin.pane
-                    ||shell.terminal_id!=origin.terminal||shell.workspace_id!=origin.workspace
-                    ||shell.tab_id!=origin.tab||(published_routes&&pane.shell_target.as_ref()!=Some(target)) {
+            ArtifactSource::Shell { target } => {
+                let (shell, epoch) = i
+                    .shells
+                    .get(&target.shell_id)
+                    .ok_or(ErrorCode::StaleSession)?;
+                if &shell.target != target
+                    || epoch != &origin.epoch
+                    || !(shell.connectivity == SessionConnectivity::Ready
+                        || (!publication
+                            && shell.connectivity == SessionConnectivity::Synchronizing))
+                    || shell.server_id != context.physical.server_id
+                    || shell.pane_id != origin.pane
+                    || shell.terminal_id != origin.terminal
+                    || shell.workspace_id != origin.workspace
+                    || shell.tab_id != origin.tab
+                    || (published_routes && pane.shell_target.as_ref() != Some(target))
+                {
                     return Err(ErrorCode::StaleSession);
                 }
             }
@@ -560,8 +616,8 @@ impl State {
                 peer: peer.peer_id().clone(),
                 epoch: peer.epoch(),
                 skills: None,
-                controls_catalogue:None,
-                queue_view:None,
+                controls_catalogue: None,
+                queue_view: None,
                 subscriptions: HashMap::new(),
                 queue: VecDeque::new(),
                 bytes: 0,
@@ -574,20 +630,32 @@ impl State {
     }
     pub fn disconnect(&self, connection: &Uuid) {
         self.creation_directories.release_connection(connection);
-        let mut i=self.inner.lock().expect("state mutex");
-        if let Some(connection)=i.connections.remove(connection)
-            &&let Some(publication)=connection.queue_view {
-            for payload in &publication.payloads {i.content.remove(payload);}
+        let mut i = self.inner.lock().expect("state mutex");
+        if let Some(connection) = i.connections.remove(connection)
+            && let Some(publication) = connection.queue_view
+        {
+            for payload in &publication.payloads {
+                i.content.remove(payload);
+            }
         }
     }
     pub fn revoke(&self, peer: &Uuid) {
         self.creation_directories.release_peer(peer);
         let mut i = self.inner.lock().expect("state mutex");
         {
-            let Inner {connections,content,..}=&mut *i;
-            for connection in connections.values_mut().filter(|connection|&connection.peer==peer) {
-                if let Some(publication)=connection.queue_view.take() {
-                    for payload in &publication.payloads {content.remove(payload);}
+            let Inner {
+                connections,
+                content,
+                ..
+            } = &mut *i;
+            for connection in connections
+                .values_mut()
+                .filter(|connection| &connection.peer == peer)
+            {
+                if let Some(publication) = connection.queue_view.take() {
+                    for payload in &publication.payloads {
+                        content.remove(payload);
+                    }
                 }
             }
         }
@@ -597,57 +665,130 @@ impl State {
         i.browse.retain(|_, c| &c.peer != peer);
     }
     pub(crate) fn reserve_publication(
-        &self,auth:&crate::pairing::Authorized,kind:crate::backends::PublicationKind,
-    )->StateResult<Arc<crate::backends::PublicationSlot>> {
-        let mut i=self.inner.lock().expect("state mutex");
-        prune_publications(&mut i,std::time::Instant::now());
-        let c=i.connections.get(&auth.connection_id).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||&c.peer!=auth.proof.peer_id()||c.epoch!=auth.proof.epoch() {return Err(ErrorCode::Unauthorized)}
-        let counter=match kind {
-            crate::backends::PublicationKind::Skills=>&mut i.skills_publications,
-            crate::backends::PublicationKind::Controls=>&mut i.controls_publications,
-            crate::backends::PublicationKind::Queue=>&mut i.queue_publications,
-        }.get_or_insert_with(||Arc::new(AtomicUsize::new(0))).clone();
-        crate::backends::PublicationSlot::reserve(counter,32)
+        &self,
+        auth: &crate::pairing::Authorized,
+        kind: crate::backends::PublicationKind,
+    ) -> StateResult<Arc<crate::backends::PublicationSlot>> {
+        let mut i = self.inner.lock().expect("state mutex");
+        prune_publications(&mut i, std::time::Instant::now());
+        let c = i
+            .connections
+            .get(&auth.connection_id)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed || &c.peer != auth.proof.peer_id() || c.epoch != auth.proof.epoch() {
+            return Err(ErrorCode::Unauthorized);
+        }
+        let counter = match kind {
+            crate::backends::PublicationKind::Skills => &mut i.skills_publications,
+            crate::backends::PublicationKind::Controls => &mut i.controls_publications,
+            crate::backends::PublicationKind::Queue => &mut i.queue_publications,
+        }
+        .get_or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+        .clone();
+        crate::backends::PublicationSlot::reserve(counter, 32)
     }
-    pub(crate) fn clear_skills_publication(&self, connection:&Uuid) {
-        if let Some(c)=self.inner.lock().expect("state mutex").connections.get_mut(connection) {c.skills=None;}
+    pub(crate) fn clear_skills_publication(&self, connection: &Uuid) {
+        if let Some(c) = self
+            .inner
+            .lock()
+            .expect("state mutex")
+            .connections
+            .get_mut(connection)
+        {
+            c.skills = None;
+        }
     }
-    pub(crate) fn clear_peer_skills(&self, peer:&Uuid) {
-        for c in self.inner.lock().expect("state mutex").connections.values_mut().filter(|c|&c.peer==peer) {c.skills=None;}
+    pub(crate) fn clear_peer_skills(&self, peer: &Uuid) {
+        for c in self
+            .inner
+            .lock()
+            .expect("state mutex")
+            .connections
+            .values_mut()
+            .filter(|c| &c.peer == peer)
+        {
+            c.skills = None;
+        }
     }
     pub(crate) fn skills_publication(
-        &self,auth:&crate::pairing::Authorized,target:&Target,generation:&Uuid,
-    )->StateResult<Arc<crate::backends::SkillsPublication>> {
-        let mut i=self.inner.lock().expect("state mutex");prune_publications(&mut i,std::time::Instant::now());
-        let c=i.connections.get(&auth.connection_id).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||&c.peer!=auth.proof.peer_id()||c.epoch!=auth.proof.epoch() {return Err(ErrorCode::Unauthorized)}
-        let publication=c.skills.as_ref().ok_or(ErrorCode::NotReady)?;
-        if &publication.catalogue.target!=target||&publication.catalogue.catalogue_generation!=generation {return Err(ErrorCode::StaleSession)}
+        &self,
+        auth: &crate::pairing::Authorized,
+        target: &Target,
+        generation: &Uuid,
+    ) -> StateResult<Arc<crate::backends::SkillsPublication>> {
+        let mut i = self.inner.lock().expect("state mutex");
+        prune_publications(&mut i, std::time::Instant::now());
+        let c = i
+            .connections
+            .get(&auth.connection_id)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed || &c.peer != auth.proof.peer_id() || c.epoch != auth.proof.epoch() {
+            return Err(ErrorCode::Unauthorized);
+        }
+        let publication = c.skills.as_ref().ok_or(ErrorCode::NotReady)?;
+        if &publication.catalogue.target != target
+            || &publication.catalogue.catalogue_generation != generation
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         Ok(publication.clone())
     }
-    pub(crate) fn skills_publication_current(&self,auth:&crate::pairing::Authorized,publication:&Arc<crate::backends::SkillsPublication>)->StateResult<()> {
-        let i=self.inner.lock().expect("state mutex");
-        let c=i.connections.get(&auth.connection_id).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed || &c.peer!=auth.proof.peer_id() || c.epoch!=auth.proof.epoch() || publication.origin.peer!=c.peer || publication.origin.peer_epoch!=c.epoch || publication.origin.connection!=auth.connection_id {return Err(ErrorCode::Unauthorized)}
-        if !c.skills.as_ref().is_some_and(|p|Arc::ptr_eq(p,publication)){return Err(ErrorCode::StaleSession)}
+    pub(crate) fn skills_publication_current(
+        &self,
+        auth: &crate::pairing::Authorized,
+        publication: &Arc<crate::backends::SkillsPublication>,
+    ) -> StateResult<()> {
+        let i = self.inner.lock().expect("state mutex");
+        let c = i
+            .connections
+            .get(&auth.connection_id)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed
+            || &c.peer != auth.proof.peer_id()
+            || c.epoch != auth.proof.epoch()
+            || publication.origin.peer != c.peer
+            || publication.origin.peer_epoch != c.epoch
+            || publication.origin.connection != auth.connection_id
+        {
+            return Err(ErrorCode::Unauthorized);
+        }
+        if !c
+            .skills
+            .as_ref()
+            .is_some_and(|p| Arc::ptr_eq(p, publication))
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         Ok(())
     }
+    /// Captured native inventory; provider sessions retain their independent authority.
     /// Captured provider epochs fence pane associations independently of the Herdr revision.
     pub fn replace_inventory(
         &self,
-        servers: Vec<Server>,
-        projects: Vec<Project>,
-        shells: Vec<(ShellSummary,Uuid)>,
-        mut unbound: Vec<UnboundRow>,
-        mut hierarchy: Vec<NativeHierarchy>,
+        inventory: NativeInventory,
         association_epochs: &[(&Target, &Uuid)],
         validate: impl FnOnce(&mut [NativeHierarchy]) -> StateResult<()>,
     ) -> StateResult<()> {
+        let NativeInventory {
+            servers,
+            projects,
+            shells,
+            mut unbound,
+            mut hierarchy,
+        } = inventory;
         valid(&servers)?;
         valid(&projects)?;
-        let mut shell_map=HashMap::new();
-        for (summary,source) in shells {valid(&summary)?;valid(&source)?;if shell_map.insert(summary.target.shell_id.clone(),(summary,source)).is_some(){return Err(ErrorCode::InvalidRequest)}}
+        let mut shell_map = HashMap::new();
+        for (summary, source) in shells {
+            valid(&summary)?;
+            valid(&source)?;
+            if shell_map
+                .insert(summary.target.shell_id.clone(), (summary, source))
+                .is_some()
+            {
+                return Err(ErrorCode::InvalidRequest);
+            }
+        }
         valid(&unbound)?;
         valid(&hierarchy)?;
         if association_epochs.len() > 512 {
@@ -755,25 +896,66 @@ impl State {
         unbound.retain(|r| !bound.contains(&(&r.server_id, &r.terminal_id, r.provider)));
         // Atomic-current checks only: no source locks, filesystem/provider I/O or waits.
         validate(&mut hierarchy)?;
-        for (summary,_) in shell_map.values_mut() {
-            let associated=hierarchy.iter().any(|graph|graph.server_id==summary.server_id && graph.freshness==NativeFreshness::Current && graph.panes.iter().any(|pane|pane.shell_target.as_ref()==Some(&summary.target) && pane.terminal_id==summary.terminal_id && pane.workspace_id==summary.workspace_id && pane.tab_id==summary.tab_id && pane.pane_id==summary.pane_id));
-            if !associated {summary.connectivity=SessionConnectivity::Offline;summary.capabilities=ShellCapabilities {read:false,create:false,input:false,close:false,artifacts:false,grid:false};}
+        for (summary, _) in shell_map.values_mut() {
+            let associated = hierarchy.iter().any(|graph| {
+                graph.server_id == summary.server_id
+                    && graph.freshness == NativeFreshness::Current
+                    && graph.panes.iter().any(|pane| {
+                        pane.shell_target.as_ref() == Some(&summary.target)
+                            && pane.terminal_id == summary.terminal_id
+                            && pane.workspace_id == summary.workspace_id
+                            && pane.tab_id == summary.tab_id
+                            && pane.pane_id == summary.pane_id
+                    })
+            });
+            if !associated {
+                summary.connectivity = SessionConnectivity::Offline;
+                summary.capabilities = ShellCapabilities {
+                    read: false,
+                    create: false,
+                    input: false,
+                    close: false,
+                    artifacts: false,
+                    grid: false,
+                };
+            }
         }
         let sessions = inventory_sessions(&i);
         cancel_grids(&mut i, |lease| {
-            let Some((target,epoch))=lease.shell() else{return !lease.retains_agent_inventory(&sessions,&hierarchy);};
-            let Some((summary,source))=shell_map.get(&target.shell_id) else{return true;};
-            if summary.target!=*target||source!=epoch{return true;}
-            let Some(graph)=hierarchy.iter().find(|graph|&graph.server_id==lease.server()) else{return true;};
-            if !lease.retains_inventory(summary,graph){return true;}
+            let Some((target, epoch)) = lease.shell() else {
+                return !lease.retains_agent_inventory(&sessions, &hierarchy);
+            };
+            let Some((summary, source)) = shell_map.get(&target.shell_id) else {
+                return true;
+            };
+            if summary.target != *target || source != epoch {
+                return true;
+            }
+            let Some(graph) = hierarchy
+                .iter()
+                .find(|graph| &graph.server_id == lease.server())
+            else {
+                return true;
+            };
+            if !lease.retains_inventory(summary, graph) {
+                return true;
+            }
             match graph.freshness {
-                NativeFreshness::Stale=>{lease.inventory_updated();false}
-                NativeFreshness::Current=>{
-                    let current=summary.connectivity==SessionConnectivity::Ready&&summary.capabilities.read&&summary.capabilities.grid&&summary.capabilities.input;
-                    if current{lease.inventory_updated();}
+                NativeFreshness::Stale => {
+                    lease.inventory_updated();
+                    false
+                }
+                NativeFreshness::Current => {
+                    let current = summary.connectivity == SessionConnectivity::Ready
+                        && summary.capabilities.read
+                        && summary.capabilities.grid
+                        && summary.capabilities.input;
+                    if current {
+                        lease.inventory_updated();
+                    }
                     !current
                 }
-                _=>true,
+                _ => true,
             }
         });
         if i.inventory_sessions.as_ref() == Some(&sessions)
@@ -790,7 +972,8 @@ impl State {
         i.shells = shell_map;
         i.unbound = unbound;
         i.hierarchy = hierarchy;
-        self.creation_directories.retain(|context|creation_context_valid(&i, context, false).is_ok());
+        self.creation_directories
+            .retain(|context| creation_context_valid(&i, context, false).is_ok());
         i.inventory_sessions = Some(sessions);
         publish(
             &mut i,
@@ -802,7 +985,7 @@ impl State {
     }
     /// Return the source epoch captured for this installation, including its completion/abort.
     pub fn begin_install(&self, mut state: SessionState) -> StateResult<Uuid> {
-        state.summary.capabilities.terminal_read=false;
+        state.summary.capabilities.terminal_read = false;
         valid(&state)?;
         let mut i = self.inner.lock().expect("state mutex");
         let id = state.summary.session_id.clone();
@@ -816,7 +999,9 @@ impl State {
             .iter()
             .filter(|row| !replacing_unbound(row))
             .count();
-        if !i.sessions.contains_key(&id) && i.sessions.len() + remaining_unbound + i.shells.len() >= 512 {
+        if !i.sessions.contains_key(&id)
+            && i.sessions.len() + remaining_unbound + i.shells.len() >= 512
+        {
             return Err(ErrorCode::ResourceLimit);
         }
         if let Some(old) = i.sessions.get(&id) {
@@ -838,8 +1023,12 @@ impl State {
                 }),
             );
         }
-        cancel_grids(&mut i,|lease|lease.agent_target().is_some_and(|target|target.session_id==id));
-        invalidate_publications(&mut i,&id);
+        cancel_grids(&mut i, |lease| {
+            lease
+                .agent_target()
+                .is_some_and(|target| target.session_id == id)
+        });
+        invalidate_publications(&mut i, &id);
         i.unbound.retain(|row| !replacing_unbound(row));
         for h in &mut i.hierarchy {
             for p in &mut h.panes {
@@ -874,14 +1063,19 @@ impl State {
                 native_bytes: 0,
             },
         );
-        self.creation_directories.retain(|context|creation_context_valid(&i, context, false).is_ok());
+        self.creation_directories
+            .retain(|context| creation_context_valid(&i, context, false).is_ok());
         Ok(source)
     }
     /// Topology4 retires only a no-longer-required row. This never stops the native provider
     /// or deletes its durable identity/resources; all old handles and subscribers invalidate.
     pub fn retire_session(&self, session: &Uuid) {
         let mut i = self.inner.lock().expect("state mutex");
-        cancel_grids(&mut i,|lease|lease.agent_target().is_some_and(|target|&target.session_id==session));
+        cancel_grids(&mut i, |lease| {
+            lease
+                .agent_target()
+                .is_some_and(|target| &target.session_id == session)
+        });
         publish(
             &mut i,
             Some(session),
@@ -890,9 +1084,10 @@ impl State {
                 reason: SyncReason::GenerationChanged,
             }),
         );
-        invalidate_publications(&mut i,session);
+        invalidate_publications(&mut i, session);
         i.sessions.remove(session);
-        self.creation_directories.retain(|context|creation_context_valid(&i, context, false).is_ok());
+        self.creation_directories
+            .retain(|context| creation_context_valid(&i, context, false).is_ok());
         i.adapter_history_bytes.remove(session);
         i.browse
             .retain(|_, node| &node.target.session_id != session);
@@ -928,19 +1123,20 @@ impl State {
         s.install_failed = false;
         s.observation_pending = false;
         s.source = Uuid::random();
-        s.state.summary.skills_generation=None;
-        s.state.summary.capabilities.skills_read=false;
-        s.state.summary.capabilities.controls=false;
+        s.state.summary.skills_generation = None;
+        s.state.summary.capabilities.skills_read = false;
+        s.state.summary.capabilities.controls = false;
         s.native_queue.clear();
         s.native_bytes = 0;
         let source = s.source.clone();
-        cancel_grids(&mut i,|lease|lease.agent_target()==Some(target));
-        invalidate_publications(&mut i,&target.session_id);
+        cancel_grids(&mut i, |lease| lease.agent_target() == Some(target));
+        invalidate_publications(&mut i, &target.session_id);
         i.content.retain(|_, p| p.target != *target);
         i.cursors.retain(|_, c| c.target != *target);
         i.native_cursors.retain(|_, c| c.target != *target);
         i.browse.retain(|_, c| c.target != *target);
-        self.creation_directories.retain(|context|creation_context_valid(&i,context,false).is_ok());
+        self.creation_directories
+            .retain(|context| creation_context_valid(&i, context, false).is_ok());
         publish(
             &mut i,
             Some(&target.session_id),
@@ -977,7 +1173,7 @@ impl State {
         Ok(())
     }
     pub fn finish_install(&self, source: &Uuid, mut snapshot: ProviderSnapshot) -> StateResult<()> {
-        snapshot.state.summary.capabilities.terminal_read=false;
+        snapshot.state.summary.capabilities.terminal_read = false;
         valid(&snapshot.state)?;
         valid(&snapshot.pending)?;
         valid(&snapshot.native_older)?;
@@ -1046,227 +1242,599 @@ impl State {
     /// Capture before an asynchronous file/page read; stale source material cannot be appended
     /// to its replacement even when the stable Target has not changed.
     /// Catalogue authority changes are ordered with ordinary session output at native ingress.
-    pub(crate) fn skills_generation(&self, target: &Target, source: &Uuid, generation: Option<Uuid>) -> StateResult<()> {
-        let mut i=self.inner.lock().expect("state mutex");
-        let session=current(&i,target)?;
-        if &session.source!=source { return Err(ErrorCode::StaleSession); }
-        if session.state.summary.skills_generation==generation && session.state.summary.capabilities.skills_read==generation.is_some() {return Ok(());}
-        let mut display=session.state.clone();
-        display.summary.capabilities.skills_read=generation.is_some();
-        display.summary.skills_generation=generation;
-        invalidate_skills(&mut i,&target.session_id);
-        update_locked(&mut i,target,SessionUpdate::State(display))
-    }
-    pub(crate) fn skills_list_response(
-        &self,connection:&Uuid,response_id:Uuid,mut publication:crate::backends::SkillsPublication,
-    )->StateResult<()> {
-        let mut i=self.inner.lock().expect("state mutex");
-        let session=current(&i,&publication.catalogue.target)?;
-        if publication.origin.context.target!=publication.catalogue.target
-            ||session.source!=publication.origin.context.epoch||session.state.summary.provider!=publication.catalogue.provider
-            ||session.state.summary.skills_generation.as_ref()!=Some(&publication.catalogue.catalogue_generation) {
+    pub(crate) fn skills_generation(
+        &self,
+        target: &Target,
+        source: &Uuid,
+        generation: Option<Uuid>,
+    ) -> StateResult<()> {
+        let mut i = self.inner.lock().expect("state mutex");
+        let session = current(&i, target)?;
+        if &session.source != source {
             return Err(ErrorCode::StaleSession);
         }
-        if session.state.summary.connectivity!=SessionConnectivity::Ready||!session.state.summary.capabilities.skills_read {
+        if session.state.summary.skills_generation == generation
+            && session.state.summary.capabilities.skills_read == generation.is_some()
+        {
+            return Ok(());
+        }
+        let mut display = session.state.clone();
+        display.summary.capabilities.skills_read = generation.is_some();
+        display.summary.skills_generation = generation;
+        invalidate_skills(&mut i, &target.session_id);
+        update_locked(&mut i, target, SessionUpdate::State(display))
+    }
+    pub(crate) fn skills_list_response(
+        &self,
+        connection: &Uuid,
+        response_id: Uuid,
+        mut publication: crate::backends::SkillsPublication,
+    ) -> StateResult<()> {
+        let mut i = self.inner.lock().expect("state mutex");
+        let session = current(&i, &publication.catalogue.target)?;
+        if publication.origin.context.target != publication.catalogue.target
+            || session.source != publication.origin.context.epoch
+            || session.state.summary.provider != publication.catalogue.provider
+            || session.state.summary.skills_generation.as_ref()
+                != Some(&publication.catalogue.catalogue_generation)
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        if session.state.summary.connectivity != SessionConnectivity::Ready
+            || !session.state.summary.capabilities.skills_read
+        {
             return Err(ErrorCode::NotReady);
         }
-        let invoke=publication.catalogue.provider==Provider::Codex&&session.state.summary.capabilities.prompt;
-        let c=i.connections.get_mut(connection).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||publication.origin.peer!=c.peer||publication.origin.peer_epoch!=c.epoch||&publication.origin.connection!=connection {
+        let invoke = publication.catalogue.provider == Provider::Codex
+            && session.state.summary.capabilities.prompt;
+        let c = i
+            .connections
+            .get_mut(connection)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed
+            || publication.origin.peer != c.peer
+            || publication.origin.peer_epoch != c.epoch
+            || &publication.origin.connection != connection
+        {
             return Err(ErrorCode::Unauthorized);
         }
-        c.skills=None;
-        for row in &mut publication.catalogue.skills {row.invocation_ref=if invoke&&row.enabled {Some(Uuid::random())}else{None};}
+        c.skills = None;
+        for row in &mut publication.catalogue.skills {
+            row.invocation_ref = if invoke && row.enabled {
+                Some(Uuid::random())
+            } else {
+                None
+            };
+        }
         valid(&publication.catalogue)?;
-        let crate::backends::SkillsPublication {origin,catalogue,documents,document_expires,native_catalogue,native_cwd,slot}=publication;
-        let envelope=Envelope::Response(Response{id:response_id,outcome:Ok(ResultBody::SkillsList(catalogue))});
-        let bytes=frame(&envelope)?;
-        c.flush();if !c.enqueue(bytes,false) {c.closed=true;return Err(ErrorCode::ResourceLimit)}
-        let Envelope::Response(Response{outcome:Ok(ResultBody::SkillsList(catalogue)),..})=envelope else {return Err(ErrorCode::InvalidRequest)};
-        c.skills=Some(Arc::new(crate::backends::SkillsPublication {origin,catalogue,documents,document_expires,native_catalogue,native_cwd,slot}));
+        let crate::backends::SkillsPublication {
+            origin,
+            catalogue,
+            documents,
+            document_expires,
+            native_catalogue,
+            native_cwd,
+            slot,
+        } = publication;
+        let envelope = Envelope::Response(Response {
+            id: response_id,
+            outcome: Ok(ResultBody::SkillsList(catalogue)),
+        });
+        let bytes = frame(&envelope)?;
+        c.flush();
+        if !c.enqueue(bytes, false) {
+            c.closed = true;
+            return Err(ErrorCode::ResourceLimit);
+        }
+        let Envelope::Response(Response {
+            outcome: Ok(ResultBody::SkillsList(catalogue)),
+            ..
+        }) = envelope
+        else {
+            return Err(ErrorCode::InvalidRequest);
+        };
+        c.skills = Some(Arc::new(crate::backends::SkillsPublication {
+            origin,
+            catalogue,
+            documents,
+            document_expires,
+            native_catalogue,
+            native_cwd,
+            slot,
+        }));
         Ok(())
     }
     pub(crate) fn skills_preview_response(
-        &self,connection:&Uuid,response_id:Uuid,publication:&Arc<crate::backends::SkillsPublication>,result:ResultBody,
-    )->StateResult<()> {
-        let target=&publication.catalogue.target;let generation=&publication.catalogue.catalogue_generation;
-        let matches=match &result {
-            ResultBody::SkillsPreviewOpen(value)=>&value.target==target&&&value.catalogue_generation==generation,
-            ResultBody::SkillsPreviewRead(value)=>&value.target==target&&&value.catalogue_generation==generation,
-            _=>false,
+        &self,
+        connection: &Uuid,
+        response_id: Uuid,
+        publication: &Arc<crate::backends::SkillsPublication>,
+        result: ResultBody,
+    ) -> StateResult<()> {
+        let target = &publication.catalogue.target;
+        let generation = &publication.catalogue.catalogue_generation;
+        let matches = match &result {
+            ResultBody::SkillsPreviewOpen(value) => {
+                &value.target == target && &value.catalogue_generation == generation
+            }
+            ResultBody::SkillsPreviewRead(value) => {
+                &value.target == target && &value.catalogue_generation == generation
+            }
+            _ => false,
         };
-        if !matches {return Err(ErrorCode::InvalidRequest)}
-        let bytes=frame(&Envelope::Response(Response{id:response_id,outcome:Ok(result)}))?;
-        let mut i=self.inner.lock().expect("state mutex");let session=current(&i,target)?;
-        if session.source!=publication.origin.context.epoch||session.state.summary.skills_generation.as_ref()!=Some(generation) {
+        if !matches {
+            return Err(ErrorCode::InvalidRequest);
+        }
+        let bytes = frame(&Envelope::Response(Response {
+            id: response_id,
+            outcome: Ok(result),
+        }))?;
+        let mut i = self.inner.lock().expect("state mutex");
+        let session = current(&i, target)?;
+        if session.source != publication.origin.context.epoch
+            || session.state.summary.skills_generation.as_ref() != Some(generation)
+        {
             return Err(ErrorCode::StaleSession);
         }
-        if session.state.summary.connectivity!=SessionConnectivity::Ready||!session.state.summary.capabilities.skills_read {
+        if session.state.summary.connectivity != SessionConnectivity::Ready
+            || !session.state.summary.capabilities.skills_read
+        {
             return Err(ErrorCode::NotReady);
         }
-        let c=i.connections.get_mut(connection).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||!c.skills.as_ref().is_some_and(|current|Arc::ptr_eq(current,publication))
-            ||publication.origin.peer!=c.peer||publication.origin.peer_epoch!=c.epoch||&publication.origin.connection!=connection {
+        let c = i
+            .connections
+            .get_mut(connection)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed
+            || !c
+                .skills
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, publication))
+            || publication.origin.peer != c.peer
+            || publication.origin.peer_epoch != c.epoch
+            || &publication.origin.connection != connection
+        {
             return Err(ErrorCode::StaleSession);
         }
-        c.flush();if !c.enqueue(bytes,false) {c.closed=true;return Err(ErrorCode::ResourceLimit)}Ok(())
+        c.flush();
+        if !c.enqueue(bytes, false) {
+            c.closed = true;
+            return Err(ErrorCode::ResourceLimit);
+        }
+        Ok(())
     }
-    pub(crate) fn controls_available(&self,target:&Target,source:&Uuid,available:bool)->StateResult<()> {
-        let mut i=self.inner.lock().expect("state mutex");let session=current(&i,target)?;
-        if &session.source!=source {return Err(ErrorCode::StaleSession)}
-        if session.state.summary.capabilities.controls==available {return Ok(())}
-        let mut display=session.state.clone();display.summary.capabilities.controls=available;
-        if !available {invalidate_controls(&mut i,&target.session_id);}
-        update_locked(&mut i,target,SessionUpdate::State(display))
+    pub(crate) fn controls_available(
+        &self,
+        target: &Target,
+        source: &Uuid,
+        available: bool,
+    ) -> StateResult<()> {
+        let mut i = self.inner.lock().expect("state mutex");
+        let session = current(&i, target)?;
+        if &session.source != source {
+            return Err(ErrorCode::StaleSession);
+        }
+        if session.state.summary.capabilities.controls == available {
+            return Ok(());
+        }
+        let mut display = session.state.clone();
+        display.summary.capabilities.controls = available;
+        if !available {
+            invalidate_controls(&mut i, &target.session_id);
+        }
+        update_locked(&mut i, target, SessionUpdate::State(display))
     }
-    pub(crate) fn project_reads_available(&self,target:&Target,source:&Uuid,artifacts:bool,git:bool)->StateResult<()> {
-        let mut i=self.inner.lock().expect("state mutex");let session=current(&i,target)?;
-        if &session.source!=source {return Err(ErrorCode::StaleSession);}
-        let git=artifacts&&git;let capabilities=&session.state.summary.capabilities;
-        if capabilities.artifacts==artifacts&&capabilities.worktrees_read==git&&capabilities.changes_read==git {return Ok(());}
-        let mut display=session.state.clone();display.summary.capabilities.artifacts=artifacts;
-        display.summary.capabilities.worktrees_read=git;display.summary.capabilities.changes_read=git;
-        update_locked(&mut i,target,SessionUpdate::State(display))
+    pub(crate) fn project_reads_available(
+        &self,
+        target: &Target,
+        source: &Uuid,
+        artifacts: bool,
+        git: bool,
+    ) -> StateResult<()> {
+        let mut i = self.inner.lock().expect("state mutex");
+        let session = current(&i, target)?;
+        if &session.source != source {
+            return Err(ErrorCode::StaleSession);
+        }
+        let git = artifacts && git;
+        let capabilities = &session.state.summary.capabilities;
+        if capabilities.artifacts == artifacts
+            && capabilities.worktrees_read == git
+            && capabilities.changes_read == git
+        {
+            return Ok(());
+        }
+        let mut display = session.state.clone();
+        display.summary.capabilities.artifacts = artifacts;
+        display.summary.capabilities.worktrees_read = git;
+        display.summary.capabilities.changes_read = git;
+        update_locked(&mut i, target, SessionUpdate::State(display))
     }
-    pub(crate) fn controls_changed(&self,target:&Target,source:&Uuid)->StateResult<()> {
-        let mut i=self.inner.lock().expect("state mutex");
-        if &current(&i,target)?.source!=source {return Err(ErrorCode::StaleSession)}
-        invalidate_controls(&mut i,&target.session_id);
-        publish(&mut i,Some(&target.session_id),None,EventBody::ControlsChanged(ControlsChangedEvent {target:target.clone()}));Ok(())
+    pub(crate) fn controls_changed(&self, target: &Target, source: &Uuid) -> StateResult<()> {
+        let mut i = self.inner.lock().expect("state mutex");
+        if &current(&i, target)?.source != source {
+            return Err(ErrorCode::StaleSession);
+        }
+        invalidate_controls(&mut i, &target.session_id);
+        publish(
+            &mut i,
+            Some(&target.session_id),
+            None,
+            EventBody::ControlsChanged(ControlsChangedEvent {
+                target: target.clone(),
+            }),
+        );
+        Ok(())
     }
-    pub(crate) fn queue_changed(&self,target:&Target,source:&Uuid)->StateResult<()> {
-        let mut i=self.inner.lock().expect("state mutex");
-        if &current(&i,target)?.source!=source {return Err(ErrorCode::StaleSession)}
-        invalidate_queue(&mut i,&target.session_id);
-        publish(&mut i,Some(&target.session_id),None,EventBody::QueueChanged(QueueChangedEvent {target:target.clone()}));Ok(())
+    pub(crate) fn queue_changed(&self, target: &Target, source: &Uuid) -> StateResult<()> {
+        let mut i = self.inner.lock().expect("state mutex");
+        if &current(&i, target)?.source != source {
+            return Err(ErrorCode::StaleSession);
+        }
+        invalidate_queue(&mut i, &target.session_id);
+        publish(
+            &mut i,
+            Some(&target.session_id),
+            None,
+            EventBody::QueueChanged(QueueChangedEvent {
+                target: target.clone(),
+            }),
+        );
+        Ok(())
     }
-    pub(crate) fn clear_controls_publication(&self,connection:&Uuid) {
-        if let Some(c)=self.inner.lock().expect("state mutex").connections.get_mut(connection) {c.controls_catalogue=None;}
+    pub(crate) fn clear_controls_publication(&self, connection: &Uuid) {
+        if let Some(c) = self
+            .inner
+            .lock()
+            .expect("state mutex")
+            .connections
+            .get_mut(connection)
+        {
+            c.controls_catalogue = None;
+        }
     }
     pub(crate) fn controls_publication(
-        &self,auth:&crate::pairing::Authorized,target:&Target,generation:&Uuid,
-    )->StateResult<Arc<crate::backends::ControlsPublication>> {
-        let mut i=self.inner.lock().expect("state mutex");prune_publications(&mut i,std::time::Instant::now());
-        let c=i.connections.get(&auth.connection_id).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||&c.peer!=auth.proof.peer_id()||c.epoch!=auth.proof.epoch() {return Err(ErrorCode::Unauthorized)}
-        let publication=c.controls_catalogue.as_ref().ok_or(ErrorCode::NotReady)?;
-        if &publication.catalogue.target!=target||&publication.catalogue.catalogue_generation!=generation {return Err(ErrorCode::StaleSession)}
+        &self,
+        auth: &crate::pairing::Authorized,
+        target: &Target,
+        generation: &Uuid,
+    ) -> StateResult<Arc<crate::backends::ControlsPublication>> {
+        let mut i = self.inner.lock().expect("state mutex");
+        prune_publications(&mut i, std::time::Instant::now());
+        let c = i
+            .connections
+            .get(&auth.connection_id)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed || &c.peer != auth.proof.peer_id() || c.epoch != auth.proof.epoch() {
+            return Err(ErrorCode::Unauthorized);
+        }
+        let publication = c.controls_catalogue.as_ref().ok_or(ErrorCode::NotReady)?;
+        if &publication.catalogue.target != target
+            || &publication.catalogue.catalogue_generation != generation
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         Ok(publication.clone())
     }
     pub(crate) fn controls_publication_current(
-        &self,auth:&crate::pairing::Authorized,publication:&Arc<crate::backends::ControlsPublication>,
-    )->StateResult<()> {
-        let i=self.inner.lock().expect("state mutex");let c=i.connections.get(&auth.connection_id).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||&c.peer!=auth.proof.peer_id()||c.epoch!=auth.proof.epoch()
-            ||publication.origin.peer!=c.peer||publication.origin.peer_epoch!=c.epoch||publication.origin.connection!=auth.connection_id {
+        &self,
+        auth: &crate::pairing::Authorized,
+        publication: &Arc<crate::backends::ControlsPublication>,
+    ) -> StateResult<()> {
+        let i = self.inner.lock().expect("state mutex");
+        let c = i
+            .connections
+            .get(&auth.connection_id)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed
+            || &c.peer != auth.proof.peer_id()
+            || c.epoch != auth.proof.epoch()
+            || publication.origin.peer != c.peer
+            || publication.origin.peer_epoch != c.epoch
+            || publication.origin.connection != auth.connection_id
+        {
             return Err(ErrorCode::Unauthorized);
         }
-        if std::time::Instant::now()>=publication.expires||!c.controls_catalogue.as_ref().is_some_and(|p|Arc::ptr_eq(p,publication)) {
+        if std::time::Instant::now() >= publication.expires
+            || !c
+                .controls_catalogue
+                .as_ref()
+                .is_some_and(|p| Arc::ptr_eq(p, publication))
+        {
             return Err(ErrorCode::StaleSession);
         }
         Ok(())
     }
     pub(crate) fn controls_response(
-        &self,connection:&Uuid,response_id:Uuid,publication:crate::backends::ControlsPublication,
-    )->StateResult<()> {
-        let mut i=self.inner.lock().expect("state mutex");let session=current(&i,&publication.catalogue.target)?;
-        if session.source!=publication.origin.context.epoch||session.state.summary.provider!=publication.origin.context.provider {
+        &self,
+        connection: &Uuid,
+        response_id: Uuid,
+        publication: crate::backends::ControlsPublication,
+    ) -> StateResult<()> {
+        let mut i = self.inner.lock().expect("state mutex");
+        let session = current(&i, &publication.catalogue.target)?;
+        if session.source != publication.origin.context.epoch
+            || session.state.summary.provider != publication.origin.context.provider
+        {
             return Err(ErrorCode::StaleSession);
         }
-        if session.state.summary.connectivity!=SessionConnectivity::Ready||!session.state.summary.capabilities.controls {
+        if session.state.summary.connectivity != SessionConnectivity::Ready
+            || !session.state.summary.capabilities.controls
+        {
             return Err(ErrorCode::NotReady);
         }
-        if publication.models.len()!=publication.catalogue.models.len()||std::time::Instant::now()>=publication.expires {
+        if publication.models.len() != publication.catalogue.models.len()
+            || std::time::Instant::now() >= publication.expires
+        {
             return Err(ErrorCode::StaleSession);
         }
         valid(&publication.catalogue)?;
-        let c=i.connections.get_mut(connection).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||publication.origin.peer!=c.peer||publication.origin.peer_epoch!=c.epoch||&publication.origin.connection!=connection {
+        let c = i
+            .connections
+            .get_mut(connection)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed
+            || publication.origin.peer != c.peer
+            || publication.origin.peer_epoch != c.epoch
+            || &publication.origin.connection != connection
+        {
             return Err(ErrorCode::Unauthorized);
         }
-        c.controls_catalogue=None;
-        let crate::backends::ControlsPublication {origin,catalogue,models,current_native,native_catalogue,observation,expires,slot}=publication;
-        let envelope=Envelope::Response(Response{id:response_id,outcome:Ok(ResultBody::SessionControlsRead(catalogue))});
-        let bytes=frame(&envelope)?;c.flush();if !c.enqueue(bytes,false) {c.closed=true;return Err(ErrorCode::ResourceLimit)}
-        let Envelope::Response(Response{outcome:Ok(ResultBody::SessionControlsRead(catalogue)),..})=envelope else {return Err(ErrorCode::InvalidRequest)};
-        c.controls_catalogue=Some(Arc::new(crate::backends::ControlsPublication {origin,catalogue,models,current_native,native_catalogue,observation,expires,slot}));
+        c.controls_catalogue = None;
+        let crate::backends::ControlsPublication {
+            origin,
+            catalogue,
+            models,
+            current_native,
+            native_catalogue,
+            observation,
+            expires,
+            slot,
+        } = publication;
+        let envelope = Envelope::Response(Response {
+            id: response_id,
+            outcome: Ok(ResultBody::SessionControlsRead(catalogue)),
+        });
+        let bytes = frame(&envelope)?;
+        c.flush();
+        if !c.enqueue(bytes, false) {
+            c.closed = true;
+            return Err(ErrorCode::ResourceLimit);
+        }
+        let Envelope::Response(Response {
+            outcome: Ok(ResultBody::SessionControlsRead(catalogue)),
+            ..
+        }) = envelope
+        else {
+            return Err(ErrorCode::InvalidRequest);
+        };
+        c.controls_catalogue = Some(Arc::new(crate::backends::ControlsPublication {
+            origin,
+            catalogue,
+            models,
+            current_native,
+            native_catalogue,
+            observation,
+            expires,
+            slot,
+        }));
         Ok(())
     }
-    pub(crate) fn clear_queue_publication(&self,connection:&Uuid) {
-        let mut i=self.inner.lock().expect("state mutex");
-        if let Some(publication)=i.connections.get_mut(connection).and_then(|c|c.queue_view.take()) {
-            for payload in &publication.payloads {i.content.remove(payload);}
+    pub(crate) fn clear_queue_publication(&self, connection: &Uuid) {
+        let mut i = self.inner.lock().expect("state mutex");
+        if let Some(publication) = i
+            .connections
+            .get_mut(connection)
+            .and_then(|c| c.queue_view.take())
+        {
+            for payload in &publication.payloads {
+                i.content.remove(payload);
+            }
         }
     }
     pub(crate) fn queue_publication(
-        &self,auth:&crate::pairing::Authorized,target:&Target,cursor:Option<&Id>,
-    )->StateResult<Arc<crate::backends::QueuePublication>> {
-        let mut i=self.inner.lock().expect("state mutex");prune_publications(&mut i,std::time::Instant::now());
-        let c=i.connections.get(&auth.connection_id).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||&c.peer!=auth.proof.peer_id()||c.epoch!=auth.proof.epoch() {return Err(ErrorCode::Unauthorized)}
-        let publication=c.queue_view.as_ref().ok_or(ErrorCode::NotReady)?;
-        if &publication.origin.context.target!=target||cursor.is_some_and(|cursor|publication.next_cursor.as_ref()!=Some(cursor))
-            ||current(&i,target)?.source!=publication.origin.context.epoch {return Err(ErrorCode::StaleSession)}
+        &self,
+        auth: &crate::pairing::Authorized,
+        target: &Target,
+        cursor: Option<&Id>,
+    ) -> StateResult<Arc<crate::backends::QueuePublication>> {
+        let mut i = self.inner.lock().expect("state mutex");
+        prune_publications(&mut i, std::time::Instant::now());
+        let c = i
+            .connections
+            .get(&auth.connection_id)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed || &c.peer != auth.proof.peer_id() || c.epoch != auth.proof.epoch() {
+            return Err(ErrorCode::Unauthorized);
+        }
+        let publication = c.queue_view.as_ref().ok_or(ErrorCode::NotReady)?;
+        if &publication.origin.context.target != target
+            || cursor.is_some_and(|cursor| publication.next_cursor.as_ref() != Some(cursor))
+            || current(&i, target)?.source != publication.origin.context.epoch
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         Ok(publication.clone())
     }
     pub(crate) fn queue_publication_current(
-        &self,auth:&crate::pairing::Authorized,publication:&Arc<crate::backends::QueuePublication>,
-    )->StateResult<()> {
-        let i=self.inner.lock().expect("state mutex");let c=i.connections.get(&auth.connection_id).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||&c.peer!=auth.proof.peer_id()||c.epoch!=auth.proof.epoch()
-            ||publication.origin.peer!=c.peer||publication.origin.peer_epoch!=c.epoch||publication.origin.connection!=auth.connection_id {return Err(ErrorCode::Unauthorized)}
-        if std::time::Instant::now()>=publication.expires||!c.queue_view.as_ref().is_some_and(|current|Arc::ptr_eq(current,publication))
-            ||current(&i,&publication.origin.context.target)?.source!=publication.origin.context.epoch {return Err(ErrorCode::StaleSession)}
+        &self,
+        auth: &crate::pairing::Authorized,
+        publication: &Arc<crate::backends::QueuePublication>,
+    ) -> StateResult<()> {
+        let i = self.inner.lock().expect("state mutex");
+        let c = i
+            .connections
+            .get(&auth.connection_id)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed
+            || &c.peer != auth.proof.peer_id()
+            || c.epoch != auth.proof.epoch()
+            || publication.origin.peer != c.peer
+            || publication.origin.peer_epoch != c.epoch
+            || publication.origin.connection != auth.connection_id
+        {
+            return Err(ErrorCode::Unauthorized);
+        }
+        if std::time::Instant::now() >= publication.expires
+            || !c
+                .queue_view
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, publication))
+            || current(&i, &publication.origin.context.target)?.source
+                != publication.origin.context.epoch
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         Ok(())
     }
     pub(crate) fn queue_response(
-        &self,connection:&Uuid,response_id:Uuid,mut publication:crate::backends::QueuePublication,
-        rows:Vec<crate::backends::QueueRow>,previous:Option<&Arc<crate::backends::QueuePublication>>,
-    )->StateResult<()> {
-        let mut i=self.inner.lock().expect("state mutex");
-        let now=std::time::Instant::now();let target=&publication.origin.context.target;
-        let session=current(&i,target)?;
-        if session.source!=publication.origin.context.epoch||session.state.summary.provider!=Provider::Codex {return Err(ErrorCode::StaleSession)}
-        if session.state.summary.connectivity!=SessionConnectivity::Ready {return Err(ErrorCode::NotReady)}
-        if publication.entries.len()>128||rows.len()>100||rows.len()>publication.entries.len()||now>=publication.expires
-            ||publication.next_cursor.is_some()!=publication.native_cursor.is_some() {return Err(ErrorCode::ResourceLimit)}
-        let c=i.connections.get(connection).ok_or(ErrorCode::Unauthorized)?;
-        if c.closed||publication.origin.peer!=c.peer||publication.origin.peer_epoch!=c.epoch||&publication.origin.connection!=connection {return Err(ErrorCode::Unauthorized)}
-        match (previous,c.queue_view.as_ref()) {
-            (None,None)=>{},
-            (Some(previous),Some(current)) if Arc::ptr_eq(previous,current)=>{},
-            _=>return Err(ErrorCode::StaleSession),
+        &self,
+        connection: &Uuid,
+        response_id: Uuid,
+        mut publication: crate::backends::QueuePublication,
+        rows: Vec<crate::backends::QueueRow>,
+        previous: Option<&Arc<crate::backends::QueuePublication>>,
+    ) -> StateResult<()> {
+        let mut i = self.inner.lock().expect("state mutex");
+        let now = std::time::Instant::now();
+        let target = &publication.origin.context.target;
+        let session = current(&i, target)?;
+        if session.source != publication.origin.context.epoch
+            || session.state.summary.provider != Provider::Codex
+        {
+            return Err(ErrorCode::StaleSession);
         }
-        let mut unique=HashSet::new();
-        if publication.entries.iter().any(|entry|!unique.insert(&entry.id))
-            ||!publication.entries[publication.entries.len()-rows.len()..].iter().zip(&rows).all(|(binding,row)|binding.id==row.id&&binding.editable==row.editable) {return Err(ErrorCode::StaleSession)}
+        if session.state.summary.connectivity != SessionConnectivity::Ready {
+            return Err(ErrorCode::NotReady);
+        }
+        if publication.entries.len() > 128
+            || rows.len() > 100
+            || rows.len() > publication.entries.len()
+            || now >= publication.expires
+            || publication.next_cursor.is_some() != publication.native_cursor.is_some()
+        {
+            return Err(ErrorCode::ResourceLimit);
+        }
+        let c = i
+            .connections
+            .get(connection)
+            .ok_or(ErrorCode::Unauthorized)?;
+        if c.closed
+            || publication.origin.peer != c.peer
+            || publication.origin.peer_epoch != c.epoch
+            || &publication.origin.connection != connection
+        {
+            return Err(ErrorCode::Unauthorized);
+        }
+        match (previous, c.queue_view.as_ref()) {
+            (None, None) => {}
+            (Some(previous), Some(current)) if Arc::ptr_eq(previous, current) => {}
+            _ => return Err(ErrorCode::StaleSession),
+        }
+        let mut unique = HashSet::new();
+        if publication
+            .entries
+            .iter()
+            .any(|entry| !unique.insert(&entry.id))
+            || !publication.entries[publication.entries.len() - rows.len()..]
+                .iter()
+                .zip(&rows)
+                .all(|(binding, row)| binding.id == row.id && binding.editable == row.editable)
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         drop(unique);
-        let now_ms=crate::pairing::now_ms();
-        let expires=now_ms.saturating_add(publication.expires.saturating_duration_since(now).as_millis().try_into().map_err(|_|ErrorCode::ResourceLimit)?);
-        let mut fresh=Vec::new();
-        let result=(||->StateResult<()> {
-            let target=&publication.origin.context.target;
-            let mut result=SessionQueueListResult {target:target.clone(),entries:Vec::with_capacity(rows.len()),next_cursor:publication.next_cursor.clone()};
-            let envelope_bytes=crate::protocol::encoded_size(&result,256*1024).map_err(|_|ErrorCode::ResourceLimit)?;
+        let now_ms = crate::pairing::now_ms();
+        let expires = now_ms.saturating_add(
+            publication
+                .expires
+                .saturating_duration_since(now)
+                .as_millis()
+                .try_into()
+                .map_err(|_| ErrorCode::ResourceLimit)?,
+        );
+        let mut fresh = Vec::new();
+        let result = (|| -> StateResult<()> {
+            let target = &publication.origin.context.target;
+            let mut result = SessionQueueListResult {
+                target: target.clone(),
+                entries: Vec::with_capacity(rows.len()),
+                next_cursor: publication.next_cursor.clone(),
+            };
+            let envelope_bytes = crate::protocol::encoded_size(&result, 256 * 1024)
+                .map_err(|_| ErrorCode::ResourceLimit)?;
             for row in rows {
                 // Charge the complete escaped text, not merely its eventual content reference.
-                let mut entry=SessionQueueEntry {id:row.id,text:Content::Text(ContentText {text:InlineText(row.text)}),editable:row.editable};
-                publication.bytes=publication.bytes.checked_add(crate::protocol::encoded_size(&entry,256*1024).map_err(|_|ErrorCode::ResourceLimit)?).ok_or(ErrorCode::ResourceLimit)?;
-                if publication.bytes.checked_add(envelope_bytes+publication.entries.len().saturating_sub(1)).is_none_or(|bytes|bytes>256*1024) {return Err(ErrorCode::ResourceLimit)}
-                let Content::Text(text)=entry.text else {return Err(ErrorCode::InvalidRequest)};
-                entry.text=project_content(&mut i,target,Mime::TextPlain,text.text.0,now_ms,expires)?;
-                if let Content::Ref(reference)=&entry.text {fresh.push(reference.handle.clone());publication.payloads.push(reference.handle.clone());}
+                let mut entry = SessionQueueEntry {
+                    id: row.id,
+                    text: Content::Text(ContentText {
+                        text: InlineText(row.text),
+                    }),
+                    editable: row.editable,
+                };
+                publication.bytes = publication
+                    .bytes
+                    .checked_add(
+                        crate::protocol::encoded_size(&entry, 256 * 1024)
+                            .map_err(|_| ErrorCode::ResourceLimit)?,
+                    )
+                    .ok_or(ErrorCode::ResourceLimit)?;
+                if publication
+                    .bytes
+                    .checked_add(envelope_bytes + publication.entries.len().saturating_sub(1))
+                    .is_none_or(|bytes| bytes > 256 * 1024)
+                {
+                    return Err(ErrorCode::ResourceLimit);
+                }
+                let Content::Text(text) = entry.text else {
+                    return Err(ErrorCode::InvalidRequest);
+                };
+                entry.text = project_content(
+                    &mut i,
+                    target,
+                    Mime::TextPlain,
+                    text.text.0,
+                    now_ms,
+                    expires,
+                )?;
+                if let Content::Ref(reference) = &entry.text {
+                    fresh.push(reference.handle.clone());
+                    publication.payloads.push(reference.handle.clone());
+                }
                 result.entries.push(entry);
             }
-            if publication.bytes.checked_add(envelope_bytes+publication.entries.len().saturating_sub(1)).is_none_or(|bytes|bytes>256*1024) {return Err(ErrorCode::ResourceLimit)}
+            if publication
+                .bytes
+                .checked_add(envelope_bytes + publication.entries.len().saturating_sub(1))
+                .is_none_or(|bytes| bytes > 256 * 1024)
+            {
+                return Err(ErrorCode::ResourceLimit);
+            }
             valid(&result)?;
-            let bytes=frame(&Envelope::Response(Response {id:response_id,outcome:Ok(ResultBody::SessionQueueList(result))}))?;
-            if std::time::Instant::now()>=publication.expires {return Err(ErrorCode::StaleSession)}
-            let c=i.connections.get_mut(connection).ok_or(ErrorCode::Unauthorized)?;c.flush();
-            if !c.enqueue(bytes,false) {c.closed=true;return Err(ErrorCode::ResourceLimit)}
-            c.queue_view=Some(Arc::new(publication));Ok(())
+            let bytes = frame(&Envelope::Response(Response {
+                id: response_id,
+                outcome: Ok(ResultBody::SessionQueueList(result)),
+            }))?;
+            if std::time::Instant::now() >= publication.expires {
+                return Err(ErrorCode::StaleSession);
+            }
+            let c = i
+                .connections
+                .get_mut(connection)
+                .ok_or(ErrorCode::Unauthorized)?;
+            c.flush();
+            if !c.enqueue(bytes, false) {
+                c.closed = true;
+                return Err(ErrorCode::ResourceLimit);
+            }
+            c.queue_view = Some(Arc::new(publication));
+            Ok(())
         })();
-        if result.is_err() {for payload in fresh {i.content.remove(&payload);}}
+        if result.is_err() {
+            for payload in fresh {
+                i.content.remove(&payload);
+            }
+        }
         result
     }
     pub fn source_epoch(&self, target: &Target) -> StateResult<Uuid> {
@@ -1293,12 +1861,24 @@ impl State {
     /// Source-ordered attention is committed synchronously while retirement is
     /// excluded. The caller proves physical/backend identity before entering;
     /// `commit` must perform only its SQLite transaction, never State/provider I/O.
-    pub(crate) fn with_attention_source<T>(&self,target:&Target,source:&Uuid,provider:Provider,commit:impl FnOnce()->T)->StateResult<T>{
-        let i=self.inner.lock().expect("state mutex");let session=current(&i,target)?;
-        if &session.source!=source||session.state.summary.provider!=provider{return Err(ErrorCode::StaleSession)}
-        let continuous=session.state.summary.connectivity==SessionConnectivity::Ready
-            ||session.state.summary.connectivity==SessionConnectivity::Synchronizing&&(session.topology_dirty||session.observation_pending);
-        if session.installing||session.install_failed||!continuous{return Err(ErrorCode::NotReady)}
+    pub(crate) fn with_attention_source<T>(
+        &self,
+        target: &Target,
+        source: &Uuid,
+        provider: Provider,
+        commit: impl FnOnce() -> T,
+    ) -> StateResult<T> {
+        let i = self.inner.lock().expect("state mutex");
+        let session = current(&i, target)?;
+        if &session.source != source || session.state.summary.provider != provider {
+            return Err(ErrorCode::StaleSession);
+        }
+        let continuous = session.state.summary.connectivity == SessionConnectivity::Ready
+            || session.state.summary.connectivity == SessionConnectivity::Synchronizing
+                && (session.topology_dirty || session.observation_pending);
+        if session.installing || session.install_failed || !continuous {
+            return Err(ErrorCode::NotReady);
+        }
         Ok(commit())
     }
     /// Native reads may continue while a bounded registry observation is pending, but
@@ -1315,12 +1895,32 @@ impl State {
         }
         Ok(())
     }
-    pub(crate) fn validate_agent_observer(&self,target:&Target,epoch:&Uuid,provider:Provider,server:&Uuid,route:&crate::herdr::shells::ShellIdentity)->StateResult<()> {
-        let i=self.inner.lock().expect("state mutex");let session=current(&i,target)?;let summary=&session.state.summary;
-        if &session.source!=epoch||summary.provider!=provider||&summary.server_id!=server
-            ||summary.workspace_id!=route.workspace_id||summary.pane_id!=route.pane_id||summary.terminal_id!=route.terminal_id
-        {return Err(ErrorCode::StaleSession);}
-        if session.installing||session.install_failed||session.topology_dirty||session.observation_pending||summary.connectivity!=SessionConnectivity::Ready {
+    pub(crate) fn validate_agent_observer(
+        &self,
+        target: &Target,
+        epoch: &Uuid,
+        provider: Provider,
+        server: &Uuid,
+        route: &crate::herdr::shells::ShellIdentity,
+    ) -> StateResult<()> {
+        let i = self.inner.lock().expect("state mutex");
+        let session = current(&i, target)?;
+        let summary = &session.state.summary;
+        if &session.source != epoch
+            || summary.provider != provider
+            || &summary.server_id != server
+            || summary.workspace_id != route.workspace_id
+            || summary.pane_id != route.pane_id
+            || summary.terminal_id != route.terminal_id
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        if session.installing
+            || session.install_failed
+            || session.topology_dirty
+            || session.observation_pending
+            || summary.connectivity != SessionConnectivity::Ready
+        {
             return Err(ErrorCode::NotReady);
         }
         Ok(())
@@ -1478,16 +2078,18 @@ impl State {
             return Err(ErrorCode::StaleSession);
         }
         offline_binding(&mut i, &target.session_id, reason)?;
-        self.creation_directories.retain(|context|creation_context_valid(&i, context, false).is_ok());
+        self.creation_directories
+            .retain(|context| creation_context_valid(&i, context, false).is_ok());
         Ok(())
     }
     /// Loss of authoritative topology invalidates every old native callback/handle, while
     /// retaining the proven identity/history truthfully offline. This never stops providers.
     pub fn topology_offline(&self, server: &Uuid, reason: &str) -> StateResult<()> {
         let mut i = self.inner.lock().expect("state mutex");
-        cancel_grids(&mut i,|lease|lease.server()==server);
+        cancel_grids(&mut i, |lease| lease.server() == server);
         stale_hierarchy(&mut i, server);
-        self.creation_directories.retain(|context|&context.physical.server_id!=server);
+        self.creation_directories
+            .retain(|context| &context.physical.server_id != server);
         let ids: Vec<_> = i
             .sessions
             .iter()
@@ -1558,7 +2160,15 @@ impl State {
             servers: i.servers.clone(),
             projects: i.projects.clone(),
             sessions: inventory_sessions(&i),
-            shells: {let mut shells:Vec<_>=i.shells.values().map(|(summary,_)|summary.clone()).collect();shells.sort_by(|left,right|left.target.shell_id.0.cmp(&right.target.shell_id.0));shells},
+            shells: {
+                let mut shells: Vec<_> = i
+                    .shells
+                    .values()
+                    .map(|(summary, _)| summary.clone())
+                    .collect();
+                shells.sort_by(|left, right| left.target.shell_id.0.cmp(&right.target.shell_id.0));
+                shells
+            },
             unbound: i.unbound.clone(),
             hierarchy: i.hierarchy.clone(),
         };
@@ -1698,23 +2308,33 @@ impl State {
         Ok(())
     }
     pub(crate) fn prune_creation_directories(&self) {
-        let i=self.inner.lock().expect("state mutex");
-        self.creation_directories.retain(|context|creation_context_valid(&i, context, false).is_ok());
+        let i = self.inner.lock().expect("state mutex");
+        self.creation_directories
+            .retain(|context| creation_context_valid(&i, context, false).is_ok());
     }
     pub(crate) fn creation_directories_response(
         &self,
-        context:&crate::herdr::creation_directories::DirectoryContext,
-        response_id:Uuid,
-        result:CreationDirectoriesResult,
-        publish_references:impl FnOnce()->StateResult<()>,
-    )->StateResult<()> {
-        let bytes=frame(&Envelope::Response(Response{id:response_id,outcome:Ok(ResultBody::CreationDirectories(result))}))?;
-        let mut i=self.inner.lock().expect("state mutex");
+        context: &crate::herdr::creation_directories::DirectoryContext,
+        response_id: Uuid,
+        result: CreationDirectoriesResult,
+        publish_references: impl FnOnce() -> StateResult<()>,
+    ) -> StateResult<()> {
+        let bytes = frame(&Envelope::Response(Response {
+            id: response_id,
+            outcome: Ok(ResultBody::CreationDirectories(result)),
+        }))?;
+        let mut i = self.inner.lock().expect("state mutex");
         creation_context_valid(&i, context, true)?;
         publish_references()?;
-        let c=i.connections.get_mut(&context.connection).ok_or(ErrorCode::Unauthorized)?;
+        let c = i
+            .connections
+            .get_mut(&context.connection)
+            .ok_or(ErrorCode::Unauthorized)?;
         c.flush();
-        if !c.enqueue(bytes,false){c.closed=true;return Err(ErrorCode::ResourceLimit)}
+        if !c.enqueue(bytes, false) {
+            c.closed = true;
+            return Err(ErrorCode::ResourceLimit);
+        }
         Ok(())
     }
     /// Worktree browsing is memory-only, but its current connection, original Target, source
@@ -1771,13 +2391,24 @@ impl State {
         let mut i = self.inner.lock().expect("state mutex");
         {
             let session = current(&i, target)?;
-            if &session.source != source { return Err(ErrorCode::StaleSession); }
+            if &session.source != source {
+                return Err(ErrorCode::StaleSession);
+            }
             if session.state.summary.connectivity != SessionConnectivity::Ready
-                || !session.state.summary.capabilities.changes_read { return Err(ErrorCode::NotReady); }
+                || !session.state.summary.capabilities.changes_read
+            {
+                return Err(ErrorCode::NotReady);
+            }
         }
-        let c = i.connections.get_mut(connection).ok_or(ErrorCode::Unauthorized)?;
+        let c = i
+            .connections
+            .get_mut(connection)
+            .ok_or(ErrorCode::Unauthorized)?;
         c.flush();
-        if !c.enqueue(bytes, false) { c.closed = true; return Err(ErrorCode::ResourceLimit); }
+        if !c.enqueue(bytes, false) {
+            c.closed = true;
+            return Err(ErrorCode::ResourceLimit);
+        }
         Ok(())
     }
     /// Use after existing-receipt lookup and again under3's live dispatch fence. Creation is
@@ -1799,14 +2430,14 @@ impl State {
         let result = (|| {
             valid(&request.body)?;
             let target = match &request.body {
-                RequestBody::SessionControlsApply(p)=>&p.target,
-                RequestBody::SessionQueueUpdate(p)=>&p.target,
-                RequestBody::SessionQueueDelete(p)=>&p.target,
-                RequestBody::SessionQueueReorder(p)=>&p.target,
-                RequestBody::SessionQueueStart(p)=>&p.target,
-                RequestBody::AttachmentsBegin(p)=>&p.target,
-                RequestBody::AttachmentsChunk(p)=>&p.target,
-                RequestBody::AttachmentsComplete(p)=>&p.target,
+                RequestBody::SessionControlsApply(p) => &p.target,
+                RequestBody::SessionQueueUpdate(p) => &p.target,
+                RequestBody::SessionQueueDelete(p) => &p.target,
+                RequestBody::SessionQueueReorder(p) => &p.target,
+                RequestBody::SessionQueueStart(p) => &p.target,
+                RequestBody::AttachmentsBegin(p) => &p.target,
+                RequestBody::AttachmentsChunk(p) => &p.target,
+                RequestBody::AttachmentsComplete(p) => &p.target,
                 RequestBody::AgentRename(p) => &p.target,
                 RequestBody::WorkspaceRename(p) => &p.target,
                 RequestBody::PromptSubmit(p) => &p.target,
@@ -1856,12 +2487,34 @@ impl State {
                 return Err(ErrorCode::NotReady);
             }
             match &request.body {
-                RequestBody::SessionControlsApply(_) if !session.state.summary.capabilities.controls=>{guard="cap_controls";Err(ErrorCode::NotReady)}
-                RequestBody::SessionQueueUpdate(_)|RequestBody::SessionQueueDelete(_)|RequestBody::SessionQueueReorder(_)|RequestBody::SessionQueueStart(_)
-                    if session.state.summary.provider!=Provider::Codex=>{guard="queue_provider";Err(ErrorCode::NotReady)}
-                body if body.attachment_action().is_some() && !session.state.summary.capabilities.attachments=>{guard="cap_attachments";Err(ErrorCode::NotReady)}
-                RequestBody::AgentRename(_) if !session.state.summary.capabilities.agent_rename => { guard = "cap_agent_rename"; Err(ErrorCode::NotReady) }
-                RequestBody::WorkspaceRename(_) if !session.state.summary.capabilities.workspace_rename => {
+                RequestBody::SessionControlsApply(_)
+                    if !session.state.summary.capabilities.controls =>
+                {
+                    guard = "cap_controls";
+                    Err(ErrorCode::NotReady)
+                }
+                RequestBody::SessionQueueUpdate(_)
+                | RequestBody::SessionQueueDelete(_)
+                | RequestBody::SessionQueueReorder(_)
+                | RequestBody::SessionQueueStart(_)
+                    if session.state.summary.provider != Provider::Codex =>
+                {
+                    guard = "queue_provider";
+                    Err(ErrorCode::NotReady)
+                }
+                body if body.attachment_action().is_some()
+                    && !session.state.summary.capabilities.attachments =>
+                {
+                    guard = "cap_attachments";
+                    Err(ErrorCode::NotReady)
+                }
+                RequestBody::AgentRename(_) if !session.state.summary.capabilities.agent_rename => {
+                    guard = "cap_agent_rename";
+                    Err(ErrorCode::NotReady)
+                }
+                RequestBody::WorkspaceRename(_)
+                    if !session.state.summary.capabilities.workspace_rename =>
+                {
                     guard = "cap_workspace_rename";
                     Err(ErrorCode::NotReady)
                 }
@@ -1869,14 +2522,29 @@ impl State {
                     guard = "cap_prompt";
                     Err(ErrorCode::NotReady)
                 }
-                RequestBody::PromptSubmit(p)=>{
-                    if p.images.is_some()&&!session.state.summary.capabilities.attachments {guard="cap_attachments";return Err(ErrorCode::NotReady)}
-                    match (session.state.summary.provider,p.delivery) {
-                        (Provider::Omp,Some(PromptDelivery::Queue))|(Provider::Codex,Some(PromptDelivery::FollowUp|PromptDelivery::Aside))=>return Err(ErrorCode::InvalidRequest),
-                        (Provider::Codex,Some(PromptDelivery::Steer))=>{
-                            if p.native_turn_id.is_none()||p.native_turn_id!=session.state.native_turn_id {return Err(ErrorCode::StaleSession)}
+                RequestBody::PromptSubmit(p) => {
+                    if p.images.is_some() && !session.state.summary.capabilities.attachments {
+                        guard = "cap_attachments";
+                        return Err(ErrorCode::NotReady);
+                    }
+                    match (session.state.summary.provider, p.delivery) {
+                        (Provider::Omp, Some(PromptDelivery::Queue))
+                        | (
+                            Provider::Codex,
+                            Some(PromptDelivery::FollowUp | PromptDelivery::Aside),
+                        ) => return Err(ErrorCode::InvalidRequest),
+                        (Provider::Codex, Some(PromptDelivery::Steer)) => {
+                            if p.native_turn_id.is_none()
+                                || p.native_turn_id != session.state.native_turn_id
+                            {
+                                return Err(ErrorCode::StaleSession);
+                            }
                         }
-                        _=>if p.native_turn_id.is_some() {return Err(ErrorCode::InvalidRequest)},
+                        _ => {
+                            if p.native_turn_id.is_some() {
+                                return Err(ErrorCode::InvalidRequest);
+                            }
+                        }
                     }
                     Ok(())
                 }
@@ -1923,7 +2591,9 @@ impl State {
         if let Some(sub) = c.subscriptions.remove(subscription)
             && matches!(sub.kind, SubscriptionKind::Grid(_))
         {
-            if let SubscriptionKind::Grid(lease)=&sub.kind {lease.release();}
+            if let SubscriptionKind::Grid(lease) = &sub.kind {
+                lease.release();
+            }
             c.queue.retain(|q| {
                 q.grid
                     .as_ref()
@@ -1983,12 +2653,24 @@ impl State {
         }
         Ok(())
     }
-    pub(crate) fn grid_lease(&self,connection:&Uuid,subscription:&Uuid)->StateResult<Arc<crate::herdr::grid::GridLease>> {
-        let i=self.inner.lock().expect("state mutex");
-        let c=i.connections.get(connection).filter(|connection|!connection.closed).ok_or(ErrorCode::Unauthorized)?;
-        match c.subscriptions.get(subscription).map(|subscription|&subscription.kind) {
-            Some(SubscriptionKind::Grid(lease))if lease.active()=>Ok(lease.clone()),
-            _=>Err(ErrorCode::StaleSession),
+    pub(crate) fn grid_lease(
+        &self,
+        connection: &Uuid,
+        subscription: &Uuid,
+    ) -> StateResult<Arc<crate::herdr::grid::GridLease>> {
+        let i = self.inner.lock().expect("state mutex");
+        let c = i
+            .connections
+            .get(connection)
+            .filter(|connection| !connection.closed)
+            .ok_or(ErrorCode::Unauthorized)?;
+        match c
+            .subscriptions
+            .get(subscription)
+            .map(|subscription| &subscription.kind)
+        {
+            Some(SubscriptionKind::Grid(lease)) if lease.active() => Ok(lease.clone()),
+            _ => Err(ErrorCode::StaleSession),
         }
     }
     pub(crate) fn reserve_grid(
@@ -2091,8 +2773,15 @@ impl State {
     pub(crate) fn reconcile_grid_source(&self, source: &crate::herdr::Source) {
         let mut i = self.inner.lock().expect("state mutex");
         cancel_grids(&mut i, |lease| {
-            if lease.server()!=&source.server_id{return false;}
-            if lease.accepts_source(source){lease.source_updated(source);false}else{true}
+            if lease.server() != &source.server_id {
+                return false;
+            }
+            if lease.accepts_source(source) {
+                lease.source_updated(source);
+                false
+            } else {
+                true
+            }
         });
     }
     pub fn peer_event(&self, peer: &AuthenticatedPeer, event: EventBody) -> StateResult<()> {
@@ -2431,7 +3120,14 @@ impl State {
         text: String,
         now: u64,
     ) -> StateResult<Content> {
-        project_content(&mut self.inner.lock().expect("state mutex"),target,mime,text,now,now.saturating_add(CONTENT_TTL_MS))
+        project_content(
+            &mut self.inner.lock().expect("state mutex"),
+            target,
+            mime,
+            text,
+            now,
+            now.saturating_add(CONTENT_TTL_MS),
+        )
     }
     /// The runtime must recheck this current authenticated peer under its package3 dispatch
     /// fence. Display payloads are host-shared; this state API is not a revocation fence.
@@ -2443,7 +3139,7 @@ impl State {
     ) -> StateResult<ContentReadResult> {
         valid(request)?;
         let mut i = self.inner.lock().expect("state mutex");
-        prune_publications(&mut i,std::time::Instant::now());
+        prune_publications(&mut i, std::time::Instant::now());
         let source = current(&i, &request.target)
             .map_err(|_| ErrorCode::ContentExpired)?
             .source
@@ -2523,7 +3219,11 @@ fn stale_hierarchy(i: &mut Inner, server: &Uuid) {
             changed = true;
         }
     }
-    for (shell, _) in i.shells.values_mut().filter(|(shell, _)| &shell.server_id == server) {
+    for (shell, _) in i
+        .shells
+        .values_mut()
+        .filter(|(shell, _)| &shell.server_id == server)
+    {
         let capabilities = ShellCapabilities {
             read: false,
             create: false,
@@ -2532,7 +3232,8 @@ fn stale_hierarchy(i: &mut Inner, server: &Uuid) {
             artifacts: false,
             grid: false,
         };
-        if shell.connectivity != SessionConnectivity::Offline || shell.capabilities != capabilities {
+        if shell.connectivity != SessionConnectivity::Offline || shell.capabilities != capabilities
+        {
             shell.connectivity = SessionConnectivity::Offline;
             shell.capabilities = capabilities;
             changed = true;
@@ -2540,63 +3241,131 @@ fn stale_hierarchy(i: &mut Inner, server: &Uuid) {
     }
     for connection in i.connections.values() {
         for subscription in connection.subscriptions.values() {
-            if let SubscriptionKind::Grid(lease)=&subscription.kind
-                &&lease.server()==server {lease.inventory_updated();}
+            if let SubscriptionKind::Grid(lease) = &subscription.kind
+                && lease.server() == server
+            {
+                lease.inventory_updated();
+            }
         }
     }
     if changed {
         publish(i, None, None, EventBody::HostChanged(HostChangedEvent {}));
     }
 }
-fn invalidate_publications(i:&mut Inner,id:&Uuid) {
-    invalidate_skills(i,id);invalidate_controls(i,id);invalidate_queue(i,id);
+fn invalidate_publications(i: &mut Inner, id: &Uuid) {
+    invalidate_skills(i, id);
+    invalidate_controls(i, id);
+    invalidate_queue(i, id);
 }
-fn invalidate_skills(i:&mut Inner,id:&Uuid) {
+fn invalidate_skills(i: &mut Inner, id: &Uuid) {
     for c in i.connections.values_mut() {
-        if c.skills.as_ref().is_some_and(|p|&p.catalogue.target.session_id==id) {c.skills=None;}
-    }
-}
-fn invalidate_controls(i:&mut Inner,id:&Uuid) {
-    for c in i.connections.values_mut() {
-        if c.controls_catalogue.as_ref().is_some_and(|p|&p.catalogue.target.session_id==id) {c.controls_catalogue=None;}
-    }
-}
-fn project_content(i:&mut Inner,target:&Target,mime:Mime,text:String,now:u64,expires:u64)->StateResult<Content> {
-    let source=current(i,target)?.source.clone();
-    if text.len()<=CONTENT_INLINE_MAX {return Ok(Content::Text(ContentText {text:InlineText(text)}))}
-    if text.len()>CONTENT_MAX as usize {return Ok(Content::Unavailable(ContentUnavailable {reason:ContentUnavailableReason::TooLarge,byte_length:Some(Uint(text.len() as u64))}))}
-    i.content.retain(|_,payload|now<payload.expires);
-    i.clock+=1;
-    while content_size(i,Some(&target.session_id))+text.len()>SESSION_BYTES||content_size(i,None)+text.len()>CONTENT_TOTAL_BYTES {
-        let session_full=content_size(i,Some(&target.session_id))+text.len()>SESSION_BYTES;
-        let victim=i.content.iter().filter(|(_,payload)|!session_full||payload.target.session_id==target.session_id)
-            .min_by_key(|(_,payload)|payload.used).map(|(id,_)|id.clone()).ok_or(ErrorCode::ResourceLimit)?;
-        i.content.remove(&victim);
-    }
-    let handle=Uuid::random();let byte_length=Uint(text.len() as u64);let used=i.clock;
-    i.content.insert(handle.clone(),Payload {target:target.clone(),source,data:text.into_bytes(),expires,used});
-    Ok(Content::Ref(ContentRef {handle,byte_length,mime}))
-}
-fn invalidate_queue(i:&mut Inner,id:&Uuid) {
-    for c in i.connections.values_mut() {
-        if c.queue_view.as_ref().is_some_and(|p|&p.origin.context.target.session_id==id)
-            &&let Some(publication)=c.queue_view.take() {
-            for payload in &publication.payloads {i.content.remove(payload);}
+        if c.skills
+            .as_ref()
+            .is_some_and(|p| &p.catalogue.target.session_id == id)
+        {
+            c.skills = None;
         }
     }
 }
-fn prune_publications(i:&mut Inner,now:std::time::Instant) {
+fn invalidate_controls(i: &mut Inner, id: &Uuid) {
     for c in i.connections.values_mut() {
-        if c.skills.as_ref().is_some_and(|p|now>=p.document_expires) {c.skills=None;}
-        if c.controls_catalogue.as_ref().is_some_and(|p|now>=p.expires) {c.controls_catalogue=None;}
-        if c.queue_view.as_ref().is_some_and(|p|now>=p.expires)
-            &&let Some(publication)=c.queue_view.take() {
-            for payload in &publication.payloads {i.content.remove(payload);}
+        if c.controls_catalogue
+            .as_ref()
+            .is_some_and(|p| &p.catalogue.target.session_id == id)
+        {
+            c.controls_catalogue = None;
+        }
+    }
+}
+fn project_content(
+    i: &mut Inner,
+    target: &Target,
+    mime: Mime,
+    text: String,
+    now: u64,
+    expires: u64,
+) -> StateResult<Content> {
+    let source = current(i, target)?.source.clone();
+    if text.len() <= CONTENT_INLINE_MAX {
+        return Ok(Content::Text(ContentText {
+            text: InlineText(text),
+        }));
+    }
+    if text.len() > CONTENT_MAX as usize {
+        return Ok(Content::Unavailable(ContentUnavailable {
+            reason: ContentUnavailableReason::TooLarge,
+            byte_length: Some(Uint(text.len() as u64)),
+        }));
+    }
+    i.content.retain(|_, payload| now < payload.expires);
+    i.clock += 1;
+    while content_size(i, Some(&target.session_id)) + text.len() > SESSION_BYTES
+        || content_size(i, None) + text.len() > CONTENT_TOTAL_BYTES
+    {
+        let session_full = content_size(i, Some(&target.session_id)) + text.len() > SESSION_BYTES;
+        let victim = i
+            .content
+            .iter()
+            .filter(|(_, payload)| !session_full || payload.target.session_id == target.session_id)
+            .min_by_key(|(_, payload)| payload.used)
+            .map(|(id, _)| id.clone())
+            .ok_or(ErrorCode::ResourceLimit)?;
+        i.content.remove(&victim);
+    }
+    let handle = Uuid::random();
+    let byte_length = Uint(text.len() as u64);
+    let used = i.clock;
+    i.content.insert(
+        handle.clone(),
+        Payload {
+            target: target.clone(),
+            source,
+            data: text.into_bytes(),
+            expires,
+            used,
+        },
+    );
+    Ok(Content::Ref(ContentRef {
+        handle,
+        byte_length,
+        mime,
+    }))
+}
+fn invalidate_queue(i: &mut Inner, id: &Uuid) {
+    for c in i.connections.values_mut() {
+        if c.queue_view
+            .as_ref()
+            .is_some_and(|p| &p.origin.context.target.session_id == id)
+            && let Some(publication) = c.queue_view.take()
+        {
+            for payload in &publication.payloads {
+                i.content.remove(payload);
+            }
+        }
+    }
+}
+fn prune_publications(i: &mut Inner, now: std::time::Instant) {
+    for c in i.connections.values_mut() {
+        if c.skills.as_ref().is_some_and(|p| now >= p.document_expires) {
+            c.skills = None;
+        }
+        if c.controls_catalogue
+            .as_ref()
+            .is_some_and(|p| now >= p.expires)
+        {
+            c.controls_catalogue = None;
+        }
+        if c.queue_view.as_ref().is_some_and(|p| now >= p.expires)
+            && let Some(publication) = c.queue_view.take()
+        {
+            for payload in &publication.payloads {
+                i.content.remove(payload);
+            }
         }
     }
 }
 fn offline_binding(i: &mut Inner, id: &Uuid, reason: &str) -> StateResult<()> {
-    invalidate_publications(i,id);
+    invalidate_publications(i, id);
     i.adapter_history_bytes.remove(id);
     let session = i.sessions.get_mut(id).ok_or(ErrorCode::NotFound)?;
     session.source = Uuid::random();
@@ -2607,9 +3376,9 @@ fn offline_binding(i: &mut Inner, id: &Uuid, reason: &str) -> StateResult<()> {
     session.pending.clear();
     let mut display = session.state.clone();
     display.summary.connectivity = SessionConnectivity::Offline;
-    display.summary.skills_generation=None;
-    display.summary.capabilities.skills_read=false;
-    display.summary.capabilities.controls=false;
+    display.summary.skills_generation = None;
+    display.summary.capabilities.skills_read = false;
+    display.summary.capabilities.controls = false;
     display.summary.reason = Some(reason.into());
     display.native_turn_id = None;
     display.activity = Activity {
@@ -2825,33 +3594,62 @@ fn update_size(update: &SessionUpdate) -> StateResult<usize> {
         .len())
 }
 fn apply(i: &mut Inner, id: &Uuid, mut update: SessionUpdate) -> StateResult<()> {
-    if let SessionUpdate::State(state)=&mut update {state.summary.capabilities.terminal_read=false;}
+    if let SessionUpdate::State(state) = &mut update {
+        state.summary.capabilities.terminal_read = false;
+    }
     update_size(&update)?;
-    let old=i.sessions.get(id).ok_or(ErrorCode::NotFound)?;
-    let invalidate=match &update {
-        SessionUpdate::State(value)=>value.summary.connectivity!=SessionConnectivity::Ready || !value.summary.capabilities.prompt || !value.summary.capabilities.skills_read || value.summary.skills_generation!=old.state.summary.skills_generation,
-        SessionUpdate::SourceGap=>true,
-        _=>false,
+    let old = i.sessions.get(id).ok_or(ErrorCode::NotFound)?;
+    let invalidate = match &update {
+        SessionUpdate::State(value) => {
+            value.summary.connectivity != SessionConnectivity::Ready
+                || !value.summary.capabilities.prompt
+                || !value.summary.capabilities.skills_read
+                || value.summary.skills_generation != old.state.summary.skills_generation
+        }
+        SessionUpdate::SourceGap => true,
+        _ => false,
     };
-    let controls_invalidate=match &update {
-        SessionUpdate::State(value)=>value.summary.connectivity!=SessionConnectivity::Ready||!value.summary.capabilities.controls,
-        SessionUpdate::SourceGap=>true,_=>false,
+    let controls_invalidate = match &update {
+        SessionUpdate::State(value) => {
+            value.summary.connectivity != SessionConnectivity::Ready
+                || !value.summary.capabilities.controls
+        }
+        SessionUpdate::SourceGap => true,
+        _ => false,
     };
-    let queue_invalidate=match &update {
-        SessionUpdate::State(value)=>value.summary.connectivity!=SessionConnectivity::Ready,
-        SessionUpdate::SourceGap=>true,_=>false,
+    let queue_invalidate = match &update {
+        SessionUpdate::State(value) => value.summary.connectivity != SessionConnectivity::Ready,
+        SessionUpdate::SourceGap => true,
+        _ => false,
     };
-    let retire_agent=match &update {
-        SessionUpdate::State(value)=>value.summary.connectivity!=SessionConnectivity::Ready
-            ||value.summary.provider!=old.state.summary.provider||value.summary.server_id!=old.state.summary.server_id
-            ||value.summary.workspace_id!=old.state.summary.workspace_id||value.summary.pane_id!=old.state.summary.pane_id
-            ||value.summary.terminal_id!=old.state.summary.terminal_id,
-        SessionUpdate::SourceGap=>true,_=>false,
+    let retire_agent = match &update {
+        SessionUpdate::State(value) => {
+            value.summary.connectivity != SessionConnectivity::Ready
+                || value.summary.provider != old.state.summary.provider
+                || value.summary.server_id != old.state.summary.server_id
+                || value.summary.workspace_id != old.state.summary.workspace_id
+                || value.summary.pane_id != old.state.summary.pane_id
+                || value.summary.terminal_id != old.state.summary.terminal_id
+        }
+        SessionUpdate::SourceGap => true,
+        _ => false,
     };
-    if retire_agent {cancel_grids(i,|lease|lease.agent_target().is_some_and(|target|&target.session_id==id));}
-    if controls_invalidate {invalidate_controls(i,id);}
-    if queue_invalidate {invalidate_queue(i,id);}
-    if invalidate {invalidate_skills(i,id);}
+    if retire_agent {
+        cancel_grids(i, |lease| {
+            lease
+                .agent_target()
+                .is_some_and(|target| &target.session_id == id)
+        });
+    }
+    if controls_invalidate {
+        invalidate_controls(i, id);
+    }
+    if queue_invalidate {
+        invalidate_queue(i, id);
+    }
+    if invalidate {
+        invalidate_skills(i, id);
+    }
     let s = i.sessions.get_mut(id).ok_or(ErrorCode::NotFound)?;
     let changes_history = matches!(&update, SessionUpdate::History(_));
     let mut changes_summary = false;
@@ -3165,69 +3963,236 @@ impl State {
     }
 }
 
-
 impl State {
-    pub(crate) fn validate_shell(&self,target:&ShellTarget,source:&Uuid,access:crate::herdr::shells::ShellAccess)->StateResult<()> {
-        let inner=self.inner.lock().expect("state mutex");
-        let (shell,epoch)=inner.shells.get(&target.shell_id).filter(|(shell,_)|shell.target==*target).ok_or(ErrorCode::StaleSession)?;
-        if epoch!=source {return Err(ErrorCode::StaleSession)}
-        if shell.connectivity!=SessionConnectivity::Ready||!shell.capabilities.read||access==crate::herdr::shells::ShellAccess::Input&&!shell.capabilities.input {return Err(ErrorCode::NotReady)}Ok(())
+    pub(crate) fn validate_shell(
+        &self,
+        target: &ShellTarget,
+        source: &Uuid,
+        access: crate::herdr::shells::ShellAccess,
+    ) -> StateResult<()> {
+        let inner = self.inner.lock().expect("state mutex");
+        let (shell, epoch) = inner
+            .shells
+            .get(&target.shell_id)
+            .filter(|(shell, _)| shell.target == *target)
+            .ok_or(ErrorCode::StaleSession)?;
+        if epoch != source {
+            return Err(ErrorCode::StaleSession);
+        }
+        if shell.connectivity != SessionConnectivity::Ready
+            || !shell.capabilities.read
+            || access == crate::herdr::shells::ShellAccess::Input && !shell.capabilities.input
+        {
+            return Err(ErrorCode::NotReady);
+        }
+        Ok(())
     }
-    pub(crate) fn validate_shell_history(&self,target:&ShellTarget,source:&Uuid)->StateResult<()> {
-        let inner=self.inner.lock().expect("state mutex");
-        let (shell,epoch)=inner.shells.get(&target.shell_id).filter(|(shell,_)|shell.target==*target).ok_or(ErrorCode::StaleSession)?;
-        if epoch!=source{return Err(ErrorCode::StaleSession);}
-        if shell.connectivity!=SessionConnectivity::Ready||!shell.capabilities.read||!shell.capabilities.grid||!shell.capabilities.input{return Err(ErrorCode::NotReady);}Ok(())
+    pub(crate) fn validate_shell_history(
+        &self,
+        target: &ShellTarget,
+        source: &Uuid,
+    ) -> StateResult<()> {
+        let inner = self.inner.lock().expect("state mutex");
+        let (shell, epoch) = inner
+            .shells
+            .get(&target.shell_id)
+            .filter(|(shell, _)| shell.target == *target)
+            .ok_or(ErrorCode::StaleSession)?;
+        if epoch != source {
+            return Err(ErrorCode::StaleSession);
+        }
+        if shell.connectivity != SessionConnectivity::Ready
+            || !shell.capabilities.read
+            || !shell.capabilities.grid
+            || !shell.capabilities.input
+        {
+            return Err(ErrorCode::NotReady);
+        }
+        Ok(())
     }
 }
 
-
 impl State {
-    pub(crate) fn creation_shell_fence(&self,peer:Uuid,action:Uuid,fence:Option<crate::herdr::shells::CreationShellFence>) {
-        let mut inner=self.inner.lock().expect("state mutex");
-        if let Some(fence)=fence{inner.creation_shell_fences.insert((peer,action),fence);}else{inner.creation_shell_fences.remove(&(peer,action));}
+    pub(crate) fn creation_shell_fence(
+        &self,
+        peer: Uuid,
+        action: Uuid,
+        fence: Option<crate::herdr::shells::CreationShellFence>,
+    ) {
+        let mut inner = self.inner.lock().expect("state mutex");
+        if let Some(fence) = fence {
+            inner.creation_shell_fences.insert((peer, action), fence);
+        } else {
+            inner.creation_shell_fences.remove(&(peer, action));
+        }
     }
-    pub(crate) fn has_creation_shell_fences(&self,server:&Uuid)->bool {
-        self.inner.lock().expect("state mutex").creation_shell_fences.values().any(|fence|&fence.server==server)
+    pub(crate) fn has_creation_shell_fences(&self, server: &Uuid) -> bool {
+        self.inner
+            .lock()
+            .expect("state mutex")
+            .creation_shell_fences
+            .values()
+            .any(|fence| &fence.server == server)
     }
-    pub(crate) fn creation_shell_blocked(&self,server:&Uuid,incarnation:&Uuid,pane:&Id,terminal:&Id)->bool {
-        self.inner.lock().expect("state mutex").creation_shell_fences.values().any(|fence|fence.blocks(server,incarnation,pane,terminal))
+    pub(crate) fn creation_shell_blocked(
+        &self,
+        server: &Uuid,
+        incarnation: &Uuid,
+        pane: &Id,
+        terminal: &Id,
+    ) -> bool {
+        self.inner
+            .lock()
+            .expect("state mutex")
+            .creation_shell_fences
+            .values()
+            .any(|fence| fence.blocks(server, incarnation, pane, terminal))
     }
 }
 
 impl State {
-    pub(crate) fn validate_attachment_mutation(&self,request:&Request)->StateResult<()> {
-        request.body.validate().map_err(|_|ErrorCode::InvalidRequest)?;
-        if matches!(request.body,RequestBody::AttachmentsDiscard(_)){return Ok(())}
-        if request.body.attachment_action().is_none(){return Err(ErrorCode::InvalidRequest)}
+    pub(crate) fn validate_attachment_mutation(&self, request: &Request) -> StateResult<()> {
+        request
+            .body
+            .validate()
+            .map_err(|_| ErrorCode::InvalidRequest)?;
+        if matches!(request.body, RequestBody::AttachmentsDiscard(_)) {
+            return Ok(());
+        }
+        if request.body.attachment_action().is_none() {
+            return Err(ErrorCode::InvalidRequest);
+        }
         self.validate_session_mutation(request)
     }
 }
 impl State {
-    pub(crate) fn attachments_status_response(&self,connection:&Uuid,id:Uuid,mut status:AttachmentsStatusResult,original:Option<(&Target,&Uuid)>)->StateResult<()> {
-        let mut inner=self.inner.lock().expect("state mutex");
-        if status.insertion_ready {let ready=original.is_some_and(|(target,source)|current(&inner,target).is_ok_and(|session|&session.source==source&&session.state.summary.connectivity==SessionConnectivity::Ready&&session.state.summary.capabilities.attachments&&!session.installing&&!session.install_failed&&!session.observation_pending));if !ready {status.insertion_ready=false}}
-        let bytes=frame(&Envelope::Response(Response {id,outcome:Ok(ResultBody::AttachmentsStatus(status))}))?;
-        let output=inner.connections.get_mut(connection).ok_or(ErrorCode::Unauthorized)?;output.flush();if !output.enqueue(bytes,false){output.closed=true;return Err(ErrorCode::ResourceLimit)}Ok(())
+    pub(crate) fn attachments_status_response(
+        &self,
+        connection: &Uuid,
+        id: Uuid,
+        mut status: AttachmentsStatusResult,
+        original: Option<(&Target, &Uuid)>,
+    ) -> StateResult<()> {
+        let mut inner = self.inner.lock().expect("state mutex");
+        if status.insertion_ready {
+            let ready = original.is_some_and(|(target, source)| {
+                current(&inner, target).is_ok_and(|session| {
+                    &session.source == source
+                        && session.state.summary.connectivity == SessionConnectivity::Ready
+                        && session.state.summary.capabilities.attachments
+                        && !session.installing
+                        && !session.install_failed
+                        && !session.observation_pending
+                })
+            });
+            if !ready {
+                status.insertion_ready = false
+            }
+        }
+        let bytes = frame(&Envelope::Response(Response {
+            id,
+            outcome: Ok(ResultBody::AttachmentsStatus(status)),
+        }))?;
+        let output = inner
+            .connections
+            .get_mut(connection)
+            .ok_or(ErrorCode::Unauthorized)?;
+        output.flush();
+        if !output.enqueue(bytes, false) {
+            output.closed = true;
+            return Err(ErrorCode::ResourceLimit);
+        }
+        Ok(())
     }
 }
 
-impl State{
- pub(crate) fn validate_artifact_source(&self,source:&ArtifactSource,epoch:&Uuid)->StateResult<()>{
-  let inner=self.inner.lock().expect("state mutex");match source{
-   ArtifactSource::Session{target}=>{let session=current(&inner,target)?;if session.source!=*epoch{return Err(ErrorCode::StaleSession)}
-   if session.state.summary.connectivity!=SessionConnectivity::Ready||!session.state.summary.capabilities.artifacts{return Err(ErrorCode::NotReady)}},
-   ArtifactSource::Shell{target}=>{let (shell,current)=inner.shells.get(&target.shell_id).filter(|(s,_)|s.target==*target).ok_or(ErrorCode::StaleSession)?;if current!=epoch{return Err(ErrorCode::StaleSession)}
-   if shell.connectivity!=SessionConnectivity::Ready||!shell.capabilities.artifacts{return Err(ErrorCode::NotReady)}}
-  }Ok(())
- }
- pub(crate) fn artifact_response(&self,connection:&Uuid,id:Uuid,source:&ArtifactSource,epoch:&Uuid,result:ResultBody)->StateResult<()>{
-  let bytes=frame(&Envelope::Response(Response{id,outcome:Ok(result)}))?;let mut inner=self.inner.lock().expect("state mutex");
-  match source{ArtifactSource::Session{target}=>{let session=current(&inner,target)?;if session.source!=*epoch{return Err(ErrorCode::StaleSession)}
-  if session.state.summary.connectivity!=SessionConnectivity::Ready||!session.state.summary.capabilities.artifacts{return Err(ErrorCode::NotReady)}},ArtifactSource::Shell{target}=>{let (shell,current)=inner.shells.get(&target.shell_id).filter(|(shell,_)|shell.target==*target).ok_or(ErrorCode::StaleSession)?;if current!=epoch{return Err(ErrorCode::StaleSession)}
-  if shell.connectivity!=SessionConnectivity::Ready||!shell.capabilities.artifacts{return Err(ErrorCode::NotReady)}}}
-  let c=inner.connections.get_mut(connection).ok_or(ErrorCode::Unauthorized)?;c.flush();if !c.enqueue(bytes,false){c.closed=true;return Err(ErrorCode::ResourceLimit)}Ok(())
- }
+impl State {
+    pub(crate) fn validate_artifact_source(
+        &self,
+        source: &ArtifactSource,
+        epoch: &Uuid,
+    ) -> StateResult<()> {
+        let inner = self.inner.lock().expect("state mutex");
+        match source {
+            ArtifactSource::Session { target } => {
+                let session = current(&inner, target)?;
+                if session.source != *epoch {
+                    return Err(ErrorCode::StaleSession);
+                }
+                if session.state.summary.connectivity != SessionConnectivity::Ready
+                    || !session.state.summary.capabilities.artifacts
+                {
+                    return Err(ErrorCode::NotReady);
+                }
+            }
+            ArtifactSource::Shell { target } => {
+                let (shell, current) = inner
+                    .shells
+                    .get(&target.shell_id)
+                    .filter(|(s, _)| s.target == *target)
+                    .ok_or(ErrorCode::StaleSession)?;
+                if current != epoch {
+                    return Err(ErrorCode::StaleSession);
+                }
+                if shell.connectivity != SessionConnectivity::Ready || !shell.capabilities.artifacts
+                {
+                    return Err(ErrorCode::NotReady);
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn artifact_response(
+        &self,
+        connection: &Uuid,
+        id: Uuid,
+        source: &ArtifactSource,
+        epoch: &Uuid,
+        result: ResultBody,
+    ) -> StateResult<()> {
+        let bytes = frame(&Envelope::Response(Response {
+            id,
+            outcome: Ok(result),
+        }))?;
+        let mut inner = self.inner.lock().expect("state mutex");
+        match source {
+            ArtifactSource::Session { target } => {
+                let session = current(&inner, target)?;
+                if session.source != *epoch {
+                    return Err(ErrorCode::StaleSession);
+                }
+                if session.state.summary.connectivity != SessionConnectivity::Ready
+                    || !session.state.summary.capabilities.artifacts
+                {
+                    return Err(ErrorCode::NotReady);
+                }
+            }
+            ArtifactSource::Shell { target } => {
+                let (shell, current) = inner
+                    .shells
+                    .get(&target.shell_id)
+                    .filter(|(shell, _)| shell.target == *target)
+                    .ok_or(ErrorCode::StaleSession)?;
+                if current != epoch {
+                    return Err(ErrorCode::StaleSession);
+                }
+                if shell.connectivity != SessionConnectivity::Ready || !shell.capabilities.artifacts
+                {
+                    return Err(ErrorCode::NotReady);
+                }
+            }
+        }
+        let c = inner
+            .connections
+            .get_mut(connection)
+            .ok_or(ErrorCode::Unauthorized)?;
+        c.flush();
+        if !c.enqueue(bytes, false) {
+            c.closed = true;
+            return Err(ErrorCode::ResourceLimit);
+        }
+        Ok(())
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -3321,24 +4286,62 @@ mod tests {
     }
     #[test]
     fn identical_state_is_compared_after_native_and_topology_gates() {
-        for native in [true,false] {
-            let (state,target,epoch,peer,_)=paging_state();
-            let connection=state.connect(&peer);
-            state.session_open(&connection,Uuid::random(),&target,0).unwrap();
+        for native in [true, false] {
+            let (state, target, epoch, peer, _) = paging_state();
+            let connection = state.connect(&peer);
+            state
+                .session_open(&connection, Uuid::random(), &target, 0)
+                .unwrap();
             state.pop_output(&connection).unwrap();
-            let ready=state.session_state(&target,&epoch).unwrap();
-            if native {state.observation_pending(&target,&epoch).unwrap();}
-            else {state.topology_synchronizing(&ready.summary.server_id).unwrap();}
-            let Envelope::Event(event)=decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(),None).unwrap() else {panic!("gate loss must publish immediately")};
-            let EventBody::SessionState(value)=event.body else {panic!("gate loss must carry effective state")};
-            assert_eq!(value.state.summary.connectivity,SessionConnectivity::Synchronizing);
-            state.update_from_source(&target,&epoch,SessionUpdate::State(ready.clone())).unwrap();
-            assert!(state.pop_output(&connection).unwrap().0.is_none(),"raw Ready cannot cause a duplicate effective Synchronizing event");
-            if native {state.observation_revalidated(&target,&epoch).unwrap();}
-            else {state.topology_revalidated(&target,&epoch,&ready.summary.workspace_id,&ready.summary.pane_id,||Ok(())).unwrap();}
-            let Envelope::Event(event)=decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(),None).unwrap() else {panic!("recovery must publish immediately")};
-            let EventBody::SessionState(value)=event.body else {panic!("recovery must carry Ready state")};
-            assert_eq!(value.state.summary.connectivity,SessionConnectivity::Ready);
+            let ready = state.session_state(&target, &epoch).unwrap();
+            if native {
+                state.observation_pending(&target, &epoch).unwrap();
+            } else {
+                state
+                    .topology_synchronizing(&ready.summary.server_id)
+                    .unwrap();
+            }
+            let Envelope::Event(event) =
+                decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(), None).unwrap()
+            else {
+                panic!("gate loss must publish immediately")
+            };
+            let EventBody::SessionState(value) = event.body else {
+                panic!("gate loss must carry effective state")
+            };
+            assert_eq!(
+                value.state.summary.connectivity,
+                SessionConnectivity::Synchronizing
+            );
+            state
+                .update_from_source(&target, &epoch, SessionUpdate::State(ready.clone()))
+                .unwrap();
+            assert!(
+                state.pop_output(&connection).unwrap().0.is_none(),
+                "raw Ready cannot cause a duplicate effective Synchronizing event"
+            );
+            if native {
+                state.observation_revalidated(&target, &epoch).unwrap();
+            } else {
+                state
+                    .topology_revalidated(
+                        &target,
+                        &epoch,
+                        &ready.summary.workspace_id,
+                        &ready.summary.pane_id,
+                        || Ok(()),
+                    )
+                    .unwrap();
+            }
+            let Envelope::Event(event) =
+                decode_payload(&state.pop_output(&connection).unwrap().0.unwrap(), None).unwrap()
+            else {
+                panic!("recovery must publish immediately")
+            };
+            let EventBody::SessionState(value) = event.body else {
+                panic!("recovery must carry Ready state")
+            };
+            assert_eq!(value.state.summary.connectivity, SessionConnectivity::Ready);
         }
     }
 
@@ -4049,9 +5052,15 @@ mod tests {
             };
             let request = Request {
                 id: Uuid::random(),
-                body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: Uuid::random(),
-                target: target.clone(),
-                text: PromptText::new("original intent").unwrap(), }),
+                body: RequestBody::PromptSubmit(PromptSubmitParams {
+                    delivery: None,
+                    native_turn_id: None,
+                    images: None,
+                    skill: None,
+                    boot_id: Uuid::random(),
+                    target: target.clone(),
+                    text: PromptText::new("original intent").unwrap(),
+                }),
             };
             let epoch = state.begin_install(value.clone()).unwrap();
             assert_eq!(
@@ -4278,7 +5287,17 @@ mod tests {
             })
             .collect();
         state
-             .replace_inventory(vec![], vec![], vec![], rows, vec![], &[], |_| Ok(()))
+            .replace_inventory(
+                NativeInventory {
+                    servers: vec![],
+                    projects: vec![],
+                    shells: vec![],
+                    unbound: rows,
+                    hierarchy: vec![],
+                },
+                &[],
+                |_| Ok(()),
+            )
             .unwrap();
         let epoch = state.begin_install(value.clone()).unwrap();
         state
@@ -4367,9 +5386,15 @@ mod tests {
             .unwrap();
         let request = Request {
             id: Uuid::random(),
-            body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: storage.boot_id.clone(),
-            target: expected,
-            text: PromptText::new("no effect").unwrap(), }),
+            body: RequestBody::PromptSubmit(PromptSubmitParams {
+                delivery: None,
+                native_turn_id: None,
+                images: None,
+                skill: None,
+                boot_id: storage.boot_id.clone(),
+                target: expected,
+                text: PromptText::new("no effect").unwrap(),
+            }),
         };
         assert_eq!(
             state.validate_session_mutation(&request),

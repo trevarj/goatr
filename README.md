@@ -49,6 +49,15 @@ Build only, without installing: `nix run .#apk-debug` or
 `nix run .#apk-release-unsigned` (the latter still needs distributor signing).
 Developer commands, exact pins and validation guidance are in [AGENTS.md](AGENTS.md).
 
+In GitHub, open **Actions → Goatr → Run workflow**, select `main`, and run it to
+produce a signed APK artifact without publishing a release. Trusted `v*` tags on `main`
+publish the verified signed `goatr.apk`, `SHA256SUMS` and license/notices as GitHub
+Release assets. The tag must match the built APK's `versionName` (currently
+`v0.2.0`, version code `2`). Both paths require the existing core/native/Android
+gates and the repository's four production signing secrets; see
+[release safety](AGENTS.md#release-ci-and-signing-safety). No keys or release
+credentials are needed for ordinary builds or pull requests.
+
 ## Start the desktop and pair
 
 Use compatible **Herdr Core 0.1.19** (`hc connect`), not the older incompatible
@@ -101,6 +110,40 @@ fingerprint, and follow the protected phone-key setup. The host needs compatible
 `hc connect` on its SSH command path. Agent notifications are opt-in and subject
 to Android background/network limits; the replaced app's ntfy/UnifiedPush interface
 is not part of this Android product.
+
+## Optional NixOS manual user service
+
+Add `inputs.goatr.url = "github:trevarj/goatr";` to your flake inputs, then import
+its module in your NixOS configuration:
+
+```nix
+{
+  imports = [ inputs.goatr.nixosModules.default ];
+  services.goatr.enable = true;
+  # Optional: services.goatr.package = inputs.goatr.packages.x86_64-linux.goatr;
+}
+```
+
+This installs the `goatr` CLI and **`goatr-companion.service` user unit**, not the
+legacy `goatr.service`. It never starts at boot/login or launches Herdr Core.
+After applying your configuration yourself, start your intended compatible core
+separately, then explicitly start the bridge:
+
+```sh
+systemctl --user start goatr-companion.service
+goatr pair
+journalctl --user -u goatr-companion.service
+# Stop only this managed bridge:
+systemctl --user stop goatr-companion.service
+```
+
+Stop any foreground companion or legacy `goatr.service` before starting this unit
+(or vice versa); the module does not adopt them. It runs `goatr serve --hc`, restarts
+only on failure after five seconds, and uses umask `0077`. Goatr owns its private
+state/runtime/socket; systemd does not remove shared directories on stop.
+For a non-default core target, use native NixOS unit overrides, for example
+`systemd.user.services.goatr-companion.environment.HC_SESSION = "work";`
+(and `HC_SOCKET` when needed), matching your intended core. Logs use the journal.
 
 ## License and provenance
 

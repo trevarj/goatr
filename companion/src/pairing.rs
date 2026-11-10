@@ -377,29 +377,116 @@ impl Drop for HandshakeAttempt<'_> {
             .finish(&self.peer, self.id, self.success);
     }
 }
-enum BoundaryOutcome {
-    Receipt(ReceiptTransition),
+pub(crate) struct NativeBoundary<'a> {
+    pub(crate) auth: &'a Authorized,
+    pub(crate) action: Uuid,
+    pub(crate) connection: OwnedFd,
+}
+// Receipt results stay inline; only the already-indirect creation outcome is boxed.
+struct BoundaryOutcome {
+    result: Option<ActionResult>,
+    kind: BoundaryOutcomeKind,
+}
+enum BoundaryOutcomeKind {
+    Receipt {
+        state: ReceiptState,
+        proof: TransitionProof,
+        error: Option<WireError>,
+        at: u64,
+    },
     Creation(Box<CreationOutcome>),
 }
-pub(crate) type TerminalCreationAckGuard=Arc<dyn Fn(&ShellCreationResources,&mut dyn FnMut()->SecurityResult<()>)->SecurityResult<()>+Send+Sync>;
+impl From<ReceiptTransition> for BoundaryOutcome {
+    fn from(outcome: ReceiptTransition) -> Self {
+        let ReceiptTransition {
+            state,
+            proof,
+            result,
+            error,
+            at,
+        } = outcome;
+        Self {
+            result,
+            kind: BoundaryOutcomeKind::Receipt {
+                state,
+                proof,
+                error,
+                at,
+            },
+        }
+    }
+}
+impl From<CreationOutcome> for BoundaryOutcome {
+    fn from(outcome: CreationOutcome) -> Self {
+        Self {
+            result: None,
+            kind: BoundaryOutcomeKind::Creation(Box::new(outcome)),
+        }
+    }
+}
+pub(crate) type TerminalCreationAckGuard = Arc<
+    dyn Fn(&ShellCreationResources, &mut dyn FnMut() -> SecurityResult<()>) -> SecurityResult<()>
+        + Send
+        + Sync,
+>;
 enum EnteredFacts {
-    TerminalShell {source:Uuid,resources:ShellCreationResources,acknowledge:TerminalCreationAckGuard},
-    Attachment {target:Target,progress:AttachmentProgress},
+    TerminalShell {
+        source: Uuid,
+        resources: ShellCreationResources,
+        acknowledge: TerminalCreationAckGuard,
+    },
+    Attachment {
+        target: Target,
+        progress: AttachmentProgress,
+    },
     PromptImages(Arc<crate::attachments::ImageReadObligation>),
-    AgentAlias {target:Target,source:Uuid,result:Option<ActionResultAgentRenamed>},
-    Agent((CreationResources,StageMetadata)),
-    ShellInput {target:ShellTarget,source:Uuid,progress:ShellDispatchProgress},
+    AgentAlias {
+        target: Target,
+        source: Uuid,
+        result: Option<ActionResultAgentRenamed>,
+    },
+    // Agent staging facts must not inflate every native-boundary Arc allocation.
+    Agent(Box<(CreationResources, StageMetadata)>),
+    ShellInput {
+        target: ShellTarget,
+        source: Uuid,
+        progress: ShellDispatchProgress,
+    },
 }
 impl EnteredFacts {
     #[cfg(test)]
-    fn agent(&self)->Option<&(CreationResources,StageMetadata)> {match self {Self::Agent(facts)=>Some(facts),Self::TerminalShell {..}|Self::ShellInput {..}|Self::AgentAlias {..}|Self::Attachment {..}|Self::PromptImages(_)=>None}}
-    fn agent_mut(&mut self)->Option<&mut (CreationResources,StageMetadata)> {match self {Self::Agent(facts)=>Some(facts),Self::TerminalShell {..}|Self::ShellInput {..}|Self::AgentAlias {..}|Self::Attachment {..}|Self::PromptImages(_)=>None}}
+    fn agent(&self) -> Option<&(CreationResources, StageMetadata)> {
+        match self {
+            Self::Agent(facts) => Some(facts),
+            Self::TerminalShell { .. }
+            | Self::ShellInput { .. }
+            | Self::AgentAlias { .. }
+            | Self::Attachment { .. }
+            | Self::PromptImages(_) => None,
+        }
+    }
+    fn agent_mut(&mut self) -> Option<&mut (CreationResources, StageMetadata)> {
+        match self {
+            Self::Agent(facts) => Some(facts),
+            Self::TerminalShell { .. }
+            | Self::ShellInput { .. }
+            | Self::AgentAlias { .. }
+            | Self::Attachment { .. }
+            | Self::PromptImages(_) => None,
+        }
+    }
 }
-#[derive(Clone,Copy,PartialEq,Eq)]
-enum EnteredEffectOwner {NativeSocket,AttachmentCleanup}
-enum EnteredConnection {Native(OwnedFd),AttachmentCleanup}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnteredEffectOwner {
+    NativeSocket,
+    AttachmentCleanup,
+}
+enum EnteredConnection {
+    Native(OwnedFd),
+    AttachmentCleanup,
+}
 struct Entered {
-    effect_owner:EnteredEffectOwner,
+    effect_owner: EnteredEffectOwner,
     ticket: Mutex<Option<DispatchTicket>>,
     connection: StdMutex<Option<OwnedFd>>,
     invalidated: AtomicBool,
@@ -412,8 +499,9 @@ struct Entered {
 }
 impl Entered {
     fn invalidate(&self) -> SecurityResult<()> {
-        if self.effect_owner==EnteredEffectOwner::AttachmentCleanup {
-            self.invalidated.store(true,Ordering::Release);return Ok(())
+        if self.effect_owner == EnteredEffectOwner::AttachmentCleanup {
+            self.invalidated.store(true, Ordering::Release);
+            return Ok(());
         }
         if let Some(fd) = self
             .connection
@@ -543,7 +631,7 @@ impl Drop for UnstartedBoundary {
             .outcome
             .lock()
             .expect("boundary outcome mutex")
-            .get_or_insert_with(|| BoundaryOutcome::Receipt(no_effect(ErrorCode::NotReady)));
+            .get_or_insert_with(|| no_effect(ErrorCode::NotReady).into());
         let security = self.security.clone();
         let entry = self.entry.clone();
         self.runtime.spawn(async move {
@@ -589,7 +677,7 @@ impl CreationCheckpoint<'_> {
                 .as_ref()
                 .ok_or(ErrorCode::NotReady)?
                 .lock();
-            let creation=held_facts.agent_mut().ok_or(ErrorCode::NotReady)?;
+            let creation = held_facts.agent_mut().ok_or(ErrorCode::NotReady)?;
             if creation.0.native_id.is_some() {
                 return Err(ErrorCode::InvalidRequest);
             }
@@ -641,17 +729,25 @@ pub struct Authorized {
 impl Authorized {
     /// Synchronous retirement fence after a full guard, before each original grid write poll.
     /// This never substitutes for the SQLite/authorization guard at admission.
-    pub(crate) fn live_connection(&self)->SecurityResult<()> {
+    pub(crate) fn live_connection(&self) -> SecurityResult<()> {
         if self.fence.stopped.load(Ordering::Acquire)
-            ||!self.fence.active.lock().expect("active mutex").as_ref().is_some_and(|(id,_)|id==&self.connection_id)
-        {return Err(ErrorCode::Unauthorized);}
+            || !self
+                .fence
+                .active
+                .lock()
+                .expect("active mutex")
+                .as_ref()
+                .is_some_and(|(id, _)| id == &self.connection_id)
+        {
+            return Err(ErrorCode::Unauthorized);
+        }
         Ok(())
     }
 }
 /// One concrete owner shared by transport, admin and later native adapters; no second peer cache.
 pub struct Security {
-    pub(crate) push:std::sync::OnceLock<Arc<crate::push::Publisher>>,
-    pub(crate) push_failed:AtomicBool,
+    pub(crate) push: std::sync::OnceLock<Arc<crate::push::Publisher>>,
+    pub(crate) push_failed: AtomicBool,
     pub storage: Arc<StorageOwner>,
     pub state: Arc<State>,
     pub host: EndpointId,
@@ -673,8 +769,8 @@ impl Security {
         pairing_name: Option<Label>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            push:std::sync::OnceLock::new(),
-            push_failed:AtomicBool::new(false),
+            push: std::sync::OnceLock::new(),
+            push_failed: AtomicBool::new(false),
             storage: Arc::new(storage),
             state,
             host,
@@ -756,9 +852,14 @@ impl Security {
         let hc = connection.alpn() == crate::HC_ALPN;
         let existing = if hc {
             let remote = remote.clone();
-            self.storage.call(move |s| s.current_epoch(&remote)).await
-                .map_err(|_| ErrorCode::PairingFailed)?.map(|(id, _)| id)
-        } else { None };
+            self.storage
+                .call(move |s| s.current_epoch(&remote))
+                .await
+                .map_err(|_| ErrorCode::PairingFailed)?
+                .map(|(id, _)| id)
+        } else {
+            None
+        };
         let device = PairedDevice {
             device_id: existing.unwrap_or_else(Uuid::random),
             endpoint_id: remote,
@@ -794,7 +895,9 @@ impl Security {
         params: HelloParams,
         connection: iroh::endpoint::Connection,
     ) -> SecurityResult<Authorized> {
-        if remote.0 != connection.remote_id().to_string() || !crate::authorized_alpn(connection.alpn()) {
+        if remote.0 != connection.remote_id().to_string()
+            || !crate::authorized_alpn(connection.alpn())
+        {
             return Err(ErrorCode::Unauthorized);
         }
         let (id, epoch) = self
@@ -813,7 +916,9 @@ impl Security {
             .storage
             .call(move |s| {
                 let p = s.authenticated_hello(&id, epoch)?;
-                if hc { s.require_hc(&p)?; }
+                if hc {
+                    s.require_hc(&p)?;
+                }
                 s.mark_seen(&p, params.device_name, now_ms())?;
                 Ok(p)
             })
@@ -958,42 +1063,164 @@ impl Security {
         let original = auth.clone();
         let runtime = tokio::runtime::Handle::current();
         let (checkpoint, guard) = self
-            .prepare_native_boundary(auth, action, connection, Some(deadline), None, move |entry| {
-                UnstartedBoundary {
+            .prepare_native_boundary(
+                auth,
+                action,
+                connection,
+                Some(deadline),
+                None,
+                move |entry| UnstartedBoundary {
                     security,
                     auth: original,
                     entry,
                     deadline,
                     runtime,
-                }
-            })
+                },
+            )
             .await?;
         drop(guard);
         Ok(checkpoint)
     }
-    pub(crate) async fn terminal_creation_boundary<'a,F,E>(
-        &'a self,auth:&'a Authorized,action:Uuid,source:Uuid,connection:OwnedFd,acknowledge:TerminalCreationAckGuard,
-        validate:impl FnOnce()->SecurityResult<()>,effect:F,
-    )->SecurityResult<()> where F:FnOnce(TerminalCreationCheckpoint<'a>)->E,E:Future<Output=ReceiptTransition> {
-        let (entry,guard)=self.prepare_native_boundary(auth,action,connection,None,Some(EnteredFacts::TerminalShell {source,resources:ShellCreationResources::default(),acknowledge}),|entry|entry).await?;
-        let checkpoint=TerminalCreationCheckpoint {security:self,auth,entry:entry.clone()};
-        self.admit_native_boundary(auth,&entry,guard,None,||validate().map(|()|BoundaryReadiness::Ready),effect(checkpoint)).await.map(|_|())
+    pub(crate) async fn terminal_creation_boundary<'a, F, E>(
+        &'a self,
+        boundary: NativeBoundary<'a>,
+        source: Uuid,
+        acknowledge: TerminalCreationAckGuard,
+        validate: impl FnOnce() -> SecurityResult<()>,
+        effect: F,
+    ) -> SecurityResult<()>
+    where
+        F: FnOnce(TerminalCreationCheckpoint<'a>) -> E,
+        E: Future<Output = ReceiptTransition>,
+    {
+        let NativeBoundary {
+            auth,
+            action,
+            connection,
+        } = boundary;
+        let (entry, guard) = self
+            .prepare_native_boundary(
+                auth,
+                action,
+                connection,
+                None,
+                Some(EnteredFacts::TerminalShell {
+                    source,
+                    resources: ShellCreationResources::default(),
+                    acknowledge,
+                }),
+                |entry| entry,
+            )
+            .await?;
+        let checkpoint = TerminalCreationCheckpoint {
+            security: self,
+            auth,
+            entry: entry.clone(),
+        };
+        self.admit_native_boundary(
+            auth,
+            &entry,
+            guard,
+            None,
+            || validate().map(|()| BoundaryReadiness::Ready),
+            effect(checkpoint),
+        )
+        .await
+        .map(|_| ())
     }
-    pub(crate) async fn shell_input_boundary<'a,F,E>(
-        &'a self,auth:&'a Authorized,action:Uuid,target:ShellTarget,source:Uuid,connection:OwnedFd,
-        validate:impl FnOnce()->SecurityResult<()>,effect:F,
-    )->SecurityResult<()> where F:FnOnce(ShellInputCheckpoint<'a>)->E,E:Future<Output=ReceiptTransition> {
-        let (entry,guard)=self.prepare_native_boundary(auth,action,connection,None,Some(EnteredFacts::ShellInput {target,source,progress:ShellDispatchProgress::default()}),|entry|entry).await?;
-        let checkpoint=ShellInputCheckpoint {security:self,auth,entry:entry.clone()};
-        self.admit_native_boundary(auth,&entry,guard,None,||validate().map(|()|BoundaryReadiness::Ready),effect(checkpoint)).await.map(|_|())
+    pub(crate) async fn shell_input_boundary<'a, F, E>(
+        &'a self,
+        boundary: NativeBoundary<'a>,
+        target: ShellTarget,
+        source: Uuid,
+        validate: impl FnOnce() -> SecurityResult<()>,
+        effect: F,
+    ) -> SecurityResult<()>
+    where
+        F: FnOnce(ShellInputCheckpoint<'a>) -> E,
+        E: Future<Output = ReceiptTransition>,
+    {
+        let NativeBoundary {
+            auth,
+            action,
+            connection,
+        } = boundary;
+        let (entry, guard) = self
+            .prepare_native_boundary(
+                auth,
+                action,
+                connection,
+                None,
+                Some(EnteredFacts::ShellInput {
+                    target,
+                    source,
+                    progress: ShellDispatchProgress::default(),
+                }),
+                |entry| entry,
+            )
+            .await?;
+        let checkpoint = ShellInputCheckpoint {
+            security: self,
+            auth,
+            entry: entry.clone(),
+        };
+        self.admit_native_boundary(
+            auth,
+            &entry,
+            guard,
+            None,
+            || validate().map(|()| BoundaryReadiness::Ready),
+            effect(checkpoint),
+        )
+        .await
+        .map(|_| ())
     }
-    pub(crate) async fn agent_alias_boundary<'a,F,E>(
-        &'a self,auth:&'a Authorized,action:Uuid,target:Target,source:Uuid,connection:OwnedFd,
-        validate:impl FnOnce()->SecurityResult<()>,effect:F,
-    )->SecurityResult<()> where F:FnOnce(AgentAliasCheckpoint<'a>)->E,E:Future<Output=ReceiptTransition> {
-        let (entry,guard)=self.prepare_native_boundary(auth,action,connection,None,Some(EnteredFacts::AgentAlias {target,source,result:None}),|entry|entry).await?;
-        let checkpoint=AgentAliasCheckpoint {security:self,auth,entry:entry.clone()};
-        self.admit_native_boundary(auth,&entry,guard,None,||validate().map(|()|BoundaryReadiness::Ready),effect(checkpoint)).await.map(|_|())
+    pub(crate) async fn agent_alias_boundary<'a, F, E>(
+        &'a self,
+        boundary: NativeBoundary<'a>,
+        target: Target,
+        source: Uuid,
+        validate: impl FnOnce() -> SecurityResult<()>,
+        effect: F,
+    ) -> SecurityResult<()>
+    where
+        F: FnOnce(AgentAliasCheckpoint<'a>) -> E,
+        E: Future<Output = ReceiptTransition>,
+    {
+        let NativeBoundary {
+            auth,
+            action,
+            connection,
+        } = boundary;
+        let (entry, guard) = self
+            .prepare_native_boundary(
+                auth,
+                action,
+                connection,
+                None,
+                Some(EnteredFacts::AgentAlias {
+                    target,
+                    source,
+                    result: None,
+                }),
+                |entry| entry,
+            )
+            .await?;
+        let checkpoint = AgentAliasCheckpoint {
+            security: self,
+            auth,
+            entry: entry.clone(),
+        };
+        self.admit_native_boundary(
+            auth,
+            &entry,
+            guard,
+            None,
+            || validate().map(|()| BoundaryReadiness::Ready),
+            effect(checkpoint),
+        )
+        .await
+        .map(|_| ())
     }
     async fn prepare_native_boundary<T: Send + 'static>(
         &self,
@@ -1001,11 +1228,19 @@ impl Security {
         action: Uuid,
         connection: OwnedFd,
         deadline: Option<Instant>,
-        facts:Option<EnteredFacts>,
+        facts: Option<EnteredFacts>,
         wrap: impl FnOnce(Arc<Entered>) -> T + Send + 'static,
     ) -> SecurityResult<(T, OwnedMutexGuard<()>)> {
         stream_socket(&connection)?;
-        self.prepare_entered_boundary(auth,action,EnteredConnection::Native(connection),deadline,facts,wrap).await
+        self.prepare_entered_boundary(
+            auth,
+            action,
+            EnteredConnection::Native(connection),
+            deadline,
+            facts,
+            wrap,
+        )
+        .await
     }
     async fn prepare_entered_boundary<T: Send + 'static>(
         &self,
@@ -1013,11 +1248,14 @@ impl Security {
         action: Uuid,
         connection: EnteredConnection,
         deadline: Option<Instant>,
-        facts:Option<EnteredFacts>,
+        facts: Option<EnteredFacts>,
         wrap: impl FnOnce(Arc<Entered>) -> T + Send + 'static,
     ) -> SecurityResult<(T, OwnedMutexGuard<()>)> {
-        let mut facts=facts;
-        let (connection,effect_owner)=match connection {EnteredConnection::Native(fd)=>(Some(fd),EnteredEffectOwner::NativeSocket),EnteredConnection::AttachmentCleanup=>(None,EnteredEffectOwner::AttachmentCleanup)};
+        let mut facts = facts;
+        let (connection, effect_owner) = match connection {
+            EnteredConnection::Native(fd) => (Some(fd), EnteredEffectOwner::NativeSocket),
+            EnteredConnection::AttachmentCleanup => (None, EnteredEffectOwner::AttachmentCleanup),
+        };
         let guard = match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, self.native_guard(auth))
                 .await
@@ -1040,12 +1278,16 @@ impl Security {
         let entry = self
             .storage
             .call(move |s| {
-                if let Some(EnteredFacts::Attachment {target,progress})=facts.as_mut() {
-                    if attachment_claimed(&fence,&progress.upload_id){return Err(StorageError::Policy(ErrorCode::Busy))}
+                if let Some(EnteredFacts::Attachment { target, progress }) = facts.as_mut() {
+                    if attachment_claimed(&fence, &progress.upload_id) {
+                        return Err(StorageError::Policy(ErrorCode::Busy));
+                    }
                     // Pin durable prior facts while this admission gate excludes competing upload jobs.
-                    if let Some(record)=s.attachment_load(p.peer_id(),&progress.upload_id)? {
-                        if record.target!=*target{return Err(StorageError::Policy(ErrorCode::StaleSession))}
-                        *progress=record.progress();
+                    if let Some(record) = s.attachment_load(p.peer_id(), &progress.upload_id)? {
+                        if record.target != *target {
+                            return Err(StorageError::Policy(ErrorCode::StaleSession));
+                        }
+                        *progress = record.progress();
                     }
                 }
 
@@ -1058,7 +1300,15 @@ impl Security {
                     ReceiptTransition {
                         state: ReceiptState::Dispatching,
                         proof: TransitionProof::Intent,
-                        result: match facts.as_ref(){Some(EnteredFacts::Attachment {target,progress})=>Some(ActionResult::Attachment(ActionResultAttachment {target:target.clone(),progress:progress.clone()})),_=>None},
+                        result: match facts.as_ref() {
+                            Some(EnteredFacts::Attachment { target, progress }) => {
+                                Some(ActionResult::Attachment(ActionResultAttachment {
+                                    target: target.clone(),
+                                    progress: progress.clone(),
+                                }))
+                            }
+                            _ => None,
+                        },
                         error: None,
                         at: now_ms(),
                     },
@@ -1180,30 +1430,38 @@ impl Security {
     where
         F: Future<Output = CreationOutcome>,
     {
-        self.creation_boundary_entered(auth, action, intent, validate, connection, None, None, |_| effect)
-            .await
+        self.creation_boundary_entered(
+            NativeBoundary {
+                auth,
+                action,
+                connection,
+            },
+            intent,
+            validate,
+            None,
+            None,
+            |_| effect,
+        )
+        .await
     }
     pub(crate) async fn thread_creation_boundary<'a, F, E>(
         &'a self,
-        auth: &'a Authorized,
-        action: Uuid,
+        boundary: NativeBoundary<'a>,
         metadata: StageMetadata,
         deadline: Instant,
         stop: watch::Receiver<bool>,
-        validate: impl FnOnce() -> Result<(),CreationAdmissionFailure>,
-        connection: OwnedFd,
+        validate: impl FnOnce() -> Result<(), CreationAdmissionFailure>,
         effect: F,
     ) -> SecurityResult<()>
     where
         F: FnOnce(CreationCheckpoint<'a>) -> E,
         E: Future<Output = CreationOutcome>,
     {
+        let auth = boundary.auth;
         self.creation_boundary_entered(
-            auth,
-            action,
+            boundary,
             (CreationStage::Thread, metadata),
             validate,
-            connection,
             Some(deadline),
             Some(stop),
             |entry| {
@@ -1218,11 +1476,9 @@ impl Security {
     }
     async fn creation_boundary_entered<F, E>(
         &self,
-        auth: &Authorized,
-        action: Uuid,
+        boundary: NativeBoundary<'_>,
         intent: (CreationStage, StageMetadata),
         validate: impl FnOnce() -> Result<(), CreationAdmissionFailure>,
-        connection: OwnedFd,
         deadline: Option<Instant>,
         mut stop: Option<watch::Receiver<bool>>,
         effect: F,
@@ -1231,6 +1487,11 @@ impl Security {
         F: FnOnce(Arc<Entered>) -> E,
         E: Future<Output = CreationOutcome>,
     {
+        let NativeBoundary {
+            auth,
+            action,
+            connection,
+        } = boundary;
         if deadline.is_some_and(|deadline| Instant::now() >= deadline)
             || stop.as_ref().is_some_and(thread_stop_requested)
         {
@@ -1291,7 +1552,7 @@ impl Security {
                 let resources = receipt.creation.ok_or(StorageError::Corrupt)?.resources;
                 let ticket = s.dispatch_ticket(&p, &action)?;
                 let entry = Arc::new(Entered {
-                    effect_owner:EnteredEffectOwner::NativeSocket,
+                    effect_owner: EnteredEffectOwner::NativeSocket,
                     ticket: Mutex::new(Some(ticket)),
                     connection: StdMutex::new(Some(connection)),
                     invalidated: AtomicBool::new(false),
@@ -1299,7 +1560,9 @@ impl Security {
                     done: AtomicBool::new(false),
                     synchronous: false,
                     outcome: StdMutex::new(None),
-                    creation: Some(parking_lot::Mutex::new(EnteredFacts::Agent((resources, metadata)))),
+                    creation: Some(parking_lot::Mutex::new(EnteredFacts::Agent(Box::new((
+                        resources, metadata,
+                    ))))),
                     admission_guard: StdMutex::new(None),
                 });
                 fence
@@ -1365,13 +1628,15 @@ impl Security {
                     }
                 }
             }
-            (None, None) => match tokio::time::timeout(BOUNDARY_TIMEOUT, effect(entry.clone())).await {
-                Ok(outcome) => self.settle_creation(&entry, outcome).await,
-                Err(_) => {
-                    entry.invalidate()?;
-                    self.settle(&entry, lost()).await
+            (None, None) => {
+                match tokio::time::timeout(BOUNDARY_TIMEOUT, effect(entry.clone())).await {
+                    Ok(outcome) => self.settle_creation(&entry, outcome).await,
+                    Err(_) => {
+                        entry.invalidate()?;
+                        self.settle(&entry, lost()).await
+                    }
                 }
-            },
+            }
             _ => Err(ErrorCode::NotReady),
         }
     }
@@ -1384,7 +1649,7 @@ impl Security {
         auth: &Authorized,
         action: Uuid,
         intent: (CreationStage, StageMetadata),
-        validate: impl FnOnce() -> Result<(),CreationAdmissionFailure>,
+        validate: impl FnOnce() -> Result<(), CreationAdmissionFailure>,
         start: impl FnOnce() -> SecurityResult<(T, CreationOutcome)>,
     ) -> SecurityResult<T> {
         let guard = self.native_guard(auth).await?;
@@ -1420,7 +1685,7 @@ impl Security {
                 let resources = receipt.creation.ok_or(StorageError::Corrupt)?.resources;
                 let ticket = s.dispatch_ticket(&p, &action)?;
                 let entry = Arc::new(Entered {
-                    effect_owner:EnteredEffectOwner::NativeSocket,
+                    effect_owner: EnteredEffectOwner::NativeSocket,
                     ticket: Mutex::new(Some(ticket)),
                     connection: StdMutex::new(None),
                     invalidated: AtomicBool::new(false),
@@ -1428,7 +1693,9 @@ impl Security {
                     done: AtomicBool::new(false),
                     synchronous: true,
                     outcome: StdMutex::new(None),
-                    creation: Some(parking_lot::Mutex::new(EnteredFacts::Agent((resources, metadata)))),
+                    creation: Some(parking_lot::Mutex::new(EnteredFacts::Agent(Box::new((
+                        resources, metadata,
+                    ))))),
                     admission_guard: StdMutex::new(None),
                 });
                 fence
@@ -1459,8 +1726,7 @@ impl Security {
                 return Err(code);
             }
         };
-        *entry.outcome.lock().expect("boundary outcome mutex") =
-            Some(BoundaryOutcome::Creation(Box::new(outcome)));
+        *entry.outcome.lock().expect("boundary outcome mutex") = Some(outcome.into());
         drop(guard);
         self.finish(&entry).await?;
         Ok(value)
@@ -1479,7 +1745,7 @@ impl Security {
             .outcome
             .lock()
             .expect("boundary outcome mutex")
-            .get_or_insert(BoundaryOutcome::Receipt(outcome));
+            .get_or_insert(outcome.into());
         self.finish(entry).await
     }
     async fn settle_creation(
@@ -1491,7 +1757,7 @@ impl Security {
             .outcome
             .lock()
             .expect("boundary outcome mutex")
-            .get_or_insert_with(|| BoundaryOutcome::Creation(Box::new(outcome)));
+            .get_or_insert_with(|| outcome.into());
         self.finish(entry).await
     }
     async fn finish(&self, entry: &Arc<Entered>) -> SecurityResult<()> {
@@ -1509,53 +1775,116 @@ impl Security {
             let completed = entry.clone();
             admission
                 .call(move |s| {
-                    match outcome {
-                        BoundaryOutcome::Creation(outcome) => {
+                    let BoundaryOutcome { result, kind } = outcome;
+                    match kind {
+                        BoundaryOutcomeKind::Creation(outcome) => {
                             s.settle_creation_stage(ticket, *outcome)?
                         }
-                        BoundaryOutcome::Receipt(outcome) => match &completed.creation {
-                            Some(creation) => {
-                                let creation = creation.lock();
-                                let EnteredFacts::Agent((resources,metadata))=&*creation else {
-                                    match &*creation {
-                                        EnteredFacts::TerminalShell {resources,acknowledge,..}=>s.settle_terminal_creation_dispatch(ticket,outcome,resources.clone(),|facts,commit|acknowledge(facts,&mut ||{if completed.invalidated.load(Ordering::Acquire){return Err(ErrorCode::StaleSession)}commit()}))?,
-                                        EnteredFacts::ShellInput {progress,..}=>s.settle_shell_input_dispatch(ticket,outcome,progress.clone())?,
-                                        EnteredFacts::Attachment {target,progress}=>s.settle_attachment_dispatch(ticket,outcome,ActionResultAttachment {target:target.clone(),progress:progress.clone()})?,
-                                        EnteredFacts::AgentAlias {result,..}=>s.settle_agent_alias_dispatch(ticket,outcome,result.clone())?,
-                                        EnteredFacts::PromptImages(_)=>s.settle_dispatch(ticket,outcome)?,
-                                        EnteredFacts::Agent(_)=>return Err(StorageError::Corrupt),
-                                    }
-                                    completed.done.store(true,Ordering::Release);
-                                    completed.connection.lock().expect("boundary descriptor mutex").take();
-                                    return Ok(());
-                                };
-                                if outcome.state == ReceiptState::Failed {
-                                    let definitive = completed
-                                        .admission_guard
-                                        .lock()
-                                        .expect("creation admission guard mutex")
-                                        .map(CreationAdmissionGuard::proof)
-                                        .unwrap_or_else(|| {
-                                            Id("native stage admission denied before start".into())
-                                        });
-                                    let stage = CreationOutcome {
-                                        resources: resources.clone(),
-                                        metadata: metadata.clone(),
-                                        state: StageState::Failed,
-                                        definitive: Some(definitive),
-                                        at: outcome.at,
+                        BoundaryOutcomeKind::Receipt {
+                            state,
+                            proof,
+                            error,
+                            at,
+                        } => {
+                            let outcome = ReceiptTransition {
+                                state,
+                                proof,
+                                result,
+                                error,
+                                at,
+                            };
+                            match &completed.creation {
+                                Some(creation) => {
+                                    let creation = creation.lock();
+                                    let EnteredFacts::Agent(facts) = &*creation else {
+                                        match &*creation {
+                                            EnteredFacts::TerminalShell {
+                                                resources,
+                                                acknowledge,
+                                                ..
+                                            } => s.settle_terminal_creation_dispatch(
+                                                ticket,
+                                                outcome,
+                                                resources.clone(),
+                                                |facts, commit| {
+                                                    acknowledge(facts, &mut || {
+                                                        if completed
+                                                            .invalidated
+                                                            .load(Ordering::Acquire)
+                                                        {
+                                                            return Err(ErrorCode::StaleSession);
+                                                        }
+                                                        commit()
+                                                    })
+                                                },
+                                            )?,
+                                            EnteredFacts::ShellInput { progress, .. } => s
+                                                .settle_shell_input_dispatch(
+                                                    ticket,
+                                                    outcome,
+                                                    progress.clone(),
+                                                )?,
+                                            EnteredFacts::Attachment { target, progress } => s
+                                                .settle_attachment_dispatch(
+                                                    ticket,
+                                                    outcome,
+                                                    ActionResultAttachment {
+                                                        target: target.clone(),
+                                                        progress: progress.clone(),
+                                                    },
+                                                )?,
+                                            EnteredFacts::AgentAlias { result, .. } => s
+                                                .settle_agent_alias_dispatch(
+                                                    ticket,
+                                                    outcome,
+                                                    result.clone(),
+                                                )?,
+                                            EnteredFacts::PromptImages(_) => {
+                                                s.settle_dispatch(ticket, outcome)?
+                                            }
+                                            EnteredFacts::Agent(_) => {
+                                                return Err(StorageError::Corrupt);
+                                            }
+                                        }
+                                        completed.done.store(true, Ordering::Release);
+                                        completed
+                                            .connection
+                                            .lock()
+                                            .expect("boundary descriptor mutex")
+                                            .take();
+                                        return Ok(());
                                     };
-                                    s.settle_creation_failure(ticket, stage, outcome)?;
-                                } else {
-                                    s.settle_creation_lost(
-                                        ticket,
-                                        resources.clone(),metadata.clone(),
-                                        outcome.at,
-                                    )?;
+                                    let (resources, metadata) = &**facts;
+                                    if outcome.state == ReceiptState::Failed {
+                                        let definitive = completed
+                                            .admission_guard
+                                            .lock()
+                                            .expect("creation admission guard mutex")
+                                            .map(CreationAdmissionGuard::proof)
+                                            .unwrap_or_else(|| {
+                                                Id("native stage admission denied before start"
+                                                    .into())
+                                            });
+                                        let stage = CreationOutcome {
+                                            resources: resources.clone(),
+                                            metadata: metadata.clone(),
+                                            state: StageState::Failed,
+                                            definitive: Some(definitive),
+                                            at: outcome.at,
+                                        };
+                                        s.settle_creation_failure(ticket, stage, outcome)?;
+                                    } else {
+                                        s.settle_creation_lost(
+                                            ticket,
+                                            resources.clone(),
+                                            metadata.clone(),
+                                            outcome.at,
+                                        )?;
+                                    }
                                 }
+                                None => s.settle_dispatch(ticket, outcome)?,
                             }
-                            None => s.settle_dispatch(ticket, outcome)?,
-                        },
+                        }
                     }
                     completed.done.store(true, Ordering::Release);
                     completed
@@ -1587,7 +1916,9 @@ impl Security {
     pub async fn revoke(&self, peer: Uuid, self_connection: Option<Uuid>) -> SecurityResult<bool> {
         let fence = self.peer(&peer);
         fence.stopped.store(true, Ordering::Release);
-        if let Some(push)=self.push.get(){push.cancel(&peer);}
+        if let Some(push) = self.push.get() {
+            push.cancel(&peer);
+        }
         let _guard = fence.gate.clone().lock_owned().await;
         let id = peer.clone();
         let changed = self
@@ -1608,7 +1939,9 @@ impl Security {
             c.close(0u32.into(), b"revoked");
         }
         drop(_guard);
-        if let Some(push)=self.push.get(){push.drain_peer(&peer).await?;}
+        if let Some(push) = self.push.get() {
+            push.drain_peer(&peer).await?;
+        }
         let entries = fence.entered.lock().expect("entered mutex").clone();
         let deadline = Instant::now() + BOUNDARY_TIMEOUT;
         for entry in entries {
@@ -1699,12 +2032,15 @@ fn no_effect(code: ErrorCode) -> ReceiptTransition {
     no_effect_admission(code.into())
 }
 fn no_effect_admission(failure: CreationAdmissionFailure) -> ReceiptTransition {
-    if failure.guard==Some(CreationAdmissionGuard::Directory) {
+    if failure.guard == Some(CreationAdmissionGuard::Directory) {
         // The earlier native workspace exists, but its required directory/cwd
         // proof was lost. No subsequent input/start is admitted; retain uncertainty.
         return ReceiptTransition {
-            state:ReceiptState::Uncertain,proof:TransitionProof::LostOutcome,
-            result:None,error:Some(crate::transport::wire_error(failure.code)),at:now_ms(),
+            state: ReceiptState::Uncertain,
+            proof: TransitionProof::LostOutcome,
+            result: None,
+            error: Some(crate::transport::wire_error(failure.code)),
+            at: now_ms(),
         };
     }
     ReceiptTransition {
@@ -1766,172 +2102,766 @@ impl RequestRate {
     }
 }
 
-
-
 /// The native writer retains progress synchronously with the same entered ticket before
 /// yielding. Dropping the waiting caller cannot lose a partial frame's byte facts.
-pub(crate) struct ShellInputProgressOwner {entry:Arc<Entered>,target:ShellTarget,source:Uuid}
+pub(crate) struct ShellInputProgressOwner {
+    entry: Arc<Entered>,
+    target: ShellTarget,
+    source: Uuid,
+}
 impl ShellInputProgressOwner {
-    pub(crate) fn retain(&self,progress:&ShellDispatchProgress)->SecurityResult<()> {
-        progress.validate().map_err(|_|ErrorCode::InvalidRequest)?;
-        let mut held=self.entry.creation.as_ref().ok_or(ErrorCode::NotReady)?.lock();
-        let EnteredFacts::ShellInput {target,source,progress:known}=&mut *held else{return Err(ErrorCode::InvalidRequest)};
-        if target!=&self.target||source!=&self.source{return Err(ErrorCode::StaleSession);}
-        crate::storage::retain_shell_input_facts(known,progress).map_err(store_error)?;
-        *known=progress.clone();Ok(())
+    pub(crate) fn retain(&self, progress: &ShellDispatchProgress) -> SecurityResult<()> {
+        progress.validate().map_err(|_| ErrorCode::InvalidRequest)?;
+        let mut held = self
+            .entry
+            .creation
+            .as_ref()
+            .ok_or(ErrorCode::NotReady)?
+            .lock();
+        let EnteredFacts::ShellInput {
+            target,
+            source,
+            progress: known,
+        } = &mut *held
+        else {
+            return Err(ErrorCode::InvalidRequest);
+        };
+        if target != &self.target || source != &self.source {
+            return Err(ErrorCode::StaleSession);
+        }
+        crate::storage::retain_shell_input_facts(known, progress).map_err(store_error)?;
+        *known = progress.clone();
+        Ok(())
     }
-    pub(crate) fn progress(&self)->SecurityResult<ShellDispatchProgress> {
-        let held=self.entry.creation.as_ref().ok_or(ErrorCode::NotReady)?.lock();
-        match &*held {EnteredFacts::ShellInput{progress,..}=>Ok(progress.clone()),_=>Err(ErrorCode::InvalidRequest)}
+    pub(crate) fn progress(&self) -> SecurityResult<ShellDispatchProgress> {
+        let held = self
+            .entry
+            .creation
+            .as_ref()
+            .ok_or(ErrorCode::NotReady)?
+            .lock();
+        match &*held {
+            EnteredFacts::ShellInput { progress, .. } => Ok(progress.clone()),
+            _ => Err(ErrorCode::InvalidRequest),
+        }
     }
 }
-pub(crate) struct ShellInputCheckpoint<'a> {security:&'a Security,auth:&'a Authorized,entry:Arc<Entered>}
+pub(crate) struct ShellInputCheckpoint<'a> {
+    security: &'a Security,
+    auth: &'a Authorized,
+    entry: Arc<Entered>,
+}
 impl ShellInputCheckpoint<'_> {
-    pub(crate) fn owner(&self,target:&ShellTarget,source:&Uuid)->SecurityResult<ShellInputProgressOwner> {
-        let owner=ShellInputProgressOwner{entry:self.entry.clone(),target:target.clone(),source:source.clone()};
-        owner.retain(&ShellDispatchProgress::default())?;Ok(owner)
+    pub(crate) fn owner(
+        &self,
+        target: &ShellTarget,
+        source: &Uuid,
+    ) -> SecurityResult<ShellInputProgressOwner> {
+        let owner = ShellInputProgressOwner {
+            entry: self.entry.clone(),
+            target: target.clone(),
+            source: source.clone(),
+        };
+        owner.retain(&ShellDispatchProgress::default())?;
+        Ok(owner)
     }
-    pub(crate) async fn checkpoint(&self)->SecurityResult<()> {
-        let _guard=self.security.native_guard(self.auth).await?;
-        let entry=self.entry.clone();
-        self.security.storage.call(move|store| {
-            let held=entry.ticket.try_lock().map_err(|_|StorageError::Policy(ErrorCode::NotReady))?;
-            let ticket=held.as_ref().ok_or(StorageError::Policy(ErrorCode::NotReady))?;
-            if entry.done.load(Ordering::Acquire) || entry.invalidated.load(Ordering::Acquire) || !entry.started.load(Ordering::Acquire) {return Err(StorageError::Policy(ErrorCode::NotReady))}
-            let facts=entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
-            let EnteredFacts::ShellInput {progress,..}=&*facts else {return Err(StorageError::Corrupt)};
-            store.checkpoint_shell_input_facts(ticket,progress.clone(),now_ms())
-        }).await.map_err(store_error)
+    pub(crate) async fn checkpoint(&self) -> SecurityResult<()> {
+        let _guard = self.security.native_guard(self.auth).await?;
+        let entry = self.entry.clone();
+        self.security
+            .storage
+            .call(move |store| {
+                let held = entry
+                    .ticket
+                    .try_lock()
+                    .map_err(|_| StorageError::Policy(ErrorCode::NotReady))?;
+                let ticket = held
+                    .as_ref()
+                    .ok_or(StorageError::Policy(ErrorCode::NotReady))?;
+                if entry.done.load(Ordering::Acquire)
+                    || entry.invalidated.load(Ordering::Acquire)
+                    || !entry.started.load(Ordering::Acquire)
+                {
+                    return Err(StorageError::Policy(ErrorCode::NotReady));
+                }
+                let facts = entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
+                let EnteredFacts::ShellInput { progress, .. } = &*facts else {
+                    return Err(StorageError::Corrupt);
+                };
+                store.checkpoint_shell_input_facts(ticket, progress.clone(), now_ms())
+            })
+            .await
+            .map_err(store_error)
     }
 }
 
 /// Alias effect facts remain owned by the original entered ticket, including revoke.
-pub(crate) struct AgentAliasCheckpoint<'a> {security:&'a Security,auth:&'a Authorized,entry:Arc<Entered>}
+pub(crate) struct AgentAliasCheckpoint<'a> {
+    security: &'a Security,
+    auth: &'a Authorized,
+    entry: Arc<Entered>,
+}
 impl AgentAliasCheckpoint<'_> {
-    pub(crate) fn retain(&self,target:&Target,source:&Uuid,result:ActionResultAgentRenamed)->SecurityResult<()> {
-        result.validate().map_err(|_|ErrorCode::InvalidRequest)?;
-        let mut held=self.entry.creation.as_ref().ok_or(ErrorCode::NotReady)?.lock();
-        let EnteredFacts::AgentAlias {target:original,source:epoch,result:known}=&mut *held else {return Err(ErrorCode::InvalidRequest)};
-        if original!=target || epoch!=source || result.target!=*target || known.as_ref().is_some_and(|old|old!=&result) {return Err(ErrorCode::StaleSession)}
-        *known=Some(result);Ok(())
+    pub(crate) fn retain(
+        &self,
+        target: &Target,
+        source: &Uuid,
+        result: ActionResultAgentRenamed,
+    ) -> SecurityResult<()> {
+        result.validate().map_err(|_| ErrorCode::InvalidRequest)?;
+        let mut held = self
+            .entry
+            .creation
+            .as_ref()
+            .ok_or(ErrorCode::NotReady)?
+            .lock();
+        let EnteredFacts::AgentAlias {
+            target: original,
+            source: epoch,
+            result: known,
+        } = &mut *held
+        else {
+            return Err(ErrorCode::InvalidRequest);
+        };
+        if original != target
+            || epoch != source
+            || result.target != *target
+            || known.as_ref().is_some_and(|old| old != &result)
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        *known = Some(result);
+        Ok(())
     }
-    pub(crate) async fn checkpoint(&self)->SecurityResult<()> {
-        let _guard=self.security.native_guard(self.auth).await?;let entry=self.entry.clone();
-        self.security.storage.call(move|store| {
-            let held=entry.ticket.try_lock().map_err(|_|StorageError::Policy(ErrorCode::NotReady))?;
-            let ticket=held.as_ref().ok_or(StorageError::Policy(ErrorCode::NotReady))?;
-            if entry.done.load(Ordering::Acquire) || entry.invalidated.load(Ordering::Acquire) || !entry.started.load(Ordering::Acquire) {return Err(StorageError::Policy(ErrorCode::NotReady))}
-            let facts=entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
-            let EnteredFacts::AgentAlias {result:Some(result),..}=&*facts else {return Err(StorageError::Corrupt)};
-            store.checkpoint_agent_alias_facts(ticket,result.clone(),now_ms())
-        }).await.map_err(store_error)
+    pub(crate) async fn checkpoint(&self) -> SecurityResult<()> {
+        let _guard = self.security.native_guard(self.auth).await?;
+        let entry = self.entry.clone();
+        self.security
+            .storage
+            .call(move |store| {
+                let held = entry
+                    .ticket
+                    .try_lock()
+                    .map_err(|_| StorageError::Policy(ErrorCode::NotReady))?;
+                let ticket = held
+                    .as_ref()
+                    .ok_or(StorageError::Policy(ErrorCode::NotReady))?;
+                if entry.done.load(Ordering::Acquire)
+                    || entry.invalidated.load(Ordering::Acquire)
+                    || !entry.started.load(Ordering::Acquire)
+                {
+                    return Err(StorageError::Policy(ErrorCode::NotReady));
+                }
+                let facts = entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
+                let EnteredFacts::AgentAlias {
+                    result: Some(result),
+                    ..
+                } = &*facts
+                else {
+                    return Err(StorageError::Corrupt);
+                };
+                store.checkpoint_agent_alias_facts(ticket, result.clone(), now_ms())
+            })
+            .await
+            .map_err(store_error)
     }
 }
 
-
-pub(crate) struct AttachmentCheckpoint<'a> {security:&'a Security,entry:Arc<Entered>}
+pub(crate) struct AttachmentCheckpoint<'a> {
+    security: &'a Security,
+    entry: Arc<Entered>,
+}
 impl Security {
-    pub(crate) async fn attachment_boundary<'a,F,E>(
-        &'a self,auth:&'a Authorized,action:Uuid,target:Target,upload:Uuid,connection:OwnedFd,
-        validate:impl FnOnce()->SecurityResult<()>,effect:F,
-    )->SecurityResult<()> where F:FnOnce(AttachmentCheckpoint<'a>)->E,E:Future<Output=ReceiptTransition>{
-        let facts=AttachmentProgress {upload_id:upload,committed_bytes:Uint(0),expires_at:None,provider_path:None,published:None,discarded:None};
-        let (entry,guard)=self.prepare_native_boundary(auth,action,connection,None,Some(EnteredFacts::Attachment {target,progress:facts}),|entry|entry).await?;
-        let checkpoint=AttachmentCheckpoint {security:self,entry:entry.clone()};
-        self.admit_native_boundary(auth,&entry,guard,None,||validate().map(|()|BoundaryReadiness::Ready),effect(checkpoint)).await.map(|_|())
+    pub(crate) async fn attachment_boundary<'a, F, E>(
+        &'a self,
+        boundary: NativeBoundary<'a>,
+        target: Target,
+        upload: Uuid,
+        validate: impl FnOnce() -> SecurityResult<()>,
+        effect: F,
+    ) -> SecurityResult<()>
+    where
+        F: FnOnce(AttachmentCheckpoint<'a>) -> E,
+        E: Future<Output = ReceiptTransition>,
+    {
+        let NativeBoundary {
+            auth,
+            action,
+            connection,
+        } = boundary;
+        let facts = AttachmentProgress {
+            upload_id: upload,
+            committed_bytes: Uint(0),
+            expires_at: None,
+            provider_path: None,
+            published: None,
+            discarded: None,
+        };
+        let (entry, guard) = self
+            .prepare_native_boundary(
+                auth,
+                action,
+                connection,
+                None,
+                Some(EnteredFacts::Attachment {
+                    target,
+                    progress: facts,
+                }),
+                |entry| entry,
+            )
+            .await?;
+        let checkpoint = AttachmentCheckpoint {
+            security: self,
+            entry: entry.clone(),
+        };
+        self.admit_native_boundary(
+            auth,
+            &entry,
+            guard,
+            None,
+            || validate().map(|()| BoundaryReadiness::Ready),
+            effect(checkpoint),
+        )
+        .await
+        .map(|_| ())
     }
-    pub(crate) async fn attachment_cleanup_boundary<'a,F,E>(
-        &'a self,auth:&'a Authorized,action:Uuid,params:&AttachmentsDiscardParams,context:&crate::attachments::CleanupContext,effect:F,
-    )->SecurityResult<()> where F:FnOnce(AttachmentCheckpoint<'a>)->E,E:Future<Output=ReceiptTransition>{
-        if params.boot_id!=self.boot{return Err(ErrorCode::StaleHost)}context.validate(auth.proof.peer_id(),params)?;
-        let (entry,guard)=self.prepare_entered_boundary(auth,action,EnteredConnection::AttachmentCleanup,None,Some(EnteredFacts::Attachment {target:params.target.clone(),progress:context.progress()}),|entry|entry).await?;
-        let checkpoint=AttachmentCheckpoint {security:self,entry:entry.clone()};
-        self.admit_native_boundary(auth,&entry,guard,None,||context.validate(auth.proof.peer_id(),params).map(|()|BoundaryReadiness::Ready),effect(checkpoint)).await.map(|_|())
+    pub(crate) async fn attachment_cleanup_boundary<'a, F, E>(
+        &'a self,
+        auth: &'a Authorized,
+        action: Uuid,
+        params: &AttachmentsDiscardParams,
+        context: &crate::attachments::CleanupContext,
+        effect: F,
+    ) -> SecurityResult<()>
+    where
+        F: FnOnce(AttachmentCheckpoint<'a>) -> E,
+        E: Future<Output = ReceiptTransition>,
+    {
+        if params.boot_id != self.boot {
+            return Err(ErrorCode::StaleHost);
+        }
+        context.validate(auth.proof.peer_id(), params)?;
+        let (entry, guard) = self
+            .prepare_entered_boundary(
+                auth,
+                action,
+                EnteredConnection::AttachmentCleanup,
+                None,
+                Some(EnteredFacts::Attachment {
+                    target: params.target.clone(),
+                    progress: context.progress(),
+                }),
+                |entry| entry,
+            )
+            .await?;
+        let checkpoint = AttachmentCheckpoint {
+            security: self,
+            entry: entry.clone(),
+        };
+        self.admit_native_boundary(
+            auth,
+            &entry,
+            guard,
+            None,
+            || {
+                context
+                    .validate(auth.proof.peer_id(), params)
+                    .map(|()| BoundaryReadiness::Ready)
+            },
+            effect(checkpoint),
+        )
+        .await
+        .map(|_| ())
     }
 }
 impl AttachmentCheckpoint<'_> {
-    pub(crate) async fn execute(&self,peer:Uuid,action:Uuid,body:RequestBody,context:Option<crate::attachments::ProviderContext>)->ReceiptTransition {
-        let entry=self.entry.clone();
-        let outcome=self.security.storage.call(move|store|{
-            let held=entry.ticket.try_lock().map_err(|_|StorageError::Policy(ErrorCode::Busy))?;
-            let ticket=held.as_ref().ok_or(StorageError::Policy(ErrorCode::NotReady))?;
-            let (target,initial)={let facts=entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();let EnteredFacts::Attachment {target,progress}=&*facts else{return Err(StorageError::Corrupt)};(target.clone(),progress.clone())};
-            if entry.invalidated.load(Ordering::Acquire)||entry.done.load(Ordering::Acquire)||!entry.started.load(Ordering::Acquire){return Err(StorageError::Policy(ErrorCode::NotReady))}
-            store.checkpoint_attachment_facts(ticket,ActionResultAttachment {target:target.clone(),progress:initial},now_ms())?;
-            let mut retain=|progress:AttachmentProgress|->Result<(),StorageError>{
-                progress.validate()?;let mut facts=entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
-                let EnteredFacts::Attachment {progress:known,..}=&mut *facts else{return Err(StorageError::Corrupt)};
-                if !progress.retains(known){return Err(StorageError::Corrupt)}*known=progress;Ok(())
-            };
-            let result=store.attachment_effect(&peer,&action,&body,context.as_ref(),&||!entry.invalidated.load(Ordering::Acquire)&&!entry.done.load(Ordering::Acquire),&mut retain);
-            let progress={let facts=entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();let EnteredFacts::Attachment {progress,..}=&*facts else{return Err(StorageError::Corrupt)};progress.clone()};
-            store.checkpoint_attachment_facts(ticket,ActionResultAttachment {target:target.clone(),progress:progress.clone()},now_ms())?;
-            Ok((target,progress,result.is_ok()&&!entry.invalidated.load(Ordering::Acquire)))
-        }).await;
+    pub(crate) async fn execute(
+        &self,
+        peer: Uuid,
+        action: Uuid,
+        body: RequestBody,
+        context: Option<crate::attachments::ProviderContext>,
+    ) -> ReceiptTransition {
+        let entry = self.entry.clone();
+        let outcome = self
+            .security
+            .storage
+            .call(move |store| {
+                let held = entry
+                    .ticket
+                    .try_lock()
+                    .map_err(|_| StorageError::Policy(ErrorCode::Busy))?;
+                let ticket = held
+                    .as_ref()
+                    .ok_or(StorageError::Policy(ErrorCode::NotReady))?;
+                let (target, initial) = {
+                    let facts = entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
+                    let EnteredFacts::Attachment { target, progress } = &*facts else {
+                        return Err(StorageError::Corrupt);
+                    };
+                    (target.clone(), progress.clone())
+                };
+                if entry.invalidated.load(Ordering::Acquire)
+                    || entry.done.load(Ordering::Acquire)
+                    || !entry.started.load(Ordering::Acquire)
+                {
+                    return Err(StorageError::Policy(ErrorCode::NotReady));
+                }
+                store.checkpoint_attachment_facts(
+                    ticket,
+                    ActionResultAttachment {
+                        target: target.clone(),
+                        progress: initial,
+                    },
+                    now_ms(),
+                )?;
+                let mut retain = |progress: AttachmentProgress| -> Result<(), StorageError> {
+                    progress.validate()?;
+                    let mut facts = entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
+                    let EnteredFacts::Attachment {
+                        progress: known, ..
+                    } = &mut *facts
+                    else {
+                        return Err(StorageError::Corrupt);
+                    };
+                    if !progress.retains(known) {
+                        return Err(StorageError::Corrupt);
+                    }
+                    *known = progress;
+                    Ok(())
+                };
+                let result = store.attachment_effect(
+                    &peer,
+                    &action,
+                    &body,
+                    context.as_ref(),
+                    &|| {
+                        !entry.invalidated.load(Ordering::Acquire)
+                            && !entry.done.load(Ordering::Acquire)
+                    },
+                    &mut retain,
+                );
+                let progress = {
+                    let facts = entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
+                    let EnteredFacts::Attachment { progress, .. } = &*facts else {
+                        return Err(StorageError::Corrupt);
+                    };
+                    progress.clone()
+                };
+                store.checkpoint_attachment_facts(
+                    ticket,
+                    ActionResultAttachment {
+                        target: target.clone(),
+                        progress: progress.clone(),
+                    },
+                    now_ms(),
+                )?;
+                Ok((
+                    target,
+                    progress,
+                    result.is_ok() && !entry.invalidated.load(Ordering::Acquire),
+                ))
+            })
+            .await;
         match outcome {
-            Ok((target,progress,true))=>ReceiptTransition {state:ReceiptState::Succeeded,proof:TransitionProof::CorrelatedAcknowledgement(Id("private attachment effect committed".into())),result:Some(ActionResult::Attachment(ActionResultAttachment {target,progress})),error:None,at:now_ms()},
-            _=>ReceiptTransition {state:ReceiptState::Uncertain,proof:TransitionProof::LostOutcome,result:None,error:None,at:now_ms()},
+            Ok((target, progress, true)) => ReceiptTransition {
+                state: ReceiptState::Succeeded,
+                proof: TransitionProof::CorrelatedAcknowledgement(Id(
+                    "private attachment effect committed".into(),
+                )),
+                result: Some(ActionResult::Attachment(ActionResultAttachment {
+                    target,
+                    progress,
+                })),
+                error: None,
+                at: now_ms(),
+            },
+            _ => ReceiptTransition {
+                state: ReceiptState::Uncertain,
+                proof: TransitionProof::LostOutcome,
+                result: None,
+                error: None,
+                at: now_ms(),
+            },
         }
     }
 }
 
-fn attachment_claimed(fence:&PeerFence,upload:&Uuid)->bool {
+fn attachment_claimed(fence: &PeerFence, upload: &Uuid) -> bool {
     fence.entered.lock().expect("entered mutex").iter().any(|entry|{
         !entry.done.load(Ordering::Acquire) && entry.creation.as_ref().is_some_and(|facts|matches!(&*facts.lock(),EnteredFacts::Attachment {progress,..} if &progress.upload_id==upload))
     })
 }
-impl Security {pub(crate) fn attachment_claim_busy(&self,auth:&Authorized,upload:&Uuid)->bool {attachment_claimed(&auth.fence,upload)}}
 impl Security {
-    pub(crate) async fn attachment_maintenance(&self,now:u64)->SecurityResult<()> {
-        let peers=self.storage.call(|store|store.attachment_peers()).await.map_err(store_error)?;
+    pub(crate) fn attachment_claim_busy(&self, auth: &Authorized, upload: &Uuid) -> bool {
+        attachment_claimed(&auth.fence, upload)
+    }
+}
+impl Security {
+    pub(crate) async fn attachment_maintenance(&self, now: u64) -> SecurityResult<()> {
+        let peers = self
+            .storage
+            .call(|store| store.attachment_peers())
+            .await
+            .map_err(store_error)?;
         for peer in peers {
-            let fence=self.peer(&peer);let _gate=fence.gate.clone().lock_owned().await;
-            let busy:Vec<Uuid>=fence.entered.lock().expect("entered mutex").iter().filter(|entry|!entry.done.load(Ordering::Acquire)).filter_map(|entry|entry.creation.as_ref().and_then(|facts|match &*facts.lock(){EnteredFacts::Attachment {progress,..}=>Some(progress.upload_id.clone()),_=>None})).collect();
-            self.storage.call(move|store|store.attachment_maintenance_peer(&peer,&busy,now)).await.map_err(store_error)?;
-        }Ok(())
+            let fence = self.peer(&peer);
+            let _gate = fence.gate.clone().lock_owned().await;
+            let busy: Vec<Uuid> = fence
+                .entered
+                .lock()
+                .expect("entered mutex")
+                .iter()
+                .filter(|entry| !entry.done.load(Ordering::Acquire))
+                .filter_map(|entry| {
+                    entry
+                        .creation
+                        .as_ref()
+                        .and_then(|facts| match &*facts.lock() {
+                            EnteredFacts::Attachment { progress, .. } => {
+                                Some(progress.upload_id.clone())
+                            }
+                            _ => None,
+                        })
+                })
+                .collect();
+            self.storage
+                .call(move |store| store.attachment_maintenance_peer(&peer, &busy, now))
+                .await
+                .map_err(store_error)?;
+        }
+        Ok(())
     }
 }
 
-pub(crate) struct TerminalCreationCheckpoint<'a> {security:&'a Security,auth:&'a Authorized,entry:Arc<Entered>}
+pub(crate) struct TerminalCreationCheckpoint<'a> {
+    security: &'a Security,
+    auth: &'a Authorized,
+    entry: Arc<Entered>,
+}
 impl TerminalCreationCheckpoint<'_> {
-    pub(crate) fn retain(&self,source:&Uuid,resources:&ShellCreationResources)->SecurityResult<()> {
-        resources.validate().map_err(|_|ErrorCode::InvalidRequest)?;
-        let mut held=self.entry.creation.as_ref().ok_or(ErrorCode::NotReady)?.lock();
-        let EnteredFacts::TerminalShell {source:epoch,resources:known,..}=&mut *held else {return Err(ErrorCode::InvalidRequest)};
-        if epoch!=source {return Err(ErrorCode::StaleSession)}
-        crate::storage::retain_shell_facts(known,resources).map_err(store_error)?;
+    pub(crate) fn retain(
+        &self,
+        source: &Uuid,
+        resources: &ShellCreationResources,
+    ) -> SecurityResult<()> {
+        resources
+            .validate()
+            .map_err(|_| ErrorCode::InvalidRequest)?;
+        let mut held = self
+            .entry
+            .creation
+            .as_ref()
+            .ok_or(ErrorCode::NotReady)?
+            .lock();
+        let EnteredFacts::TerminalShell {
+            source: epoch,
+            resources: known,
+            ..
+        } = &mut *held
+        else {
+            return Err(ErrorCode::InvalidRequest);
+        };
+        if epoch != source {
+            return Err(ErrorCode::StaleSession);
+        }
+        crate::storage::retain_shell_facts(known, resources).map_err(store_error)?;
         // Synchronous before the next await. Even a later failed durable checkpoint
         // leaves these facts with the exact entered settlement owner.
-        *known=resources.clone();Ok(())
+        *known = resources.clone();
+        Ok(())
     }
-    pub(crate) async fn checkpoint(&self)->SecurityResult<()> {
-        let _guard=self.security.native_guard(self.auth).await?;
-        let entry=self.entry.clone();
-        self.security.storage.call(move|store| {
-            let held=entry.ticket.try_lock().map_err(|_|StorageError::Policy(ErrorCode::NotReady))?;
-            let ticket=held.as_ref().ok_or(StorageError::Policy(ErrorCode::NotReady))?;
-            if entry.done.load(Ordering::Acquire) || entry.invalidated.load(Ordering::Acquire) || !entry.started.load(Ordering::Acquire) {return Err(StorageError::Policy(ErrorCode::NotReady))}
-            let facts=entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
-            let EnteredFacts::TerminalShell {resources,..}=&*facts else {return Err(StorageError::Corrupt)};
-            store.checkpoint_shell_facts(ticket,resources.clone(),now_ms())
-        }).await.map_err(store_error)
+    pub(crate) async fn checkpoint(&self) -> SecurityResult<()> {
+        let _guard = self.security.native_guard(self.auth).await?;
+        let entry = self.entry.clone();
+        self.security
+            .storage
+            .call(move |store| {
+                let held = entry
+                    .ticket
+                    .try_lock()
+                    .map_err(|_| StorageError::Policy(ErrorCode::NotReady))?;
+                let ticket = held
+                    .as_ref()
+                    .ok_or(StorageError::Policy(ErrorCode::NotReady))?;
+                if entry.done.load(Ordering::Acquire)
+                    || entry.invalidated.load(Ordering::Acquire)
+                    || !entry.started.load(Ordering::Acquire)
+                {
+                    return Err(StorageError::Policy(ErrorCode::NotReady));
+                }
+                let facts = entry.creation.as_ref().ok_or(StorageError::Corrupt)?.lock();
+                let EnteredFacts::TerminalShell { resources, .. } = &*facts else {
+                    return Err(StorageError::Corrupt);
+                };
+                store.checkpoint_shell_facts(ticket, resources.clone(), now_ms())
+            })
+            .await
+            .map_err(store_error)
     }
 }
 
-
 impl Security {
-    pub(crate) async fn push_guard(&self,proof:&AuthenticatedPeer)->SecurityResult<OwnedMutexGuard<()>>{
-        let fence=self.peer(proof.peer_id());if fence.stopped.load(Ordering::Acquire){return Err(ErrorCode::Unauthorized)}
-        let guard=fence.gate.clone().lock_owned().await;let proof=proof.clone();self.storage.call(move|s|s.recheck(&proof)).await.map_err(store_error)?;
-        if fence.stopped.load(Ordering::Acquire){return Err(ErrorCode::Unauthorized)}Ok(guard)
+    pub(crate) async fn push_guard(
+        &self,
+        proof: &AuthenticatedPeer,
+    ) -> SecurityResult<OwnedMutexGuard<()>> {
+        let fence = self.peer(proof.peer_id());
+        if fence.stopped.load(Ordering::Acquire) {
+            return Err(ErrorCode::Unauthorized);
+        }
+        let guard = fence.gate.clone().lock_owned().await;
+        let proof = proof.clone();
+        self.storage
+            .call(move |s| s.recheck(&proof))
+            .await
+            .map_err(store_error)?;
+        if fence.stopped.load(Ordering::Acquire) {
+            return Err(ErrorCode::Unauthorized);
+        }
+        Ok(guard)
     }
-    pub(crate) async fn publish_attention(&self,events:Vec<(Uuid,AttentionEvent)>)->SecurityResult<()> {
-        for(peer,event)in events{
-            let id=peer.clone();let Some(proof)=self.storage.call(move|s|s.attention_peer(&id)).await.map_err(store_error)?else{continue};
-            let _guard=match self.push_guard(&proof).await{Ok(g)=>g,Err(_)=>continue};
-            self.state.peer_event(&proof,EventBody::NotificationUpsert(NotificationUpsertEvent{event}))?;
-            let p=proof.clone();if self.storage.call(move|s|s.push_sync_needed(&p)).await.map_err(store_error)?{self.state.peer_event(&proof,EventBody::SyncRequired(SyncRequiredEvent{reason:SyncReason::Overflow}))?;}
-        }Ok(())
+    pub(crate) async fn publish_attention(
+        &self,
+        events: Vec<(Uuid, AttentionEvent)>,
+    ) -> SecurityResult<()> {
+        for (peer, event) in events {
+            let id = peer.clone();
+            let Some(proof) = self
+                .storage
+                .call(move |s| s.attention_peer(&id))
+                .await
+                .map_err(store_error)?
+            else {
+                continue;
+            };
+            let _guard = match self.push_guard(&proof).await {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            self.state.peer_event(
+                &proof,
+                EventBody::NotificationUpsert(NotificationUpsertEvent { event }),
+            )?;
+            let p = proof.clone();
+            if self
+                .storage
+                .call(move |s| s.push_sync_needed(&p))
+                .await
+                .map_err(store_error)?
+            {
+                self.state.peer_event(
+                    &proof,
+                    EventBody::SyncRequired(SyncRequiredEvent {
+                        reason: SyncReason::Overflow,
+                    }),
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+pub(crate) struct ImageCheckpoint {
+    security: Arc<Security>,
+    entry: Arc<Entered>,
+    owner: Arc<crate::attachments::ImageReadObligation>,
+}
+impl ImageCheckpoint {
+    pub(crate) async fn mark(&self) -> SecurityResult<()> {
+        let entry = self.entry.clone();
+        let owner = self.owner.clone();
+        self.security
+            .storage
+            .call(move |store| {
+                let held = entry
+                    .ticket
+                    .try_lock()
+                    .map_err(|_| StorageError::Policy(ErrorCode::NotReady))?;
+                let ticket = held
+                    .as_ref()
+                    .ok_or(StorageError::Policy(ErrorCode::NotReady))?;
+                if !entry.started.load(Ordering::Acquire)
+                    || entry.done.load(Ordering::Acquire)
+                    || entry.invalidated.load(Ordering::Acquire)
+                {
+                    return Err(StorageError::Policy(ErrorCode::NotReady));
+                }
+                owner.recheck().map_err(StorageError::Policy)?;
+                if entry.invalidated.load(Ordering::Acquire) || entry.done.load(Ordering::Acquire) {
+                    return Err(StorageError::Policy(ErrorCode::NotReady));
+                }
+                store.image_use_enter(ticket, &owner.facts)?;
+                owner.entered.store(true, Ordering::Release);
+                Ok(())
+            })
+            .await
+            .map_err(store_error)
+    }
+    pub(crate) async fn no_effect(&self) -> SecurityResult<()> {
+        let owner = self.owner.clone();
+        self.security
+            .storage
+            .call(move |store| store.release_image_owner(&owner))
+            .await
+            .map_err(store_error)
+    }
+    pub(crate) async fn read_complete(
+        &self,
+        original: crate::backends::OriginalContext,
+    ) -> SecurityResult<bool> {
+        let input = self.owner.facts.input.clone();
+        self.security
+            .storage
+            .call(move |store| store.image_read_prepared(&original, &input))
+            .await
+            .map_err(store_error)
+    }
+}
+impl UnstartedBoundary {
+    pub(crate) fn image_checkpoint(&self) -> SecurityResult<ImageCheckpoint> {
+        let facts = self
+            .entry
+            .creation
+            .as_ref()
+            .ok_or(ErrorCode::NotReady)?
+            .lock();
+        let EnteredFacts::PromptImages(owner) = &*facts else {
+            return Err(ErrorCode::NotReady);
+        };
+        Ok(ImageCheckpoint {
+            security: self.security.clone(),
+            entry: self.entry.clone(),
+            owner: owner.clone(),
+        })
+    }
+}
+impl Security {
+    pub(crate) async fn prepare_prompt_images(
+        self: &Arc<Self>,
+        auth: &Arc<Authorized>,
+        request: &Request,
+        source: crate::attachments::ImageSource,
+    ) -> SecurityResult<Option<Arc<crate::attachments::ImageReadObligation>>> {
+        let RequestBody::PromptSubmit(params) = &request.body else {
+            return Err(ErrorCode::InvalidRequest);
+        };
+        let Some(uploads) = &params.images else {
+            return Ok(None);
+        };
+        params.validate().map_err(|_| ErrorCode::InvalidRequest)?;
+        if params.target != source.original.target {
+            return Err(ErrorCode::StaleSession);
+        }
+        let facts = crate::attachments::ImageUseFacts {
+            peer: auth.proof.peer_id().clone(),
+            peer_epoch: auth.proof.epoch(),
+            connection: auth.connection_id.clone(),
+            action: request.id.clone(),
+            boot: self.boot.clone(),
+            target: params.target.clone(),
+            source: source.original.epoch.clone(),
+            native: source.original.native.clone(),
+            owner: source.original.process.clone(),
+            input: Uuid::random(),
+            uploads: uploads.clone(),
+        };
+        let authorization = auth.clone();
+        let proof = auth.proof.clone();
+        self.storage
+            .call(move |store| {
+                store.prepare_image_read(&proof, facts, source, &|| {
+                    authorization.live_connection().is_ok()
+                })
+            })
+            .await
+            .map(Some)
+            .map_err(store_error)
+    }
+    pub(crate) async fn unstarted_image_boundary(
+        self: &Arc<Self>,
+        auth: &Arc<Authorized>,
+        action: Uuid,
+        connection: OwnedFd,
+        deadline: Instant,
+        owner: Arc<crate::attachments::ImageReadObligation>,
+    ) -> SecurityResult<UnstartedBoundary> {
+        let security = self.clone();
+        let original = auth.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let (checkpoint, guard) = self
+            .prepare_native_boundary(
+                auth,
+                action,
+                connection,
+                Some(deadline),
+                Some(EnteredFacts::PromptImages(owner)),
+                move |entry| UnstartedBoundary {
+                    security,
+                    auth: original,
+                    entry,
+                    deadline,
+                    runtime,
+                },
+            )
+            .await?;
+        drop(guard);
+        Ok(checkpoint)
+    }
+    pub(crate) async fn image_boundary<F, E>(
+        self: &Arc<Self>,
+        auth: &Authorized,
+        action: Uuid,
+        connection: OwnedFd,
+        owner: Arc<crate::attachments::ImageReadObligation>,
+        validate: impl FnOnce() -> SecurityResult<()>,
+        effect: F,
+    ) -> SecurityResult<()>
+    where
+        F: FnOnce(ImageCheckpoint) -> E,
+        E: Future<Output = ReceiptTransition>,
+    {
+        let (entry, guard) = self
+            .prepare_native_boundary(
+                auth,
+                action,
+                connection,
+                None,
+                Some(EnteredFacts::PromptImages(owner.clone())),
+                |entry| entry,
+            )
+            .await?;
+        let checkpoint = ImageCheckpoint {
+            security: self.clone(),
+            entry: entry.clone(),
+            owner,
+        };
+        self.admit_native_boundary(
+            auth,
+            &entry,
+            guard,
+            None,
+            || validate().map(|()| BoundaryReadiness::Ready),
+            effect(checkpoint),
+        )
+        .await
+        .map(|_| ())
+    }
+    pub(crate) async fn image_preparation_failed(
+        &self,
+        owner: Arc<crate::attachments::ImageReadObligation>,
+    ) -> SecurityResult<()> {
+        self.storage
+            .call(move |store| {
+                let record = store
+                    .image_use_for_input(owner.native_input())?
+                    .ok_or(StorageError::Corrupt)?;
+                if record.entered || owner.entered.load(Ordering::Acquire) {
+                    return Err(StorageError::Policy(ErrorCode::NotReady));
+                }
+                store.release_image_owner(&owner)
+            })
+            .await
+            .map_err(store_error)
     }
 }
 #[cfg(test)]
@@ -2068,12 +2998,18 @@ pub(crate) mod tests {
         );
         let request = Request {
             id: Uuid::random(),
-            body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: security.boot.clone(),
-            target: Target {
-                session_id: Uuid::random(),
-                generation: Uuid::random(),
-            },
-            text: PromptText("owned boundary".into()), }),
+            body: RequestBody::PromptSubmit(PromptSubmitParams {
+                delivery: None,
+                native_turn_id: None,
+                images: None,
+                skill: None,
+                boot_id: security.boot.clone(),
+                target: Target {
+                    session_id: Uuid::random(),
+                    generation: Uuid::random(),
+                },
+                text: PromptText("owned boundary".into()),
+            }),
         };
         security
             .reserve(&auth, request.clone(), |_| Ok(()), |_| {})
@@ -2229,23 +3165,34 @@ pub(crate) mod tests {
         Request {
             id: Uuid::random(),
             body: if creation {
-                RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: boot,
-                server_id: Uuid::random(),
-                project_id: Uuid::random(),
-                provider: Provider::Codex,
-                name: Label("review fixture".into()), })
+                RequestBody::SessionCreate(SessionCreateParams {
+                    directory_ref: None,
+                    placement: None,
+                    boot_id: boot,
+                    server_id: Uuid::random(),
+                    project_id: Uuid::random(),
+                    provider: Provider::Codex,
+                    name: Label("review fixture".into()),
+                })
             } else {
-                RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
-                target: Target {
-                    session_id: Uuid::random(),
-                    generation: Uuid::random(),
-                },
-                text: PromptText("review owned socket".into()), })
+                RequestBody::PromptSubmit(PromptSubmitParams {
+                    delivery: None,
+                    native_turn_id: None,
+                    images: None,
+                    skill: None,
+                    boot_id: boot,
+                    target: Target {
+                        session_id: Uuid::random(),
+                        generation: Uuid::random(),
+                    },
+                    text: PromptText("review owned socket".into()),
+                })
             },
         }
     }
     fn review_resources() -> CreationResources {
-        CreationResources { checkout: None,
+        CreationResources {
+            checkout: None,
             workspace_id: Some(Id("owned-workspace".into())),
             pane_id: Some(Id("owned-pane".into())),
             terminal_id: Some(Id("owned-terminal".into())),
@@ -2336,40 +3283,62 @@ pub(crate) mod tests {
             let (_thread_stop_sender, thread_stop) = tokio::sync::watch::channel(false);
             let (s, a, action) = (security.clone(), auth.clone(), request.id.clone());
             let boundary = tokio::spawn(async move {
-                s.thread_creation_boundary(&a, action, StageMetadata::default(), Instant::now() + BOUNDARY_TIMEOUT, thread_stop, || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, native.into(), |checkpoint| async move {
-                    let blocked = if interruption == 2 {
-                        let queue = ReviewQueue::block(&checkpoint.security.storage, 0);
-                        {
-                            let mut acknowledgement = Box::pin(
-                                checkpoint.acknowledge(Id("acknowledged-original-T".into())),
+                s.thread_creation_boundary(
+                    NativeBoundary {
+                        auth: &a,
+                        action,
+                        connection: native.into(),
+                    },
+                    StageMetadata::default(),
+                    Instant::now() + BOUNDARY_TIMEOUT,
+                    thread_stop,
+                    || {
+                        let checked: Result<(), ErrorCode> = Ok(());
+                        checked.map_err(Into::into)
+                    },
+                    |checkpoint| async move {
+                        let blocked = if interruption == 2 {
+                            let queue = ReviewQueue::block(&checkpoint.security.storage, 0);
+                            {
+                                let mut acknowledgement = Box::pin(
+                                    checkpoint.acknowledge(Id("acknowledged-original-T".into())),
+                                );
+                                let mut context =
+                                    std::task::Context::from_waker(std::task::Waker::noop());
+                                assert!(acknowledgement.as_mut().poll(&mut context).is_pending());
+                            }
+                            Some(queue)
+                        } else {
+                            checkpoint
+                                .acknowledge(Id("acknowledged-original-T".into()))
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                checkpoint.acknowledge(Id("substitute-T".into())).await,
+                                Err(ErrorCode::InvalidRequest),
                             );
-                            let mut context =
-                                std::task::Context::from_waker(std::task::Waker::noop());
-                            assert!(acknowledgement.as_mut().poll(&mut context).is_pending());
-                        }
-                        Some(queue)
-                    } else {
-                        checkpoint
-                            .acknowledge(Id("acknowledged-original-T".into()))
-                            .await
-                            .unwrap();
-                        assert_eq!(
-                            checkpoint.acknowledge(Id("substitute-T".into())).await,
-                            Err(ErrorCode::InvalidRequest),
-                        );
-                        None
-                    };
-                    checkpointed
-                        .send((checkpoint.entry.clone(), blocked))
-                        .unwrap_or_else(|_| panic!("checkpoint receiver"));
-                    // Interruption between the acknowledged start and materializing read.
-                    std::future::pending::<CreationOutcome>().await
-                })
+                            None
+                        };
+                        checkpointed
+                            .send((checkpoint.entry.clone(), blocked))
+                            .unwrap_or_else(|_| panic!("checkpoint receiver"));
+                        // Interruption between the acknowledged start and materializing read.
+                        std::future::pending::<CreationOutcome>().await
+                    },
+                )
                 .await
             });
             let (entry, mut blocked) = ready.await.unwrap();
             assert_eq!(
-                entry.creation.as_ref().unwrap().lock().agent().unwrap().0.native_id,
+                entry
+                    .creation
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .agent()
+                    .unwrap()
+                    .0
+                    .native_id,
                 Some(Id("acknowledged-original-T".into())),
             );
             if interruption != 2 {
@@ -2489,30 +3458,39 @@ pub(crate) mod tests {
         let boundary_root = root.clone();
         let boundary = tokio::spawn(async move {
             if variant == 2 {
-                s.start_boundary(&a, action, (CreationStage::Workspace, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, || {
-                    // An actual OS resource admission, not a provider echo/start mock.
-                    let marker = boundary_root.join("started-resource");
-                    let file = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .mode(0o600)
-                        .open(marker)
-                        .unwrap();
-                    file.sync_all().unwrap();
-                    entered
-                        .send(ReviewQueue::block(&s.storage, 64))
-                        .unwrap_or_else(|_| panic!("fixture receiver"));
-                    Ok((
-                        (),
-                        CreationOutcome {
-                            resources: review_resources(),
-                            metadata: StageMetadata::default(),
-                            state: StageState::Confirmed,
-                            definitive: Some(Id("owned file created once".into())),
-                            at: now_ms(),
-                        },
-                    ))
-                })
+                s.start_boundary(
+                    &a,
+                    action,
+                    (CreationStage::Workspace, StageMetadata::default()),
+                    || {
+                        let checked: Result<(), ErrorCode> = Ok(());
+                        checked.map_err(Into::into)
+                    },
+                    || {
+                        // An actual OS resource admission, not a provider echo/start mock.
+                        let marker = boundary_root.join("started-resource");
+                        let file = OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .mode(0o600)
+                            .open(marker)
+                            .unwrap();
+                        file.sync_all().unwrap();
+                        entered
+                            .send(ReviewQueue::block(&s.storage, 64))
+                            .unwrap_or_else(|_| panic!("fixture receiver"));
+                        Ok((
+                            (),
+                            CreationOutcome {
+                                resources: review_resources(),
+                                metadata: StageMetadata::default(),
+                                state: StageState::Confirmed,
+                                definitive: Some(Id("owned file created once".into())),
+                                at: now_ms(),
+                            },
+                        ))
+                    },
+                )
                 .await
             } else {
                 let effect = async {
@@ -2732,19 +3710,28 @@ pub(crate) mod tests {
                 )
                 .await
             } else {
-                s.start_boundary(&a, action, (CreationStage::Workspace, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (deny)(); checked.map_err(Into::into) }, || {
-                    counted.fetch_add(1, Ordering::SeqCst);
-                    Ok((
-                        (),
-                        CreationOutcome {
-                            resources: review_resources(),
-                            metadata: StageMetadata::default(),
-                            state: StageState::Confirmed,
-                            definitive: Some(Id("forbidden".into())),
-                            at: now_ms(),
-                        },
-                    ))
-                })
+                s.start_boundary(
+                    &a,
+                    action,
+                    (CreationStage::Workspace, StageMetadata::default()),
+                    || {
+                        let checked: Result<(), ErrorCode> = (deny)();
+                        checked.map_err(Into::into)
+                    },
+                    || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        Ok((
+                            (),
+                            CreationOutcome {
+                                resources: review_resources(),
+                                metadata: StageMetadata::default(),
+                                state: StageState::Confirmed,
+                                definitive: Some(Id("forbidden".into())),
+                                at: now_ms(),
+                            },
+                        ))
+                    },
+                )
                 .await
             }
         });
@@ -2882,62 +3869,185 @@ pub(crate) mod tests {
         assert!(shutdown.is_ok());
     }
     #[tokio::test]
-    async fn lost_directory_proof_retains_created_resources_uncertain_without_query_or_provider_start() {
-        use std::io::{Read as _,Write as _};
-        for synchronous in [false,true] {
-            let (host,phone,security,auth,root)=review_authorized().await;
-            let request=review_request(security.boot.clone(),true);
-            security.reserve(&auth,request.clone(),|_|Ok(()),|_|{}).await.unwrap();
-            let resources=review_resources();
-            let probe=StageMetadata{workspace_operation:WorkspaceOperation::ShellProbe,
-                shell_probe:Some(ShellProbeMetadata{
-                    attempt_id:Uuid::random(),action_id:request.id.clone(),workspace_id:resources.workspace_id.clone().unwrap(),
-                    pane_id:resources.pane_id.clone().unwrap(),terminal_id:resources.terminal_id.clone().unwrap(),
-                    shell:crate::herdr::process_evidence(std::process::id()).unwrap(),
-                    executable:std::env::current_exe().unwrap().to_str().unwrap().into(),result_path:root.join("probe-result").to_str().unwrap().into(),
-                    result_device:1,result_inode:1,parent_device:1,parent_inode:1,focused_workspace_id:Id("desktop".into()),
-                }),..StageMetadata::default()};
-            let proof=auth.proof.clone();let action=request.id.clone();let known=resources.clone();let previous_probe=probe.clone();
-            security.storage.call(move|store| {
-                store.transition(&proof,&action,ReceiptTransition{state:ReceiptState::Dispatching,proof:TransitionProof::Intent,result:None,error:None,at:now_ms()})?;
-                let mut stages=vec![StageMetadata{created_tab_id:Some(Id("created-tab".into())),..StageMetadata::default()}];
-                if synchronous {stages.push(previous_probe);}
-                for metadata in stages {
-                    store.creation_intent(&proof,&action,CreationStage::Workspace,metadata.clone(),now_ms())?;
-                    store.creation_result(&proof,&action,CreationOutcome{resources:known.clone(),metadata,state:StageState::Confirmed,
-                        definitive:Some(Id("earlier native creation confirmed".into())),at:now_ms()})?;
-                }
-                Ok(())
-            }).await.unwrap();
-            let effects=Arc::new(AtomicUsize::new(0));let counted=effects.clone();
-            let marker=root.join("must-not-start");
+    async fn lost_directory_proof_retains_created_resources_uncertain_without_query_or_provider_start()
+     {
+        use std::io::{Read as _, Write as _};
+        for synchronous in [false, true] {
+            let (host, phone, security, auth, root) = review_authorized().await;
+            let request = review_request(security.boot.clone(), true);
+            security
+                .reserve(&auth, request.clone(), |_| Ok(()), |_| {})
+                .await
+                .unwrap();
+            let resources = review_resources();
+            let probe = StageMetadata {
+                workspace_operation: WorkspaceOperation::ShellProbe,
+                shell_probe: Some(ShellProbeMetadata {
+                    attempt_id: Uuid::random(),
+                    action_id: request.id.clone(),
+                    workspace_id: resources.workspace_id.clone().unwrap(),
+                    pane_id: resources.pane_id.clone().unwrap(),
+                    terminal_id: resources.terminal_id.clone().unwrap(),
+                    shell: crate::herdr::process_evidence(std::process::id()).unwrap(),
+                    executable: std::env::current_exe().unwrap().to_str().unwrap().into(),
+                    result_path: root.join("probe-result").to_str().unwrap().into(),
+                    result_device: 1,
+                    result_inode: 1,
+                    parent_device: 1,
+                    parent_inode: 1,
+                    focused_workspace_id: Id("desktop".into()),
+                }),
+                ..StageMetadata::default()
+            };
+            let proof = auth.proof.clone();
+            let action = request.id.clone();
+            let known = resources.clone();
+            let previous_probe = probe.clone();
+            security
+                .storage
+                .call(move |store| {
+                    store.transition(
+                        &proof,
+                        &action,
+                        ReceiptTransition {
+                            state: ReceiptState::Dispatching,
+                            proof: TransitionProof::Intent,
+                            result: None,
+                            error: None,
+                            at: now_ms(),
+                        },
+                    )?;
+                    let mut stages = vec![StageMetadata {
+                        created_tab_id: Some(Id("created-tab".into())),
+                        ..StageMetadata::default()
+                    }];
+                    if synchronous {
+                        stages.push(previous_probe);
+                    }
+                    for metadata in stages {
+                        store.creation_intent(
+                            &proof,
+                            &action,
+                            CreationStage::Workspace,
+                            metadata.clone(),
+                            now_ms(),
+                        )?;
+                        store.creation_result(
+                            &proof,
+                            &action,
+                            CreationOutcome {
+                                resources: known.clone(),
+                                metadata,
+                                state: StageState::Confirmed,
+                                definitive: Some(Id("earlier native creation confirmed".into())),
+                                at: now_ms(),
+                            },
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let effects = Arc::new(AtomicUsize::new(0));
+            let counted = effects.clone();
+            let marker = root.join("must-not-start");
             if synchronous {
-                let effect_marker=marker.clone();
-                assert_eq!(security.start_boundary(&auth,request.id.clone(),(CreationStage::Owner,StageMetadata::default()),
-                    ||Err(CreationAdmissionFailure::guarded(ErrorCode::NotReady,CreationAdmissionGuard::Directory)),
-                    || {counted.fetch_add(1,Ordering::SeqCst);std::fs::write(effect_marker,b"forbidden").unwrap();
-                        Ok(((),CreationOutcome{resources:resources.clone(),metadata:StageMetadata::default(),state:StageState::Confirmed,
-                            definitive:Some(Id("forbidden".into())),at:now_ms()}))}
-                ).await,Err(ErrorCode::NotReady));
+                let effect_marker = marker.clone();
+                assert_eq!(
+                    security
+                        .start_boundary(
+                            &auth,
+                            request.id.clone(),
+                            (CreationStage::Owner, StageMetadata::default()),
+                            || Err(CreationAdmissionFailure::guarded(
+                                ErrorCode::NotReady,
+                                CreationAdmissionGuard::Directory
+                            )),
+                            || {
+                                counted.fetch_add(1, Ordering::SeqCst);
+                                std::fs::write(effect_marker, b"forbidden").unwrap();
+                                Ok((
+                                    (),
+                                    CreationOutcome {
+                                        resources: resources.clone(),
+                                        metadata: StageMetadata::default(),
+                                        state: StageState::Confirmed,
+                                        definitive: Some(Id("forbidden".into())),
+                                        at: now_ms(),
+                                    },
+                                ))
+                            }
+                        )
+                        .await,
+                    Err(ErrorCode::NotReady)
+                );
             } else {
-                let (mut native,mut receiver)=std::os::unix::net::UnixStream::pair().unwrap();
-                receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                let descriptor=native.try_clone().unwrap();
-                assert_eq!(security.creation_boundary_guarded(&auth,request.id.clone(),(CreationStage::Workspace,probe),
-                    ||Err(CreationAdmissionFailure::guarded(ErrorCode::NotReady,CreationAdmissionGuard::Directory)),descriptor.into(),
-                    async move {counted.fetch_add(1,Ordering::SeqCst);native.write_all(b"forbidden query").unwrap();
-                        CreationOutcome{resources:review_resources(),metadata:StageMetadata::default(),state:StageState::Confirmed,
-                            definitive:Some(Id("forbidden".into())),at:now_ms()}}
-                ).await,Err(ErrorCode::NotReady));
-                let mut byte=[0];assert_eq!(receiver.read(&mut byte).unwrap(),0);
+                let (mut native, mut receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+                receiver
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let descriptor = native.try_clone().unwrap();
+                assert_eq!(
+                    security
+                        .creation_boundary_guarded(
+                            &auth,
+                            request.id.clone(),
+                            (CreationStage::Workspace, probe),
+                            || Err(CreationAdmissionFailure::guarded(
+                                ErrorCode::NotReady,
+                                CreationAdmissionGuard::Directory
+                            )),
+                            descriptor.into(),
+                            async move {
+                                counted.fetch_add(1, Ordering::SeqCst);
+                                native.write_all(b"forbidden query").unwrap();
+                                CreationOutcome {
+                                    resources: review_resources(),
+                                    metadata: StageMetadata::default(),
+                                    state: StageState::Confirmed,
+                                    definitive: Some(Id("forbidden".into())),
+                                    at: now_ms(),
+                                }
+                            }
+                        )
+                        .await,
+                    Err(ErrorCode::NotReady)
+                );
+                let mut byte = [0];
+                assert_eq!(receiver.read(&mut byte).unwrap(), 0);
             }
-            assert_eq!(effects.load(Ordering::SeqCst),0);assert!(!marker.exists());
-            let proof=auth.proof.clone();let action=request.id.clone();
-            let (receipt,local)=security.storage.call(move|store|Ok((store.status(&proof,&action,now_ms())?.unwrap(),store.creation_local(&proof,&action)?.unwrap()))).await.unwrap();
-            assert_eq!(receipt.state,ReceiptState::Uncertain);
-            let progress=receipt.creation.unwrap();assert_eq!(progress.stage_state,StageState::Uncertain);assert_eq!(progress.resources,resources);
-            assert_eq!(local.stages.first().unwrap().result.as_ref().unwrap().created_tab_id,Some(Id("created-tab".into())));
-            let shutdown=security.shutdown().await;review_close(host,phone,security,auth,root).await;assert!(shutdown.is_ok());
+            assert_eq!(effects.load(Ordering::SeqCst), 0);
+            assert!(!marker.exists());
+            let proof = auth.proof.clone();
+            let action = request.id.clone();
+            let (receipt, local) = security
+                .storage
+                .call(move |store| {
+                    Ok((
+                        store.status(&proof, &action, now_ms())?.unwrap(),
+                        store.creation_local(&proof, &action)?.unwrap(),
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(receipt.state, ReceiptState::Uncertain);
+            let progress = receipt.creation.unwrap();
+            assert_eq!(progress.stage_state, StageState::Uncertain);
+            assert_eq!(progress.resources, resources);
+            assert_eq!(
+                local
+                    .stages
+                    .first()
+                    .unwrap()
+                    .result
+                    .as_ref()
+                    .unwrap()
+                    .created_tab_id,
+                Some(Id("created-tab".into()))
+            );
+            let shutdown = security.shutdown().await;
+            review_close(host, phone, security, auth, root).await;
+            assert!(shutdown.is_ok());
         }
     }
     #[tokio::test]
@@ -3112,76 +4222,5 @@ pub(crate) mod tests {
             admitted, 1,
             "successful hello must release its reservation, not erase four failures"
         );
-    }
-}
-
-pub(crate) struct ImageCheckpoint {security:Arc<Security>,entry:Arc<Entered>,owner:Arc<crate::attachments::ImageReadObligation>}
-impl ImageCheckpoint {
-    pub(crate) async fn mark(&self)->SecurityResult<()> {
-        let entry=self.entry.clone();let owner=self.owner.clone();
-        self.security.storage.call(move|store|{
-            let held=entry.ticket.try_lock().map_err(|_|StorageError::Policy(ErrorCode::NotReady))?;
-            let ticket=held.as_ref().ok_or(StorageError::Policy(ErrorCode::NotReady))?;
-            if !entry.started.load(Ordering::Acquire)||entry.done.load(Ordering::Acquire)||entry.invalidated.load(Ordering::Acquire) {return Err(StorageError::Policy(ErrorCode::NotReady))}
-            owner.recheck().map_err(StorageError::Policy)?;
-            if entry.invalidated.load(Ordering::Acquire)||entry.done.load(Ordering::Acquire) {return Err(StorageError::Policy(ErrorCode::NotReady))}
-            store.image_use_enter(ticket,&owner.facts)?;owner.entered.store(true,Ordering::Release);Ok(())
-        }).await.map_err(store_error)
-    }
-    pub(crate) async fn no_effect(&self)->SecurityResult<()> {
-        let owner=self.owner.clone();
-        self.security.storage.call(move|store|store.release_image_owner(&owner)).await.map_err(store_error)
-    }
-    pub(crate) async fn read_complete(&self,original:crate::backends::OriginalContext)->SecurityResult<bool> {
-        let input=self.owner.facts.input.clone();
-        self.security.storage.call(move|store|store.image_read_prepared(&original,&input)).await.map_err(store_error)
-    }
-}
-impl UnstartedBoundary {
-    pub(crate) fn image_checkpoint(&self)->SecurityResult<ImageCheckpoint> {
-        let facts=self.entry.creation.as_ref().ok_or(ErrorCode::NotReady)?.lock();
-        let EnteredFacts::PromptImages(owner)=&*facts else {return Err(ErrorCode::NotReady)};
-        Ok(ImageCheckpoint {security:self.security.clone(),entry:self.entry.clone(),owner:owner.clone()})
-    }
-}
-impl Security {
-    pub(crate) async fn prepare_prompt_images(
-        self:&Arc<Self>,auth:&Arc<Authorized>,request:&Request,source:crate::attachments::ImageSource,
-    )->SecurityResult<Option<Arc<crate::attachments::ImageReadObligation>>> {
-        let RequestBody::PromptSubmit(params)=&request.body else {return Err(ErrorCode::InvalidRequest)};
-        let Some(uploads)=&params.images else {return Ok(None)};
-        params.validate().map_err(|_|ErrorCode::InvalidRequest)?;
-        if params.target!=source.original.target {return Err(ErrorCode::StaleSession)}
-        let facts=crate::attachments::ImageUseFacts {peer:auth.proof.peer_id().clone(),peer_epoch:auth.proof.epoch(),
-            connection:auth.connection_id.clone(),action:request.id.clone(),boot:self.boot.clone(),target:params.target.clone(),
-            source:source.original.epoch.clone(),native:source.original.native.clone(),owner:source.original.process.clone(),
-            input:Uuid::random(),uploads:uploads.clone()};
-        let authorization=auth.clone();let proof=auth.proof.clone();
-        self.storage.call(move|store|store.prepare_image_read(&proof,facts,source,&||authorization.live_connection().is_ok())).await.map(Some).map_err(store_error)
-    }
-    pub(crate) async fn unstarted_image_boundary(
-        self:&Arc<Self>,auth:&Arc<Authorized>,action:Uuid,connection:OwnedFd,deadline:Instant,
-        owner:Arc<crate::attachments::ImageReadObligation>,
-    )->SecurityResult<UnstartedBoundary> {
-        let security=self.clone();let original=auth.clone();let runtime=tokio::runtime::Handle::current();
-        let (checkpoint,guard)=self.prepare_native_boundary(auth,action,connection,Some(deadline),Some(EnteredFacts::PromptImages(owner)),move|entry|
-            UnstartedBoundary {security,auth:original,entry,deadline,runtime}
-        ).await?;
-        drop(guard);Ok(checkpoint)
-    }
-    pub(crate) async fn image_boundary<F,E>(
-        self:&Arc<Self>,auth:&Authorized,action:Uuid,connection:OwnedFd,owner:Arc<crate::attachments::ImageReadObligation>,
-        validate:impl FnOnce()->SecurityResult<()>,effect:F,
-    )->SecurityResult<()> where F:FnOnce(ImageCheckpoint)->E,E:Future<Output=ReceiptTransition> {
-        let (entry,guard)=self.prepare_native_boundary(auth,action,connection,None,Some(EnteredFacts::PromptImages(owner.clone())),|entry|entry).await?;
-        let checkpoint=ImageCheckpoint {security:self.clone(),entry:entry.clone(),owner};
-        self.admit_native_boundary(auth,&entry,guard,None,||validate().map(|()|BoundaryReadiness::Ready),effect(checkpoint)).await.map(|_|())
-    }
-    pub(crate) async fn image_preparation_failed(&self,owner:Arc<crate::attachments::ImageReadObligation>)->SecurityResult<()> {
-        self.storage.call(move|store|{
-            let record=store.image_use_for_input(owner.native_input())?.ok_or(StorageError::Corrupt)?;
-            if record.entered||owner.entered.load(Ordering::Acquire) {return Err(StorageError::Policy(ErrorCode::NotReady))}
-            store.release_image_owner(&owner)
-        }).await.map_err(store_error)
     }
 }

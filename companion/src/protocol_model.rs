@@ -476,27 +476,37 @@ impl WireValidate for SyncReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ActionMethod {
-    #[serde(rename="session.controls.apply")]SessionControlsApply,
-    #[serde(rename="session.queue.update")]SessionQueueUpdate,
-    #[serde(rename="session.queue.delete")]SessionQueueDelete,
-    #[serde(rename="session.queue.reorder")]SessionQueueReorder,
-    #[serde(rename="session.queue.start")]SessionQueueStart,
-    #[serde(rename="terminal.create")] TerminalCreate,
-    #[serde(rename="attachments.begin")] AttachmentsBegin,
-    #[serde(rename="attachments.chunk")] AttachmentsChunk,
-    #[serde(rename="attachments.complete")] AttachmentsComplete,
-    #[serde(rename="attachments.discard")] AttachmentsDiscard,
+    #[serde(rename = "session.controls.apply")]
+    SessionControlsApply,
+    #[serde(rename = "session.queue.update")]
+    SessionQueueUpdate,
+    #[serde(rename = "session.queue.delete")]
+    SessionQueueDelete,
+    #[serde(rename = "session.queue.reorder")]
+    SessionQueueReorder,
+    #[serde(rename = "session.queue.start")]
+    SessionQueueStart,
+    #[serde(rename = "terminal.create")]
+    TerminalCreate,
+    #[serde(rename = "attachments.begin")]
+    AttachmentsBegin,
+    #[serde(rename = "attachments.chunk")]
+    AttachmentsChunk,
+    #[serde(rename = "attachments.complete")]
+    AttachmentsComplete,
+    #[serde(rename = "attachments.discard")]
+    AttachmentsDiscard,
     #[serde(rename = "session.create")]
     SessionCreate,
     #[serde(rename = "shell.create")]
     ShellCreate,
     #[serde(rename = "shell.input")]
     ShellInput,
-    #[serde(rename="shell.resize")]
+    #[serde(rename = "shell.resize")]
     ShellResize,
-    #[serde(rename="shell.scroll")]
+    #[serde(rename = "shell.scroll")]
     ShellScroll,
-    #[serde(rename="worktrees.remove")]
+    #[serde(rename = "worktrees.remove")]
     WorktreesRemove,
     #[serde(rename = "agent.rename")]
     AgentRename,
@@ -636,27 +646,40 @@ impl WireValidate for PresentationKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Method {
-    #[serde(rename="session.controls.read")]SessionControlsRead,
-    #[serde(rename="session.controls.apply")]SessionControlsApply,
-    #[serde(rename="session.queue.list")]SessionQueueList,
-    #[serde(rename="session.queue.update")]SessionQueueUpdate,
-    #[serde(rename="session.queue.delete")]SessionQueueDelete,
-    #[serde(rename="session.queue.reorder")]SessionQueueReorder,
-    #[serde(rename="session.queue.start")]SessionQueueStart,
-    #[serde(rename="artifacts.list")]
+    #[serde(rename = "session.controls.read")]
+    SessionControlsRead,
+    #[serde(rename = "session.controls.apply")]
+    SessionControlsApply,
+    #[serde(rename = "session.queue.list")]
+    SessionQueueList,
+    #[serde(rename = "session.queue.update")]
+    SessionQueueUpdate,
+    #[serde(rename = "session.queue.delete")]
+    SessionQueueDelete,
+    #[serde(rename = "session.queue.reorder")]
+    SessionQueueReorder,
+    #[serde(rename = "session.queue.start")]
+    SessionQueueStart,
+    #[serde(rename = "artifacts.list")]
     ArtifactsList,
-    #[serde(rename="artifacts.open")]
+    #[serde(rename = "artifacts.open")]
     ArtifactsOpen,
-    #[serde(rename="artifacts.read")]
+    #[serde(rename = "artifacts.read")]
     ArtifactsRead,
-    #[serde(rename="artifacts.close")]
+    #[serde(rename = "artifacts.close")]
     ArtifactsClose,
-    #[serde(rename="terminal.create")] TerminalCreate,
-    #[serde(rename="attachments.begin")] AttachmentsBegin,
-    #[serde(rename="attachments.chunk")] AttachmentsChunk,
-    #[serde(rename="attachments.complete")] AttachmentsComplete,
-    #[serde(rename="attachments.discard")] AttachmentsDiscard,
-    #[serde(rename="attachments.status")] AttachmentsStatus,
+    #[serde(rename = "terminal.create")]
+    TerminalCreate,
+    #[serde(rename = "attachments.begin")]
+    AttachmentsBegin,
+    #[serde(rename = "attachments.chunk")]
+    AttachmentsChunk,
+    #[serde(rename = "attachments.complete")]
+    AttachmentsComplete,
+    #[serde(rename = "attachments.discard")]
+    AttachmentsDiscard,
+    #[serde(rename = "attachments.status")]
+    AttachmentsStatus,
     #[serde(rename = "pair.confirm")]
     PairConfirm,
     #[serde(rename = "hello")]
@@ -675,9 +698,9 @@ pub enum Method {
     SessionCreate,
     #[serde(rename = "shell.input")]
     ShellInput,
-    #[serde(rename="shell.resize")]
+    #[serde(rename = "shell.resize")]
     ShellResize,
-    #[serde(rename="shell.scroll")]
+    #[serde(rename = "shell.scroll")]
     ShellScroll,
     #[serde(rename = "agent.rename")]
     AgentRename,
@@ -703,9 +726,12 @@ pub enum Method {
     ChangesRead,
     #[serde(rename = "skills.list")]
     SkillsList,
-    #[serde(rename="skills.preview.open")]SkillsPreviewOpen,
-    #[serde(rename="skills.preview.read")]SkillsPreviewRead,
-    #[serde(rename="skills.preview.close")]SkillsPreviewClose,
+    #[serde(rename = "skills.preview.open")]
+    SkillsPreviewOpen,
+    #[serde(rename = "skills.preview.read")]
+    SkillsPreviewRead,
+    #[serde(rename = "skills.preview.close")]
+    SkillsPreviewClose,
     #[serde(rename = "notifications.sync")]
     NotificationsSync,
     #[serde(rename = "notifications.read")]
@@ -1000,7 +1026,11 @@ pub struct NativePane {
         deserialize_with = "optional_non_null"
     )]
     pub unbound_row_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub shell_target: Option<ShellTarget>,
 }
 impl WireValidate for NativePane {
@@ -1018,7 +1048,12 @@ impl WireValidate for NativePane {
         self.target.validate()?;
         self.unbound_row_id.validate()?;
         self.shell_target.validate()?;
-        ensure(usize::from(self.target.is_some()) + usize::from(self.unbound_row_id.is_some()) + usize::from(self.shell_target.is_some()) <= 1)
+        ensure(
+            usize::from(self.target.is_some())
+                + usize::from(self.unbound_row_id.is_some())
+                + usize::from(self.shell_target.is_some())
+                <= 1,
+        )
     }
 }
 
@@ -1075,10 +1110,14 @@ impl WireValidate for Project {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-    #[serde(default)]pub controls:bool,
-    #[serde(default)]pub terminal_create:bool,
-    #[serde(default)]pub artifacts:bool,
-    #[serde(default)]pub attachments:bool,
+    #[serde(default)]
+    pub controls: bool,
+    #[serde(default)]
+    pub terminal_create: bool,
+    #[serde(default)]
+    pub artifacts: bool,
+    #[serde(default)]
+    pub attachments: bool,
     pub history: bool,
     pub prompt: bool,
     pub cancel: bool,
@@ -1153,7 +1192,11 @@ pub struct SessionSummary {
     pub connectivity: SessionConnectivity,
     pub capabilities: Capabilities,
     pub history_coverage: HistoryCoverage,
-    #[serde(default, skip_serializing_if="Option::is_none", deserialize_with="optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub skills_generation: Option<Uuid>,
     #[serde(
         default,
@@ -1618,7 +1661,11 @@ pub struct Receipt {
         deserialize_with = "optional_non_null"
     )]
     pub target: Option<Target>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub shell_target: Option<ShellTarget>,
     pub created_at: Uint,
     pub updated_at: Uint,
@@ -1663,7 +1710,11 @@ impl WireValidate for Receipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreationProgress {
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub source_target: Option<Target>,
     pub server_id: Uuid,
     pub project_id: Uuid,
@@ -1689,7 +1740,11 @@ impl WireValidate for CreationProgress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreationResources {
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub checkout: Option<CreationCheckoutResources>,
     #[serde(
         default,
@@ -2421,9 +2476,17 @@ pub struct SessionCreateParams {
     pub project_id: Uuid,
     pub provider: Provider,
     pub name: Label,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub directory_ref: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub placement: Option<SessionPlacement>,
 }
 impl WireValidate for SessionCreateParams {
@@ -2440,54 +2503,100 @@ impl WireValidate for SessionCreateParams {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionPlacement { pub source_target: Target }
+pub struct SessionPlacement {
+    pub source_target: Target,
+}
 impl WireValidate for SessionPlacement {
-    fn validate(&self) -> Validation { self.source_target.validate() }
+    fn validate(&self) -> Validation {
+        self.source_target.validate()
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreationDirectoriesParams {
     pub server_id: Uuid,
     pub project_id: Uuid,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub source: Option<ArtifactSource>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub parent: Option<Uuid>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub cursor: Option<Uuid>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub limit: Option<Uint>,
 }
 impl WireValidate for CreationDirectoriesParams {
     fn validate(&self) -> Validation {
-        self.server_id.validate()?;self.project_id.validate()?;self.source.validate()?;
-        self.parent.validate()?;self.cursor.validate()?;self.limit.validate()?;
-        ensure(self.limit.is_none_or(|limit|(1..=100).contains(&limit.0)))
+        self.server_id.validate()?;
+        self.project_id.validate()?;
+        self.source.validate()?;
+        self.parent.validate()?;
+        self.cursor.validate()?;
+        self.limit.validate()?;
+        ensure(self.limit.is_none_or(|limit| (1..=100).contains(&limit.0)))
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreationDirectoryEntry { pub reference: Uuid, pub name: Label }
+pub struct CreationDirectoryEntry {
+    pub reference: Uuid,
+    pub name: Label,
+}
 impl WireValidate for CreationDirectoryEntry {
-    fn validate(&self) -> Validation { self.reference.validate()?;self.name.validate() }
+    fn validate(&self) -> Validation {
+        self.reference.validate()?;
+        self.name.validate()
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreationDirectoriesResult {
     pub server_id: Uuid,
     pub project_id: Uuid,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub source: Option<ArtifactSource>,
     pub entries: Vec<CreationDirectoryEntry>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub next_cursor: Option<Uuid>,
 }
 impl WireValidate for CreationDirectoriesResult {
     fn validate(&self) -> Validation {
-        self.server_id.validate()?;self.project_id.validate()?;self.source.validate()?;
-        ensure(self.entries.len()<=100)?;self.entries.validate()?;self.next_cursor.validate()?;
-        let mut seen=HashSet::with_capacity(self.entries.len());
-        ensure(self.entries.iter().all(|entry|seen.insert(&entry.reference)))
+        self.server_id.validate()?;
+        self.project_id.validate()?;
+        self.source.validate()?;
+        ensure(self.entries.len() <= 100)?;
+        self.entries.validate()?;
+        self.next_cursor.validate()?;
+        let mut seen = HashSet::with_capacity(self.entries.len());
+        ensure(
+            self.entries
+                .iter()
+                .all(|entry| seen.insert(&entry.reference)),
+        )
     }
 }
 
@@ -2496,19 +2605,34 @@ impl WireValidate for CreationDirectoriesResult {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CreationCheckout {
     New {
-        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "optional_non_null"
+        )]
         branch: Option<Text>,
-        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "optional_non_null"
+        )]
         base: Option<Text>,
     },
-    Existing { branch: Text },
+    Existing {
+        branch: Text,
+    },
 }
 impl WireValidate for CreationCheckout {
     fn validate(&self) -> Validation {
         match self {
             Self::New { branch, base } => {
-                branch.as_ref().map(|value| validate_worktree_text(value, 1024, false)).transpose()?;
-                base.as_ref().map(|value| validate_worktree_text(value, 1024, false)).transpose()?;
+                branch
+                    .as_ref()
+                    .map(|value| validate_worktree_text(value, 1024, false))
+                    .transpose()?;
+                base.as_ref()
+                    .map(|value| validate_worktree_text(value, 1024, false))
+                    .transpose()?;
             }
             Self::Existing { branch } => validate_worktree_text(branch, 1024, false)?,
         }
@@ -2603,14 +2727,30 @@ pub struct PromptSubmitParams {
     pub boot_id: Uuid,
     pub target: Target,
     pub text: PromptText,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub skill: Option<SkillSelector>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub delivery:Option<PromptDelivery>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub native_turn_id:Option<Id>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub images:Option<Vec<Uuid>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub delivery: Option<PromptDelivery>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub native_turn_id: Option<Id>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub images: Option<Vec<Uuid>>,
 }
 impl WireValidate for PromptSubmitParams {
     fn validate(&self) -> Validation {
@@ -2618,13 +2758,23 @@ impl WireValidate for PromptSubmitParams {
         self.target.validate()?;
         self.text.validate()?;
         self.skill.validate()?;
-        self.delivery.validate()?;self.native_turn_id.validate()?;self.images.validate()?;
-        ensure(self.native_turn_id.is_none()||self.delivery==Some(PromptDelivery::Steer))?;
-        if let Some(images)=&self.images {
-            let mut seen=std::collections::HashSet::new();
-            ensure(!images.is_empty()&&images.len()<=4&&images.iter().all(|id|seen.insert(id)))?;
+        self.delivery.validate()?;
+        self.native_turn_id.validate()?;
+        self.images.validate()?;
+        ensure(self.native_turn_id.is_none() || self.delivery == Some(PromptDelivery::Steer))?;
+        if let Some(images) = &self.images {
+            let mut seen = std::collections::HashSet::new();
+            ensure(
+                !images.is_empty() && images.len() <= 4 && images.iter().all(|id| seen.insert(id)),
+            )?;
         }
-        ensure(self.skill.is_none() || self.text.0.is_empty()&&self.delivery.is_none()&&self.native_turn_id.is_none()&&self.images.is_none())?;
+        ensure(
+            self.skill.is_none()
+                || self.text.0.is_empty()
+                    && self.delivery.is_none()
+                    && self.native_turn_id.is_none()
+                    && self.images.is_none(),
+        )?;
         Ok(())
     }
 }
@@ -2874,8 +3024,12 @@ pub struct GridBegin {
     #[serde(default)]
     pub popup_blocked: bool,
     pub part_count: Uint,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub scroll:Option<GridScroll>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub scroll: Option<GridScroll>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2894,17 +3048,30 @@ impl WireValidate for GridBegin {
         if let Some(c) = &self.cursor {
             ensure(c.column.0 < self.columns.0 && c.row.0 < self.rows.0 && c.shape.0 <= 6)?;
         }
-        if let Some(scroll)=&self.scroll {scroll.validate()?;}
+        if let Some(scroll) = &self.scroll {
+            scroll.validate()?;
+        }
         Ok(())
     }
 }
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct GridScroll {pub offset_from_bottom:Uint,pub max_offset_from_bottom:Uint,pub viewport_rows:Uint}
-impl WireValidate for GridScroll {fn validate(&self)->Validation {
-    self.offset_from_bottom.validate()?;self.max_offset_from_bottom.validate()?;self.viewport_rows.validate()?;
-    ensure(self.offset_from_bottom.0<=self.max_offset_from_bottom.0&&(1..=256).contains(&self.viewport_rows.0))
-}}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GridScroll {
+    pub offset_from_bottom: Uint,
+    pub max_offset_from_bottom: Uint,
+    pub viewport_rows: Uint,
+}
+impl WireValidate for GridScroll {
+    fn validate(&self) -> Validation {
+        self.offset_from_bottom.validate()?;
+        self.max_offset_from_bottom.validate()?;
+        self.viewport_rows.validate()?;
+        ensure(
+            self.offset_from_bottom.0 <= self.max_offset_from_bottom.0
+                && (1..=256).contains(&self.viewport_rows.0),
+        )
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GridSpan {
@@ -2977,15 +3144,27 @@ impl WireValidate for WorktreesListParams {
 pub struct WorktreeEntry {
     pub path: Text,
     pub label: Text,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub branch: Option<Text>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub head: Option<Text>,
     pub is_bare: bool,
     pub is_detached: bool,
     pub is_locked: bool,
     pub is_prunable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub is_linked_worktree: Option<bool>,
 }
 impl WireValidate for WorktreeEntry {
@@ -3001,17 +3180,23 @@ impl WireValidate for WorktreeEntry {
         self.is_linked_worktree.validate()?;
         validate_worktree_text(&self.path, 4096, true)?;
         validate_worktree_text(&self.label, 1024, false)?;
-        if let Some(branch) = &self.branch { validate_worktree_text(branch, 1024, false)?; }
-        if let Some(head) = &self.head { validate_worktree_text(head, 1024, false)?; }
+        if let Some(branch) = &self.branch {
+            validate_worktree_text(branch, 1024, false)?;
+        }
+        if let Some(head) = &self.head {
+            validate_worktree_text(head, 1024, false)?;
+        }
         Ok(())
     }
 }
 
 fn validate_worktree_text(value: &str, max_bytes: usize, absolute: bool) -> Validation {
-    ensure(!value.is_empty()
-        && value.len() <= max_bytes
-        && !value.chars().any(char::is_control)
-        && (!absolute || value.starts_with('/')))
+    ensure(
+        !value.is_empty()
+            && value.len() <= max_bytes
+            && !value.chars().any(char::is_control)
+            && (!absolute || value.starts_with('/')),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3034,13 +3219,28 @@ pub struct ChangesReadParams {
     pub target: Target,
 }
 impl WireValidate for ChangesReadParams {
-    fn validate(&self) -> Validation { self.target.validate() }
+    fn validate(&self) -> Validation {
+        self.target.validate()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChangeState { Unchanged, Added, Modified, Deleted, Renamed, Copied, TypeChanged, Unmerged }
-impl WireValidate for ChangeState { fn validate(&self) -> Validation { Ok(()) } }
+pub enum ChangeState {
+    Unchanged,
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Unmerged,
+}
+impl WireValidate for ChangeState {
+    fn validate(&self) -> Validation {
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3051,77 +3251,167 @@ pub struct ChangeSubmodule {
 }
 impl WireValidate for ChangeSubmodule {
     fn validate(&self) -> Validation {
-        self.commit_changed.validate()?; self.tracked_dirty.validate()?; self.untracked_dirty.validate()
+        self.commit_changed.validate()?;
+        self.tracked_dirty.validate()?;
+        self.untracked_dirty.validate()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ChangeEntry {
     Tracked {
         path: Text,
-        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "optional_non_null"
+        )]
         original_path: Option<Text>,
         index: ChangeState,
         worktree: ChangeState,
-        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "optional_non_null"
+        )]
         submodule: Option<ChangeSubmodule>,
         staged_binary: bool,
         unstaged_binary: bool,
     },
-    Untracked { path: Text },
+    Untracked {
+        path: Text,
+    },
 }
 impl WireValidate for ChangeEntry {
     fn validate(&self) -> Validation {
         match self {
-            Self::Tracked { path, original_path, index, worktree, submodule, staged_binary, unstaged_binary } => {
-                path.validate()?; original_path.validate()?; index.validate()?; worktree.validate()?;
-                submodule.validate()?; staged_binary.validate()?; unstaged_binary.validate()?;
+            Self::Tracked {
+                path,
+                original_path,
+                index,
+                worktree,
+                submodule,
+                staged_binary,
+                unstaged_binary,
+            } => {
+                path.validate()?;
+                original_path.validate()?;
+                index.validate()?;
+                worktree.validate()?;
+                submodule.validate()?;
+                staged_binary.validate()?;
+                unstaged_binary.validate()?;
                 validate_worktree_text(path, 4096, false)?;
-                if let Some(old) = original_path { validate_worktree_text(old, 4096, false)?; }
+                if let Some(old) = original_path {
+                    validate_worktree_text(old, 4096, false)?;
+                }
                 let requires_original = matches!(index, ChangeState::Renamed | ChangeState::Copied)
                     || matches!(worktree, ChangeState::Renamed | ChangeState::Copied);
                 ensure(requires_original == original_path.is_some())
             }
-            Self::Untracked { path } => { path.validate()?; validate_worktree_text(path, 4096, false) }
+            Self::Untracked { path } => {
+                path.validate()?;
+                validate_worktree_text(path, 4096, false)
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct ChangesRepositoryContext {
-    pub unborn:bool,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub upstream:Option<ChangesUpstream>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub latest_commit:Option<ChangesLatestCommit>,
+    pub unborn: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub upstream: Option<ChangesUpstream>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub latest_commit: Option<ChangesLatestCommit>,
 }
-impl WireValidate for ChangesRepositoryContext {fn validate(&self)->Validation {self.upstream.validate()?;self.latest_commit.validate()}}
+impl WireValidate for ChangesRepositoryContext {
+    fn validate(&self) -> Validation {
+        self.upstream.validate()?;
+        self.latest_commit.validate()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct ChangesUpstream {
-    pub name:Text,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub ahead:Option<Uint>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub behind:Option<Uint>,
+    pub name: Text,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub ahead: Option<Uint>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub behind: Option<Uint>,
 }
-impl WireValidate for ChangesUpstream {fn validate(&self)->Validation {validate_worktree_text(&self.name,1024,false)?;self.ahead.validate()?;self.behind.validate()?;ensure(self.ahead.is_some()==self.behind.is_some())}}
+impl WireValidate for ChangesUpstream {
+    fn validate(&self) -> Validation {
+        validate_worktree_text(&self.name, 1024, false)?;
+        self.ahead.validate()?;
+        self.behind.validate()?;
+        ensure(self.ahead.is_some() == self.behind.is_some())
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ChangesLatestCommit {pub oid:Text,pub subject:Text}
-fn valid_changes_oid(value:&str)->bool {matches!(value.len(),40|64) && value.bytes().all(|byte|byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))}
-impl WireValidate for ChangesLatestCommit {fn validate(&self)->Validation {ensure(valid_changes_oid(&self.oid) && self.subject.len()<=1024 && !self.subject.chars().any(char::is_control))}}
+#[serde(rename_all = "camelCase")]
+pub struct ChangesLatestCommit {
+    pub oid: Text,
+    pub subject: Text,
+}
+fn valid_changes_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+impl WireValidate for ChangesLatestCommit {
+    fn validate(&self) -> Validation {
+        ensure(
+            valid_changes_oid(&self.oid)
+                && self.subject.len() <= 1024
+                && !self.subject.chars().any(char::is_control),
+        )
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangesInfo {
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub repository_context:Option<ChangesRepositoryContext>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub repository_context: Option<ChangesRepositoryContext>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub branch: Option<Text>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub head: Option<Text>,
     pub detached: bool,
     pub entries: Vec<ChangeEntry>,
@@ -3130,21 +3420,49 @@ pub struct ChangesInfo {
 }
 impl WireValidate for ChangesInfo {
     fn validate(&self) -> Validation {
-        self.branch.validate()?; self.head.validate()?; self.detached.validate()?;
+        self.branch.validate()?;
+        self.head.validate()?;
+        self.detached.validate()?;
         self.repository_context.validate()?;
-        if let Some(context)=&self.repository_context {
+        if let Some(context) = &self.repository_context {
             ensure(!self.detached || context.upstream.is_none())?;
-            if context.unborn {ensure(!self.detached && self.branch.is_some() && self.head.is_none() && context.latest_commit.is_none() && context.upstream.as_ref().is_none_or(|upstream|upstream.ahead.is_none() && upstream.behind.is_none()))?;}
-            else {ensure(self.head.as_deref().is_some_and(valid_changes_oid) && context.latest_commit.as_ref().is_some_and(|commit|Some(&commit.oid)==self.head.as_ref()))?;}
+            if context.unborn {
+                ensure(
+                    !self.detached
+                        && self.branch.is_some()
+                        && self.head.is_none()
+                        && context.latest_commit.is_none()
+                        && context.upstream.as_ref().is_none_or(|upstream| {
+                            upstream.ahead.is_none() && upstream.behind.is_none()
+                        }),
+                )?;
+            } else {
+                ensure(
+                    self.head.as_deref().is_some_and(valid_changes_oid)
+                        && context
+                            .latest_commit
+                            .as_ref()
+                            .is_some_and(|commit| Some(&commit.oid) == self.head.as_ref()),
+                )?;
+            }
         }
-        self.entries.validate()?; self.staged_patch.validate()?; self.unstaged_patch.validate()?;
+        self.entries.validate()?;
+        self.staged_patch.validate()?;
+        self.unstaged_patch.validate()?;
         ensure(self.entries.len() <= 128 && (!self.detached || self.branch.is_none()))?;
-        if let Some(branch) = &self.branch { validate_worktree_text(branch, 1024, false)?; }
-        if let Some(head) = &self.head { validate_worktree_text(head, 1024, false)?; }
-        validate_patch_text(&self.staged_patch)?; validate_patch_text(&self.unstaged_patch)?;
+        if let Some(branch) = &self.branch {
+            validate_worktree_text(branch, 1024, false)?;
+        }
+        if let Some(head) = &self.head {
+            validate_worktree_text(head, 1024, false)?;
+        }
+        validate_patch_text(&self.staged_patch)?;
+        validate_patch_text(&self.unstaged_patch)?;
         let mut paths = std::collections::HashSet::new();
         for entry in &self.entries {
-            let path = match entry { ChangeEntry::Tracked { path, .. } | ChangeEntry::Untracked { path } => path };
+            let path = match entry {
+                ChangeEntry::Tracked { path, .. } | ChangeEntry::Untracked { path } => path,
+            };
             ensure(paths.insert(path))?;
         }
         Ok(())
@@ -3158,11 +3476,19 @@ pub struct ChangesReadResult {
     pub changes: ChangesInfo,
 }
 impl WireValidate for ChangesReadResult {
-    fn validate(&self) -> Validation { self.target.validate()?; self.changes.validate() }
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.changes.validate()
+    }
 }
 
 fn validate_patch_text(value: &str) -> Validation {
-    ensure(value.len() <= 256 * 1024 && value.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t')))
+    ensure(
+        value.len() <= 256 * 1024
+            && value
+                .chars()
+                .all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t')),
+    )
 }
 impl WireValidate for ContentReadResult {
     fn validate(&self) -> Validation {
@@ -3263,7 +3589,11 @@ pub struct PushRegisterParams {
     pub push_key: Key32,
     pub probe: Uuid,
 }
-impl std::fmt::Debug for PushRegisterParams{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("PushRegisterParams(redacted)")}}
+impl std::fmt::Debug for PushRegisterParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PushRegisterParams(redacted)")
+    }
+}
 impl WireValidate for PushRegisterParams {
     fn validate(&self) -> Validation {
         self.boot_id.validate()?;
@@ -3600,18 +3930,21 @@ impl WireValidate for Answer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ActionResult {
-    #[serde(rename="queue")]Queue(ActionResultQueue),
-    #[serde(rename="attachment")] Attachment(ActionResultAttachment),
-    #[serde(rename="worktree_removal")]WorktreeRemoval(ActionResultWorktreeRemoval),
+    #[serde(rename = "queue")]
+    Queue(ActionResultQueue),
+    #[serde(rename = "attachment")]
+    Attachment(ActionResultAttachment),
+    #[serde(rename = "worktree_removal")]
+    WorktreeRemoval(ActionResultWorktreeRemoval),
     #[serde(rename = "shell_creation")]
     ShellCreation(ActionResultShellCreation),
     #[serde(rename = "shell_input")]
     ShellInput(ActionResultShellInput),
-    #[serde(rename="shell_dispatch")]
+    #[serde(rename = "shell_dispatch")]
     ShellDispatch(ActionResultShellDispatch),
-    #[serde(rename="shell_resize")]
+    #[serde(rename = "shell_resize")]
     ShellResize(ActionResultShellResize),
-    #[serde(rename="shell_scroll")]
+    #[serde(rename = "shell_scroll")]
     ShellScroll(GridScroll),
     #[serde(rename = "agent_renamed")]
     AgentRenamed(ActionResultAgentRenamed),
@@ -3629,14 +3962,14 @@ pub enum ActionResult {
 impl WireValidate for ActionResult {
     fn validate(&self) -> Validation {
         match self {
-            Self::Queue(x)=>x.validate(),
-            Self::Attachment(x)=>x.validate(),
+            Self::Queue(x) => x.validate(),
+            Self::Attachment(x) => x.validate(),
             Self::ShellCreation(x) => x.validate(),
             Self::ShellInput(x) => x.validate(),
-            Self::ShellDispatch(x)=>x.validate(),
-            Self::ShellResize(x)=>x.validate(),
-            Self::ShellScroll(x)=>x.validate(),
-            Self::WorktreeRemoval(x)=>x.validate(),
+            Self::ShellDispatch(x) => x.validate(),
+            Self::ShellResize(x) => x.validate(),
+            Self::ShellScroll(x) => x.validate(),
+            Self::WorktreeRemoval(x) => x.validate(),
             Self::AgentRenamed(x) => x.validate(),
             Self::WorkspaceRenamed(x) => x.validate(),
             Self::Prompt(x) => x.validate(),
@@ -3667,13 +4000,20 @@ impl WireValidate for FieldValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum RequestBody {
-    #[serde(rename="session.controls.read")]SessionControlsRead(SessionControlsReadParams),
-    #[serde(rename="session.controls.apply")]SessionControlsApply(SessionControlsApplyParams),
-    #[serde(rename="session.queue.list")]SessionQueueList(SessionQueueListParams),
-    #[serde(rename="session.queue.update")]SessionQueueUpdate(SessionQueueUpdateParams),
-    #[serde(rename="session.queue.delete")]SessionQueueDelete(SessionQueueDeleteParams),
-    #[serde(rename="session.queue.reorder")]SessionQueueReorder(SessionQueueReorderParams),
-    #[serde(rename="session.queue.start")]SessionQueueStart(SessionQueueStartParams),
+    #[serde(rename = "session.controls.read")]
+    SessionControlsRead(SessionControlsReadParams),
+    #[serde(rename = "session.controls.apply")]
+    SessionControlsApply(SessionControlsApplyParams),
+    #[serde(rename = "session.queue.list")]
+    SessionQueueList(SessionQueueListParams),
+    #[serde(rename = "session.queue.update")]
+    SessionQueueUpdate(SessionQueueUpdateParams),
+    #[serde(rename = "session.queue.delete")]
+    SessionQueueDelete(SessionQueueDeleteParams),
+    #[serde(rename = "session.queue.reorder")]
+    SessionQueueReorder(SessionQueueReorderParams),
+    #[serde(rename = "session.queue.start")]
+    SessionQueueStart(SessionQueueStartParams),
     #[serde(rename = "artifacts.list")]
     ArtifactsList(ArtifactsListParams),
     #[serde(rename = "artifacts.open")]
@@ -3682,12 +4022,18 @@ pub enum RequestBody {
     ArtifactsRead(ArtifactsReadParams),
     #[serde(rename = "artifacts.close")]
     ArtifactsClose(ArtifactsCloseParams),
-    #[serde(rename="terminal.create")] TerminalCreate(TerminalCreateParams),
-    #[serde(rename="attachments.begin") ] AttachmentsBegin(AttachmentsBeginParams),
-    #[serde(rename="attachments.chunk") ] AttachmentsChunk(AttachmentsChunkParams),
-    #[serde(rename="attachments.complete") ] AttachmentsComplete(AttachmentsCompleteParams),
-    #[serde(rename="attachments.discard") ] AttachmentsDiscard(AttachmentsDiscardParams),
-    #[serde(rename="attachments.status") ] AttachmentsStatus(AttachmentsStatusParams),
+    #[serde(rename = "terminal.create")]
+    TerminalCreate(TerminalCreateParams),
+    #[serde(rename = "attachments.begin")]
+    AttachmentsBegin(AttachmentsBeginParams),
+    #[serde(rename = "attachments.chunk")]
+    AttachmentsChunk(AttachmentsChunkParams),
+    #[serde(rename = "attachments.complete")]
+    AttachmentsComplete(AttachmentsCompleteParams),
+    #[serde(rename = "attachments.discard")]
+    AttachmentsDiscard(AttachmentsDiscardParams),
+    #[serde(rename = "attachments.status")]
+    AttachmentsStatus(AttachmentsStatusParams),
     #[serde(rename = "pair.confirm")]
     PairConfirm(PairConfirmParams),
     #[serde(rename = "hello")]
@@ -3706,9 +4052,9 @@ pub enum RequestBody {
     SessionCreate(SessionCreateParams),
     #[serde(rename = "shell.input")]
     ShellInput(ShellInputParams),
-    #[serde(rename="shell.resize")]
+    #[serde(rename = "shell.resize")]
     ShellResize(ShellResizeParams),
-    #[serde(rename="shell.scroll")]
+    #[serde(rename = "shell.scroll")]
     ShellScroll(ShellScrollParams),
     #[serde(rename = "agent.rename")]
     AgentRename(AgentRenameParams),
@@ -3734,9 +4080,12 @@ pub enum RequestBody {
     ChangesRead(ChangesReadParams),
     #[serde(rename = "skills.list")]
     SkillsList(SkillsListParams),
-    #[serde(rename="skills.preview.open")]SkillsPreviewOpen(SkillsPreviewOpenParams),
-    #[serde(rename="skills.preview.read")]SkillsPreviewRead(SkillsPreviewReadParams),
-    #[serde(rename="skills.preview.close")]SkillsPreviewClose(SkillsPreviewCloseParams),
+    #[serde(rename = "skills.preview.open")]
+    SkillsPreviewOpen(SkillsPreviewOpenParams),
+    #[serde(rename = "skills.preview.read")]
+    SkillsPreviewRead(SkillsPreviewReadParams),
+    #[serde(rename = "skills.preview.close")]
+    SkillsPreviewClose(SkillsPreviewCloseParams),
     #[serde(rename = "notifications.sync")]
     NotificationsSync(NotificationsSyncParams),
     #[serde(rename = "notifications.read")]
@@ -3753,23 +4102,23 @@ pub enum RequestBody {
 impl RequestBody {
     pub fn method(&self) -> Method {
         match self {
-            Self::SessionControlsRead(_)=>Method::SessionControlsRead,
-            Self::SessionControlsApply(_)=>Method::SessionControlsApply,
-            Self::SessionQueueList(_)=>Method::SessionQueueList,
-            Self::SessionQueueUpdate(_)=>Method::SessionQueueUpdate,
-            Self::SessionQueueDelete(_)=>Method::SessionQueueDelete,
-            Self::SessionQueueReorder(_)=>Method::SessionQueueReorder,
-            Self::SessionQueueStart(_)=>Method::SessionQueueStart,
-            Self::ArtifactsList(_)=>Method::ArtifactsList,
-            Self::ArtifactsOpen(_)=>Method::ArtifactsOpen,
-            Self::ArtifactsRead(_)=>Method::ArtifactsRead,
-            Self::ArtifactsClose(_)=>Method::ArtifactsClose,
-            Self::TerminalCreate(_)=>Method::TerminalCreate,
-            Self::AttachmentsBegin(_)=>Method::AttachmentsBegin,
-            Self::AttachmentsChunk(_)=>Method::AttachmentsChunk,
-            Self::AttachmentsComplete(_)=>Method::AttachmentsComplete,
-            Self::AttachmentsDiscard(_)=>Method::AttachmentsDiscard,
-            Self::AttachmentsStatus(_)=>Method::AttachmentsStatus,
+            Self::SessionControlsRead(_) => Method::SessionControlsRead,
+            Self::SessionControlsApply(_) => Method::SessionControlsApply,
+            Self::SessionQueueList(_) => Method::SessionQueueList,
+            Self::SessionQueueUpdate(_) => Method::SessionQueueUpdate,
+            Self::SessionQueueDelete(_) => Method::SessionQueueDelete,
+            Self::SessionQueueReorder(_) => Method::SessionQueueReorder,
+            Self::SessionQueueStart(_) => Method::SessionQueueStart,
+            Self::ArtifactsList(_) => Method::ArtifactsList,
+            Self::ArtifactsOpen(_) => Method::ArtifactsOpen,
+            Self::ArtifactsRead(_) => Method::ArtifactsRead,
+            Self::ArtifactsClose(_) => Method::ArtifactsClose,
+            Self::TerminalCreate(_) => Method::TerminalCreate,
+            Self::AttachmentsBegin(_) => Method::AttachmentsBegin,
+            Self::AttachmentsChunk(_) => Method::AttachmentsChunk,
+            Self::AttachmentsComplete(_) => Method::AttachmentsComplete,
+            Self::AttachmentsDiscard(_) => Method::AttachmentsDiscard,
+            Self::AttachmentsStatus(_) => Method::AttachmentsStatus,
             Self::PairConfirm(_) => Method::PairConfirm,
             Self::Hello(_) => Method::Hello,
             Self::HostSnapshot(_) => Method::HostSnapshot,
@@ -3779,8 +4128,8 @@ impl RequestBody {
             Self::CreationDirectories(_) => Method::CreationDirectories,
             Self::SessionCreate(_) => Method::SessionCreate,
             Self::ShellInput(_) => Method::ShellInput,
-            Self::ShellResize(_)=>Method::ShellResize,
-            Self::ShellScroll(_)=>Method::ShellScroll,
+            Self::ShellResize(_) => Method::ShellResize,
+            Self::ShellScroll(_) => Method::ShellScroll,
             Self::ShellGridSubscribe(_) => Method::ShellGridSubscribe,
             Self::AgentRename(_) => Method::AgentRename,
             Self::WorkspaceRename(_) => Method::WorkspaceRename,
@@ -3793,9 +4142,9 @@ impl RequestBody {
             Self::WorktreesList(_) => Method::WorktreesList,
             Self::ChangesRead(_) => Method::ChangesRead,
             Self::SkillsList(_) => Method::SkillsList,
-            Self::SkillsPreviewOpen(_)=>Method::SkillsPreviewOpen,
-            Self::SkillsPreviewRead(_)=>Method::SkillsPreviewRead,
-            Self::SkillsPreviewClose(_)=>Method::SkillsPreviewClose,
+            Self::SkillsPreviewOpen(_) => Method::SkillsPreviewOpen,
+            Self::SkillsPreviewRead(_) => Method::SkillsPreviewRead,
+            Self::SkillsPreviewClose(_) => Method::SkillsPreviewClose,
             Self::NotificationsSync(_) => Method::NotificationsSync,
             Self::NotificationsRead(_) => Method::NotificationsRead,
             Self::PushRegister(_) => Method::PushRegister,
@@ -3808,23 +4157,23 @@ impl RequestBody {
 impl WireValidate for RequestBody {
     fn validate(&self) -> Validation {
         match self {
-            Self::SessionControlsRead(x)=>x.validate(),
-            Self::SessionControlsApply(x)=>x.validate(),
-            Self::SessionQueueList(x)=>x.validate(),
-            Self::SessionQueueUpdate(x)=>x.validate(),
-            Self::SessionQueueDelete(x)=>x.validate(),
-            Self::SessionQueueReorder(x)=>x.validate(),
-            Self::SessionQueueStart(x)=>x.validate(),
-            Self::ArtifactsList(x)=>x.validate(),
-            Self::ArtifactsOpen(x)=>x.validate(),
-            Self::ArtifactsRead(x)=>x.validate(),
-            Self::ArtifactsClose(x)=>x.validate(),
-            Self::TerminalCreate(x)=>x.validate(),
-            Self::AttachmentsBegin(x)=>x.validate(),
-            Self::AttachmentsChunk(x)=>x.validate(),
-            Self::AttachmentsComplete(x)=>x.validate(),
-            Self::AttachmentsDiscard(x)=>x.validate(),
-            Self::AttachmentsStatus(x)=>x.validate(),
+            Self::SessionControlsRead(x) => x.validate(),
+            Self::SessionControlsApply(x) => x.validate(),
+            Self::SessionQueueList(x) => x.validate(),
+            Self::SessionQueueUpdate(x) => x.validate(),
+            Self::SessionQueueDelete(x) => x.validate(),
+            Self::SessionQueueReorder(x) => x.validate(),
+            Self::SessionQueueStart(x) => x.validate(),
+            Self::ArtifactsList(x) => x.validate(),
+            Self::ArtifactsOpen(x) => x.validate(),
+            Self::ArtifactsRead(x) => x.validate(),
+            Self::ArtifactsClose(x) => x.validate(),
+            Self::TerminalCreate(x) => x.validate(),
+            Self::AttachmentsBegin(x) => x.validate(),
+            Self::AttachmentsChunk(x) => x.validate(),
+            Self::AttachmentsComplete(x) => x.validate(),
+            Self::AttachmentsDiscard(x) => x.validate(),
+            Self::AttachmentsStatus(x) => x.validate(),
             Self::PairConfirm(x) => x.validate(),
             Self::Hello(x) => x.validate(),
             Self::HostSnapshot(x) => x.validate(),
@@ -3834,8 +4183,8 @@ impl WireValidate for RequestBody {
             Self::CreationDirectories(x) => x.validate(),
             Self::SessionCreate(x) => x.validate(),
             Self::ShellInput(x) => x.validate(),
-            Self::ShellResize(x)=>x.validate(),
-            Self::ShellScroll(x)=>x.validate(),
+            Self::ShellResize(x) => x.validate(),
+            Self::ShellScroll(x) => x.validate(),
             Self::ShellGridSubscribe(x) => x.validate(),
             Self::AgentRename(x) => x.validate(),
             Self::WorkspaceRename(x) => x.validate(),
@@ -3848,7 +4197,9 @@ impl WireValidate for RequestBody {
             Self::WorktreesList(x) => x.validate(),
             Self::ChangesRead(x) => x.validate(),
             Self::SkillsList(x) => x.validate(),
-            Self::SkillsPreviewOpen(x)=>x.validate(),Self::SkillsPreviewRead(x)=>x.validate(),Self::SkillsPreviewClose(x)=>x.validate(),
+            Self::SkillsPreviewOpen(x) => x.validate(),
+            Self::SkillsPreviewRead(x) => x.validate(),
+            Self::SkillsPreviewClose(x) => x.validate(),
             Self::NotificationsSync(x) => x.validate(),
             Self::NotificationsRead(x) => x.validate(),
             Self::PushRegister(x) => x.validate(),
@@ -3901,7 +4252,9 @@ pub enum ResultBody {
     WorktreesList(WorktreesListResult),
     ChangesRead(ChangesReadResult),
     SkillsList(SkillsListResult),
-    SkillsPreviewOpen(SkillsPreviewOpenResult),SkillsPreviewRead(SkillsPreviewReadResult),SkillsPreviewClose(SkillsPreviewCloseResult),
+    SkillsPreviewOpen(SkillsPreviewOpenResult),
+    SkillsPreviewRead(SkillsPreviewReadResult),
+    SkillsPreviewClose(SkillsPreviewCloseResult),
     NotificationsSync(NotificationsSyncResult),
     NotificationsRead(NotificationsReadResult),
     PushRegister(PushRegisterResult),
@@ -3912,7 +4265,8 @@ pub enum ResultBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ActionStatusResult {
-    Known(KnownActionStatus),
+    // Keep the untagged wire shape without embedding a receipt in every status variant.
+    Known(Box<KnownActionStatus>),
     Unknown(UnknownActionStatus),
 }
 impl WireValidate for ActionStatusResult {
@@ -3927,8 +4281,10 @@ impl WireValidate for ActionStatusResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum EventBody {
-    #[serde(rename="controls.changed")]ControlsChanged(ControlsChangedEvent),
-    #[serde(rename="queue.changed")]QueueChanged(QueueChangedEvent),
+    #[serde(rename = "controls.changed")]
+    ControlsChanged(ControlsChangedEvent),
+    #[serde(rename = "queue.changed")]
+    QueueChanged(QueueChangedEvent),
     #[serde(rename = "grid.begin")]
     GridBegin(GridBeginEvent),
     #[serde(rename = "grid.part")]
@@ -3959,8 +4315,8 @@ pub enum EventBody {
 impl WireValidate for EventBody {
     fn validate(&self) -> Validation {
         match self {
-            Self::ControlsChanged(x)=>x.validate(),
-            Self::QueueChanged(x)=>x.validate(),
+            Self::ControlsChanged(x) => x.validate(),
+            Self::QueueChanged(x) => x.validate(),
             Self::GridBegin(x) => x.validate(),
             Self::GridPart(x) => x.validate(),
             Self::GridCommit(x) => x.validate(),
@@ -3980,25 +4336,44 @@ impl WireValidate for EventBody {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CheckoutKind { New, Existing }
+pub enum CheckoutKind {
+    New,
+    Existing,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreationCheckoutResources {
     pub kind: CheckoutKind,
     pub branch: Text,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub requested_base: Option<Text>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub resolved_commit: Option<Text>,
 }
 impl WireValidate for CreationCheckoutResources {
     fn validate(&self) -> Validation {
         validate_worktree_text(&self.branch, 1024, false)?;
-        self.requested_base.as_ref().map(|base| validate_worktree_text(base, 1024, false)).transpose()?;
+        self.requested_base
+            .as_ref()
+            .map(|base| validate_worktree_text(base, 1024, false))
+            .transpose()?;
         ensure((self.kind == CheckoutKind::New) == self.requested_base.is_some())?;
         if let Some(commit) = &self.resolved_commit {
-            ensure([40,64].contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))?;
+            ensure(
+                [40, 64].contains(&commit.len())
+                    && commit
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            )?;
         }
         Ok(())
     }
@@ -4006,557 +4381,1880 @@ impl WireValidate for CreationCheckoutResources {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SkillsListParams { pub target: Target }
-impl WireValidate for SkillsListParams { fn validate(&self) -> Validation { self.target.validate() } }
+pub struct SkillsListParams {
+    pub target: Target,
+}
+impl WireValidate for SkillsListParams {
+    fn validate(&self) -> Validation {
+        self.target.validate()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillEntry {
-    pub name: Text, pub description: Text,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub path: Option<Text>, pub scope: Text, pub enabled: bool,
-    #[serde(default, skip_serializing_if="Option::is_none", deserialize_with="optional_non_null")]
+    pub name: Text,
+    pub description: Text,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub path: Option<Text>,
+    pub scope: Text,
+    pub enabled: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub display_name: Option<Text>,
-    #[serde(default, skip_serializing_if="Option::is_none", deserialize_with="optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub short_description: Option<Text>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub command_name:Option<Text>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub document_ref:Option<Uuid>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub invocation_ref:Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub command_name: Option<Text>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub document_ref: Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub invocation_ref: Option<Uuid>,
 }
 /// Pinned producer grammar: exact linked mentions only; no escaping or bare-name fallback.
 pub fn skill_insert_text(skill: &SkillEntry) -> Option<String> {
-    if let Some(command)=&skill.command_name {
-        let name=command.strip_prefix("skill:")?;
-        return (skill.enabled&&!name.is_empty()&&name.len()<=128&&name.bytes().all(|b|b.is_ascii_alphanumeric()||b"._-".contains(&b))).then(||format!("/{command}"));
+    if let Some(command) = &skill.command_name {
+        let name = command.strip_prefix("skill:")?;
+        return (skill.enabled
+            && !name.is_empty()
+            && name.len() <= 128
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
+        .then(|| format!("/{command}"));
     }
-    let name = skill.name.as_str(); let path = skill.path.as_deref()?;
-    if !skill.enabled || name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_:-".contains(&b))
-        || ["PATH","HOME","USER","SHELL","PWD","TMPDIR","TEMP","TMP","LANG","TERM","XDG_CONFIG_HOME"].iter().any(|n| name.eq_ignore_ascii_case(n))
-        || !path.starts_with('/') || path.trim()!=path || path.contains(')') || path.chars().any(char::is_control) { return None; }
+    let name = skill.name.as_str();
+    let path = skill.path.as_deref()?;
+    if !skill.enabled
+        || name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_:-".contains(&b))
+        || [
+            "PATH",
+            "HOME",
+            "USER",
+            "SHELL",
+            "PWD",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+            "LANG",
+            "TERM",
+            "XDG_CONFIG_HOME",
+        ]
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+        || !path.starts_with('/')
+        || path.trim() != path
+        || path.contains(')')
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
     Some(format!("[${name}]({path})"))
 }
-impl WireValidate for SkillEntry { fn validate(&self) -> Validation {
-    self.name.validate()?; self.description.validate()?; self.path.validate()?; self.scope.validate()?;
-    self.display_name.validate()?; self.short_description.validate()?;self.command_name.validate()?;self.document_ref.validate()?;
-    self.invocation_ref.validate()?;
-    ensure(self.invocation_ref.is_none() || self.enabled && self.command_name.is_none())?;
-    if self.command_name.as_ref().is_some_and(|command|command.is_empty()||command.len()>256||command.chars().any(char::is_control))||self.document_ref.is_some()&&!self.enabled{return Err(invalid())}
-    if self.name.is_empty() || self.name.len()>256 || self.description.len()>16384 || self.path.as_ref().is_some_and(|path|path.is_empty()||path.len()>4096)
-        || !["user","repo","system","admin","enabled"].contains(&self.scope.as_str())
-        || self.display_name.as_ref().is_some_and(|s|s.len()>1024)
-        || self.short_description.as_ref().is_some_and(|s|s.len()>4096) { return Err(invalid()); } Ok(())
-} }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillLoadError { pub path: Text, pub message: Text }
-impl WireValidate for SkillLoadError { fn validate(&self) -> Validation { self.path.validate()?; self.message.validate()?; if self.path.len()>4096 || self.message.len()>4096 { return Err(invalid()); } Ok(()) } }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillsListResult { pub target: Target, pub catalogue_generation: Uuid, pub skills: Vec<SkillEntry>, pub errors: Vec<SkillLoadError>,#[serde(default="skills_provider_default")]pub provider:Provider }
-fn skills_provider_default()->Provider {Provider::Codex}
-impl WireValidate for SkillsListResult { fn validate(&self) -> Validation {
-    self.target.validate()?; self.catalogue_generation.validate()?; self.skills.validate()?; self.errors.validate()?;
-    let mut invocations=std::collections::HashSet::new();
-    if self.skills.iter().any(|entry|entry.invocation_ref.as_ref().is_some_and(|r|self.provider!=Provider::Codex||!entry.enabled||!invocations.insert(r))){return Err(invalid())}
-    let mut document_refs=std::collections::HashSet::new();
-    ensure(self.skills.iter().all(|entry|entry.document_ref.as_ref().is_none_or(|reference|entry.enabled&&document_refs.insert(reference))))?;
-    if self.skills.iter().any(|entry|match self.provider {Provider::Codex=>entry.path.is_none()||entry.command_name.is_some()||entry.scope=="enabled",Provider::Omp=>entry.path.is_some()||!entry.enabled||entry.command_name.is_none()||entry.scope!="enabled"}){return Err(invalid())}
-    if self.provider==Provider::Omp {
-        if !self.errors.is_empty(){return Err(invalid())}
-        let mut commands=std::collections::HashSet::new();let mut documents=std::collections::HashSet::new();
-        if self.skills.iter().any(|entry|entry.command_name.as_ref().is_none_or(|command|command.strip_prefix("skill:")!=Some(entry.name.as_str())||!commands.insert(command))||entry.document_ref.as_ref().is_some_and(|reference|!documents.insert(reference))){return Err(invalid())}
+impl WireValidate for SkillEntry {
+    fn validate(&self) -> Validation {
+        self.name.validate()?;
+        self.description.validate()?;
+        self.path.validate()?;
+        self.scope.validate()?;
+        self.display_name.validate()?;
+        self.short_description.validate()?;
+        self.command_name.validate()?;
+        self.document_ref.validate()?;
+        self.invocation_ref.validate()?;
+        ensure(self.invocation_ref.is_none() || self.enabled && self.command_name.is_none())?;
+        if self.command_name.as_ref().is_some_and(|command| {
+            command.is_empty() || command.len() > 256 || command.chars().any(char::is_control)
+        }) || self.document_ref.is_some() && !self.enabled
+        {
+            return Err(invalid());
+        }
+        if self.name.is_empty()
+            || self.name.len() > 256
+            || self.description.len() > 16384
+            || self
+                .path
+                .as_ref()
+                .is_some_and(|path| path.is_empty() || path.len() > 4096)
+            || !["user", "repo", "system", "admin", "enabled"].contains(&self.scope.as_str())
+            || self.display_name.as_ref().is_some_and(|s| s.len() > 1024)
+            || self
+                .short_description
+                .as_ref()
+                .is_some_and(|s| s.len() > 4096)
+        {
+            return Err(invalid());
+        }
+        Ok(())
     }
-    if self.skills.len()>128 || self.errors.len()>32 || serde_json::to_vec(self).map_err(|_| invalid())?.len()>256*1024 { return Err(invalid()); } Ok(())
-} }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillLoadError {
+    pub path: Text,
+    pub message: Text,
+}
+impl WireValidate for SkillLoadError {
+    fn validate(&self) -> Validation {
+        self.path.validate()?;
+        self.message.validate()?;
+        if self.path.len() > 4096 || self.message.len() > 4096 {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsListResult {
+    pub target: Target,
+    pub catalogue_generation: Uuid,
+    pub skills: Vec<SkillEntry>,
+    pub errors: Vec<SkillLoadError>,
+    #[serde(default = "skills_provider_default")]
+    pub provider: Provider,
+}
+fn skills_provider_default() -> Provider {
+    Provider::Codex
+}
+impl WireValidate for SkillsListResult {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.catalogue_generation.validate()?;
+        self.skills.validate()?;
+        self.errors.validate()?;
+        let mut invocations = std::collections::HashSet::new();
+        if self.skills.iter().any(|entry| {
+            entry.invocation_ref.as_ref().is_some_and(|r| {
+                self.provider != Provider::Codex || !entry.enabled || !invocations.insert(r)
+            })
+        }) {
+            return Err(invalid());
+        }
+        let mut document_refs = std::collections::HashSet::new();
+        ensure(self.skills.iter().all(|entry| {
+            entry
+                .document_ref
+                .as_ref()
+                .is_none_or(|reference| entry.enabled && document_refs.insert(reference))
+        }))?;
+        if self.skills.iter().any(|entry| match self.provider {
+            Provider::Codex => {
+                entry.path.is_none() || entry.command_name.is_some() || entry.scope == "enabled"
+            }
+            Provider::Omp => {
+                entry.path.is_some()
+                    || !entry.enabled
+                    || entry.command_name.is_none()
+                    || entry.scope != "enabled"
+            }
+        }) {
+            return Err(invalid());
+        }
+        if self.provider == Provider::Omp {
+            if !self.errors.is_empty() {
+                return Err(invalid());
+            }
+            let mut commands = std::collections::HashSet::new();
+            let mut documents = std::collections::HashSet::new();
+            if self.skills.iter().any(|entry| {
+                entry.command_name.as_ref().is_none_or(|command| {
+                    command.strip_prefix("skill:") != Some(entry.name.as_str())
+                        || !commands.insert(command)
+                }) || entry
+                    .document_ref
+                    .as_ref()
+                    .is_some_and(|reference| !documents.insert(reference))
+            }) {
+                return Err(invalid());
+            }
+        }
+        if self.skills.len() > 128
+            || self.errors.len() > 32
+            || serde_json::to_vec(self).map_err(|_| invalid())?.len() > 256 * 1024
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
 
-
-
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]#[serde(rename_all="camelCase")]
-pub struct SkillsPreviewOpenParams {pub target:Target,pub catalogue_generation:Uuid,pub document_ref:Uuid}
-impl WireValidate for SkillsPreviewOpenParams {fn validate(&self)->Validation{self.target.validate()?;self.catalogue_generation.validate()?;self.document_ref.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]#[serde(rename_all="camelCase")]
-pub struct SkillsPreviewOpenResult {pub target:Target,pub catalogue_generation:Uuid,pub document_ref:Uuid,pub read_id:Uuid,pub size:Uint,pub sha256:String}
-impl WireValidate for SkillsPreviewOpenResult {fn validate(&self)->Validation{self.target.validate()?;self.catalogue_generation.validate()?;self.document_ref.validate()?;self.read_id.validate()?;self.size.validate()?;ensure(self.size.0<=1048576&&self.sha256.len()==64&&self.sha256.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)))}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]#[serde(rename_all="camelCase")]
-pub struct SkillsPreviewReadParams {pub target:Target,pub catalogue_generation:Uuid,pub read_id:Uuid,pub offset:Uint,pub limit:Uint}
-impl WireValidate for SkillsPreviewReadParams {fn validate(&self)->Validation{self.target.validate()?;self.catalogue_generation.validate()?;self.read_id.validate()?;self.offset.validate()?;self.limit.validate()?;ensure(self.offset.0<=1048576&&self.limit.0>0&&self.limit.0<=65536)}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]#[serde(rename_all="camelCase")]
-pub struct SkillsPreviewReadResult {pub target:Target,pub catalogue_generation:Uuid,pub read_id:Uuid,pub offset:Uint,pub data:Base64Bytes,pub eof:bool}
-impl std::fmt::Debug for SkillsPreviewReadResult {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("SkillsPreviewReadResult(redacted)")}}
-impl WireValidate for SkillsPreviewReadResult {fn validate(&self)->Validation{self.target.validate()?;self.catalogue_generation.validate()?;self.read_id.validate()?;self.offset.validate()?;self.data.validate()?;ensure(self.offset.0<=1048576&&STANDARD.decode(&self.data.0).map_err(|_|invalid())?.len()<=65536)}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]#[serde(rename_all="camelCase")]
-pub struct SkillsPreviewCloseParams {pub target:Target,pub catalogue_generation:Uuid,pub read_id:Uuid}
-impl WireValidate for SkillsPreviewCloseParams {fn validate(&self)->Validation{self.target.validate()?;self.catalogue_generation.validate()?;self.read_id.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]#[serde(rename_all="camelCase")]
-pub struct SkillsPreviewCloseResult {pub closed:bool}
-impl WireValidate for SkillsPreviewCloseResult {fn validate(&self)->Validation{Ok(())}}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPreviewOpenParams {
+    pub target: Target,
+    pub catalogue_generation: Uuid,
+    pub document_ref: Uuid,
+}
+impl WireValidate for SkillsPreviewOpenParams {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.catalogue_generation.validate()?;
+        self.document_ref.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPreviewOpenResult {
+    pub target: Target,
+    pub catalogue_generation: Uuid,
+    pub document_ref: Uuid,
+    pub read_id: Uuid,
+    pub size: Uint,
+    pub sha256: String,
+}
+impl WireValidate for SkillsPreviewOpenResult {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.catalogue_generation.validate()?;
+        self.document_ref.validate()?;
+        self.read_id.validate()?;
+        self.size.validate()?;
+        ensure(
+            self.size.0 <= 1048576
+                && self.sha256.len() == 64
+                && self
+                    .sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        )
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPreviewReadParams {
+    pub target: Target,
+    pub catalogue_generation: Uuid,
+    pub read_id: Uuid,
+    pub offset: Uint,
+    pub limit: Uint,
+}
+impl WireValidate for SkillsPreviewReadParams {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.catalogue_generation.validate()?;
+        self.read_id.validate()?;
+        self.offset.validate()?;
+        self.limit.validate()?;
+        ensure(self.offset.0 <= 1048576 && self.limit.0 > 0 && self.limit.0 <= 65536)
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPreviewReadResult {
+    pub target: Target,
+    pub catalogue_generation: Uuid,
+    pub read_id: Uuid,
+    pub offset: Uint,
+    pub data: Base64Bytes,
+    pub eof: bool,
+}
+impl std::fmt::Debug for SkillsPreviewReadResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SkillsPreviewReadResult(redacted)")
+    }
+}
+impl WireValidate for SkillsPreviewReadResult {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.catalogue_generation.validate()?;
+        self.read_id.validate()?;
+        self.offset.validate()?;
+        self.data.validate()?;
+        ensure(
+            self.offset.0 <= 1048576
+                && STANDARD.decode(&self.data.0).map_err(|_| invalid())?.len() <= 65536,
+        )
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPreviewCloseParams {
+    pub target: Target,
+    pub catalogue_generation: Uuid,
+    pub read_id: Uuid,
+}
+impl WireValidate for SkillsPreviewCloseParams {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.catalogue_generation.validate()?;
+        self.read_id.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPreviewCloseResult {
+    pub closed: bool,
+}
+impl WireValidate for SkillsPreviewCloseResult {
+    fn validate(&self) -> Validation {
+        Ok(())
+    }
+}
 
 /// Ordinary shells never resolve through provider session IDs or history reducers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellTarget { pub shell_id:Uuid, pub generation:Uuid }
-impl WireValidate for ShellTarget {fn validate(&self)->Validation {self.shell_id.validate()?;self.generation.validate()}}
+#[serde(rename_all = "camelCase")]
+pub struct ShellTarget {
+    pub shell_id: Uuid,
+    pub generation: Uuid,
+}
+impl WireValidate for ShellTarget {
+    fn validate(&self) -> Validation {
+        self.shell_id.validate()?;
+        self.generation.validate()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellCapabilities {pub read:bool,pub create:bool,pub input:bool,pub close:bool,#[serde(default)]pub artifacts:bool,#[serde(default)]pub grid:bool}
-impl WireValidate for ShellCapabilities {fn validate(&self)->Validation {ensure(!self.close && (!(self.create || self.input || self.grid) || self.read))}}
+#[serde(rename_all = "camelCase")]
+pub struct ShellCapabilities {
+    pub read: bool,
+    pub create: bool,
+    pub input: bool,
+    pub close: bool,
+    #[serde(default)]
+    pub artifacts: bool,
+    #[serde(default)]
+    pub grid: bool,
+}
+impl WireValidate for ShellCapabilities {
+    fn validate(&self) -> Validation {
+        ensure(!self.close && (!(self.create || self.input || self.grid) || self.read))
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct ShellSummary {
-    pub target:ShellTarget,pub server_id:Uuid,pub workspace_id:Id,pub tab_id:Id,pub pane_id:Id,pub terminal_id:Id,
-    pub title:Label,pub connectivity:SessionConnectivity,pub capabilities:ShellCapabilities,
+    pub target: ShellTarget,
+    pub server_id: Uuid,
+    pub workspace_id: Id,
+    pub tab_id: Id,
+    pub pane_id: Id,
+    pub terminal_id: Id,
+    pub title: Label,
+    pub connectivity: SessionConnectivity,
+    pub capabilities: ShellCapabilities,
 }
-impl WireValidate for ShellSummary {fn validate(&self)->Validation {
-    self.target.validate()?;self.server_id.validate()?;self.workspace_id.validate()?;self.tab_id.validate()?;self.pane_id.validate()?;self.terminal_id.validate()?;self.title.validate()?;self.capabilities.validate()?;
-    ensure(matches!(self.connectivity,SessionConnectivity::Ready|SessionConnectivity::Offline) && (self.connectivity==SessionConnectivity::Ready || (!self.capabilities.read && !self.capabilities.create && !self.capabilities.input && !self.capabilities.artifacts && !self.capabilities.grid)))
-}}
+impl WireValidate for ShellSummary {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.server_id.validate()?;
+        self.workspace_id.validate()?;
+        self.tab_id.validate()?;
+        self.pane_id.validate()?;
+        self.terminal_id.validate()?;
+        self.title.validate()?;
+        self.capabilities.validate()?;
+        ensure(
+            matches!(
+                self.connectivity,
+                SessionConnectivity::Ready | SessionConnectivity::Offline
+            ) && (self.connectivity == SessionConnectivity::Ready
+                || (!self.capabilities.read
+                    && !self.capabilities.create
+                    && !self.capabilities.input
+                    && !self.capabilities.artifacts
+                    && !self.capabilities.grid)),
+        )
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellGridSubscribeParams {pub target:ShellTarget,#[serde(default)]pub history:bool}
-impl WireValidate for ShellGridSubscribeParams {fn validate(&self)->Validation {self.target.validate()}}
+#[serde(rename_all = "camelCase")]
+pub struct ShellGridSubscribeParams {
+    pub target: ShellTarget,
+    #[serde(default)]
+    pub history: bool,
+}
+impl WireValidate for ShellGridSubscribeParams {
+    fn validate(&self) -> Validation {
+        self.target.validate()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellGridSubscribeResult {pub target:ShellTarget,pub subscription:Uuid,pub seq:ZeroValue,pub frame:GridBegin}
-impl WireValidate for ShellGridSubscribeResult {fn validate(&self)->Validation {self.target.validate()?;self.subscription.validate()?;self.seq.validate()?;self.frame.validate()?;ensure(self.frame.revision.0==0)}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+#[serde(rename_all = "camelCase")]
+pub struct ShellGridSubscribeResult {
+    pub target: ShellTarget,
+    pub subscription: Uuid,
+    pub seq: ZeroValue,
+    pub frame: GridBegin,
+}
+impl WireValidate for ShellGridSubscribeResult {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.subscription.validate()?;
+        self.seq.validate()?;
+        self.frame.validate()?;
+        ensure(self.frame.revision.0 == 0)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShellResizeParams {
-    pub boot_id:Uuid,pub target:ShellTarget,pub subscription:Uuid,pub columns:Uint,pub rows:Uint,
+    pub boot_id: Uuid,
+    pub target: ShellTarget,
+    pub subscription: Uuid,
+    pub columns: Uint,
+    pub rows: Uint,
 }
-fn shell_dimensions(columns:&Uint,rows:&Uint)->Validation {
-    ensure((1..=512).contains(&columns.0)&&(1..=256).contains(&rows.0)&&columns.0*rows.0<=32768)
+fn shell_dimensions(columns: &Uint, rows: &Uint) -> Validation {
+    ensure(
+        (1..=512).contains(&columns.0)
+            && (1..=256).contains(&rows.0)
+            && columns.0 * rows.0 <= 32768,
+    )
 }
 impl WireValidate for ShellResizeParams {
-    fn validate(&self)->Validation {
-        self.boot_id.validate()?;self.target.validate()?;self.subscription.validate()?;
-        shell_dimensions(&self.columns,&self.rows)
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.subscription.validate()?;
+        shell_dimensions(&self.columns, &self.rows)
     }
 }
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellResizeResult {pub receipt:Receipt}
-impl WireValidate for ShellResizeResult {fn validate(&self)->Validation{self.receipt.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ActionResultShellResize {pub columns:Uint,pub rows:Uint}
-impl WireValidate for ActionResultShellResize {fn validate(&self)->Validation{shell_dimensions(&self.columns,&self.rows)}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellScrollParams {pub boot_id:Uuid,pub target:ShellTarget,pub subscription:Uuid,pub offset_from_bottom:Uint}
-impl WireValidate for ShellScrollParams {fn validate(&self)->Validation {
-    self.boot_id.validate()?;self.target.validate()?;self.subscription.validate()?;self.offset_from_bottom.validate()
-}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellScrollResult {pub receipt:Receipt}
-impl WireValidate for ShellScrollResult {fn validate(&self)->Validation {self.receipt.validate()?;ensure(self.receipt.method==ActionMethod::ShellScroll)}}
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellCreationResources {
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub server_id:Option<Uuid>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub workspace_id:Option<Id>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub tab_id:Option<Id>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub pane_id:Option<Id>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub terminal_id:Option<Id>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub created_target:Option<ShellTarget>,
-}
-impl ShellCreationResources {pub fn complete(&self)->bool {self.server_id.is_some() && self.workspace_id.is_some() && self.tab_id.is_some() && self.pane_id.is_some() && self.terminal_id.is_some()}}
-impl WireValidate for ShellCreationResources {fn validate(&self)->Validation {self.server_id.validate()?;self.workspace_id.validate()?;self.tab_id.validate()?;self.pane_id.validate()?;self.terminal_id.validate()?;self.created_target.validate()}}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ActionResultShellCreation {pub resources:ShellCreationResources}
-impl WireValidate for ActionResultShellCreation {fn validate(&self)->Validation {self.resources.validate()}}
+#[serde(rename_all = "camelCase")]
+pub struct ShellResizeResult {
+    pub receipt: Receipt,
+}
+impl WireValidate for ShellResizeResult {
+    fn validate(&self) -> Validation {
+        self.receipt.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionResultShellResize {
+    pub columns: Uint,
+    pub rows: Uint,
+}
+impl WireValidate for ActionResultShellResize {
+    fn validate(&self) -> Validation {
+        shell_dimensions(&self.columns, &self.rows)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellScrollParams {
+    pub boot_id: Uuid,
+    pub target: ShellTarget,
+    pub subscription: Uuid,
+    pub offset_from_bottom: Uint,
+}
+impl WireValidate for ShellScrollParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.subscription.validate()?;
+        self.offset_from_bottom.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellScrollResult {
+    pub receipt: Receipt,
+}
+impl WireValidate for ShellScrollResult {
+    fn validate(&self) -> Validation {
+        self.receipt.validate()?;
+        ensure(self.receipt.method == ActionMethod::ShellScroll)
+    }
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellCreationResources {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub server_id: Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub workspace_id: Option<Id>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub tab_id: Option<Id>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub pane_id: Option<Id>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub terminal_id: Option<Id>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub created_target: Option<ShellTarget>,
+}
+impl ShellCreationResources {
+    pub fn complete(&self) -> bool {
+        self.server_id.is_some()
+            && self.workspace_id.is_some()
+            && self.tab_id.is_some()
+            && self.pane_id.is_some()
+            && self.terminal_id.is_some()
+    }
+}
+impl WireValidate for ShellCreationResources {
+    fn validate(&self) -> Validation {
+        self.server_id.validate()?;
+        self.workspace_id.validate()?;
+        self.tab_id.validate()?;
+        self.pane_id.validate()?;
+        self.terminal_id.validate()?;
+        self.created_target.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionResultShellCreation {
+    pub resources: ShellCreationResources,
+}
+impl WireValidate for ActionResultShellCreation {
+    fn validate(&self) -> Validation {
+        self.resources.validate()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag="kind", rename_all="snake_case", deny_unknown_fields)]
-pub enum ShellInput { Text {text:String}, Keys {events:Vec<ShellKeyEvent>} }
-impl WireValidate for ShellInput {fn validate(&self)->Validation {match self {
-    Self::Text {text}=>ensure(!text.is_empty() && text.len()<=16384 && text.chars().all(|c|!c.is_control() || c=='\n' || c=='\t')),
-    Self::Keys {events}=>{ensure(!events.is_empty() && events.len()<=32)?;for event in events {event.validate()?;}Ok(())}
-}}}
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ShellInput {
+    Text { text: String },
+    Keys { events: Vec<ShellKeyEvent> },
+}
+impl WireValidate for ShellInput {
+    fn validate(&self) -> Validation {
+        match self {
+            Self::Text { text } => ensure(
+                !text.is_empty()
+                    && text.len() <= 16384
+                    && text
+                        .chars()
+                        .all(|c| !c.is_control() || c == '\n' || c == '\t'),
+            ),
+            Self::Keys { events } => {
+                ensure(!events.is_empty() && events.len() <= 32)?;
+                for event in events {
+                    event.validate()?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag="key",content="value",rename_all="snake_case",deny_unknown_fields)]
-pub enum ShellKey {Character(char),Enter,Tab,Escape,Backspace,Delete,Insert,Left,Right,Up,Down,Home,End,PageUp,PageDown,F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12}
+#[serde(
+    tag = "key",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ShellKey {
+    Character(char),
+    Enter,
+    Tab,
+    Escape,
+    Backspace,
+    Delete,
+    Insert,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ShellKeyModifiers {pub shift:bool,pub ctrl:bool,pub alt:bool,#[serde(rename="super")]pub super_key:bool}
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum ShellKeyPhase {Press,Repeat,Release}
+pub struct ShellKeyModifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    #[serde(rename = "super")]
+    pub super_key: bool,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellKeyPhase {
+    Press,
+    Repeat,
+    Release,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ShellKeyEvent {
-    pub key:ShellKey,pub modifiers:ShellKeyModifiers,pub phase:ShellKeyPhase,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]
-    pub physical_key_id:Option<Uint>,
+    pub key: ShellKey,
+    pub modifiers: ShellKeyModifiers,
+    pub phase: ShellKeyPhase,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub physical_key_id: Option<Uint>,
 }
-impl WireValidate for ShellKeyEvent {fn validate(&self)->Validation {
-    if let ShellKey::Character(c)=self.key {ensure(!c.is_control())?;}
-    self.physical_key_id.validate()?;ensure(self.physical_key_id.is_none_or(|id|id.0<=u64::from(u32::MAX)))
-}}
+impl WireValidate for ShellKeyEvent {
+    fn validate(&self) -> Validation {
+        if let ShellKey::Character(c) = self.key {
+            ensure(!c.is_control())?;
+        }
+        self.physical_key_id.validate()?;
+        ensure(
+            self.physical_key_id
+                .is_none_or(|id| id.0 <= u64::from(u32::MAX)),
+        )
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellInputParams {pub boot_id:Uuid,pub target:ShellTarget,pub subscription:Uuid,pub input:ShellInput}
-impl WireValidate for ShellInputParams {fn validate(&self)->Validation {self.boot_id.validate()?;self.target.validate()?;self.subscription.validate()?;self.input.validate()}}
+#[serde(rename_all = "camelCase")]
+pub struct ShellInputParams {
+    pub boot_id: Uuid,
+    pub target: ShellTarget,
+    pub subscription: Uuid,
+    pub input: ShellInput,
+}
+impl WireValidate for ShellInputParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.subscription.validate()?;
+        self.input.validate()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ShellInputResult {pub receipt:Receipt}
-impl WireValidate for ShellInputResult {fn validate(&self)->Validation {self.receipt.validate()}}
+#[serde(rename_all = "camelCase")]
+pub struct ShellInputResult {
+    pub receipt: Receipt,
+}
+impl WireValidate for ShellInputResult {
+    fn validate(&self) -> Validation {
+        self.receipt.validate()
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct ShellInputProgress {
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub encoded_bytes:Option<u32>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub written_bytes:Option<u32>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub flush_completed:Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub encoded_bytes: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub written_bytes: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub flush_completed: Option<bool>,
 }
-impl ShellInputProgress {pub fn accepted(&self)->bool {self.encoded_bytes.is_some_and(|n|n>0 && self.written_bytes==Some(n)) && self.flush_completed==Some(true)}}
-impl WireValidate for ShellInputProgress {fn validate(&self)->Validation {
-    ensure(self.encoded_bytes.is_none_or(|n|n>0 && n<=16396) && self.written_bytes.is_none_or(|n|self.encoded_bytes.is_some_and(|total|n<=total)) && (self.flush_completed!=Some(true) || self.accepted()))
-}}
+impl ShellInputProgress {
+    pub fn accepted(&self) -> bool {
+        self.encoded_bytes
+            .is_some_and(|n| n > 0 && self.written_bytes == Some(n))
+            && self.flush_completed == Some(true)
+    }
+}
+impl WireValidate for ShellInputProgress {
+    fn validate(&self) -> Validation {
+        ensure(
+            self.encoded_bytes.is_none_or(|n| n > 0 && n <= 16396)
+                && self
+                    .written_bytes
+                    .is_none_or(|n| self.encoded_bytes.is_some_and(|total| n <= total))
+                && (self.flush_completed != Some(true) || self.accepted()),
+        )
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ActionResultShellInput {pub progress:ShellInputProgress}
-impl WireValidate for ActionResultShellInput {fn validate(&self)->Validation {self.progress.validate()}}
+#[serde(rename_all = "camelCase")]
+pub struct ActionResultShellInput {
+    pub progress: ShellInputProgress,
+}
+impl WireValidate for ActionResultShellInput {
+    fn validate(&self) -> Validation {
+        self.progress.validate()
+    }
+}
 
 /// Full native socket frame progress, including its four-byte length prefix; never PTY bytes.
-#[derive(Debug,Clone,Default,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShellDispatchProgress {
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub frame_bytes:Option<u32>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub socket_bytes_written:Option<u32>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub frame_complete:Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub frame_bytes: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub socket_bytes_written: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub frame_complete: Option<bool>,
 }
 impl ShellDispatchProgress {
-    pub fn complete(&self)->bool {self.frame_bytes.is_some_and(|total|total>4&&self.socket_bytes_written==Some(total))&&self.frame_complete==Some(true)}
-    pub(crate) fn retains(&self,old:&Self)->bool {
-        old.frame_bytes.is_none_or(|total|self.frame_bytes==Some(total))
-            &&old.socket_bytes_written.is_none_or(|written|self.socket_bytes_written.is_some_and(|next|next>=written))
-            &&(old.frame_complete!=Some(true)||self.frame_complete==Some(true))
+    pub fn complete(&self) -> bool {
+        self.frame_bytes
+            .is_some_and(|total| total > 4 && self.socket_bytes_written == Some(total))
+            && self.frame_complete == Some(true)
+    }
+    pub(crate) fn retains(&self, old: &Self) -> bool {
+        old.frame_bytes
+            .is_none_or(|total| self.frame_bytes == Some(total))
+            && old.socket_bytes_written.is_none_or(|written| {
+                self.socket_bytes_written
+                    .is_some_and(|next| next >= written)
+            })
+            && (old.frame_complete != Some(true) || self.frame_complete == Some(true))
     }
 }
-impl WireValidate for ShellDispatchProgress {fn validate(&self)->Validation {
-    ensure(self.frame_bytes.is_none_or(|total|total>4&&total<=2_097_156)
-        &&self.socket_bytes_written.is_none_or(|written|self.frame_bytes.is_some_and(|total|written<=total))
-        &&(self.frame_complete!=Some(true)||self.complete()))
-}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ActionResultShellDispatch {pub progress:ShellDispatchProgress}
-impl WireValidate for ActionResultShellDispatch {fn validate(&self)->Validation {self.progress.validate()}}
+impl WireValidate for ShellDispatchProgress {
+    fn validate(&self) -> Validation {
+        ensure(
+            self.frame_bytes
+                .is_none_or(|total| total > 4 && total <= 2_097_156)
+                && self
+                    .socket_bytes_written
+                    .is_none_or(|written| self.frame_bytes.is_some_and(|total| written <= total))
+                && (self.frame_complete != Some(true) || self.complete()),
+        )
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionResultShellDispatch {
+    pub progress: ShellDispatchProgress,
+}
+impl WireValidate for ActionResultShellDispatch {
+    fn validate(&self) -> Validation {
+        self.progress.validate()
+    }
+}
 
-#[derive(Debug,Clone,Default,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorktreeRemovalProgress {
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub effect_started:Option<bool>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub git_remove_succeeded:Option<bool>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub checkout_absent:Option<bool>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub registration_absent:Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub effect_started: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub git_remove_succeeded: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub checkout_absent: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub registration_absent: Option<bool>,
 }
 impl WorktreeRemovalProgress {
-    pub fn complete(&self)->bool {self.effect_started==Some(true) && self.git_remove_succeeded==Some(true) && self.checkout_absent==Some(true) && self.registration_absent==Some(true)}
-    pub fn retains(&self,old:&Self)->bool {
-        let keeps=|old:Option<bool>,new:Option<bool>|old.is_none() || new.is_some() && (old!=Some(true) || new==Some(true));
-        keeps(old.effect_started,self.effect_started) && keeps(old.git_remove_succeeded,self.git_remove_succeeded) && keeps(old.checkout_absent,self.checkout_absent) && keeps(old.registration_absent,self.registration_absent)
+    pub fn complete(&self) -> bool {
+        self.effect_started == Some(true)
+            && self.git_remove_succeeded == Some(true)
+            && self.checkout_absent == Some(true)
+            && self.registration_absent == Some(true)
+    }
+    pub fn retains(&self, old: &Self) -> bool {
+        let keeps = |old: Option<bool>, new: Option<bool>| {
+            old.is_none() || new.is_some() && (old != Some(true) || new == Some(true))
+        };
+        keeps(old.effect_started, self.effect_started)
+            && keeps(old.git_remove_succeeded, self.git_remove_succeeded)
+            && keeps(old.checkout_absent, self.checkout_absent)
+            && keeps(old.registration_absent, self.registration_absent)
     }
 }
-impl WireValidate for WorktreeRemovalProgress {fn validate(&self)->Validation {ensure(self.git_remove_succeeded!=Some(true) || self.effect_started==Some(true))}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ActionResultWorktreeRemoval {pub target:Target,pub candidate_id:Uuid,pub preview_id:Uuid,pub progress:WorktreeRemovalProgress}
-impl WireValidate for ActionResultWorktreeRemoval {fn validate(&self)->Validation{self.target.validate()?;self.candidate_id.validate()?;self.preview_id.validate()?;self.progress.validate()}}
-
-fn attachment_digest(value:&str)->Validation {ensure(value.len()==64 && value.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))}
-fn attachment_label(value:&str)->Validation {ensure(!value.is_empty() && value.len()<=128 && !value.chars().any(char::is_control))}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct AttachmentsBeginParams {pub boot_id:Uuid,pub target:Target,pub upload_id:Uuid,pub display_name:Text,pub media_type:Text,pub size:Uint,pub sha256:Text}
-impl std::fmt::Debug for AttachmentsBeginParams {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("AttachmentsBeginParams(redacted)")}}
-impl WireValidate for AttachmentsBeginParams {fn validate(&self)->Validation {self.boot_id.validate()?;self.target.validate()?;self.upload_id.validate()?;attachment_label(&self.display_name)?;attachment_label(&self.media_type)?;ensure((1..=8*1024*1024).contains(&self.size.0))?;ensure(!self.display_name.contains(['/', '\\']))?;attachment_digest(&self.sha256)}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct AttachmentsChunkParams {pub boot_id:Uuid,pub target:Target,pub upload_id:Uuid,pub offset:Uint,pub data:Text,pub sha256:Text}
-impl std::fmt::Debug for AttachmentsChunkParams {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("AttachmentsChunkParams(redacted)")}}
-impl WireValidate for AttachmentsChunkParams {fn validate(&self)->Validation {self.boot_id.validate()?;self.target.validate()?;self.upload_id.validate()?;ensure(self.offset.0<8*1024*1024 && self.data.len()<=174764)?;let bytes=STANDARD.decode(&self.data).map_err(|_|invalid())?;ensure(!bytes.is_empty() && bytes.len()<=128*1024 && STANDARD.encode(&bytes)==self.data && crate::pairing::hex(&sha256(&bytes))==self.sha256)?;attachment_digest(&self.sha256)}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct AttachmentsCompleteParams {pub boot_id:Uuid,pub target:Target,pub upload_id:Uuid}
-impl WireValidate for AttachmentsCompleteParams {fn validate(&self)->Validation {self.boot_id.validate()?;self.target.validate()?;self.upload_id.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct AttachmentsDiscardParams {pub boot_id:Uuid,pub target:Target,pub upload_id:Uuid}
-impl WireValidate for AttachmentsDiscardParams {fn validate(&self)->Validation {self.boot_id.validate()?;self.target.validate()?;self.upload_id.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct AttachmentsStatusParams {pub target:Target,pub upload_id:Uuid}
-impl WireValidate for AttachmentsStatusParams {fn validate(&self)->Validation {self.target.validate()?;self.upload_id.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct AttachmentProgress {
-    pub upload_id:Uuid,pub committed_bytes:Uint,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub expires_at:Option<Uint>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub provider_path:Option<Text>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub published:Option<bool>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub discarded:Option<bool>,
+impl WireValidate for WorktreeRemovalProgress {
+    fn validate(&self) -> Validation {
+        ensure(self.git_remove_succeeded != Some(true) || self.effect_started == Some(true))
+    }
 }
-impl AttachmentProgress {pub fn retains(&self,old:&Self)->bool {self.upload_id==old.upload_id && self.committed_bytes>=old.committed_bytes && old.expires_at.as_ref().is_none_or(|x|self.expires_at.as_ref()==Some(x)||old.published!=Some(true)&&self.published==Some(true)&&self.provider_path.is_some()&&self.expires_at.as_ref().is_some_and(|new|new>x)) && old.provider_path.as_ref().is_none_or(|x|self.provider_path.as_ref()==Some(x)) && old.published.is_none_or(|x|self.published==Some(x)||!x&&self.published==Some(true)) && old.discarded.is_none_or(|x|self.discarded==Some(x)||!x&&self.discarded==Some(true))}}
-impl WireValidate for AttachmentProgress {fn validate(&self)->Validation {self.upload_id.validate()?;ensure(self.committed_bytes.0<=8*1024*1024)?;self.expires_at.validate()?;if let Some(path)=&self.provider_path{ensure(path.len()<=4096 && path.starts_with('/') && !path.chars().any(char::is_control) && self.published==Some(true))?}Ok(())}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ActionResultAttachment {pub target:Target,pub progress:AttachmentProgress}
-impl WireValidate for ActionResultAttachment {fn validate(&self)->Validation {self.target.validate()?;self.progress.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum AttachmentUploadState {Receiving,Complete,Discarded,Uncertain}
-impl WireValidate for AttachmentUploadState {fn validate(&self)->Validation {Ok(())}}
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum ImagePreparationReason {PendingOriginalRead,OriginalSourceUnavailable,OwnershipProofUnavailable,CapacityInUse}
-impl WireValidate for ImagePreparationReason {fn validate(&self)->Validation {Ok(())}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionResultWorktreeRemoval {
+    pub target: Target,
+    pub candidate_id: Uuid,
+    pub preview_id: Uuid,
+    pub progress: WorktreeRemovalProgress,
+}
+impl WireValidate for ActionResultWorktreeRemoval {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.candidate_id.validate()?;
+        self.preview_id.validate()?;
+        self.progress.validate()
+    }
+}
+
+fn attachment_digest(value: &str) -> Validation {
+    ensure(
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+    )
+}
+fn attachment_label(value: &str) -> Validation {
+    ensure(!value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control))
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentsBeginParams {
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub upload_id: Uuid,
+    pub display_name: Text,
+    pub media_type: Text,
+    pub size: Uint,
+    pub sha256: Text,
+}
+impl std::fmt::Debug for AttachmentsBeginParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AttachmentsBeginParams(redacted)")
+    }
+}
+impl WireValidate for AttachmentsBeginParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.upload_id.validate()?;
+        attachment_label(&self.display_name)?;
+        attachment_label(&self.media_type)?;
+        ensure((1..=8 * 1024 * 1024).contains(&self.size.0))?;
+        ensure(!self.display_name.contains(['/', '\\']))?;
+        attachment_digest(&self.sha256)
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentsChunkParams {
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub upload_id: Uuid,
+    pub offset: Uint,
+    pub data: Text,
+    pub sha256: Text,
+}
+impl std::fmt::Debug for AttachmentsChunkParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AttachmentsChunkParams(redacted)")
+    }
+}
+impl WireValidate for AttachmentsChunkParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.upload_id.validate()?;
+        ensure(self.offset.0 < 8 * 1024 * 1024 && self.data.len() <= 174764)?;
+        let bytes = STANDARD.decode(&self.data).map_err(|_| invalid())?;
+        ensure(
+            !bytes.is_empty()
+                && bytes.len() <= 128 * 1024
+                && STANDARD.encode(&bytes) == self.data
+                && crate::pairing::hex(&sha256(&bytes)) == self.sha256,
+        )?;
+        attachment_digest(&self.sha256)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentsCompleteParams {
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub upload_id: Uuid,
+}
+impl WireValidate for AttachmentsCompleteParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.upload_id.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentsDiscardParams {
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub upload_id: Uuid,
+}
+impl WireValidate for AttachmentsDiscardParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.upload_id.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentsStatusParams {
+    pub target: Target,
+    pub upload_id: Uuid,
+}
+impl WireValidate for AttachmentsStatusParams {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.upload_id.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentProgress {
+    pub upload_id: Uuid,
+    pub committed_bytes: Uint,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub expires_at: Option<Uint>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub provider_path: Option<Text>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub published: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub discarded: Option<bool>,
+}
+impl AttachmentProgress {
+    pub fn retains(&self, old: &Self) -> bool {
+        self.upload_id == old.upload_id
+            && self.committed_bytes >= old.committed_bytes
+            && old.expires_at.as_ref().is_none_or(|x| {
+                self.expires_at.as_ref() == Some(x)
+                    || old.published != Some(true)
+                        && self.published == Some(true)
+                        && self.provider_path.is_some()
+                        && self.expires_at.as_ref().is_some_and(|new| new > x)
+            })
+            && old
+                .provider_path
+                .as_ref()
+                .is_none_or(|x| self.provider_path.as_ref() == Some(x))
+            && old
+                .published
+                .is_none_or(|x| self.published == Some(x) || !x && self.published == Some(true))
+            && old
+                .discarded
+                .is_none_or(|x| self.discarded == Some(x) || !x && self.discarded == Some(true))
+    }
+}
+impl WireValidate for AttachmentProgress {
+    fn validate(&self) -> Validation {
+        self.upload_id.validate()?;
+        ensure(self.committed_bytes.0 <= 8 * 1024 * 1024)?;
+        self.expires_at.validate()?;
+        if let Some(path) = &self.provider_path {
+            ensure(
+                path.len() <= 4096
+                    && path.starts_with('/')
+                    && !path.chars().any(char::is_control)
+                    && self.published == Some(true),
+            )?
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionResultAttachment {
+    pub target: Target,
+    pub progress: AttachmentProgress,
+}
+impl WireValidate for ActionResultAttachment {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.progress.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentUploadState {
+    Receiving,
+    Complete,
+    Discarded,
+    Uncertain,
+}
+impl WireValidate for AttachmentUploadState {
+    fn validate(&self) -> Validation {
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImagePreparationReason {
+    PendingOriginalRead,
+    OriginalSourceUnavailable,
+    OwnershipProofUnavailable,
+    CapacityInUse,
+}
+impl WireValidate for ImagePreparationReason {
+    fn validate(&self) -> Validation {
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativeImagePreparation {
-    pub reason:ImagePreparationReason,pub actions:Vec<Uuid>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub peer_owners:Option<Uint>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub host_owners:Option<Uint>,
+    pub reason: ImagePreparationReason,
+    pub actions: Vec<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub peer_owners: Option<Uint>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub host_owners: Option<Uint>,
 }
 impl WireValidate for NativeImagePreparation {
-    fn validate(&self)->Validation {
-        self.actions.validate()?;self.peer_owners.validate()?;self.host_owners.validate()?;
-        let mut unique=std::collections::HashSet::new();
-        ensure(self.actions.len()<=4&&self.actions.iter().all(|action|unique.insert(action)))?;
-        ensure(self.reason==ImagePreparationReason::OwnershipProofUnavailable||self.peer_owners.is_some()&&self.host_owners.is_some()&&(self.reason==ImagePreparationReason::CapacityInUse||!self.actions.is_empty()))?;
-        ensure(self.peer_owners.is_none_or(|count|count.0<=4&&count.0>=self.actions.len() as u64)
-            &&self.host_owners.is_none_or(|count|count.0<=16&&self.peer_owners.is_none_or(|peer|peer<=count)))
+    fn validate(&self) -> Validation {
+        self.actions.validate()?;
+        self.peer_owners.validate()?;
+        self.host_owners.validate()?;
+        let mut unique = std::collections::HashSet::new();
+        ensure(self.actions.len() <= 4 && self.actions.iter().all(|action| unique.insert(action)))?;
+        ensure(
+            self.reason == ImagePreparationReason::OwnershipProofUnavailable
+                || self.peer_owners.is_some()
+                    && self.host_owners.is_some()
+                    && (self.reason == ImagePreparationReason::CapacityInUse
+                        || !self.actions.is_empty()),
+        )?;
+        ensure(
+            self.peer_owners
+                .is_none_or(|count| count.0 <= 4 && count.0 >= self.actions.len() as u64)
+                && self.host_owners.is_none_or(|count| {
+                    count.0 <= 16 && self.peer_owners.is_none_or(|peer| peer <= count)
+                }),
+        )
     }
 }
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AttachmentsStatusResult {
-    #[serde(default)]pub insertion_ready:bool,pub target:Target,pub progress:AttachmentProgress,pub state:AttachmentUploadState,pub size:Uint,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub native_preparation:Option<NativeImagePreparation>,
+    #[serde(default)]
+    pub insertion_ready: bool,
+    pub target: Target,
+    pub progress: AttachmentProgress,
+    pub state: AttachmentUploadState,
+    pub size: Uint,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub native_preparation: Option<NativeImagePreparation>,
 }
-impl WireValidate for AttachmentsStatusResult {fn validate(&self)->Validation {self.target.validate()?;self.progress.validate()?;self.native_preparation.validate()?;ensure(self.size.0>0 && self.size.0<=8*1024*1024 && self.progress.committed_bytes<=self.size)?;ensure(!self.insertion_ready || self.state==AttachmentUploadState::Complete && self.progress.published==Some(true) && self.progress.discarded!=Some(true) && self.progress.provider_path.is_some())}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct AttachmentsResult {pub receipt:Receipt}
-impl WireValidate for AttachmentsResult {fn validate(&self)->Validation {self.receipt.validate()}}
-impl RequestBody {pub fn attachment_action(&self)->Option<(ActionMethod,&Uuid,&Target,&Uuid)> {match self {Self::AttachmentsBegin(p)=>Some((ActionMethod::AttachmentsBegin,&p.boot_id,&p.target,&p.upload_id)),Self::AttachmentsChunk(p)=>Some((ActionMethod::AttachmentsChunk,&p.boot_id,&p.target,&p.upload_id)),Self::AttachmentsComplete(p)=>Some((ActionMethod::AttachmentsComplete,&p.boot_id,&p.target,&p.upload_id)),Self::AttachmentsDiscard(p)=>Some((ActionMethod::AttachmentsDiscard,&p.boot_id,&p.target,&p.upload_id)),_=>None}}}
+impl WireValidate for AttachmentsStatusResult {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.progress.validate()?;
+        self.native_preparation.validate()?;
+        ensure(
+            self.size.0 > 0
+                && self.size.0 <= 8 * 1024 * 1024
+                && self.progress.committed_bytes <= self.size,
+        )?;
+        ensure(
+            !self.insertion_ready
+                || self.state == AttachmentUploadState::Complete
+                    && self.progress.published == Some(true)
+                    && self.progress.discarded != Some(true)
+                    && self.progress.provider_path.is_some(),
+        )
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentsResult {
+    pub receipt: Receipt,
+}
+impl WireValidate for AttachmentsResult {
+    fn validate(&self) -> Validation {
+        self.receipt.validate()
+    }
+}
+impl RequestBody {
+    pub fn attachment_action(&self) -> Option<(ActionMethod, &Uuid, &Target, &Uuid)> {
+        match self {
+            Self::AttachmentsBegin(p) => Some((
+                ActionMethod::AttachmentsBegin,
+                &p.boot_id,
+                &p.target,
+                &p.upload_id,
+            )),
+            Self::AttachmentsChunk(p) => Some((
+                ActionMethod::AttachmentsChunk,
+                &p.boot_id,
+                &p.target,
+                &p.upload_id,
+            )),
+            Self::AttachmentsComplete(p) => Some((
+                ActionMethod::AttachmentsComplete,
+                &p.boot_id,
+                &p.target,
+                &p.upload_id,
+            )),
+            Self::AttachmentsDiscard(p) => Some((
+                ActionMethod::AttachmentsDiscard,
+                &p.boot_id,
+                &p.target,
+                &p.upload_id,
+            )),
+            _ => None,
+        }
+    }
+}
 
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TerminalCreateParams {
-    pub boot_id:Uuid,pub server_id:Uuid,pub workspace_id:Id,pub project_id:Uuid,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub directory_ref:Option<Uuid>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub source:Option<ArtifactSource>,
+    pub boot_id: Uuid,
+    pub server_id: Uuid,
+    pub workspace_id: Id,
+    pub project_id: Uuid,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub directory_ref: Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub source: Option<ArtifactSource>,
 }
-impl WireValidate for TerminalCreateParams {fn validate(&self)->Validation {
-    self.boot_id.validate()?;self.server_id.validate()?;self.workspace_id.validate()?;self.project_id.validate()?;self.directory_ref.validate()?;self.source.validate()
-}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct TerminalCreateResult {pub receipt:Receipt}
-impl WireValidate for TerminalCreateResult {fn validate(&self)->Validation{self.receipt.validate()}}
+impl WireValidate for TerminalCreateParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.server_id.validate()?;
+        self.workspace_id.validate()?;
+        self.project_id.validate()?;
+        self.directory_ref.validate()?;
+        self.source.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCreateResult {
+    pub receipt: Receipt,
+}
+impl WireValidate for TerminalCreateResult {
+    fn validate(&self) -> Validation {
+        self.receipt.validate()
+    }
+}
 
 /// An exact original source, never a phone-selected path or native process proof.
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(tag="kind",rename_all="snake_case",deny_unknown_fields)]
-pub enum ArtifactSource {Session {target:Target},Shell {target:ShellTarget}}
-impl WireValidate for ArtifactSource{fn validate(&self)->Validation{match self{Self::Session{target}=>target.validate(),Self::Shell{target}=>target.validate()}}}
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum ArtifactKind{Directory,File}
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum ArtifactPreviewKind{Text,Binary,Unavailable}
-fn artifact_name(name:&str)->Validation{ensure(!name.is_empty()&&name.len()<=255&&!name.chars().any(char::is_control))}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct ArtifactEntry{pub reference:Uuid,pub name:String,pub kind:ArtifactKind,#[serde(skip_serializing_if="Option::is_none")]pub size:Option<Uint>}
-impl WireValidate for ArtifactEntry{fn validate(&self)->Validation{self.reference.validate()?;artifact_name(&self.name)?;self.size.validate()?;ensure((self.kind==ArtifactKind::File)==self.size.is_some())}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct ArtifactsListParams{pub source:ArtifactSource,#[serde(default,skip_serializing_if="Option::is_none")]pub parent:Option<Uuid>,#[serde(default,skip_serializing_if="Option::is_none")]pub cursor:Option<Uuid>,pub limit:Uint}
-impl WireValidate for ArtifactsListParams{fn validate(&self)->Validation{self.source.validate()?;self.parent.validate()?;self.cursor.validate()?;self.limit.validate()?;ensure(self.parent.is_none()||self.cursor.is_none())?;ensure(self.limit.0>0&&self.limit.0<=100)}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ArtifactsListResult{pub source:ArtifactSource,pub entries:Vec<ArtifactEntry>,#[serde(default,skip_serializing_if="Option::is_none")]pub next_cursor:Option<Uuid>}
-impl WireValidate for ArtifactsListResult{fn validate(&self)->Validation{self.source.validate()?;self.entries.validate()?;self.next_cursor.validate()?;ensure(self.entries.len()<=100)?;let mut refs=std::collections::HashSet::new();ensure(self.entries.iter().all(|entry|refs.insert(&entry.reference)))}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct ArtifactsOpenParams{pub source:ArtifactSource,pub file:Uuid}
-impl WireValidate for ArtifactsOpenParams{fn validate(&self)->Validation{self.source.validate()?;self.file.validate()}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ArtifactsOpenResult{pub source:ArtifactSource,pub read_id:Uuid,pub name:String,pub size:Uint,pub sha256:String,pub preview_kind:ArtifactPreviewKind}
-impl WireValidate for ArtifactsOpenResult{fn validate(&self)->Validation{self.source.validate()?;self.read_id.validate()?;artifact_name(&self.name)?;self.size.validate()?;ensure((self.preview_kind!=ArtifactPreviewKind::Text||self.size.0<=1024*1024)&&self.size.0<=32*1024*1024&&self.sha256.len()==64&&self.sha256.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)))}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct ArtifactsReadParams{pub source:ArtifactSource,pub read_id:Uuid,pub offset:Uint,pub limit:Uint}
-impl WireValidate for ArtifactsReadParams{fn validate(&self)->Validation{self.source.validate()?;self.read_id.validate()?;self.offset.validate()?;self.limit.validate()?;ensure(self.offset.0<=32*1024*1024&&self.limit.0>0&&self.limit.0<=65536)}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ArtifactsReadResult{pub source:ArtifactSource,pub read_id:Uuid,pub offset:Uint,pub data:Base64Bytes,pub eof:bool}
-impl WireValidate for ArtifactsReadResult{fn validate(&self)->Validation{self.source.validate()?;self.read_id.validate()?;self.offset.validate()?;self.data.validate()?;ensure(self.offset.0<=32*1024*1024)}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub struct ArtifactsCloseParams{pub source:ArtifactSource,pub read_id:Uuid}
-impl WireValidate for ArtifactsCloseParams{fn validate(&self)->Validation{self.source.validate()?;self.read_id.validate()}}
-#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ArtifactsCloseResult{pub source:ArtifactSource,pub read_id:Uuid,pub closed:bool}
-impl WireValidate for ArtifactsCloseResult{fn validate(&self)->Validation{self.source.validate()?;self.read_id.validate()}}
-impl std::fmt::Debug for ArtifactEntry{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactEntry(redacted)")}}
-impl std::fmt::Debug for ArtifactsListParams{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactsListParams(redacted)")}}
-impl std::fmt::Debug for ArtifactsListResult{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactsListResult(redacted)")}}
-impl std::fmt::Debug for ArtifactsOpenParams{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactsOpenParams(redacted)")}}
-impl std::fmt::Debug for ArtifactsOpenResult{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactsOpenResult(redacted)")}}
-impl std::fmt::Debug for ArtifactsReadParams{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactsReadParams(redacted)")}}
-impl std::fmt::Debug for ArtifactsReadResult{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactsReadResult(redacted)")}}
-impl std::fmt::Debug for ArtifactsCloseParams{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactsCloseParams(redacted)")}}
-impl std::fmt::Debug for ArtifactsCloseResult{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("ArtifactsCloseResult(redacted)")}}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ArtifactSource {
+    Session { target: Target },
+    Shell { target: ShellTarget },
+}
+impl WireValidate for ArtifactSource {
+    fn validate(&self) -> Validation {
+        match self {
+            Self::Session { target } => target.validate(),
+            Self::Shell { target } => target.validate(),
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Directory,
+    File,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactPreviewKind {
+    Text,
+    Binary,
+    Unavailable,
+}
+fn artifact_name(name: &str) -> Validation {
+    ensure(!name.is_empty() && name.len() <= 255 && !name.chars().any(char::is_control))
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactEntry {
+    pub reference: Uuid,
+    pub name: String,
+    pub kind: ArtifactKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<Uint>,
+}
+impl WireValidate for ArtifactEntry {
+    fn validate(&self) -> Validation {
+        self.reference.validate()?;
+        artifact_name(&self.name)?;
+        self.size.validate()?;
+        ensure((self.kind == ArtifactKind::File) == self.size.is_some())
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactsListParams {
+    pub source: ArtifactSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Uuid>,
+    pub limit: Uint,
+}
+impl WireValidate for ArtifactsListParams {
+    fn validate(&self) -> Validation {
+        self.source.validate()?;
+        self.parent.validate()?;
+        self.cursor.validate()?;
+        self.limit.validate()?;
+        ensure(self.parent.is_none() || self.cursor.is_none())?;
+        ensure(self.limit.0 > 0 && self.limit.0 <= 100)
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactsListResult {
+    pub source: ArtifactSource,
+    pub entries: Vec<ArtifactEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<Uuid>,
+}
+impl WireValidate for ArtifactsListResult {
+    fn validate(&self) -> Validation {
+        self.source.validate()?;
+        self.entries.validate()?;
+        self.next_cursor.validate()?;
+        ensure(self.entries.len() <= 100)?;
+        let mut refs = std::collections::HashSet::new();
+        ensure(
+            self.entries
+                .iter()
+                .all(|entry| refs.insert(&entry.reference)),
+        )
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactsOpenParams {
+    pub source: ArtifactSource,
+    pub file: Uuid,
+}
+impl WireValidate for ArtifactsOpenParams {
+    fn validate(&self) -> Validation {
+        self.source.validate()?;
+        self.file.validate()
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactsOpenResult {
+    pub source: ArtifactSource,
+    pub read_id: Uuid,
+    pub name: String,
+    pub size: Uint,
+    pub sha256: String,
+    pub preview_kind: ArtifactPreviewKind,
+}
+impl WireValidate for ArtifactsOpenResult {
+    fn validate(&self) -> Validation {
+        self.source.validate()?;
+        self.read_id.validate()?;
+        artifact_name(&self.name)?;
+        self.size.validate()?;
+        ensure(
+            (self.preview_kind != ArtifactPreviewKind::Text || self.size.0 <= 1024 * 1024)
+                && self.size.0 <= 32 * 1024 * 1024
+                && self.sha256.len() == 64
+                && self
+                    .sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        )
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactsReadParams {
+    pub source: ArtifactSource,
+    pub read_id: Uuid,
+    pub offset: Uint,
+    pub limit: Uint,
+}
+impl WireValidate for ArtifactsReadParams {
+    fn validate(&self) -> Validation {
+        self.source.validate()?;
+        self.read_id.validate()?;
+        self.offset.validate()?;
+        self.limit.validate()?;
+        ensure(self.offset.0 <= 32 * 1024 * 1024 && self.limit.0 > 0 && self.limit.0 <= 65536)
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactsReadResult {
+    pub source: ArtifactSource,
+    pub read_id: Uuid,
+    pub offset: Uint,
+    pub data: Base64Bytes,
+    pub eof: bool,
+}
+impl WireValidate for ArtifactsReadResult {
+    fn validate(&self) -> Validation {
+        self.source.validate()?;
+        self.read_id.validate()?;
+        self.offset.validate()?;
+        self.data.validate()?;
+        ensure(self.offset.0 <= 32 * 1024 * 1024)
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactsCloseParams {
+    pub source: ArtifactSource,
+    pub read_id: Uuid,
+}
+impl WireValidate for ArtifactsCloseParams {
+    fn validate(&self) -> Validation {
+        self.source.validate()?;
+        self.read_id.validate()
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactsCloseResult {
+    pub source: ArtifactSource,
+    pub read_id: Uuid,
+    pub closed: bool,
+}
+impl WireValidate for ArtifactsCloseResult {
+    fn validate(&self) -> Validation {
+        self.source.validate()?;
+        self.read_id.validate()
+    }
+}
+impl std::fmt::Debug for ArtifactEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactEntry(redacted)")
+    }
+}
+impl std::fmt::Debug for ArtifactsListParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactsListParams(redacted)")
+    }
+}
+impl std::fmt::Debug for ArtifactsListResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactsListResult(redacted)")
+    }
+}
+impl std::fmt::Debug for ArtifactsOpenParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactsOpenParams(redacted)")
+    }
+}
+impl std::fmt::Debug for ArtifactsOpenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactsOpenResult(redacted)")
+    }
+}
+impl std::fmt::Debug for ArtifactsReadParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactsReadParams(redacted)")
+    }
+}
+impl std::fmt::Debug for ArtifactsReadResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactsReadResult(redacted)")
+    }
+}
+impl std::fmt::Debug for ArtifactsCloseParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactsCloseParams(redacted)")
+    }
+}
+impl std::fmt::Debug for ArtifactsCloseResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactsCloseResult(redacted)")
+    }
+}
 
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum ControlMode {Default,Plan}
-impl WireValidate for ControlMode {fn validate(&self)->Validation {Ok(())}}
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum PromptDelivery {Native,Steer,FollowUp,Aside,Queue}
-impl WireValidate for PromptDelivery {fn validate(&self)->Validation {Ok(())}}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlMode {
+    Default,
+    Plan,
+}
+impl WireValidate for ControlMode {
+    fn validate(&self) -> Validation {
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptDelivery {
+    Native,
+    Steer,
+    FollowUp,
+    Aside,
+    Queue,
+}
+impl WireValidate for PromptDelivery {
+    fn validate(&self) -> Validation {
+        Ok(())
+    }
+}
 
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionControlModel {pub reference:Uuid,pub label:Label,pub efforts:Vec<Text>}
-impl WireValidate for SessionControlModel {fn validate(&self)->Validation {
-    self.reference.validate()?;self.label.validate()?;self.efforts.validate()?;
-    ensure(self.efforts.len()<=64&&self.efforts.iter().enumerate().all(|(index,value)|!self.efforts[..index].contains(value)))
-}}
-#[derive(Debug,Clone,Default,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionControlModel {
+    pub reference: Uuid,
+    pub label: Label,
+    pub efforts: Vec<Text>,
+}
+impl WireValidate for SessionControlModel {
+    fn validate(&self) -> Validation {
+        self.reference.validate()?;
+        self.label.validate()?;
+        self.efforts.validate()?;
+        ensure(
+            self.efforts.len() <= 64
+                && self
+                    .efforts
+                    .iter()
+                    .enumerate()
+                    .all(|(index, value)| !self.efforts[..index].contains(value)),
+        )
+    }
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionControlsCurrent {
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub model_ref:Option<Uuid>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub effort:Option<Text>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub mode:Option<ControlMode>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub model_ref: Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub effort: Option<Text>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub mode: Option<ControlMode>,
 }
-impl WireValidate for SessionControlsCurrent {fn validate(&self)->Validation {self.model_ref.validate()?;self.effort.validate()?;self.mode.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionControlsReadParams {pub target:Target}
-impl WireValidate for SessionControlsReadParams {fn validate(&self)->Validation {self.target.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+impl WireValidate for SessionControlsCurrent {
+    fn validate(&self) -> Validation {
+        self.model_ref.validate()?;
+        self.effort.validate()?;
+        self.mode.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionControlsReadParams {
+    pub target: Target,
+}
+impl WireValidate for SessionControlsReadParams {
+    fn validate(&self) -> Validation {
+        self.target.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionControlsReadResult {
-    pub target:Target,pub catalogue_generation:Uuid,pub models:Vec<SessionControlModel>,
-    pub current:SessionControlsCurrent,pub modes:Vec<ControlMode>,pub deliveries:Vec<PromptDelivery>,pub queue_available:bool,
+    pub target: Target,
+    pub catalogue_generation: Uuid,
+    pub models: Vec<SessionControlModel>,
+    pub current: SessionControlsCurrent,
+    pub modes: Vec<ControlMode>,
+    pub deliveries: Vec<PromptDelivery>,
+    pub queue_available: bool,
 }
-impl WireValidate for SessionControlsReadResult {fn validate(&self)->Validation {
-    self.target.validate()?;self.catalogue_generation.validate()?;self.models.validate()?;self.current.validate()?;
-    self.modes.validate()?;self.deliveries.validate()?;
-    let mut references=std::collections::HashSet::new();
-    ensure(self.models.len()<=256&&self.models.iter().all(|model|references.insert(&model.reference)))?;
-    ensure(self.current.model_ref.as_ref().is_none_or(|reference|references.contains(reference)))?;
-    ensure(self.modes.len()<=2&&self.modes.iter().enumerate().all(|(index,value)|!self.modes[..index].contains(value)))?;
-    ensure(self.deliveries.len()<=5&&self.deliveries.iter().enumerate().all(|(index,value)|!self.deliveries[..index].contains(value)))?;
-    let members=13+self.models.len()*4+self.models.iter().map(|model|model.efforts.len()).sum::<usize>()
-        +usize::from(self.current.model_ref.is_some())+usize::from(self.current.effort.is_some())+usize::from(self.current.mode.is_some())
-        +self.modes.len()+self.deliveries.len();
-    ensure(members<=JSON_MEMBERS_MAX)?;
-    encoded_limit(self,256*1024)
-}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+impl WireValidate for SessionControlsReadResult {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.catalogue_generation.validate()?;
+        self.models.validate()?;
+        self.current.validate()?;
+        self.modes.validate()?;
+        self.deliveries.validate()?;
+        let mut references = std::collections::HashSet::new();
+        ensure(
+            self.models.len() <= 256
+                && self
+                    .models
+                    .iter()
+                    .all(|model| references.insert(&model.reference)),
+        )?;
+        ensure(
+            self.current
+                .model_ref
+                .as_ref()
+                .is_none_or(|reference| references.contains(reference)),
+        )?;
+        ensure(
+            self.modes.len() <= 2
+                && self
+                    .modes
+                    .iter()
+                    .enumerate()
+                    .all(|(index, value)| !self.modes[..index].contains(value)),
+        )?;
+        ensure(
+            self.deliveries.len() <= 5
+                && self
+                    .deliveries
+                    .iter()
+                    .enumerate()
+                    .all(|(index, value)| !self.deliveries[..index].contains(value)),
+        )?;
+        let members = 13
+            + self.models.len() * 4
+            + self
+                .models
+                .iter()
+                .map(|model| model.efforts.len())
+                .sum::<usize>()
+            + usize::from(self.current.model_ref.is_some())
+            + usize::from(self.current.effort.is_some())
+            + usize::from(self.current.mode.is_some())
+            + self.modes.len()
+            + self.deliveries.len();
+        ensure(members <= JSON_MEMBERS_MAX)?;
+        encoded_limit(self, 256 * 1024)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionControlsApplyParams {
-    pub boot_id:Uuid,pub target:Target,pub catalogue_generation:Uuid,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub model_ref:Option<Uuid>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub effort:Option<Text>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub mode:Option<ControlMode>,
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub catalogue_generation: Uuid,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub model_ref: Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub effort: Option<Text>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub mode: Option<ControlMode>,
 }
-impl WireValidate for SessionControlsApplyParams {fn validate(&self)->Validation {
-    self.boot_id.validate()?;self.target.validate()?;self.catalogue_generation.validate()?;
-    self.model_ref.validate()?;self.effort.validate()?;self.mode.validate()?;
-    ensure(self.model_ref.is_some()||self.effort.is_some()||self.mode.is_some())
-}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionControlsApplyResult {pub receipt:Receipt}
-impl WireValidate for SessionControlsApplyResult {fn validate(&self)->Validation {self.receipt.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct ControlsChangedEvent {pub target:Target}
-impl WireValidate for ControlsChangedEvent {fn validate(&self)->Validation {self.target.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct QueueChangedEvent {pub target:Target}
-impl WireValidate for QueueChangedEvent {fn validate(&self)->Validation {self.target.validate()}}
+impl WireValidate for SessionControlsApplyParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.catalogue_generation.validate()?;
+        self.model_ref.validate()?;
+        self.effort.validate()?;
+        self.mode.validate()?;
+        ensure(self.model_ref.is_some() || self.effort.is_some() || self.mode.is_some())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionControlsApplyResult {
+    pub receipt: Receipt,
+}
+impl WireValidate for SessionControlsApplyResult {
+    fn validate(&self) -> Validation {
+        self.receipt.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlsChangedEvent {
+    pub target: Target,
+}
+impl WireValidate for ControlsChangedEvent {
+    fn validate(&self) -> Validation {
+        self.target.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueChangedEvent {
+    pub target: Target,
+}
+impl WireValidate for QueueChangedEvent {
+    fn validate(&self) -> Validation {
+        self.target.validate()
+    }
+}
 
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionQueueListParams {
-    pub target:Target,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub cursor:Option<Id>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub limit:Option<Uint>,
+    pub target: Target,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub cursor: Option<Id>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub limit: Option<Uint>,
 }
-impl WireValidate for SessionQueueListParams {fn validate(&self)->Validation {
-    self.target.validate()?;self.cursor.validate()?;self.limit.validate()?;
-    ensure(self.limit.is_none_or(|limit|limit.0>0&&limit.0<=100))
-}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionQueueEntry {pub id:Id,pub text:Content,pub editable:bool}
-impl WireValidate for SessionQueueEntry {fn validate(&self)->Validation {self.id.validate()?;self.text.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+impl WireValidate for SessionQueueListParams {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.cursor.validate()?;
+        self.limit.validate()?;
+        ensure(self.limit.is_none_or(|limit| limit.0 > 0 && limit.0 <= 100))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQueueEntry {
+    pub id: Id,
+    pub text: Content,
+    pub editable: bool,
+}
+impl WireValidate for SessionQueueEntry {
+    fn validate(&self) -> Validation {
+        self.id.validate()?;
+        self.text.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionQueueListResult {
-    pub target:Target,pub entries:Vec<SessionQueueEntry>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub next_cursor:Option<Id>,
+    pub target: Target,
+    pub entries: Vec<SessionQueueEntry>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub next_cursor: Option<Id>,
 }
-impl WireValidate for SessionQueueListResult {fn validate(&self)->Validation {
-    self.target.validate()?;self.entries.validate()?;self.next_cursor.validate()?;
-    let mut ids=std::collections::HashSet::new();
-    ensure(self.entries.len()<=100&&self.entries.iter().all(|entry|ids.insert(&entry.id)))?;
-    encoded_limit(self,256*1024)
-}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionQueueUpdateParams {pub boot_id:Uuid,pub target:Target,pub entry_id:Id,pub text:PromptText}
-impl WireValidate for SessionQueueUpdateParams {fn validate(&self)->Validation {self.boot_id.validate()?;self.target.validate()?;self.entry_id.validate()?;self.text.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionQueueDeleteParams {pub boot_id:Uuid,pub target:Target,pub entry_id:Id}
-impl WireValidate for SessionQueueDeleteParams {fn validate(&self)->Validation {self.boot_id.validate()?;self.target.validate()?;self.entry_id.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionQueueStartParams {pub boot_id:Uuid,pub target:Target,pub entry_id:Id}
-impl WireValidate for SessionQueueStartParams {fn validate(&self)->Validation {self.boot_id.validate()?;self.target.validate()?;self.entry_id.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionQueueReorderParams {pub boot_id:Uuid,pub target:Target,pub entry_ids:Vec<Id>}
-impl WireValidate for SessionQueueReorderParams {fn validate(&self)->Validation {
-    self.boot_id.validate()?;self.target.validate()?;self.entry_ids.validate()?;
-    let mut ids=std::collections::HashSet::new();
-    ensure(self.entry_ids.len()<=128&&self.entry_ids.iter().all(|id|ids.insert(id)))
-}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
-pub struct SessionQueueResult {pub receipt:Receipt}
-impl WireValidate for SessionQueueResult {fn validate(&self)->Validation {self.receipt.validate()}}
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
-#[serde(rename_all="camelCase")]
+impl WireValidate for SessionQueueListResult {
+    fn validate(&self) -> Validation {
+        self.target.validate()?;
+        self.entries.validate()?;
+        self.next_cursor.validate()?;
+        let mut ids = std::collections::HashSet::new();
+        ensure(
+            self.entries.len() <= 100 && self.entries.iter().all(|entry| ids.insert(&entry.id)),
+        )?;
+        encoded_limit(self, 256 * 1024)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQueueUpdateParams {
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub entry_id: Id,
+    pub text: PromptText,
+}
+impl WireValidate for SessionQueueUpdateParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.entry_id.validate()?;
+        self.text.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQueueDeleteParams {
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub entry_id: Id,
+}
+impl WireValidate for SessionQueueDeleteParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.entry_id.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQueueStartParams {
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub entry_id: Id,
+}
+impl WireValidate for SessionQueueStartParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.entry_id.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQueueReorderParams {
+    pub boot_id: Uuid,
+    pub target: Target,
+    pub entry_ids: Vec<Id>,
+}
+impl WireValidate for SessionQueueReorderParams {
+    fn validate(&self) -> Validation {
+        self.boot_id.validate()?;
+        self.target.validate()?;
+        self.entry_ids.validate()?;
+        let mut ids = std::collections::HashSet::new();
+        ensure(self.entry_ids.len() <= 128 && self.entry_ids.iter().all(|id| ids.insert(id)))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQueueResult {
+    pub receipt: Receipt,
+}
+impl WireValidate for SessionQueueResult {
+    fn validate(&self) -> Validation {
+        self.receipt.validate()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionResultQueue {
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub entry_id:Option<Id>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub deleted:Option<bool>,
-    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="optional_non_null")]pub native_turn_id:Option<Id>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub entry_id: Option<Id>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub deleted: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
+    pub native_turn_id: Option<Id>,
 }
-impl WireValidate for ActionResultQueue {fn validate(&self)->Validation {
-    self.entry_id.validate()?;self.deleted.validate()?;self.native_turn_id.validate()?;
-    ensure((self.deleted.is_none()&&self.native_turn_id.is_none()||self.entry_id.is_some())
-        &&!(self.deleted.is_some()&&self.native_turn_id.is_some()))
-}}
+impl WireValidate for ActionResultQueue {
+    fn validate(&self) -> Validation {
+        self.entry_id.validate()?;
+        self.deleted.validate()?;
+        self.native_turn_id.validate()?;
+        ensure(
+            (self.deleted.is_none() && self.native_turn_id.is_none() || self.entry_id.is_some())
+                && !(self.deleted.is_some() && self.native_turn_id.is_some()),
+        )
+    }
+}

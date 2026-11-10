@@ -105,20 +105,28 @@ fn state(provider: Provider) -> SessionState {
             title: "synthetic provider-data fixture".into(),
             status: SessionStatus::Idle,
             connectivity: SessionConnectivity::Ready,
-            capabilities: Capabilities { controls: false, terminal_create:false,artifacts:false, attachments:false, history: true,
-            prompt: true,
-            cancel: true,
-            respond: true,
-            prompt_mode: PromptMode::SubmitOrSteer,
-            cancel_mode: if provider == Provider::Omp {
-                CancelMode::CurrentWork
-            } else {
-                CancelMode::NativeTurn
+            capabilities: Capabilities {
+                controls: false,
+                terminal_create: false,
+                artifacts: false,
+                attachments: false,
+                history: true,
+                prompt: true,
+                cancel: true,
+                respond: true,
+                prompt_mode: PromptMode::SubmitOrSteer,
+                cancel_mode: if provider == Provider::Omp {
+                    CancelMode::CurrentWork
+                } else {
+                    CancelMode::NativeTurn
+                },
+                terminal_read: false,
+                worktrees_read: false,
+                changes_read: false,
+                workspace_rename: false,
+                agent_rename: false,
+                skills_read: false,
             },
-            terminal_read: false,
-            worktrees_read: false,
-            changes_read: false,
-            workspace_rename: false, agent_rename: false, skills_read: false, },
             skills_generation: None,
             history_coverage: HistoryCoverage {
                 scope: if provider == Provider::Omp {
@@ -187,11 +195,13 @@ struct ProcessIdentity {
     executable: PathBuf,
 }
 async fn adb(lease: &EmulatorLease, args: &[&str]) -> io::Result<String> {
-    let mut command=tokio::process::Command::new("adb");
-    super::live::configure_adb_client_home(&mut command,&lease.root,&lease.adb_client_home)?;
+    let mut command = tokio::process::Command::new("adb");
+    super::live::configure_adb_client_home(&mut command, &lease.root, &lease.adb_client_home)?;
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        command.arg("-s").arg(&lease.serial)
+        command
+            .arg("-s")
+            .arg(&lease.serial)
             .args(args)
             .kill_on_drop(true)
             .output(),
@@ -328,11 +338,7 @@ pub async fn run() -> io::Result<bool> {
             "scope":"synthetic provider data; no live provider effects"
         }),
     )?;
-    adb(
-        &lease,
-        &["reverse", "--no-rebind", &mapping, &mapping],
-    )
-    .await?;
+    adb(&lease, &["reverse", "--no-rebind", &mapping, &mapping]).await?;
     let (stop, rx) = tokio::sync::watch::channel(false);
     let server_endpoint = endpoint.clone();
     let server_security = security.clone();
@@ -572,11 +578,13 @@ pub async fn run() -> io::Result<bool> {
                     current.summary.connectivity = SessionConnectivity::Synchronizing;
                     installing = Some(policy(security.state.begin_install(current.clone()))?);
                     policy(security.state.replace_inventory(
-                        vec![],
-                        vec![],
-                        vec![],
-                        vec![],
-                        vec![],
+                        goatr::state::NativeInventory {
+                            servers: vec![],
+                            projects: vec![],
+                            shells: vec![],
+                            unbound: vec![],
+                            hierarchy: vec![],
+                        },
                         &[],
                         |_| Ok(()),
                     ))?;
@@ -609,9 +617,15 @@ pub async fn run() -> io::Result<bool> {
                         .ok_or_else(|| failure("receipt before authorization refused"))?;
                     let request = Request {
                         id: action.clone(),
-                        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot.clone(),
-                        target: target(&current),
-                        text: PromptText("synthetic retained action".into()), }),
+                        body: RequestBody::PromptSubmit(PromptSubmitParams {
+                            delivery: None,
+                            native_turn_id: None,
+                            images: None,
+                            skill: None,
+                            boot_id: boot.clone(),
+                            target: target(&current),
+                            text: PromptText("synthetic retained action".into()),
+                        }),
                     };
                     security
                         .storage

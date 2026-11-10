@@ -13,11 +13,11 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio::time::Instant;
 use tokio::{
     sync::{Semaphore, mpsc},
     task::JoinSet,
 };
-use tokio::time::Instant;
 /// Public address/provenance only, written exclusively by the hidden local smoke invocation.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -322,16 +322,14 @@ fn report_codex_transport_frame(
     guard: &'static str,
     error: &io::Error,
 ) {
-    let (code, io, frame) = FrameFailure::from_error(error).map_or(
-        (None, "other", "none"),
-        |failure| {
+    let (code, io, frame) =
+        FrameFailure::from_error(error).map_or((None, "other", "none"), |failure| {
             (
                 failure.code,
                 closed_frame_io(failure.io),
                 closed_frame_stage(failure.stage),
             )
-        },
-    );
+        });
     if let Some(reporter) = reporter {
         reporter.transport(connection, guard, code, io, 0, frame);
     }
@@ -400,7 +398,13 @@ impl HelloCaptureReporter {
             Some(self.clone())
         }
     }
-    fn report(&self, phase: &'static str, guard: &'static str, code: Option<ErrorCode>, io: &'static str) {
+    fn report(
+        &self,
+        phase: &'static str,
+        guard: &'static str,
+        code: Option<ErrorCode>,
+        io: &'static str,
+    ) {
         let mut state = self.0.lock().expect("hello capture reporter mutex");
         if state.lines >= 8 || !state.observations.insert((phase, guard)) {
             return;
@@ -457,11 +461,15 @@ async fn output_step(
     if let Some(output) = bytes {
         let bytes = output.bytes;
         let grid = output.grid;
-        if let Some((lease,_,deadline))=&grid
-            && let Err(code)=lease.current(*deadline).await
+        if let Some((lease, _, deadline)) = &grid
+            && let Err(code) = lease.current(*deadline).await
         {
-            security.state.grid_failed(&auth.connection_id,&lease.id);
-            return Err(if code==ErrorCode::Timeout{frame_deadline()}else{invalid()});
+            security.state.grid_failed(&auth.connection_id, &lease.id);
+            return Err(if code == ErrorCode::Timeout {
+                frame_deadline()
+            } else {
+                invalid()
+            });
         }
         let guarded = if let Some((lease, _, deadline)) = &grid {
             lease.authorize(security, auth, *deadline).await
@@ -508,24 +516,40 @@ async fn output_step(
             });
         }
         // Parse only delivery metadata. No frame/control payload is logged or retained.
-        let events = if grid.is_some() { Vec::new() } else { delivered_notifications(&bytes).inspect_err(|error| {
-            report_transport_frame(reporter, &auth.connection_id, "delivery_metadata", error);
+        let events = if grid.is_some() {
+            Vec::new()
+        } else {
+            delivered_notifications(&bytes).inspect_err(|error| {
+                report_transport_frame(reporter, &auth.connection_id, "delivery_metadata", error);
+                report_codex_transport_frame(
+                    codex_reporter,
+                    &auth.connection_id,
+                    "delivery_metadata",
+                    error,
+                );
+            })?
+        };
+        let deadline = grid.as_ref().map_or_else(
+            || Instant::now() + Duration::from_secs(5),
+            |(_, _, deadline)| *deadline,
+        );
+        let written = write_frame_until(send, &bytes, deadline);
+        let result = if let Some((lease, _, _)) = &grid {
+            tokio::select! {biased; _=lease.cancelled()=>Err(invalid()),result=written=>result}
+        } else {
+            written.await
+        };
+        if let Err(error) = result {
+            if let Some((lease, _, _)) = &grid {
+                security.state.grid_failed(&auth.connection_id, &lease.id);
+            }
+            report_transport_frame(reporter, &auth.connection_id, "output_write", &error);
             report_codex_transport_frame(
                 codex_reporter,
                 &auth.connection_id,
-                "delivery_metadata",
-                error,
+                "output_write",
+                &error,
             );
-        })? };
-        let deadline=grid.as_ref().map_or_else(||Instant::now()+Duration::from_secs(5),|(_,_,deadline)|*deadline);
-        let written=write_frame_until(send,&bytes,deadline);
-        let result=if let Some((lease,_,_))=&grid {
-            tokio::select! {biased; _=lease.cancelled()=>Err(invalid()),result=written=>result}
-        } else {written.await};
-        if let Err(error)=result {
-            if let Some((lease,_,_))=&grid {security.state.grid_failed(&auth.connection_id,&lease.id);}
-            report_transport_frame(reporter,&auth.connection_id,"output_write",&error);
-            report_codex_transport_frame(codex_reporter,&auth.connection_id,"output_write",&error);
             return Err(error);
         }
         if let Some((_, completion, _)) = grid {
@@ -645,11 +669,16 @@ impl CodexTransportCapture {
     pub fn selected(&self, winner: CodexTransportWinner, result: Option<&io::Result<()>>) {
         match winner {
             CodexTransportWinner::CtrlC | CodexTransportWinner::Sigterm => {
-                self.0.supervisor(Self::selected_guard(winner, false), None, "cancelled", 0);
+                self.0
+                    .supervisor(Self::selected_guard(winner, false), None, "cancelled", 0);
             }
             _ => match result.expect("selected job has a result") {
-                Ok(()) => self.0.supervisor(Self::selected_guard(winner, false), None, "none", 0),
-                Err(error) => self.0.supervisor_error(Self::selected_guard(winner, true), error),
+                Ok(()) => self
+                    .0
+                    .supervisor(Self::selected_guard(winner, false), None, "none", 0),
+                Err(error) => self
+                    .0
+                    .supervisor_error(Self::selected_guard(winner, true), error),
             },
         }
     }
@@ -687,10 +716,15 @@ pub async fn serve(
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> io::Result<()> {
     let terminal_topology = topology.clone();
-    let push=crate::push::Publisher::new(topology.as_ref().map(|t|t.config.push_allowed_origins.clone()).unwrap_or_else(crate::config::default_push_allowed_origins));
-    security.push.set(push.clone()).map_err(|_|invalid())?;
-    let (push_stop,push_receiver)=tokio::sync::watch::channel(false);
-    let push_job=tokio::spawn(push.run(Arc::downgrade(&security),push_receiver));
+    let push = crate::push::Publisher::new(
+        topology
+            .as_ref()
+            .map(|t| t.config.push_allowed_origins.clone())
+            .unwrap_or_else(crate::config::default_push_allowed_origins),
+    );
+    security.push.set(push.clone()).map_err(|_| invalid())?;
+    let (push_stop, push_receiver) = tokio::sync::watch::channel(false);
+    let push_job = tokio::spawn(push.run(Arc::downgrade(&security), push_receiver));
     // Only the smoke runner's already validated owned relay can opt into a diagnostic.
     // A run selects one provider capture so its shared eight-line budget cannot overlap.
     let owned = owned_omp_relay.is_some();
@@ -765,20 +799,22 @@ pub async fn serve(
             let _ = owner.run(stop).await;
         })
     });
-    let mut attachment_ticks=tokio::time::interval(Duration::from_secs(30));
+    let mut attachment_ticks = tokio::time::interval(Duration::from_secs(30));
     loop {
         tokio::select! {
             _=attachment_ticks.tick()=>{let _=security.attachment_maintenance(now_ms()).await;},
             changed=stop.changed()=>{if changed.is_err() || *stop.borrow() {break;}},
-            incoming=endpoint.accept()=>{let Some(incoming)=incoming else {break;}; let Ok(permit)=security.admission() else {incoming.refuse();continue;}; let security=security.clone(); let topology=terminal_topology.clone(); let omp=omp.clone(); let codex=codex.clone(); let omp_first_guard=omp_first_guard.clone(); let codex_invalidation_reporter=codex_invalidation_reporter.clone(); let hello_capture=hello_capture.clone().and_then(|capture| capture.select()); jobs.spawn(async move {if let Some(capture)=&hello_capture {capture.report("admission","entered",None,"none");} let connection=match tokio::time::timeout(Duration::from_secs(10),incoming).await {Ok(Ok(connection))=>connection,Ok(Err(_))=>{if let Some(capture)=&hello_capture {capture.report("admission","incoming_error",None,"other");}return;},Err(_)=>{if let Some(capture)=&hello_capture {capture.report("admission","incoming_deadline",Some(ErrorCode::Timeout),"timed_out");}return;}}; let remote=EndpointId(connection.remote_id().to_string()); let Some(attempt)=security.handshake(&remote) else {if let Some(capture)=&hello_capture {capture.report("admission","handshake_rejected",None,"none");} connection.close(0u32.into(),b"admission"); return;}; let _=connection_loop(connection.clone(),&security,topology,omp,codex,omp_first_guard,codex_invalidation_reporter,hello_capture,permit,attempt).await; connection.close(0u32.into(),b"closed");});},
+            incoming=endpoint.accept()=>{let Some(incoming)=incoming else {break;}; let Ok(permit)=security.admission() else {incoming.refuse();continue;}; let security=security.clone(); let topology=terminal_topology.clone(); let omp=omp.clone(); let codex=codex.clone(); let omp_first_guard=omp_first_guard.clone(); let codex_invalidation_reporter=codex_invalidation_reporter.clone(); let hello_capture=hello_capture.clone().and_then(|capture| capture.select()); jobs.spawn(async move {if let Some(capture)=&hello_capture {capture.report("admission","entered",None,"none");} let connection=match tokio::time::timeout(Duration::from_secs(10),incoming).await {Ok(Ok(connection))=>connection,Ok(Err(_))=>{if let Some(capture)=&hello_capture {capture.report("admission","incoming_error",None,"other");}return;},Err(_)=>{if let Some(capture)=&hello_capture {capture.report("admission","incoming_deadline",Some(ErrorCode::Timeout),"timed_out");}return;}}; let remote=EndpointId(connection.remote_id().to_string()); let Some(attempt)=security.handshake(&remote) else {if let Some(capture)=&hello_capture {capture.report("admission","handshake_rejected",None,"none");} connection.close(0u32.into(),b"admission"); return;}; let _=connection_loop(connection.clone(),&security,Backends { topology, omp, codex },ConnectionReporters { omp_first_guard, codex_invalidation_reporter, hello_capture },permit,attempt).await; connection.close(0u32.into(),b"closed");});},
             Some(_)=jobs.join_next(),if !jobs.is_empty()=>{},
         }
     }
     jobs.abort_all();
     while jobs.join_next().await.is_some() {}
-    if let Some(push)=security.push.get(){push.cancel_all();}
-    let _=push_stop.send(true);
-    let _=push_job.await;
+    if let Some(push) = security.push.get() {
+        push.cancel_all();
+    }
+    let _ = push_stop.send(true);
+    let _ = push_job.await;
     if let Some(job) = omp_job {
         let _ = job.await;
     }
@@ -787,18 +823,34 @@ pub async fn serve(
     }
     Ok(())
 }
-async fn connection_loop(
-    connection: Connection,
-    security: &Arc<Security>,
+struct Backends {
     topology: Option<Arc<crate::herdr::Topology>>,
     omp: Option<Arc<crate::backends::omp::Runtime>>,
     codex: Option<Arc<crate::backends::codex::Runtime>>,
+}
+struct ConnectionReporters {
     omp_first_guard: Option<crate::herdr::OmpCreationReporter>,
     codex_invalidation_reporter: Option<crate::herdr::CodexInvalidationReporter>,
     hello_capture: Option<HelloCaptureReporter>,
+}
+async fn connection_loop(
+    connection: Connection,
+    security: &Arc<Security>,
+    backends: Backends,
+    reporters: ConnectionReporters,
     permit: tokio::sync::OwnedSemaphorePermit,
     attempt: HandshakeAttempt<'_>,
 ) -> io::Result<()> {
+    let Backends {
+        topology,
+        omp,
+        codex,
+    } = backends;
+    let ConnectionReporters {
+        omp_first_guard,
+        codex_invalidation_reporter,
+        hello_capture,
+    } = reporters;
     if !crate::authorized_alpn(connection.alpn()) {
         if let Some(capture) = &hello_capture {
             capture.report("admission", "alpn_mismatch", None, "none");
@@ -810,10 +862,9 @@ async fn connection_loop(
     if let Some(capture) = &hello_capture {
         capture.report("stream_accept", "entered", None, "none");
     }
-    let (mut send, mut recv) = match tokio::time::timeout_at(deadline, connection.accept_bi()).await {
-        Ok(Ok(stream)) => {
-            stream
-        }
+    let (mut send, mut recv) = match tokio::time::timeout_at(deadline, connection.accept_bi()).await
+    {
+        Ok(Ok(stream)) => stream,
         Ok(Err(_)) => {
             if let Some(capture) = &hello_capture {
                 capture.report("stream_accept", "stream_error", None, "other");
@@ -822,7 +873,12 @@ async fn connection_loop(
         }
         Err(_) => {
             if let Some(capture) = &hello_capture {
-                capture.report("stream_accept", "deadline", Some(ErrorCode::Timeout), "timed_out");
+                capture.report(
+                    "stream_accept",
+                    "deadline",
+                    Some(ErrorCode::Timeout),
+                    "timed_out",
+                );
             }
             return Err(invalid());
         }
@@ -841,7 +897,12 @@ async fn connection_loop(
         }
         Err(_) => {
             if let Some(capture) = &hello_capture {
-                capture.report("hello_frame", "deadline", Some(ErrorCode::Timeout), "timed_out");
+                capture.report(
+                    "hello_frame",
+                    "deadline",
+                    Some(ErrorCode::Timeout),
+                    "timed_out",
+                );
             }
             return Err(invalid());
         }
@@ -850,7 +911,12 @@ async fn connection_loop(
         Ok(request) => request,
         Err(error) => {
             if let Some(capture) = &hello_capture {
-                capture.report("hello_frame", "invalid_request", Some(ErrorCode::InvalidRequest), "none");
+                capture.report(
+                    "hello_frame",
+                    "invalid_request",
+                    Some(ErrorCode::InvalidRequest),
+                    "none",
+                );
             }
             return Err(error);
         }
@@ -876,7 +942,12 @@ async fn connection_loop(
             }
             Err(_) => {
                 if let Some(capture) = &hello_capture {
-                    capture.report("hello_frame", "deadline", Some(ErrorCode::Timeout), "timed_out");
+                    capture.report(
+                        "hello_frame",
+                        "deadline",
+                        Some(ErrorCode::Timeout),
+                        "timed_out",
+                    );
                 }
                 return Err(invalid());
             }
@@ -885,7 +956,12 @@ async fn connection_loop(
             Ok(request) => request,
             Err(error) => {
                 if let Some(capture) = &hello_capture {
-                    capture.report("hello_frame", "invalid_request", Some(ErrorCode::InvalidRequest), "none");
+                    capture.report(
+                        "hello_frame",
+                        "invalid_request",
+                        Some(ErrorCode::InvalidRequest),
+                        "none",
+                    );
                 }
                 return Err(error);
             }
@@ -894,7 +970,12 @@ async fn connection_loop(
     }
     let RequestBody::Hello(params) = handshake.body else {
         if let Some(capture) = &hello_capture {
-            capture.report("hello_frame", "not_hello", Some(ErrorCode::Unauthorized), "none");
+            capture.report(
+                "hello_frame",
+                "not_hello",
+                Some(ErrorCode::Unauthorized),
+                "none",
+            );
         }
         response(&mut send, handshake.id, Err(ErrorCode::Unauthorized)).await?;
         let _ = finish_reply(&mut send).await;
@@ -904,9 +985,7 @@ async fn connection_loop(
         capture.report("hello_authorization", "entered", None, "none");
     }
     let auth = match security.hello(remote, params, connection.clone()).await {
-        Ok(a) => {
-            Arc::new(a)
-        }
+        Ok(a) => Arc::new(a),
         Err(code) => {
             if let Some(capture) = &hello_capture {
                 capture.report("hello_authorization", "rejected", Some(code), "none");
@@ -927,9 +1006,7 @@ async fn connection_loop(
             capture.report("security_guard", "entered", None, "none");
         }
         let _guard = match security.guard(&auth).await {
-            Ok(guard) => {
-                guard
-            }
+            Ok(guard) => guard,
             Err(code) => {
                 if let Some(capture) = &hello_capture {
                     capture.report("security_guard", "rejected", Some(code), "none");
@@ -949,14 +1026,24 @@ async fn connection_loop(
                     omp.as_ref()
                         .map_or_else(|| backend.clone(), |owner| owner.backend())
                 } else {
-                    codex.as_ref().map_or_else(|| backend.clone(), |owner| {
-                        owner.backend_observed(hello_capture.as_ref().map(|_| &mut codex_manager_failure))
-                    })
+                    codex.as_ref().map_or_else(
+                        || backend.clone(),
+                        |owner| {
+                            owner.backend_observed(
+                                hello_capture.as_ref().map(|_| &mut codex_manager_failure),
+                            )
+                        },
+                    )
                 }
             })
             .collect();
         if let (Some(capture), Some(detail)) = (&hello_capture, codex_manager_failure) {
-            capture.report("codex_manager_hello", detail.guard.label(), Some(ErrorCode::NotReady), closed_manager_io(detail.io));
+            capture.report(
+                "codex_manager_hello",
+                detail.guard.label(),
+                Some(ErrorCode::NotReady),
+                closed_manager_io(detail.io),
+            );
         }
         let hello = ResultBody::Hello(HelloResult {
             host_id: security.host.clone(),
@@ -964,7 +1051,10 @@ async fn connection_loop(
             boot_id: security.boot.clone(),
             protocol: ProtocolVersion(2),
             backends,
-            features: HelloFeatures { agent_ansi: topology.is_some(), shell_history:topology.is_some() },
+            features: HelloFeatures {
+                agent_ansi: topology.is_some(),
+                shell_history: topology.is_some(),
+            },
         });
         if let Some(capture) = &hello_capture {
             capture.report("response_write", "entered", None, "none");
@@ -1195,9 +1285,7 @@ async fn connection_loop(
                     let mut dispatch = Some(Box::pin(dispatch(
                         security,
                         &auth,
-                        topology.clone(),
-                        omp.clone(),
-                        codex.clone(),
+                        Backends { topology: topology.clone(), omp: omp.clone(), codex: codex.clone() },
                         request,
                         &mut views,
                         dispatch_deadline,
@@ -1372,13 +1460,25 @@ async fn workspace_rename_no_effect(
 ) -> SecurityResult<Receipt> {
     let proof = auth.proof.clone();
     let action = action.clone();
-    security.storage.call(move |store| store.transition(&proof, &action, crate::storage::ReceiptTransition {
-        state: ReceiptState::Failed,
-        proof: crate::storage::TransitionProof::DefinitiveNoEffect(Id("workspace rename native boundary not entered".into())),
-        result: None,
-        error: Some(wire_error(code)),
-        at: now_ms(),
-    })).await.map_err(store_error)
+    security
+        .storage
+        .call(move |store| {
+            store.transition(
+                &proof,
+                &action,
+                crate::storage::ReceiptTransition {
+                    state: ReceiptState::Failed,
+                    proof: crate::storage::TransitionProof::DefinitiveNoEffect(Id(
+                        "workspace rename native boundary not entered".into(),
+                    )),
+                    result: None,
+                    error: Some(wire_error(code)),
+                    at: now_ms(),
+                },
+            )
+        })
+        .await
+        .map_err(store_error)
 }
 
 fn delivered_notifications(bytes: &[u8]) -> io::Result<Vec<AttentionEvent>> {
@@ -1400,37 +1500,72 @@ fn delivered_notifications(bytes: &[u8]) -> io::Result<Vec<AttentionEvent>> {
     Ok(Vec::new())
 }
 async fn authorize_skill_document(
-    auth:&Arc<Authorized>,publication:&Arc<crate::backends::SkillsPublication>,document:&Uuid,
-    omp:Option<&Arc<crate::backends::omp::Runtime>>,codex:Option<&Arc<crate::backends::codex::Runtime>>,
-)->SecurityResult<()> {
+    auth: &Arc<Authorized>,
+    publication: &Arc<crate::backends::SkillsPublication>,
+    document: &Uuid,
+    omp: Option<&Arc<crate::backends::omp::Runtime>>,
+    codex: Option<&Arc<crate::backends::codex::Runtime>>,
+) -> SecurityResult<()> {
     match publication.origin.context.provider {
-        Provider::Omp=>omp.ok_or(ErrorCode::NotReady)?.authorize_skill_document(auth,publication,document).await,
-        Provider::Codex=>codex.ok_or(ErrorCode::NotReady)?.authorize_skill_document(auth,publication,document).await,
+        Provider::Omp => {
+            omp.ok_or(ErrorCode::NotReady)?
+                .authorize_skill_document(auth, publication, document)
+                .await
+        }
+        Provider::Codex => {
+            codex
+                .ok_or(ErrorCode::NotReady)?
+                .authorize_skill_document(auth, publication, document)
+                .await
+        }
     }
 }
 async fn provider_project_context(
-    provider:Provider,target:&Target,omp:Option<&Arc<crate::backends::omp::Runtime>>,codex:Option<&Arc<crate::backends::codex::Runtime>>,
-    job:Arc<crate::herdr::artifacts::ReadJob>,
-)->SecurityResult<crate::project_read::ProjectReadContext> {
-    job.current()?;let target=target.clone();let owner=job.clone();
-    let worker=match provider {
-        Provider::Omp=>{let runtime=omp.cloned().ok_or(ErrorCode::NotReady)?;tokio::task::spawn_blocking(move||{owner.current()?;runtime.project_context(&target)})},
-        Provider::Codex=>{let runtime=codex.cloned().ok_or(ErrorCode::NotReady)?;tokio::task::spawn_blocking(move||{owner.current()?;runtime.project_context(&target)})},
+    provider: Provider,
+    target: &Target,
+    omp: Option<&Arc<crate::backends::omp::Runtime>>,
+    codex: Option<&Arc<crate::backends::codex::Runtime>>,
+    job: Arc<crate::herdr::artifacts::ReadJob>,
+) -> SecurityResult<crate::project_read::ProjectReadContext> {
+    job.current()?;
+    let target = target.clone();
+    let owner = job.clone();
+    let worker = match provider {
+        Provider::Omp => {
+            let runtime = omp.cloned().ok_or(ErrorCode::NotReady)?;
+            tokio::task::spawn_blocking(move || {
+                owner.current()?;
+                runtime.project_context(&target)
+            })
+        }
+        Provider::Codex => {
+            let runtime = codex.cloned().ok_or(ErrorCode::NotReady)?;
+            tokio::task::spawn_blocking(move || {
+                owner.current()?;
+                runtime.project_context(&target)
+            })
+        }
     };
-    tokio::time::timeout_at(Instant::from_std(job.deadline),worker).await.map_err(|_|ErrorCode::Timeout)?.map_err(|_|ErrorCode::NotReady)?
+    tokio::time::timeout_at(Instant::from_std(job.deadline), worker)
+        .await
+        .map_err(|_| ErrorCode::Timeout)?
+        .map_err(|_| ErrorCode::NotReady)?
 }
 
 async fn dispatch(
     // Routing reads current reducer authority, never desktop focus/native ID guesses.
     security: &Arc<Security>,
     auth: &Arc<Authorized>,
-    topology: Option<Arc<crate::herdr::Topology>>,
-    omp: Option<Arc<crate::backends::omp::Runtime>>,
-    codex: Option<Arc<crate::backends::codex::Runtime>>,
+    backends: Backends,
     r: Request,
     views: &mut Viewing,
     deadline: Instant,
 ) -> SecurityResult<Option<ResultBody>> {
+    let Backends {
+        topology,
+        omp,
+        codex,
+    } = backends;
     let grid = matches!(
         &r.body,
         RequestBody::TerminalGridSubscribe(_) | RequestBody::ShellGridSubscribe(_)
@@ -1447,30 +1582,53 @@ async fn dispatch(
     };
     let p = auth.proof.clone();
     let result = match r.body {
-        RequestBody::CreationDirectories(params)=>{
-            let topology=topology.ok_or(ErrorCode::NotReady)?;
+        RequestBody::CreationDirectories(params) => {
+            let topology = topology.ok_or(ErrorCode::NotReady)?;
             drop(guard);
-            let prepared=topology.creation_directories(auth,&params).await?;
-            let _guard=security.guard(auth).await?;
-            topology.enqueue_creation_directories(auth,r.id,prepared).await?;
+            let prepared = topology.creation_directories(auth, &params).await?;
+            let _guard = security.guard(auth).await?;
+            topology
+                .enqueue_creation_directories(auth, r.id, prepared)
+                .await?;
             return Ok(None);
         }
-        body @ (RequestBody::ArtifactsList(_)|RequestBody::ArtifactsOpen(_)|RequestBody::ArtifactsRead(_)|RequestBody::ArtifactsClose(_))=>{
-            let topology=topology.ok_or(ErrorCode::NotReady)?;
-            let job=topology.reserve_project_read(auth,false,deadline.into_std())?;
-            drop(guard);job.current()?;
-            let initial=if let RequestBody::ArtifactsList(params)=&body {
-                if params.parent.is_none()&&params.cursor.is_none() {
+        body @ (RequestBody::ArtifactsList(_)
+        | RequestBody::ArtifactsOpen(_)
+        | RequestBody::ArtifactsRead(_)
+        | RequestBody::ArtifactsClose(_)) => {
+            let topology = topology.ok_or(ErrorCode::NotReady)?;
+            let job = topology.reserve_project_read(auth, false, deadline.into_std())?;
+            drop(guard);
+            job.current()?;
+            let initial = if let RequestBody::ArtifactsList(params) = &body {
+                if params.parent.is_none() && params.cursor.is_none() {
                     Some(match &params.source {
-                        ArtifactSource::Session{target}=>provider_project_context(target_provider(&security.state,target)?,target,omp.as_ref(),codex.as_ref(),job.clone()).await?,
-                        ArtifactSource::Shell{target}=>topology.shell_project_context(target,job.clone()).await?,
+                        ArtifactSource::Session { target } => {
+                            provider_project_context(
+                                target_provider(&security.state, target)?,
+                                target,
+                                omp.as_ref(),
+                                codex.as_ref(),
+                                job.clone(),
+                            )
+                            .await?
+                        }
+                        ArtifactSource::Shell { target } => {
+                            topology.shell_project_context(target, job.clone()).await?
+                        }
                     })
-                }else{None}
-            }else{None};
-            let (context,result,mut pending)=topology.artifact_request(auth,&body,initial,job).await?;
-            let _guard=security.guard(auth).await?;
-            topology.enqueue_artifact(&auth.connection_id,r.id,&context,result,&pending)?;
-            pending.published();return Ok(None);
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let (context, result, mut pending) =
+                topology.artifact_request(auth, &body, initial, job).await?;
+            let _guard = security.guard(auth).await?;
+            topology.enqueue_artifact(&auth.connection_id, r.id, &context, result, &pending)?;
+            pending.published();
+            return Ok(None);
         }
         RequestBody::HostSnapshot(_) => {
             security.state.host_snapshot(&auth.connection_id, r.id)?;
@@ -1527,25 +1685,50 @@ async fn dispatch(
         RequestBody::WorkspaceRename(v) => {
             // Reserve before topology acquisition: an exact duplicate returns its durable receipt
             // even if the original desktop source is now unavailable.
-            let request = Request { id: r.id.clone(), body: RequestBody::WorkspaceRename(v.clone()) };
+            let request = Request {
+                id: r.id.clone(),
+                body: RequestBody::WorkspaceRename(v.clone()),
+            };
             let state = security.state.clone();
             drop(guard);
-            let reservation = security.reserve(auth, request, move |request| {
-                state.validate_session_mutation(request)
-            }, |_| {}).await?;
+            let reservation = security
+                .reserve(
+                    auth,
+                    request,
+                    move |request| state.validate_session_mutation(request),
+                    |_| {},
+                )
+                .await?;
             let receipt = match reservation {
                 Reservation::Existing(receipt) => receipt,
                 Reservation::Reserved(_) => {
-                    let outcome=match topology {
-                        Some(topology)=>topology.workspace_rename_once(security,auth,&r.id,&v).await,
-                        None=>Err(ErrorCode::NotReady),
+                    let outcome = match topology {
+                        Some(topology) => {
+                            topology
+                                .workspace_rename_once(security, auth, &r.id, &v)
+                                .await
+                        }
+                        None => Err(ErrorCode::NotReady),
                     };
-                    let proof=auth.proof.clone();let action=r.id.clone();
-                    let receipt=security.storage.call(move|store|store.status(&proof,&action,now_ms()))
-                        .await.map_err(store_error)?.ok_or(ErrorCode::NotReady)?;
-                    if receipt.state==ReceiptState::Reserved {
-                        workspace_rename_no_effect(security,auth,&r.id,outcome.err().unwrap_or(ErrorCode::NotReady)).await?
-                    } else {receipt}
+                    let proof = auth.proof.clone();
+                    let action = r.id.clone();
+                    let receipt = security
+                        .storage
+                        .call(move |store| store.status(&proof, &action, now_ms()))
+                        .await
+                        .map_err(store_error)?
+                        .ok_or(ErrorCode::NotReady)?;
+                    if receipt.state == ReceiptState::Reserved {
+                        workspace_rename_no_effect(
+                            security,
+                            auth,
+                            &r.id,
+                            outcome.err().unwrap_or(ErrorCode::NotReady),
+                        )
+                        .await?
+                    } else {
+                        receipt
+                    }
                 }
             };
             ResultBody::WorkspaceRename(WorkspaceRenameResult { receipt })
@@ -1558,221 +1741,669 @@ async fn dispatch(
                 .await?;
             return Ok(None);
         }
-        RequestBody::TerminalCreate(params)=>{
-            let request=Request{id:r.id.clone(),body:RequestBody::TerminalCreate(params)};drop(guard);
-            let receipt=match topology {
-                Some(topology)=>topology.terminal_create(security,auth,request,deadline).await?,
-                None=>{let (_,existing)=security.preflight_request(auth,request).await?;existing.ok_or(ErrorCode::NotReady)?},
+        RequestBody::TerminalCreate(params) => {
+            let request = Request {
+                id: r.id.clone(),
+                body: RequestBody::TerminalCreate(params),
             };
-            ResultBody::TerminalCreate(TerminalCreateResult{receipt})
+            drop(guard);
+            let receipt = match topology {
+                Some(topology) => {
+                    topology
+                        .terminal_create(security, auth, request, deadline)
+                        .await?
+                }
+                None => {
+                    let (_, existing) = security.preflight_request(auth, request).await?;
+                    existing.ok_or(ErrorCode::NotReady)?
+                }
+            };
+            ResultBody::TerminalCreate(TerminalCreateResult { receipt })
         }
-        RequestBody::AttachmentsStatus(params)=>{
-            let context=match target_provider(&security.state,&params.target).ok() {Some(Provider::Omp)=>omp.as_ref().and_then(|runtime|runtime.attachment_context(&params.target).ok()),Some(Provider::Codex)=>codex.as_ref().and_then(|runtime|runtime.attachment_context(&params.target).ok()),None=>None};
-            let original=context.clone();let upload=params.upload_id.clone();let proof=auth.proof.clone();drop(guard);
-            let (mut status,record)=security.storage.call(move|store|store.authorized_attachment_status(&proof,&params,context.as_ref())).await.map_err(store_error)?;
-            let _guard=security.guard(auth).await?;
-            if security.attachment_claim_busy(auth,&upload){status.insertion_ready=false;status.state=AttachmentUploadState::Uncertain}
-            if let Some(original)=original {original.enqueue_status(&security.state,&auth.connection_id,r.id,status,&record)?;}
-            else {status.insertion_ready=false;security.state.attachments_status_response(&auth.connection_id,r.id,status,None)?;}return Ok(None);
+        RequestBody::AttachmentsStatus(params) => {
+            let context = match target_provider(&security.state, &params.target).ok() {
+                Some(Provider::Omp) => omp
+                    .as_ref()
+                    .and_then(|runtime| runtime.attachment_context(&params.target).ok()),
+                Some(Provider::Codex) => codex
+                    .as_ref()
+                    .and_then(|runtime| runtime.attachment_context(&params.target).ok()),
+                None => None,
+            };
+            let original = context.clone();
+            let upload = params.upload_id.clone();
+            let proof = auth.proof.clone();
+            drop(guard);
+            let (mut status, record) = security
+                .storage
+                .call(move |store| {
+                    store.authorized_attachment_status(&proof, &params, context.as_ref())
+                })
+                .await
+                .map_err(store_error)?;
+            let _guard = security.guard(auth).await?;
+            if security.attachment_claim_busy(auth, &upload) {
+                status.insertion_ready = false;
+                status.state = AttachmentUploadState::Uncertain
+            }
+            if let Some(original) = original {
+                original.enqueue_status(
+                    &security.state,
+                    &auth.connection_id,
+                    r.id,
+                    status,
+                    &record,
+                )?;
+            } else {
+                status.insertion_ready = false;
+                security.state.attachments_status_response(
+                    &auth.connection_id,
+                    r.id,
+                    status,
+                    None,
+                )?;
+            }
+            return Ok(None);
         }
-        body @ (RequestBody::AttachmentsBegin(_)|RequestBody::AttachmentsChunk(_)|RequestBody::AttachmentsComplete(_)|RequestBody::AttachmentsDiscard(_))=>{
-            let request=Request {id:r.id.clone(),body:body.clone()};let state=security.state.clone();drop(guard);
-            let reservation=security.reserve(auth,request,move|request|state.validate_attachment_mutation(request),|_|{}).await?;
-            let receipt=match reservation {
-                Reservation::Existing(receipt)=>receipt,
-                Reservation::Reserved(_)=>{
-                    let run=async {
-                        let (_,_,target,upload)=body.attachment_action().ok_or(ErrorCode::InvalidRequest)?;
-                        if let RequestBody::AttachmentsDiscard(params)=&body {
-                            let proof=auth.proof.clone();let owned=params.clone();
-                            let cleanup=security.storage.call(move|store|store.attachment_cleanup_context(&proof,&owned)).await.map_err(store_error)?;
-                            let effect_body=body.clone();let peer=auth.proof.peer_id().clone();let action=r.id.clone();
-                            security.attachment_cleanup_boundary(auth,r.id.clone(),params,&cleanup,|checkpoint|async move {checkpoint.execute(peer,action,effect_body,None).await}).await
-                        }else{
-                            let provider=target_provider(&security.state,target)?;
-                            let context=match provider {Provider::Omp=>omp.as_ref().ok_or(ErrorCode::NotReady)?.attachment_context(target)?,Provider::Codex=>codex.as_ref().ok_or(ErrorCode::NotReady)?.attachment_context(target)?};
+        body @ (RequestBody::AttachmentsBegin(_)
+        | RequestBody::AttachmentsChunk(_)
+        | RequestBody::AttachmentsComplete(_)
+        | RequestBody::AttachmentsDiscard(_)) => {
+            let request = Request {
+                id: r.id.clone(),
+                body: body.clone(),
+            };
+            let state = security.state.clone();
+            drop(guard);
+            let reservation = security
+                .reserve(
+                    auth,
+                    request,
+                    move |request| state.validate_attachment_mutation(request),
+                    |_| {},
+                )
+                .await?;
+            let receipt = match reservation {
+                Reservation::Existing(receipt) => receipt,
+                Reservation::Reserved(_) => {
+                    let run = async {
+                        let (_, _, target, upload) =
+                            body.attachment_action().ok_or(ErrorCode::InvalidRequest)?;
+                        if let RequestBody::AttachmentsDiscard(params) = &body {
+                            let proof = auth.proof.clone();
+                            let owned = params.clone();
+                            let cleanup = security
+                                .storage
+                                .call(move |store| store.attachment_cleanup_context(&proof, &owned))
+                                .await
+                                .map_err(store_error)?;
+                            let effect_body = body.clone();
+                            let peer = auth.proof.peer_id().clone();
+                            let action = r.id.clone();
+                            security
+                                .attachment_cleanup_boundary(
+                                    auth,
+                                    r.id.clone(),
+                                    params,
+                                    &cleanup,
+                                    |checkpoint| async move {
+                                        checkpoint.execute(peer, action, effect_body, None).await
+                                    },
+                                )
+                                .await
+                        } else {
+                            let provider = target_provider(&security.state, target)?;
+                            let context = match provider {
+                                Provider::Omp => omp
+                                    .as_ref()
+                                    .ok_or(ErrorCode::NotReady)?
+                                    .attachment_context(target)?,
+                                Provider::Codex => codex
+                                    .as_ref()
+                                    .ok_or(ErrorCode::NotReady)?
+                                    .attachment_context(target)?,
+                            };
                             let client = crate::herdr::Client::connect_source(&context.source)
                                 .await
                                 .map_err(|_| ErrorCode::NotReady)?;
-                            if client.evidence!=context.source.evidence{return Err(ErrorCode::StaleSession)}context.recheck()?;
-                            let fd=client.fence_socket().map_err(|_|ErrorCode::NotReady)?;
-                            let original=context.clone();let effect_body=body.clone();let peer=auth.proof.peer_id().clone();let action=r.id.clone();
-                            security.attachment_boundary(auth,r.id.clone(),target.clone(),upload.clone(),fd,||{original.recheck()?;security.state.validate_attachment_mutation(&Request {id:r.id.clone(),body:body.clone()})},|checkpoint|async move {checkpoint.execute(peer,action,effect_body,Some(context)).await}).await
+                            if client.evidence != context.source.evidence {
+                                return Err(ErrorCode::StaleSession);
+                            }
+                            context.recheck()?;
+                            let fd = client.fence_socket().map_err(|_| ErrorCode::NotReady)?;
+                            let original = context.clone();
+                            let effect_body = body.clone();
+                            let peer = auth.proof.peer_id().clone();
+                            let action = r.id.clone();
+                            security
+                                .attachment_boundary(
+                                    crate::pairing::NativeBoundary {
+                                        auth,
+                                        action: r.id.clone(),
+                                        connection: fd,
+                                    },
+                                    target.clone(),
+                                    upload.clone(),
+                                    || {
+                                        original.recheck()?;
+                                        security.state.validate_attachment_mutation(&Request {
+                                            id: r.id.clone(),
+                                            body: body.clone(),
+                                        })
+                                    },
+                                    |checkpoint| async move {
+                                        checkpoint
+                                            .execute(peer, action, effect_body, Some(context))
+                                            .await
+                                    },
+                                )
+                                .await
                         }
-                    }.await;
-                    let proof=auth.proof.clone();let action=r.id.clone();let mut receipt=security.storage.call(move|store|store.status(&proof,&action,now_ms())).await.map_err(store_error)?.ok_or(ErrorCode::NotReady)?;
-                    if receipt.state==ReceiptState::Reserved {let proof=auth.proof.clone();let action=r.id.clone();let code=run.err().unwrap_or(ErrorCode::NotReady);receipt=security.storage.call(move|store|store.transition(&proof,&action,crate::storage::ReceiptTransition {state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("attachment boundary not entered".into())),result:None,error:Some(wire_error(code)),at:now_ms()})).await.map_err(store_error)?;}
+                    }
+                    .await;
+                    let proof = auth.proof.clone();
+                    let action = r.id.clone();
+                    let mut receipt = security
+                        .storage
+                        .call(move |store| store.status(&proof, &action, now_ms()))
+                        .await
+                        .map_err(store_error)?
+                        .ok_or(ErrorCode::NotReady)?;
+                    if receipt.state == ReceiptState::Reserved {
+                        let proof = auth.proof.clone();
+                        let action = r.id.clone();
+                        let code = run.err().unwrap_or(ErrorCode::NotReady);
+                        receipt = security
+                            .storage
+                            .call(move |store| {
+                                store.transition(
+                                    &proof,
+                                    &action,
+                                    crate::storage::ReceiptTransition {
+                                        state: ReceiptState::Failed,
+                                        proof: crate::storage::TransitionProof::DefinitiveNoEffect(
+                                            Id("attachment boundary not entered".into()),
+                                        ),
+                                        result: None,
+                                        error: Some(wire_error(code)),
+                                        at: now_ms(),
+                                    },
+                                )
+                            })
+                            .await
+                            .map_err(store_error)?;
+                    }
                     receipt
                 }
             };
-            let result=AttachmentsResult {receipt};match body.method(){Method::AttachmentsBegin=>ResultBody::AttachmentsBegin(result),Method::AttachmentsChunk=>ResultBody::AttachmentsChunk(result),Method::AttachmentsComplete=>ResultBody::AttachmentsComplete(result),Method::AttachmentsDiscard=>ResultBody::AttachmentsDiscard(result),_=>return Err(ErrorCode::InvalidRequest)}
+            let result = AttachmentsResult { receipt };
+            match body.method() {
+                Method::AttachmentsBegin => ResultBody::AttachmentsBegin(result),
+                Method::AttachmentsChunk => ResultBody::AttachmentsChunk(result),
+                Method::AttachmentsComplete => ResultBody::AttachmentsComplete(result),
+                Method::AttachmentsDiscard => ResultBody::AttachmentsDiscard(result),
+                _ => return Err(ErrorCode::InvalidRequest),
+            }
         }
         RequestBody::AgentRename(params) => {
-            let request=Request {id:r.id.clone(),body:RequestBody::AgentRename(params.clone())};
-            let state=security.state.clone();drop(guard);
-            let reservation=security.reserve(auth,request,move|request|state.validate_session_mutation(request),|_|{}).await?;
-            let receipt=match reservation {
-                Reservation::Existing(receipt)=>receipt,
-                Reservation::Reserved(_)=>{
-                    let outcome=match topology {Some(topology)=>topology.agent_alias_once(security,auth,&r.id,&params).await,None=>Err(ErrorCode::NotReady)};
-                    let proof=auth.proof.clone();let action=r.id.clone();
-                    let mut receipt=security.storage.call(move|store|store.status(&proof,&action,now_ms())).await.map_err(store_error)?.ok_or(ErrorCode::NotReady)?;
-                    if receipt.state==ReceiptState::Reserved {
-                        let proof=auth.proof.clone();let action=r.id.clone();let code=outcome.err().unwrap_or(ErrorCode::NotReady);
-                        receipt=security.storage.call(move|store|store.transition(&proof,&action,crate::storage::ReceiptTransition {
-                            state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("agent alias native boundary not entered".into())),result:None,error:Some(wire_error(code)),at:now_ms(),
-                        })).await.map_err(store_error)?;
+            let request = Request {
+                id: r.id.clone(),
+                body: RequestBody::AgentRename(params.clone()),
+            };
+            let state = security.state.clone();
+            drop(guard);
+            let reservation = security
+                .reserve(
+                    auth,
+                    request,
+                    move |request| state.validate_session_mutation(request),
+                    |_| {},
+                )
+                .await?;
+            let receipt = match reservation {
+                Reservation::Existing(receipt) => receipt,
+                Reservation::Reserved(_) => {
+                    let outcome = match topology {
+                        Some(topology) => {
+                            topology
+                                .agent_alias_once(security, auth, &r.id, &params)
+                                .await
+                        }
+                        None => Err(ErrorCode::NotReady),
+                    };
+                    let proof = auth.proof.clone();
+                    let action = r.id.clone();
+                    let mut receipt = security
+                        .storage
+                        .call(move |store| store.status(&proof, &action, now_ms()))
+                        .await
+                        .map_err(store_error)?
+                        .ok_or(ErrorCode::NotReady)?;
+                    if receipt.state == ReceiptState::Reserved {
+                        let proof = auth.proof.clone();
+                        let action = r.id.clone();
+                        let code = outcome.err().unwrap_or(ErrorCode::NotReady);
+                        receipt = security
+                            .storage
+                            .call(move |store| {
+                                store.transition(
+                                    &proof,
+                                    &action,
+                                    crate::storage::ReceiptTransition {
+                                        state: ReceiptState::Failed,
+                                        proof: crate::storage::TransitionProof::DefinitiveNoEffect(
+                                            Id("agent alias native boundary not entered".into()),
+                                        ),
+                                        result: None,
+                                        error: Some(wire_error(code)),
+                                        at: now_ms(),
+                                    },
+                                )
+                            })
+                            .await
+                            .map_err(store_error)?;
                     }
                     receipt
                 }
             };
-            ResultBody::AgentRename(AgentRenameResult {receipt})
+            ResultBody::AgentRename(AgentRenameResult { receipt })
         }
         RequestBody::ShellInput(params) => {
-            let request=Request {id:r.id.clone(),body:RequestBody::ShellInput(params.clone())};
-            drop(guard);
-            let (request,existing)=security.preflight_request(auth,request).await?;
-            let reservation=if let Some(receipt)=existing {Reservation::Existing(receipt)}else{
-                let owner=topology.as_ref().ok_or(ErrorCode::NotReady)?;
-                owner.await_shell_input(&security.state,&auth.connection_id,&params,deadline).await?;
-                let validator=owner.clone();let state=security.state.clone();let connection=auth.connection_id.clone();
-                security.reserve(auth,request,move|request|{
-                    let RequestBody::ShellInput(params)=&request.body else{return Err(ErrorCode::InvalidRequest)};
-                    validator.validate_shell_input(&state,&connection,params).map(|_|())
-                },|_|{}).await?
+            let request = Request {
+                id: r.id.clone(),
+                body: RequestBody::ShellInput(params.clone()),
             };
-            let receipt=match reservation {
-                Reservation::Existing(receipt)=>receipt,
-                Reservation::Reserved(_)=>{
-                    let outcome=match topology {Some(topology)=>topology.shell_input_once(security,auth,&r.id,&params,deadline).await,None=>Err(ErrorCode::NotReady)};
-                    let proof=auth.proof.clone();let action=r.id.clone();
-                    let mut receipt=security.storage.call(move|store|store.status(&proof,&action,now_ms())).await.map_err(store_error)?.ok_or(ErrorCode::NotReady)?;
-                    if receipt.state==ReceiptState::Reserved {
-                        let proof=auth.proof.clone();let action=r.id.clone();let code=outcome.err().unwrap_or(ErrorCode::NotReady);
-                        receipt=security.storage.call(move|store|store.transition(&proof,&action,crate::storage::ReceiptTransition {
-                            state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("shell native boundary not entered".into())),result:None,error:Some(wire_error(code)),at:now_ms(),
-                        })).await.map_err(store_error)?;
+            drop(guard);
+            let (request, existing) = security.preflight_request(auth, request).await?;
+            let reservation = if let Some(receipt) = existing {
+                Reservation::Existing(receipt)
+            } else {
+                let owner = topology.as_ref().ok_or(ErrorCode::NotReady)?;
+                owner
+                    .await_shell_input(&security.state, &auth.connection_id, &params, deadline)
+                    .await?;
+                let validator = owner.clone();
+                let state = security.state.clone();
+                let connection = auth.connection_id.clone();
+                security
+                    .reserve(
+                        auth,
+                        request,
+                        move |request| {
+                            let RequestBody::ShellInput(params) = &request.body else {
+                                return Err(ErrorCode::InvalidRequest);
+                            };
+                            validator
+                                .validate_shell_input(&state, &connection, params)
+                                .map(|_| ())
+                        },
+                        |_| {},
+                    )
+                    .await?
+            };
+            let receipt = match reservation {
+                Reservation::Existing(receipt) => receipt,
+                Reservation::Reserved(_) => {
+                    let outcome = match topology {
+                        Some(topology) => {
+                            topology
+                                .shell_input_once(security, auth, &r.id, &params, deadline)
+                                .await
+                        }
+                        None => Err(ErrorCode::NotReady),
+                    };
+                    let proof = auth.proof.clone();
+                    let action = r.id.clone();
+                    let mut receipt = security
+                        .storage
+                        .call(move |store| store.status(&proof, &action, now_ms()))
+                        .await
+                        .map_err(store_error)?
+                        .ok_or(ErrorCode::NotReady)?;
+                    if receipt.state == ReceiptState::Reserved {
+                        let proof = auth.proof.clone();
+                        let action = r.id.clone();
+                        let code = outcome.err().unwrap_or(ErrorCode::NotReady);
+                        receipt = security
+                            .storage
+                            .call(move |store| {
+                                store.transition(
+                                    &proof,
+                                    &action,
+                                    crate::storage::ReceiptTransition {
+                                        state: ReceiptState::Failed,
+                                        proof: crate::storage::TransitionProof::DefinitiveNoEffect(
+                                            Id("shell native boundary not entered".into()),
+                                        ),
+                                        result: None,
+                                        error: Some(wire_error(code)),
+                                        at: now_ms(),
+                                    },
+                                )
+                            })
+                            .await
+                            .map_err(store_error)?;
                     }
                     receipt
                 }
             };
-            ResultBody::ShellInput(ShellInputResult {receipt})
+            ResultBody::ShellInput(ShellInputResult { receipt })
         }
-        RequestBody::ShellResize(params)=>{
-            let request=Request{id:r.id.clone(),body:RequestBody::ShellResize(params.clone())};
-            let validator=topology.clone();let state=security.state.clone();let connection=auth.connection_id.clone();
+        RequestBody::ShellResize(params) => {
+            let request = Request {
+                id: r.id.clone(),
+                body: RequestBody::ShellResize(params.clone()),
+            };
+            let validator = topology.clone();
+            let state = security.state.clone();
+            let connection = auth.connection_id.clone();
             drop(guard);
-            let reservation=security.reserve(auth,request,move|request|{
-                let RequestBody::ShellResize(params)=&request.body else{return Err(ErrorCode::InvalidRequest);};
-                validator.as_ref().ok_or(ErrorCode::NotReady)?.validate_shell_resize(&state,&connection,params).map(|_|())
-            },|_|{}).await?;
-            let receipt=match reservation {
-                Reservation::Existing(receipt)=>receipt,
-                Reservation::Reserved(_)=>{
-                    let outcome=match topology {Some(topology)=>topology.shell_resize_once(security,auth,&r.id,&params,deadline).await,None=>Err(ErrorCode::NotReady)};
-                    let proof=auth.proof.clone();let action=r.id.clone();
-                    let mut receipt=security.storage.call(move|store|store.status(&proof,&action,now_ms())).await.map_err(store_error)?.ok_or(ErrorCode::NotReady)?;
-                    if receipt.state==ReceiptState::Reserved {
-                        let proof=auth.proof.clone();let action=r.id.clone();let code=outcome.err().unwrap_or(ErrorCode::NotReady);
-                        receipt=security.storage.call(move|store|store.transition(&proof,&action,crate::storage::ReceiptTransition {
-                            state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("resize boundary not entered".into())),result:None,error:Some(wire_error(code)),at:now_ms(),
-                        })).await.map_err(store_error)?;
+            let reservation = security
+                .reserve(
+                    auth,
+                    request,
+                    move |request| {
+                        let RequestBody::ShellResize(params) = &request.body else {
+                            return Err(ErrorCode::InvalidRequest);
+                        };
+                        validator
+                            .as_ref()
+                            .ok_or(ErrorCode::NotReady)?
+                            .validate_shell_resize(&state, &connection, params)
+                            .map(|_| ())
+                    },
+                    |_| {},
+                )
+                .await?;
+            let receipt = match reservation {
+                Reservation::Existing(receipt) => receipt,
+                Reservation::Reserved(_) => {
+                    let outcome = match topology {
+                        Some(topology) => {
+                            topology
+                                .shell_resize_once(security, auth, &r.id, &params, deadline)
+                                .await
+                        }
+                        None => Err(ErrorCode::NotReady),
+                    };
+                    let proof = auth.proof.clone();
+                    let action = r.id.clone();
+                    let mut receipt = security
+                        .storage
+                        .call(move |store| store.status(&proof, &action, now_ms()))
+                        .await
+                        .map_err(store_error)?
+                        .ok_or(ErrorCode::NotReady)?;
+                    if receipt.state == ReceiptState::Reserved {
+                        let proof = auth.proof.clone();
+                        let action = r.id.clone();
+                        let code = outcome.err().unwrap_or(ErrorCode::NotReady);
+                        receipt = security
+                            .storage
+                            .call(move |store| {
+                                store.transition(
+                                    &proof,
+                                    &action,
+                                    crate::storage::ReceiptTransition {
+                                        state: ReceiptState::Failed,
+                                        proof: crate::storage::TransitionProof::DefinitiveNoEffect(
+                                            Id("resize boundary not entered".into()),
+                                        ),
+                                        result: None,
+                                        error: Some(wire_error(code)),
+                                        at: now_ms(),
+                                    },
+                                )
+                            })
+                            .await
+                            .map_err(store_error)?;
                     }
                     receipt
                 }
             };
-            ResultBody::ShellResize(ShellResizeResult{receipt})
+            ResultBody::ShellResize(ShellResizeResult { receipt })
         }
-        RequestBody::ShellScroll(params)=>{
-            let request=Request{id:r.id.clone(),body:RequestBody::ShellScroll(params.clone())};
-            let validator=topology.clone();let state=security.state.clone();let connection=auth.connection_id.clone();
+        RequestBody::ShellScroll(params) => {
+            let request = Request {
+                id: r.id.clone(),
+                body: RequestBody::ShellScroll(params.clone()),
+            };
+            let validator = topology.clone();
+            let state = security.state.clone();
+            let connection = auth.connection_id.clone();
             drop(guard);
-            let reservation=security.reserve(auth,request,move|request|{
-                let RequestBody::ShellScroll(params)=&request.body else{return Err(ErrorCode::InvalidRequest);};
-                validator.as_ref().ok_or(ErrorCode::NotReady)?.validate_shell_scroll(&state,&connection,params).map(|_|())
-            },|_|{}).await?;
-            let receipt=match reservation {
-                Reservation::Existing(receipt)=>receipt,
-                Reservation::Reserved(_)=>{
-                    let outcome=match topology {Some(topology)=>topology.shell_scroll_once(security,auth,&r.id,&params,deadline).await,None=>Err(ErrorCode::NotReady)};
-                    let proof=auth.proof.clone();let action=r.id.clone();
-                    let mut receipt=security.storage.call(move|store|store.status(&proof,&action,now_ms())).await.map_err(store_error)?.ok_or(ErrorCode::NotReady)?;
-                    if receipt.state==ReceiptState::Reserved {
-                        let proof=auth.proof.clone();let action=r.id.clone();let code=outcome.err().unwrap_or(ErrorCode::NotReady);
-                        receipt=security.storage.call(move|store|store.transition(&proof,&action,crate::storage::ReceiptTransition {
-                            state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("scroll boundary not entered".into())),result:None,error:Some(wire_error(code)),at:now_ms(),
-                        })).await.map_err(store_error)?;
+            let reservation = security
+                .reserve(
+                    auth,
+                    request,
+                    move |request| {
+                        let RequestBody::ShellScroll(params) = &request.body else {
+                            return Err(ErrorCode::InvalidRequest);
+                        };
+                        validator
+                            .as_ref()
+                            .ok_or(ErrorCode::NotReady)?
+                            .validate_shell_scroll(&state, &connection, params)
+                            .map(|_| ())
+                    },
+                    |_| {},
+                )
+                .await?;
+            let receipt = match reservation {
+                Reservation::Existing(receipt) => receipt,
+                Reservation::Reserved(_) => {
+                    let outcome = match topology {
+                        Some(topology) => {
+                            topology
+                                .shell_scroll_once(security, auth, &r.id, &params, deadline)
+                                .await
+                        }
+                        None => Err(ErrorCode::NotReady),
+                    };
+                    let proof = auth.proof.clone();
+                    let action = r.id.clone();
+                    let mut receipt = security
+                        .storage
+                        .call(move |store| store.status(&proof, &action, now_ms()))
+                        .await
+                        .map_err(store_error)?
+                        .ok_or(ErrorCode::NotReady)?;
+                    if receipt.state == ReceiptState::Reserved {
+                        let proof = auth.proof.clone();
+                        let action = r.id.clone();
+                        let code = outcome.err().unwrap_or(ErrorCode::NotReady);
+                        receipt = security
+                            .storage
+                            .call(move |store| {
+                                store.transition(
+                                    &proof,
+                                    &action,
+                                    crate::storage::ReceiptTransition {
+                                        state: ReceiptState::Failed,
+                                        proof: crate::storage::TransitionProof::DefinitiveNoEffect(
+                                            Id("scroll boundary not entered".into()),
+                                        ),
+                                        result: None,
+                                        error: Some(wire_error(code)),
+                                        at: now_ms(),
+                                    },
+                                )
+                            })
+                            .await
+                            .map_err(store_error)?;
                     }
                     receipt
                 }
             };
-            ResultBody::ShellScroll(ShellScrollResult{receipt})
+            ResultBody::ShellScroll(ShellScrollResult { receipt })
         }
         RequestBody::WorktreesList(v) => {
-            let topology=topology.ok_or(ErrorCode::NotReady)?;
-            let provider=target_provider(&security.state,&v.target)?;
-            let job=topology.reserve_project_read(auth,true,deadline.into_std())?;drop(guard);job.current()?;
-            let context=provider_project_context(provider,&v.target,omp.as_ref(),codex.as_ref(),job.clone()).await?;
-            let prepared=crate::project_read::git::observe(context,job,false).await?;
-            let _guard=security.guard(auth).await?;
-            prepared.enqueue(&security.state,&auth.connection_id,r.id)?;return Ok(None);
+            let topology = topology.ok_or(ErrorCode::NotReady)?;
+            let provider = target_provider(&security.state, &v.target)?;
+            let job = topology.reserve_project_read(auth, true, deadline.into_std())?;
+            drop(guard);
+            job.current()?;
+            let context = provider_project_context(
+                provider,
+                &v.target,
+                omp.as_ref(),
+                codex.as_ref(),
+                job.clone(),
+            )
+            .await?;
+            let prepared = crate::project_read::git::observe(context, job, false).await?;
+            let _guard = security.guard(auth).await?;
+            prepared.enqueue(&security.state, &auth.connection_id, r.id)?;
+            return Ok(None);
         }
 
-        RequestBody::SkillsList(v)=>{
-            let provider=target_provider(&security.state,&v.target)?;drop(guard);
-            match provider {
-                Provider::Codex=>{let owner=codex.ok_or(ErrorCode::NotReady)?;let publication=owner.skills_list(auth,&v.target).await?;let _guard=security.guard(auth).await?;owner.enqueue_skills_list(&auth.connection_id,r.id,publication)?;},
-                Provider::Omp=>{let owner=omp.ok_or(ErrorCode::NotReady)?;let publication=owner.skills_list(auth,&v.target).await?;let _guard=security.guard(auth).await?;owner.enqueue_skills_list(&auth.connection_id,r.id,publication)?;},
-            }return Ok(None);
-        }
-        RequestBody::SessionControlsRead(params)=>{
-            let provider=target_provider(&security.state,&params.target)?;drop(guard);
-            match provider {
-                Provider::Omp=>{let owner=omp.ok_or(ErrorCode::NotReady)?;let publication=owner.controls_read(auth,&params.target).await?;let _guard=security.guard(auth).await?;owner.enqueue_controls(&auth.connection_id,r.id,publication)?;},
-                Provider::Codex=>{let owner=codex.ok_or(ErrorCode::NotReady)?;let publication=owner.controls_read(auth,&params.target).await?;let _guard=security.guard(auth).await?;owner.enqueue_controls(&auth.connection_id,r.id,publication)?;},
-            }return Ok(None);
-        }
-        RequestBody::SessionQueueList(params)=>{
-            if target_provider(&security.state,&params.target)?!=Provider::Codex {return Err(ErrorCode::NotReady)}
-            let owner=codex.ok_or(ErrorCode::NotReady)?;drop(guard);
-            let read=owner.queue_list(auth,&params).await?;let _guard=security.guard(auth).await?;
-            owner.enqueue_queue(&auth.connection_id,r.id,read)?;return Ok(None);
-        }
-        RequestBody::SkillsPreviewOpen(params)=>{
-            let documents=topology.as_ref().ok_or(ErrorCode::NotReady)?.skill_documents.clone();
-            let publication=security.state.skills_publication(auth,&params.target,&params.catalogue_generation)?;
+        RequestBody::SkillsList(v) => {
+            let provider = target_provider(&security.state, &v.target)?;
             drop(guard);
-            authorize_skill_document(auth,&publication,&params.document_ref,omp.as_ref(),codex.as_ref()).await?;
-            let (result,mut pending)=documents.open(auth,publication.clone(),&params).await?;
-            authorize_skill_document(auth,&publication,&params.document_ref,omp.as_ref(),codex.as_ref()).await?;
-            let _guard=security.guard(auth).await?;let mut result=Some(ResultBody::SkillsPreviewOpen(result));
-            documents.publish(&pending,||publication.origin.context.with_current(||security.state.skills_preview_response(&auth.connection_id,r.id.clone(),&publication,result.take().ok_or(ErrorCode::StaleSession)?)))?;
-            pending.published();return Ok(None);
+            match provider {
+                Provider::Codex => {
+                    let owner = codex.ok_or(ErrorCode::NotReady)?;
+                    let publication = owner.skills_list(auth, &v.target).await?;
+                    let _guard = security.guard(auth).await?;
+                    owner.enqueue_skills_list(&auth.connection_id, r.id, publication)?;
+                }
+                Provider::Omp => {
+                    let owner = omp.ok_or(ErrorCode::NotReady)?;
+                    let publication = owner.skills_list(auth, &v.target).await?;
+                    let _guard = security.guard(auth).await?;
+                    owner.enqueue_skills_list(&auth.connection_id, r.id, publication)?;
+                }
+            }
+            return Ok(None);
         }
-        RequestBody::SkillsPreviewRead(params)=>{
-            let documents=topology.as_ref().ok_or(ErrorCode::NotReady)?.skill_documents.clone();
-            let (publication,document)=documents.authority(auth,&params)?;
+        RequestBody::SessionControlsRead(params) => {
+            let provider = target_provider(&security.state, &params.target)?;
             drop(guard);
-            authorize_skill_document(auth,&publication,&document,omp.as_ref(),codex.as_ref()).await?;
-            let (result,mut pending)=documents.read(auth,&params).await?;
-            authorize_skill_document(auth,&publication,&document,omp.as_ref(),codex.as_ref()).await?;
-            let _guard=security.guard(auth).await?;let mut result=Some(ResultBody::SkillsPreviewRead(result));
-            documents.publish(&pending,||publication.origin.context.with_current(||security.state.skills_preview_response(&auth.connection_id,r.id.clone(),&publication,result.take().ok_or(ErrorCode::StaleSession)?)))?;
-            pending.published();return Ok(None);
+            match provider {
+                Provider::Omp => {
+                    let owner = omp.ok_or(ErrorCode::NotReady)?;
+                    let publication = owner.controls_read(auth, &params.target).await?;
+                    let _guard = security.guard(auth).await?;
+                    owner.enqueue_controls(&auth.connection_id, r.id, publication)?;
+                }
+                Provider::Codex => {
+                    let owner = codex.ok_or(ErrorCode::NotReady)?;
+                    let publication = owner.controls_read(auth, &params.target).await?;
+                    let _guard = security.guard(auth).await?;
+                    owner.enqueue_controls(&auth.connection_id, r.id, publication)?;
+                }
+            }
+            return Ok(None);
         }
-        RequestBody::SkillsPreviewClose(params)=>{
-            let documents=&topology.as_ref().ok_or(ErrorCode::NotReady)?.skill_documents;
-            let result=documents.close(auth.proof.peer_id(),&params);
+        RequestBody::SessionQueueList(params) => {
+            if target_provider(&security.state, &params.target)? != Provider::Codex {
+                return Err(ErrorCode::NotReady);
+            }
+            let owner = codex.ok_or(ErrorCode::NotReady)?;
+            drop(guard);
+            let read = owner.queue_list(auth, &params).await?;
+            let _guard = security.guard(auth).await?;
+            owner.enqueue_queue(&auth.connection_id, r.id, read)?;
+            return Ok(None);
+        }
+        RequestBody::SkillsPreviewOpen(params) => {
+            let documents = topology
+                .as_ref()
+                .ok_or(ErrorCode::NotReady)?
+                .skill_documents
+                .clone();
+            let publication = security.state.skills_publication(
+                auth,
+                &params.target,
+                &params.catalogue_generation,
+            )?;
+            drop(guard);
+            authorize_skill_document(
+                auth,
+                &publication,
+                &params.document_ref,
+                omp.as_ref(),
+                codex.as_ref(),
+            )
+            .await?;
+            let (result, mut pending) = documents.open(auth, publication.clone(), &params).await?;
+            authorize_skill_document(
+                auth,
+                &publication,
+                &params.document_ref,
+                omp.as_ref(),
+                codex.as_ref(),
+            )
+            .await?;
+            let _guard = security.guard(auth).await?;
+            let mut result = Some(ResultBody::SkillsPreviewOpen(result));
+            documents.publish(&pending, || {
+                publication.origin.context.with_current(|| {
+                    security.state.skills_preview_response(
+                        &auth.connection_id,
+                        r.id.clone(),
+                        &publication,
+                        result.take().ok_or(ErrorCode::StaleSession)?,
+                    )
+                })
+            })?;
+            pending.published();
+            return Ok(None);
+        }
+        RequestBody::SkillsPreviewRead(params) => {
+            let documents = topology
+                .as_ref()
+                .ok_or(ErrorCode::NotReady)?
+                .skill_documents
+                .clone();
+            let (publication, document) = documents.authority(auth, &params)?;
+            drop(guard);
+            authorize_skill_document(auth, &publication, &document, omp.as_ref(), codex.as_ref())
+                .await?;
+            let (result, mut pending) = documents.read(auth, &params).await?;
+            authorize_skill_document(auth, &publication, &document, omp.as_ref(), codex.as_ref())
+                .await?;
+            let _guard = security.guard(auth).await?;
+            let mut result = Some(ResultBody::SkillsPreviewRead(result));
+            documents.publish(&pending, || {
+                publication.origin.context.with_current(|| {
+                    security.state.skills_preview_response(
+                        &auth.connection_id,
+                        r.id.clone(),
+                        &publication,
+                        result.take().ok_or(ErrorCode::StaleSession)?,
+                    )
+                })
+            })?;
+            pending.published();
+            return Ok(None);
+        }
+        RequestBody::SkillsPreviewClose(params) => {
+            let documents = &topology
+                .as_ref()
+                .ok_or(ErrorCode::NotReady)?
+                .skill_documents;
+            let result = documents.close(auth.proof.peer_id(), &params);
             ResultBody::SkillsPreviewClose(result)
         }
         RequestBody::ChangesRead(v) => {
-            let topology=topology.ok_or(ErrorCode::NotReady)?;
-            let provider=target_provider(&security.state,&v.target)?;
-            let job=topology.reserve_project_read(auth,true,deadline.into_std())?;drop(guard);job.current()?;
-            let context=provider_project_context(provider,&v.target,omp.as_ref(),codex.as_ref(),job.clone()).await?;
-            let prepared=crate::project_read::git::observe(context,job,true).await?;
-            let _guard=security.guard(auth).await?;
-            prepared.enqueue(&security.state,&auth.connection_id,r.id)?;return Ok(None);
+            let topology = topology.ok_or(ErrorCode::NotReady)?;
+            let provider = target_provider(&security.state, &v.target)?;
+            let job = topology.reserve_project_read(auth, true, deadline.into_std())?;
+            drop(guard);
+            job.current()?;
+            let context = provider_project_context(
+                provider,
+                &v.target,
+                omp.as_ref(),
+                codex.as_ref(),
+                job.clone(),
+            )
+            .await?;
+            let prepared = crate::project_read::git::observe(context, job, true).await?;
+            let _guard = security.guard(auth).await?;
+            prepared.enqueue(&security.state, &auth.connection_id, r.id)?;
+            return Ok(None);
         }
 
         RequestBody::ActionStatus(v) => {
@@ -1782,7 +2413,7 @@ async fn dispatch(
                 .await
                 .map_err(store_error)?;
             ResultBody::ActionStatus(match receipt {
-                Some(receipt) => ActionStatusResult::Known(KnownActionStatus { receipt }),
+                Some(receipt) => ActionStatusResult::Known(Box::new(KnownActionStatus { receipt })),
                 None => ActionStatusResult::Unknown(UnknownActionStatus {
                     state: UnknownValue("unknown".into()),
                 }),
@@ -1827,28 +2458,47 @@ async fn dispatch(
         | RequestBody::TurnCancel(_)
         | RequestBody::RequestRespond(_)) => {
             let method = body.method();
-            let codex_only=matches!(method,Method::SessionQueueUpdate|Method::SessionQueueDelete|Method::SessionQueueReorder|Method::SessionQueueStart);
+            let codex_only = matches!(
+                method,
+                Method::SessionQueueUpdate
+                    | Method::SessionQueueDelete
+                    | Method::SessionQueueReorder
+                    | Method::SessionQueueStart
+            );
             let request = Request { id: r.id, body };
             drop(guard);
             let provider = match &request.body {
                 RequestBody::SessionCreate(p) => Some(p.provider),
-                RequestBody::SessionControlsApply(p)=>target_provider(&security.state,&p.target).ok(),
-                RequestBody::SessionQueueUpdate(p)=>target_provider(&security.state,&p.target).ok(),
-                RequestBody::SessionQueueDelete(p)=>target_provider(&security.state,&p.target).ok(),
-                RequestBody::SessionQueueReorder(p)=>target_provider(&security.state,&p.target).ok(),
-                RequestBody::SessionQueueStart(p)=>target_provider(&security.state,&p.target).ok(),
+                RequestBody::SessionControlsApply(p) => {
+                    target_provider(&security.state, &p.target).ok()
+                }
+                RequestBody::SessionQueueUpdate(p) => {
+                    target_provider(&security.state, &p.target).ok()
+                }
+                RequestBody::SessionQueueDelete(p) => {
+                    target_provider(&security.state, &p.target).ok()
+                }
+                RequestBody::SessionQueueReorder(p) => {
+                    target_provider(&security.state, &p.target).ok()
+                }
+                RequestBody::SessionQueueStart(p) => {
+                    target_provider(&security.state, &p.target).ok()
+                }
                 RequestBody::PromptSubmit(p) => target_provider(&security.state, &p.target).ok(),
                 RequestBody::TurnCancel(p) => target_provider(&security.state, &p.target).ok(),
                 RequestBody::RequestRespond(p) => target_provider(&security.state, &p.target).ok(),
                 _ => None,
             };
             // An expired Target still reaches reserve: matching receipts precede stale checks.
-            let receipt = if codex_only&&codex.is_none() {
-                match security.reserve(auth,request,|_|Err(ErrorCode::NotReady),|_|{}).await? {
-                    Reservation::Existing(receipt)=>receipt,
-                    Reservation::Reserved(_)=>return Err(ErrorCode::NotReady),
+            let receipt = if codex_only && codex.is_none() {
+                match security
+                    .reserve(auth, request, |_| Err(ErrorCode::NotReady), |_| {})
+                    .await?
+                {
+                    Reservation::Existing(receipt) => receipt,
+                    Reservation::Reserved(_) => return Err(ErrorCode::NotReady),
                 }
-            } else if (codex_only||provider==Some(Provider::Codex))
+            } else if (codex_only || provider == Some(Provider::Codex))
                 && let Some(owner) = codex.clone()
             {
                 owner.mutate(auth.clone(), request).await?
@@ -1866,11 +2516,21 @@ async fn dispatch(
                 }
             };
             match method {
-                Method::SessionControlsApply=>ResultBody::SessionControlsApply(SessionControlsApplyResult {receipt}),
-                Method::SessionQueueUpdate=>ResultBody::SessionQueueUpdate(SessionQueueResult {receipt}),
-                Method::SessionQueueDelete=>ResultBody::SessionQueueDelete(SessionQueueResult {receipt}),
-                Method::SessionQueueReorder=>ResultBody::SessionQueueReorder(SessionQueueResult {receipt}),
-                Method::SessionQueueStart=>ResultBody::SessionQueueStart(SessionQueueResult {receipt}),
+                Method::SessionControlsApply => {
+                    ResultBody::SessionControlsApply(SessionControlsApplyResult { receipt })
+                }
+                Method::SessionQueueUpdate => {
+                    ResultBody::SessionQueueUpdate(SessionQueueResult { receipt })
+                }
+                Method::SessionQueueDelete => {
+                    ResultBody::SessionQueueDelete(SessionQueueResult { receipt })
+                }
+                Method::SessionQueueReorder => {
+                    ResultBody::SessionQueueReorder(SessionQueueResult { receipt })
+                }
+                Method::SessionQueueStart => {
+                    ResultBody::SessionQueueStart(SessionQueueResult { receipt })
+                }
                 Method::SessionCreate => ResultBody::SessionCreate(SessionCreateResult { receipt }),
                 Method::PromptSubmit => ResultBody::PromptSubmit(PromptSubmitResult { receipt }),
                 Method::TurnCancel => ResultBody::TurnCancel(TurnCancelResult { receipt }),
@@ -1880,13 +2540,54 @@ async fn dispatch(
                 _ => return Err(ErrorCode::InvalidRequest),
             }
         }
-        RequestBody::PushRegister(v)=>{
-            if v.boot_id!=security.boot{return Err(ErrorCode::StaleHost)}
-            let push=security.push.get().ok_or(ErrorCode::NotReady)?;push.validate(&v.endpoint)?;let peer=p.peer_id().clone();
-            let (result,changed)=security.storage.call(move|s|s.push_register(&p,v,now_ms())).await.map_err(store_error)?;if changed{push.cancel(&peer)}drop(guard);if changed{push.drain_peer(&peer).await?;}ResultBody::PushRegister(result)
-        },
-        RequestBody::PushProbeAck(v)=>ResultBody::PushProbeAck(security.storage.call(move|s|s.push_ack(&p,v,now_ms())).await.map_err(store_error)?),
-        RequestBody::PushUnregister(v)=>{let peer=p.peer_id().clone();let result=security.storage.call(move|s|s.push_unregister(&p,v,now_ms())).await.map_err(store_error)?;if result.unregistered&&let Some(push)=security.push.get(){push.cancel(&peer)}drop(guard);if result.unregistered&&let Some(push)=security.push.get(){push.drain_peer(&peer).await?;}ResultBody::PushUnregister(result)},
+        RequestBody::PushRegister(v) => {
+            if v.boot_id != security.boot {
+                return Err(ErrorCode::StaleHost);
+            }
+            let push = security.push.get().ok_or(ErrorCode::NotReady)?;
+            push.validate(&v.endpoint)?;
+            let peer = p.peer_id().clone();
+            let (result, changed) = security
+                .storage
+                .call(move |s| s.push_register(&p, v, now_ms()))
+                .await
+                .map_err(store_error)?;
+            if changed {
+                push.cancel(&peer)
+            }
+            drop(guard);
+            if changed {
+                push.drain_peer(&peer).await?;
+            }
+            ResultBody::PushRegister(result)
+        }
+        RequestBody::PushProbeAck(v) => ResultBody::PushProbeAck(
+            security
+                .storage
+                .call(move |s| s.push_ack(&p, v, now_ms()))
+                .await
+                .map_err(store_error)?,
+        ),
+        RequestBody::PushUnregister(v) => {
+            let peer = p.peer_id().clone();
+            let result = security
+                .storage
+                .call(move |s| s.push_unregister(&p, v, now_ms()))
+                .await
+                .map_err(store_error)?;
+            if result.unregistered
+                && let Some(push) = security.push.get()
+            {
+                push.cancel(&peer)
+            }
+            drop(guard);
+            if result.unregistered
+                && let Some(push) = security.push.get()
+            {
+                push.drain_peer(&peer).await?;
+            }
+            ResultBody::PushUnregister(result)
+        }
         RequestBody::Hello(_) | RequestBody::PairConfirm(_) | RequestBody::DeviceUnpair(_) => {
             return Err(ErrorCode::InvalidRequest);
         }
@@ -1908,17 +2609,38 @@ mod tests {
         let reporter = HelloCaptureReporter::new();
         let selected = reporter.select().unwrap();
         assert!(reporter.select().is_none());
-        for phase in ["admission","stream_accept","hello_frame","hello_authorization","security_guard","backend_capabilities"] {
-            selected.report(phase,"entered",None,"none");
+        for phase in [
+            "admission",
+            "stream_accept",
+            "hello_frame",
+            "hello_authorization",
+            "security_guard",
+            "backend_capabilities",
+        ] {
+            selected.report(phase, "entered", None, "none");
         }
-        selected.report("codex_manager_hello","process_evidence",Some(ErrorCode::NotReady),closed_manager_io(Some(io::ErrorKind::PermissionDenied)));
-        selected.report("codex_manager_hello","process_evidence",Some(ErrorCode::NotReady),closed_manager_io(Some(io::ErrorKind::PermissionDenied)));
-        selected.report("response_write","entered",None,"none");
-        selected.report("complete","completed",None,"none");
+        selected.report(
+            "codex_manager_hello",
+            "process_evidence",
+            Some(ErrorCode::NotReady),
+            closed_manager_io(Some(io::ErrorKind::PermissionDenied)),
+        );
+        selected.report(
+            "codex_manager_hello",
+            "process_evidence",
+            Some(ErrorCode::NotReady),
+            closed_manager_io(Some(io::ErrorKind::PermissionDenied)),
+        );
+        selected.report("response_write", "entered", None, "none");
+        selected.report("complete", "completed", None, "none");
         let state = reporter.0.lock().unwrap();
-        assert_eq!(state.lines,8);
-        assert!(state.observations.contains(&("codex_manager_hello","process_evidence")));
-        assert!(!state.observations.contains(&("complete","completed")));
+        assert_eq!(state.lines, 8);
+        assert!(
+            state
+                .observations
+                .contains(&("codex_manager_hello", "process_evidence"))
+        );
+        assert!(!state.observations.contains(&("complete", "completed")));
     }
     struct WriterFixture {
         host: Endpoint,
@@ -2014,89 +2736,326 @@ mod tests {
     }
     #[tokio::test]
     async fn stock_endpoint_begin_resize_confirmation_receipts_and_lost_result_never_replay() {
-        use crate::herdr::endpoint::{fixture as native,Rect};
-        use std::{os::unix::fs::PermissionsExt,sync::atomic::{AtomicBool,AtomicUsize,Ordering}};
-        use tokio::io::{AsyncReadExt,AsyncWriteExt};
-        async fn native_frame(stream:&mut tokio::net::UnixStream)->Vec<u8>{
-            let n=stream.read_u32_le().await.unwrap() as usize;assert!(n>0&&n<=2*1024*1024);
-            let mut bytes=vec![0;n];stream.read_exact(&mut bytes).await.unwrap();bytes
+        use crate::herdr::endpoint::{Rect, fixture as native};
+        use std::{
+            os::unix::fs::PermissionsExt,
+            sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn native_frame(stream: &mut tokio::net::UnixStream) -> Vec<u8> {
+            let n = stream.read_u32_le().await.unwrap() as usize;
+            assert!(n > 0 && n <= 2 * 1024 * 1024);
+            let mut bytes = vec![0; n];
+            stream.read_exact(&mut bytes).await.unwrap();
+            bytes
         }
-        async fn drain(wire:&mut WriterFixture)->Vec<Envelope> {
-            let done=AtomicBool::new(false);let security=wire.security.clone();let auth=wire.auth.clone();
-            let send=&mut wire.send;let recv=&mut wire.recv;
-            let writing=async {let mut response=false;while !done.load(Ordering::Acquire){
-                assert!(!matches!(output_step(send,&security,&auth,false,None,None,&mut response).await.unwrap(),OutputStep::Closed));
-                tokio::task::yield_now().await;
-            }};
-            let reading=async {let mut frames=Vec::new();for _ in 0..3{frames.push(decode_payload(&read_frame(recv,FRAME_MAX).await.unwrap(),Some(Method::ShellGridSubscribe)).unwrap());}done.store(true,Ordering::Release);frames};
-            let ((),frames)=tokio::time::timeout(Duration::from_secs(15),async{tokio::join!(writing,reading)}).await.unwrap();frames
+        async fn drain(wire: &mut WriterFixture) -> Vec<Envelope> {
+            let done = AtomicBool::new(false);
+            let security = wire.security.clone();
+            let auth = wire.auth.clone();
+            let send = &mut wire.send;
+            let recv = &mut wire.recv;
+            let writing = async {
+                let mut response = false;
+                while !done.load(Ordering::Acquire) {
+                    assert!(!matches!(
+                        output_step(send, &security, &auth, false, None, None, &mut response)
+                            .await
+                            .unwrap(),
+                        OutputStep::Closed
+                    ));
+                    tokio::task::yield_now().await;
+                }
+            };
+            let reading = async {
+                let mut frames = Vec::new();
+                for _ in 0..3 {
+                    frames.push(
+                        decode_payload(
+                            &read_frame(recv, FRAME_MAX).await.unwrap(),
+                            Some(Method::ShellGridSubscribe),
+                        )
+                        .unwrap(),
+                    );
+                }
+                done.store(true, Ordering::Release);
+                frames
+            };
+            let ((), frames) = tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::join!(writing, reading)
+            })
+            .await
+            .unwrap();
+            frames
         }
-        for (history,lose_second) in [(false,false),(false,true),(true,false),(true,true)] {
-            let mut wire=WriterFixture::new().await;
-            let fixture=crate::herdr::grid::queue_fixture(wire.security.state.clone(),Uuid::random()).await;
-            let topology=fixture.topology();
-            let ResultBody::ShellGridSubscribe(description)=fixture.opening() else{panic!("shell fixture");};
-            let path=fixture.source.socket_path.with_file_name("native-client.sock");
-            let listener=tokio::net::UnixListener::bind(&path).unwrap();
-            std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
-            {let accept=listener.accept();tokio::pin!(accept);assert!(futures_util::poll!(&mut accept).is_pending(),"metadata alone cannot activate a native frontend");}
-            let resizes=Arc::new(AtomicUsize::new(0));let native_resizes=resizes.clone();
-            let deactivated=Arc::new(AtomicBool::new(false));let native_deactivated=deactivated.clone();
-            let native_owner=tokio::spawn(async move {
-                let (mut socket,_)=listener.accept().await.unwrap();
-                let (tag,hello)=native::read_client(&native_frame(&mut socket).await);
-                assert_eq!(tag,20);assert_eq!(hello["surface_active"],false);assert_eq!(hello["surface_size"],serde_json::json!({"cols":1,"rows":1}));
+        for (history, lose_second) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut wire = WriterFixture::new().await;
+            let fixture =
+                crate::herdr::grid::queue_fixture(wire.security.state.clone(), Uuid::random())
+                    .await;
+            let topology = fixture.topology();
+            let ResultBody::ShellGridSubscribe(description) = fixture.opening() else {
+                panic!("shell fixture");
+            };
+            let path = fixture
+                .source
+                .socket_path
+                .with_file_name("native-client.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            {
+                let accept = listener.accept();
+                tokio::pin!(accept);
+                assert!(
+                    futures_util::poll!(&mut accept).is_pending(),
+                    "metadata alone cannot activate a native frontend"
+                );
+            }
+            let resizes = Arc::new(AtomicUsize::new(0));
+            let native_resizes = resizes.clone();
+            let deactivated = Arc::new(AtomicBool::new(false));
+            let native_deactivated = deactivated.clone();
+            let native_owner = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (tag, hello) = native::read_client(&native_frame(&mut socket).await);
+                assert_eq!(tag, 20);
+                assert_eq!(hello["surface_active"], false);
+                assert_eq!(
+                    hello["surface_size"],
+                    serde_json::json!({"cols":1,"rows":1})
+                );
                 socket.write_all(&native::native_control("endpoint.welcome.v1",serde_json::json!({"generation":1,"server_version":"fixture","snapshot_codec":"shell.snapshot.v1","surface_codec":"shell.surface.v1","input_codec":"shell.input.semantic.v1","blob_codec":"shell.blob.v1","methods":["client_shell.surface.set","workspace.focus","tab.focus","pane.focus"]}))).await.unwrap();
-                socket.write_all(&native::native_control("shell.snapshot.v1",native::view(1))).await.unwrap();
-                let mut surface_revision=0;
+                socket
+                    .write_all(&native::native_control(
+                        "shell.snapshot.v1",
+                        native::view(1),
+                    ))
+                    .await
+                    .unwrap();
+                let mut surface_revision = 0;
                 loop {
-                    let (tag,request)=native::read_client(&native_frame(&mut socket).await);
-                    if tag==12 {
-                        let count=native_resizes.fetch_add(1,Ordering::AcqRel)+1;
-                        if lose_second&&count==2{socket.write_all(&[3,0,0,0,13]).await.unwrap();break;}
-                        let columns=request["columns"].as_u64().unwrap() as u16;assert_eq!(request["rows"],1);
-                        surface_revision+=1;let cells=vec![("x",0,0,0,false);usize::from(columns)];
-                        socket.write_all(&native::packet(&native::surface(columns,surface_revision,2,&cells,Rect{x:0,y:0,width:columns,height:1},false))).await.unwrap();continue;
+                    let (tag, request) = native::read_client(&native_frame(&mut socket).await);
+                    if tag == 12 {
+                        let count = native_resizes.fetch_add(1, Ordering::AcqRel) + 1;
+                        if lose_second && count == 2 {
+                            socket.write_all(&[3, 0, 0, 0, 13]).await.unwrap();
+                            break;
+                        }
+                        let columns = request["columns"].as_u64().unwrap() as u16;
+                        assert_eq!(request["rows"], 1);
+                        surface_revision += 1;
+                        let cells = vec![("x", 0, 0, 0, false); usize::from(columns)];
+                        socket
+                            .write_all(&native::packet(&native::surface(
+                                columns,
+                                surface_revision,
+                                2,
+                                &cells,
+                                Rect {
+                                    x: 0,
+                                    y: 0,
+                                    width: columns,
+                                    height: 1,
+                                },
+                                false,
+                            )))
+                            .await
+                            .unwrap();
+                        continue;
                     }
-                    assert_eq!(tag,15);let id=request["id"].as_str().unwrap();
-                    let result=match request["method"].as_str().unwrap() {
-                        "client_shell.surface.set"=>{
-                            if request["params"]["active"]==false{native_deactivated.store(true,Ordering::Release);break;}
+                    assert_eq!(tag, 15);
+                    let id = request["id"].as_str().unwrap();
+                    let result = match request["method"].as_str().unwrap() {
+                        "client_shell.surface.set" => {
+                            if request["params"]["active"] == false {
+                                native_deactivated.store(true, Ordering::Release);
+                                break;
+                            }
                             serde_json::json!({"type":"client_shell_surface_set","active":true,"projection_revision":2})
-                        },
-                        "workspace.focus"=>serde_json::json!({"type":"workspace_info","workspace":{"workspace_id":"w"}}),
-                        "tab.focus"=>serde_json::json!({"type":"tab_info","tab":{"workspace_id":"w","tab_id":"t"}}),
-                        "pane.focus"=>serde_json::json!({"type":"pane_info","pane":{"pane_id":"p","terminal_id":"n","workspace_id":"w","tab_id":"t"}}),
-                        _=>panic!("no input, alternate native method or provider action is allowed"),
+                        }
+                        "workspace.focus" => {
+                            serde_json::json!({"type":"workspace_info","workspace":{"workspace_id":"w"}})
+                        }
+                        "tab.focus" => {
+                            serde_json::json!({"type":"tab_info","tab":{"workspace_id":"w","tab_id":"t"}})
+                        }
+                        "pane.focus" => {
+                            serde_json::json!({"type":"pane_info","pane":{"pane_id":"p","terminal_id":"n","workspace_id":"w","tab_id":"t"}})
+                        }
+                        _ => panic!(
+                            "no input, alternate native method or provider action is allowed"
+                        ),
                     };
-                    socket.write_all(&native::response(id,result)).await.unwrap();
-                    if surface_revision==0 {
-                        surface_revision=1;socket.write_all(&native::native_control("shell.snapshot.v1",native::view(2))).await.unwrap();
-                        socket.write_all(&native::packet(&native::surface_with_scroll(1,1,2,&[("x",0,0,0,false)],Rect{x:0,y:0,width:1,height:1},false,Some([0,20,1]),None,false))).await.unwrap();
+                    socket
+                        .write_all(&native::response(id, result))
+                        .await
+                        .unwrap();
+                    if surface_revision == 0 {
+                        surface_revision = 1;
+                        socket
+                            .write_all(&native::native_control(
+                                "shell.snapshot.v1",
+                                native::view(2),
+                            ))
+                            .await
+                            .unwrap();
+                        socket
+                            .write_all(&native::packet(&native::surface_with_scroll(
+                                1,
+                                1,
+                                2,
+                                &[("x", 0, 0, 0, false)],
+                                Rect {
+                                    x: 0,
+                                    y: 0,
+                                    width: 1,
+                                    height: 1,
+                                },
+                                false,
+                                native::ScrollState {
+                                    selected: Some([0, 20, 1]),
+                                    sibling: None,
+                                    alternate: false,
+                                },
+                            )))
+                            .await
+                            .unwrap();
                     }
                 }
             });
-            topology.grid_open(wire.security.clone(),wire.auth.clone(),Uuid::random(),RequestBody::ShellGridSubscribe(ShellGridSubscribeParams { target: description.target.clone(), history }),Instant::now()+Duration::from_secs(15)).await.unwrap();
-            let frames=drain(&mut wire).await;
-            let Envelope::Response(Response{outcome:Ok(ResultBody::ShellGridSubscribe(opened)),..})=&frames[0] else{panic!("actual owned opening descriptor");};
-            assert_eq!(opened.frame.scroll.as_ref().map(|metrics|metrics.offset_from_bottom.0),history.then_some(0));
-            let subscription=opened.subscription.clone();
-            let request=Request{id:Uuid::random(),body:RequestBody::ShellResize(ShellResizeParams{boot_id:wire.security.boot.clone(),target:description.target.clone(),subscription:subscription.clone(),columns:Uint(2),rows:Uint(1)})};
-            let mut views=Viewing::default();
-            let result=dispatch(&wire.security,&wire.auth,Some(topology.clone()),None,None,request.clone(),&mut views,Instant::now()+Duration::from_secs(15)).await.unwrap().unwrap();
-            let ResultBody::ShellResize(result)=result else{panic!("resize receipt");};assert_eq!(result.receipt.state,ReceiptState::Succeeded);
-            let repeated=dispatch(&wire.security,&wire.auth,Some(topology.clone()),None,None,request.clone(),&mut views,Instant::now()+Duration::from_secs(15)).await.unwrap().unwrap();
-            assert_eq!(repeated,ResultBody::ShellResize(result));assert_eq!(resizes.load(Ordering::Acquire),1);
+            topology
+                .grid_open(
+                    wire.security.clone(),
+                    wire.auth.clone(),
+                    Uuid::random(),
+                    RequestBody::ShellGridSubscribe(ShellGridSubscribeParams {
+                        target: description.target.clone(),
+                        history,
+                    }),
+                    Instant::now() + Duration::from_secs(15),
+                )
+                .await
+                .unwrap();
+            let frames = drain(&mut wire).await;
+            let Envelope::Response(Response {
+                outcome: Ok(ResultBody::ShellGridSubscribe(opened)),
+                ..
+            }) = &frames[0]
+            else {
+                panic!("actual owned opening descriptor");
+            };
+            assert_eq!(
+                opened
+                    .frame
+                    .scroll
+                    .as_ref()
+                    .map(|metrics| metrics.offset_from_bottom.0),
+                history.then_some(0)
+            );
+            let subscription = opened.subscription.clone();
+            let request = Request {
+                id: Uuid::random(),
+                body: RequestBody::ShellResize(ShellResizeParams {
+                    boot_id: wire.security.boot.clone(),
+                    target: description.target.clone(),
+                    subscription: subscription.clone(),
+                    columns: Uint(2),
+                    rows: Uint(1),
+                }),
+            };
+            let mut views = Viewing::default();
+            let result = dispatch(
+                &wire.security,
+                &wire.auth,
+                Backends {
+                    topology: Some(topology.clone()),
+                    omp: None,
+                    codex: None,
+                },
+                request.clone(),
+                &mut views,
+                Instant::now() + Duration::from_secs(15),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let ResultBody::ShellResize(result) = result else {
+                panic!("resize receipt");
+            };
+            assert_eq!(result.receipt.state, ReceiptState::Succeeded);
+            let repeated = dispatch(
+                &wire.security,
+                &wire.auth,
+                Backends {
+                    topology: Some(topology.clone()),
+                    omp: None,
+                    codex: None,
+                },
+                request.clone(),
+                &mut views,
+                Instant::now() + Duration::from_secs(15),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(repeated, ResultBody::ShellResize(result));
+            assert_eq!(resizes.load(Ordering::Acquire), 1);
             drain(&mut wire).await;
             if lose_second {
-                let mut lost=request;lost.id=Uuid::random();if let RequestBody::ShellResize(params)=&mut lost.body{params.columns=Uint(3);}
-                let result=dispatch(&wire.security,&wire.auth,Some(topology.clone()),None,None,lost.clone(),&mut views,Instant::now()+Duration::from_secs(15)).await.unwrap().unwrap();
-                let ResultBody::ShellResize(receipt)=&result else{panic!("uncertain resize");};assert_eq!(receipt.receipt.state,ReceiptState::Uncertain);
-                assert_eq!(dispatch(&wire.security,&wire.auth,Some(topology),None,None,lost,&mut views,Instant::now()+Duration::from_secs(15)).await.unwrap().unwrap(),result);
-                assert_eq!(resizes.load(Ordering::Acquire),2);
-            }else{wire.security.state.unsubscribe(&wire.auth.connection_id,&subscription).unwrap();}
-            tokio::time::timeout(Duration::from_secs(5),native_owner).await.unwrap().unwrap();
-            assert_eq!(deactivated.load(Ordering::Acquire),!lose_second);
+                let mut lost = request;
+                lost.id = Uuid::random();
+                if let RequestBody::ShellResize(params) = &mut lost.body {
+                    params.columns = Uint(3);
+                }
+                let result = dispatch(
+                    &wire.security,
+                    &wire.auth,
+                    Backends {
+                        topology: Some(topology.clone()),
+                        omp: None,
+                        codex: None,
+                    },
+                    lost.clone(),
+                    &mut views,
+                    Instant::now() + Duration::from_secs(15),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let ResultBody::ShellResize(receipt) = &result else {
+                    panic!("uncertain resize");
+                };
+                assert_eq!(receipt.receipt.state, ReceiptState::Uncertain);
+                assert_eq!(
+                    dispatch(
+                        &wire.security,
+                        &wire.auth,
+                        Backends {
+                            topology: Some(topology),
+                            omp: None,
+                            codex: None
+                        },
+                        lost,
+                        &mut views,
+                        Instant::now() + Duration::from_secs(15)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                    result
+                );
+                assert_eq!(resizes.load(Ordering::Acquire), 2);
+            } else {
+                wire.security
+                    .state
+                    .unsubscribe(&wire.auth.connection_id, &subscription)
+                    .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), native_owner)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(deactivated.load(Ordering::Acquire), !lose_second);
             wire.close().await;
         }
     }

@@ -67,12 +67,18 @@ async fn authorized() -> (
 fn prompt(boot: Uuid) -> Request {
     Request {
         id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
-        target: Target {
-            session_id: Uuid::random(),
-            generation: Uuid::random(),
-        },
-        text: PromptText("owned socket boundary".into()), }),
+        body: RequestBody::PromptSubmit(PromptSubmitParams {
+            delivery: None,
+            native_turn_id: None,
+            images: None,
+            skill: None,
+            boot_id: boot,
+            target: Target {
+                session_id: Uuid::random(),
+                generation: Uuid::random(),
+            },
+            text: PromptText("owned socket boundary".into()),
+        }),
     }
 }
 #[tokio::test]
@@ -305,11 +311,15 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
     let action = Uuid::random();
     let request = Request {
         id: action.clone(),
-        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: security.boot.clone(),
-        server_id: Uuid::random(),
-        project_id: Uuid::random(),
-        provider: Provider::Codex,
-        name: Label::new("owned OS boundary fixture").unwrap(), }),
+        body: RequestBody::SessionCreate(SessionCreateParams {
+            directory_ref: None,
+            placement: None,
+            boot_id: security.boot.clone(),
+            server_id: Uuid::random(),
+            project_id: Uuid::random(),
+            provider: Provider::Codex,
+            name: Label::new("owned OS boundary fixture").unwrap(),
+        }),
     };
     security
         .reserve(&auth, request, |_| Ok(()), |_| {})
@@ -317,49 +327,57 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
         .unwrap();
     let root = std::env::temp_dir().join(format!("goatr-start-{}", Uuid::random().0));
     let directory = root.clone();
-    let resources = security.start_boundary(&auth, action.clone(), (CreationStage::Workspace, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, move || {
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&directory)
-            .unwrap();
-        let marker = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(directory.join("resource"))
-            .unwrap();
-        marker.sync_all().unwrap();
-        let resources = CreationResources { checkout: None,
-            workspace_id: Some(Id(format!(
-                "directory-inode-{}",
-                fs::metadata(&directory).unwrap().ino()
-            ))),
-            pane_id: Some(Id(format!(
-                "file-inode-{}",
-                marker.metadata().unwrap().ino()
-            ))),
-            terminal_id: Some(Id(format!(
-                "descriptor-inode-{}",
-                marker.metadata().unwrap().ino()
-            ))),
-            native_id: None,
-            binding_id: None,
-            session_id: None,
-            generation: None,
-            owner_started: None,
-            relay_started: None,
-        };
-        Ok((
-            resources.clone(),
-            CreationOutcome {
-                resources,
-                metadata: StageMetadata::default(),
-                state: StageState::Confirmed,
-                definitive: Some(Id("owned directory/file creation completed".into())),
-                at: now_ms(),
+    let resources = security
+        .start_boundary(
+            &auth,
+            action.clone(),
+            (CreationStage::Workspace, StageMetadata::default()),
+            || Ok(()),
+            move || {
+                fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&directory)
+                    .unwrap();
+                let marker = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(directory.join("resource"))
+                    .unwrap();
+                marker.sync_all().unwrap();
+                let resources = CreationResources {
+                    checkout: None,
+                    workspace_id: Some(Id(format!(
+                        "directory-inode-{}",
+                        fs::metadata(&directory).unwrap().ino()
+                    ))),
+                    pane_id: Some(Id(format!(
+                        "file-inode-{}",
+                        marker.metadata().unwrap().ino()
+                    ))),
+                    terminal_id: Some(Id(format!(
+                        "descriptor-inode-{}",
+                        marker.metadata().unwrap().ino()
+                    ))),
+                    native_id: None,
+                    binding_id: None,
+                    session_id: None,
+                    generation: None,
+                    owner_started: None,
+                    relay_started: None,
+                };
+                Ok((
+                    resources.clone(),
+                    CreationOutcome {
+                        resources,
+                        metadata: StageMetadata::default(),
+                        state: StageState::Confirmed,
+                        definitive: Some(Id("owned directory/file creation completed".into())),
+                        at: now_ms(),
+                    },
+                ))
             },
-        ))
-    })
+        )
         .await
         .unwrap();
     let proof = auth.proof.clone();
@@ -410,48 +428,56 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
         .await
         .unwrap();
     let known = resources.clone();
-    let mut child = security.start_boundary(&auth, action.clone(), (CreationStage::Owner, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, move || {
-        let child = std::process::Command::new("sleep")
-            .arg("30")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        let ticks = stat[stat.rfind(')').unwrap() + 2..]
-            .split_whitespace()
-            .nth(19)
-            .unwrap()
-            .parse::<u64>()
-            .unwrap();
-        let boot = Uuid::new(
-            fs::read_to_string("/proc/sys/kernel/random/boot_id")
-                .unwrap()
-                .trim(),
-        )
-        .unwrap();
-        let resources = CreationResources { checkout: None,
-            owner_started: Some(true),
-            ..known
-        };
-        Ok((
-            child,
-            CreationOutcome {
-                resources,
-                metadata: StageMetadata {
-                    pid: Some(pid),
-                    pid_start_ticks: Some(ticks),
-                    linux_boot_id: Some(boot),
-                    ..StageMetadata::default()
-                },
-                state: StageState::Confirmed,
-                definitive: Some(Id(format!("started-pid-{pid}-{ticks}"))),
-                at: now_ms(),
+    let mut child = security
+        .start_boundary(
+            &auth,
+            action.clone(),
+            (CreationStage::Owner, StageMetadata::default()),
+            || Ok(()),
+            move || {
+                let child = std::process::Command::new("sleep")
+                    .arg("30")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                let pid = child.id();
+                let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+                let ticks = stat[stat.rfind(')').unwrap() + 2..]
+                    .split_whitespace()
+                    .nth(19)
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                let boot = Uuid::new(
+                    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                        .unwrap()
+                        .trim(),
+                )
+                .unwrap();
+                let resources = CreationResources {
+                    checkout: None,
+                    owner_started: Some(true),
+                    ..known
+                };
+                Ok((
+                    child,
+                    CreationOutcome {
+                        resources,
+                        metadata: StageMetadata {
+                            pid: Some(pid),
+                            pid_start_ticks: Some(ticks),
+                            linux_boot_id: Some(boot),
+                            ..StageMetadata::default()
+                        },
+                        state: StageState::Confirmed,
+                        definitive: Some(Id(format!("started-pid-{pid}-{ticks}"))),
+                        at: now_ms(),
+                    },
+                ))
             },
-        ))
-    })
+        )
         .await
         .unwrap();
     let revoked = security
@@ -472,19 +498,26 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
         let forbidden = root.join(format!("forbidden-{stage:?}"));
         let attempt = forbidden.clone();
         let preserved = resources.clone();
-        let denied = security.start_boundary(&auth, action.clone(), (stage, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, move || {
-            fs::DirBuilder::new().mode(0o700).create(attempt).unwrap();
-            Ok((
-                (),
-                CreationOutcome {
-                    resources: preserved,
-                    metadata: StageMetadata::default(),
-                    state: StageState::Uncertain,
-                    definitive: None,
-                    at: now_ms(),
+        let denied = security
+            .start_boundary(
+                &auth,
+                action.clone(),
+                (stage, StageMetadata::default()),
+                || Ok(()),
+                move || {
+                    fs::DirBuilder::new().mode(0o700).create(attempt).unwrap();
+                    Ok((
+                        (),
+                        CreationOutcome {
+                            resources: preserved,
+                            metadata: StageMetadata::default(),
+                            state: StageState::Uncertain,
+                            definitive: None,
+                            at: now_ms(),
+                        },
+                    ))
                 },
-            ))
-        })
+            )
             .await;
         assert_eq!(denied.unwrap_err(), ErrorCode::Unauthorized);
         assert!(!forbidden.exists());
@@ -496,7 +529,6 @@ async fn synchronous_real_process_start_preserves_work_and_fences_every_later_st
     goatr::close_endpoint(&host).await.unwrap();
     goatr::close_endpoint(&phone).await.unwrap();
 }
-
 
 #[tokio::test]
 async fn accepted_native_job_survives_disconnect_replacement_and_client_timeout_without_replay() {
@@ -751,17 +783,22 @@ async fn codex_admission_before_readiness_component(stage: CreationStage) {
     let action = Uuid::random();
     let request = Request {
         id: action.clone(),
-        body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: security.boot.clone(),
-        server_id: Uuid::random(),
-        project_id: Uuid::random(),
-        provider: Provider::Codex,
-        name: Label::new("admission consumer component").unwrap(), }),
+        body: RequestBody::SessionCreate(SessionCreateParams {
+            directory_ref: None,
+            placement: None,
+            boot_id: security.boot.clone(),
+            server_id: Uuid::random(),
+            project_id: Uuid::random(),
+            provider: Provider::Codex,
+            name: Label::new("admission consumer component").unwrap(),
+        }),
     };
     security
         .reserve(&auth, request.clone(), |_| Ok(()), |_| {})
         .await
         .unwrap();
-    let resources = CreationResources { checkout: None,
+    let resources = CreationResources {
+        checkout: None,
         workspace_id: Some(Id(format!("component-root-{}", parent_object.ino()))),
         pane_id: Some(Id(format!("component-pane-{}", result_object.ino()))),
         terminal_id: Some(Id(format!("component-terminal-{}", result_object.ino()))),
@@ -912,29 +949,35 @@ async fn codex_admission_before_readiness_component(stage: CreationStage) {
     let admission_path = marker_path.clone();
     let admission = tokio::time::timeout(
         Duration::from_secs(3),
-        security.start_boundary(&auth, action.clone(), (stage, StageMetadata::default()), || { let checked: Result<(), ErrorCode> = (|| Ok(()))(); checked.map_err(Into::into) }, move || {
-            let file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&admission_path)
-                .unwrap();
-            file.sync_all().unwrap();
-            effects_started.fetch_add(1, Ordering::SeqCst);
-            *retained_start.lock() = Some(file);
-            Ok((
-                (),
-                CreationOutcome {
-                    resources: admitted,
-                    metadata: StageMetadata::default(),
-                    state: StageState::Dispatching,
-                    definitive: Some(Id(
-                        "exclusive OS admission completed; native readiness unconfirmed".into(),
-                    )),
-                    at: now_ms(),
-                },
-            ))
-        }),
+        security.start_boundary(
+            &auth,
+            action.clone(),
+            (stage, StageMetadata::default()),
+            || Ok(()),
+            move || {
+                let file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&admission_path)
+                    .unwrap();
+                file.sync_all().unwrap();
+                effects_started.fetch_add(1, Ordering::SeqCst);
+                *retained_start.lock() = Some(file);
+                Ok((
+                    (),
+                    CreationOutcome {
+                        resources: admitted,
+                        metadata: StageMetadata::default(),
+                        state: StageState::Dispatching,
+                        definitive: Some(Id(
+                            "exclusive OS admission completed; native readiness unconfirmed".into(),
+                        )),
+                        at: now_ms(),
+                    },
+                ))
+            },
+        ),
     )
     .await;
     let proof = auth.proof.clone();

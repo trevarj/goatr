@@ -12,9 +12,9 @@ use goatr::{
     storage::{CreationStageRecord, ServerEvidence},
     transport,
 };
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use rusqlite::{Connection, OpenFlags};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -37,15 +37,15 @@ mod dev_continuity;
 mod herdr_report_capture;
 #[path = "paging_proof.rs"]
 mod paging_proof;
+#[path = "physical.rs"]
+mod physical;
 #[path = "setup_acceptance.rs"]
 mod setup_acceptance;
 #[path = "ui.rs"]
 mod ui;
-#[path = "physical.rs"]
-mod physical;
 const APP: &str = "io.github.trevarj.goatr.debug";
-const NTFY_APK_SHA256:&str="b4baa6f668bd57ad5df3b4e0e769165dcf25c5ee19fdb04f78077ee819616f2a";
-const NTFY_SIGNER_SHA256:&str="76e94d8e04706c5b99064c23210d8ca9910608abae8f3e972b41e388391646e0";
+const NTFY_APK_SHA256: &str = "b4baa6f668bd57ad5df3b4e0e769165dcf25c5ee19fdb04f78077ee819616f2a";
+const NTFY_SIGNER_SHA256: &str = "76e94d8e04706c5b99064c23210d8ca9910608abae8f3e972b41e388391646e0";
 #[derive(Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct Lease {
@@ -161,16 +161,36 @@ fn adb_selector(l: &Lease) -> io::Result<[&str; 6]> {
 }
 /// One recorded console-auth home, used only by ADB/emulator children. No credential bytes
 /// are opened, retained or reported; the ordinary exact console-name proof is unchanged.
-pub(super) fn validate_adb_client_home(root:&Path,home:&Path)->io::Result<()> {
-    if home==root||!home.starts_with(root)||!home.is_absolute()||fs::canonicalize(home)?!=home{return Err(failure("ADB client HOME is not the canonical recorded owned directory"));}
-    private_dir(home,false)?;
-    let metadata=fs::symlink_metadata(home.join(".emulator_console_auth_token"))?;
-    if !metadata.file_type().is_file()||metadata.uid()!=uid()||metadata.mode()&0o7777!=0o600||metadata.nlink()!=1{return Err(failure("ADB console credential metadata is not a private original regular file"));}
+pub(super) fn validate_adb_client_home(root: &Path, home: &Path) -> io::Result<()> {
+    if home == root
+        || !home.starts_with(root)
+        || !home.is_absolute()
+        || fs::canonicalize(home)? != home
+    {
+        return Err(failure(
+            "ADB client HOME is not the canonical recorded owned directory",
+        ));
+    }
+    private_dir(home, false)?;
+    let metadata = fs::symlink_metadata(home.join(".emulator_console_auth_token"))?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != uid()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(failure(
+            "ADB console credential metadata is not a private original regular file",
+        ));
+    }
     Ok(())
 }
-pub(super) fn configure_adb_client_home(command:&mut tokio::process::Command,root:&Path,home:&Path)->io::Result<()> {
-    validate_adb_client_home(root,home)?;
-    command.env("HOME",home);
+pub(super) fn configure_adb_client_home(
+    command: &mut tokio::process::Command,
+    root: &Path,
+    home: &Path,
+) -> io::Result<()> {
+    validate_adb_client_home(root, home)?;
+    command.env("HOME", home);
     Ok(())
 }
 fn lease(path: &Path) -> io::Result<Lease> {
@@ -202,7 +222,7 @@ fn lease(path: &Path) -> io::Result<Lease> {
             return Err(failure("emulator AVD/resource ownership mismatch"));
         }
     }
-    validate_adb_client_home(&l.root,&l.adb_client_home)?;
+    validate_adb_client_home(&l.root, &l.adb_client_home)?;
     source.recheck(path)?;
     Ok(l)
 }
@@ -391,7 +411,7 @@ async fn adb(l: &Lease, args: &[&str]) -> io::Result<String> {
         return Err(failure("owned emulator process identity changed"));
     }
     let mut c = tokio::process::Command::new(sdk);
-    configure_adb_client_home(&mut c,&l.root,&l.adb_client_home)?;
+    configure_adb_client_home(&mut c, &l.root, &l.adb_client_home)?;
     c.args(adb_selector(l)?).args(args);
     String::from_utf8(output(c, 15, 1024 * 1024).await?).map_err(io::Error::other)
 }
@@ -450,7 +470,7 @@ fn selected_serial_availability(
 async fn selected_serial_is_absent(l: &Lease) -> io::Result<()> {
     let sdk = sdk_adb().await?;
     let mut command = tokio::process::Command::new(sdk);
-    configure_adb_client_home(&mut command,&l.root,&l.adb_client_home)?;
+    configure_adb_client_home(&mut command, &l.root, &l.adb_client_home)?;
     command
         .args(adb_selector(l)?)
         .arg("get-state")
@@ -523,7 +543,7 @@ async fn prepare(path: &Path, l: &Lease, evidence: &Path) -> io::Result<bool> {
         "2",
     ])
     .env("ANDROID_AVD_HOME", &l.avd_home)
-    .env("HOME",&l.adb_client_home)
+    .env("HOME", &l.adb_client_home)
     .env("ANDROID_USER_HOME", &l.android_user_home)
     .env("ANDROID_EMULATOR_HOME", &l.android_user_home)
     .env("XDG_RUNTIME_DIR", &runtime)
@@ -858,7 +878,9 @@ impl GridQualification {
     fn configuration(path: &Path, sha: &str) -> io::Result<Config> {
         use sha2::{Digest, Sha256};
         if sha.len() != 64
-            || !sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !sha
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
             return Err(grid_failure("configuration_pin"));
         }
@@ -866,53 +888,85 @@ impl GridQualification {
         if fs::canonicalize(path).map_err(|_| grid_failure("configuration_path"))? != path {
             return Err(grid_failure("configuration_path"));
         }
-        let parent = path.parent().ok_or_else(|| grid_failure("configuration_parent"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| grid_failure("configuration_parent"))?;
         private_dir(parent, false).map_err(|_| grid_failure("configuration_parent"))?;
-        let parent_before = fs::symlink_metadata(parent)
-            .map_err(|_| grid_failure("configuration_parent"))?;
-        let named_before = fs::symlink_metadata(path)
-            .map_err(|_| grid_failure("configuration_metadata"))?;
+        let parent_before =
+            fs::symlink_metadata(parent).map_err(|_| grid_failure("configuration_parent"))?;
+        let named_before =
+            fs::symlink_metadata(path).map_err(|_| grid_failure("configuration_metadata"))?;
         let owner = uid();
-        let permitted = |m: &fs::Metadata| m.is_file() && m.uid() == owner && m.nlink() == 1
-            && m.mode() & 0o7777 == 0o400 && m.len() <= goatr::config::CONFIG_BYTES as u64;
+        let permitted = |m: &fs::Metadata| {
+            m.is_file()
+                && m.uid() == owner
+                && m.nlink() == 1
+                && m.mode() & 0o7777 == 0o400
+                && m.len() <= goatr::config::CONFIG_BYTES as u64
+        };
         if !permitted(&named_before) {
             return Err(grid_failure("configuration_immutable"));
         }
-        let mut file = OpenOptions::new().read(true)
+        let mut file = OpenOptions::new()
+            .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(path).map_err(|_| grid_failure("configuration_open"))?;
-        let before = file.metadata().map_err(|_| grid_failure("configuration_metadata"))?;
-        let stamp = |m: &fs::Metadata| (
-            m.dev(), m.ino(), m.len(), m.mode(), m.uid(), m.gid(), m.nlink(),
-            m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(),
-        );
-        if !permitted(&before) || stamp(&before) != stamp(&named_before)
-        {
+            .open(path)
+            .map_err(|_| grid_failure("configuration_open"))?;
+        let before = file
+            .metadata()
+            .map_err(|_| grid_failure("configuration_metadata"))?;
+        let stamp = |m: &fs::Metadata| {
+            (
+                m.dev(),
+                m.ino(),
+                m.len(),
+                m.mode(),
+                m.uid(),
+                m.gid(),
+                m.nlink(),
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec(),
+            )
+        };
+        if !permitted(&before) || stamp(&before) != stamp(&named_before) {
             return Err(grid_failure("configuration_immutable"));
         }
         let mut text = String::with_capacity(before.len() as usize);
-        (&mut file).take((goatr::config::CONFIG_BYTES + 1) as u64)
-            .read_to_string(&mut text).map_err(|_| grid_failure("configuration_read"))?;
+        (&mut file)
+            .take((goatr::config::CONFIG_BYTES + 1) as u64)
+            .read_to_string(&mut text)
+            .map_err(|_| grid_failure("configuration_read"))?;
         if text.len() > goatr::config::CONFIG_BYTES {
             return Err(grid_failure("configuration_bound"));
         }
         let hex = b"0123456789abcdef";
-        if Sha256::digest(text.as_bytes()).iter().zip(sha.as_bytes().chunks_exact(2))
-            .any(|(byte, pair)| pair[0] != hex[usize::from(*byte >> 4)]
-                || pair[1] != hex[usize::from(*byte & 15)])
+        if Sha256::digest(text.as_bytes())
+            .iter()
+            .zip(sha.as_bytes().as_chunks::<2>().0)
+            .any(|(byte, pair)| {
+                pair[0] != hex[usize::from(*byte >> 4)] || pair[1] != hex[usize::from(*byte & 15)]
+            })
         {
             return Err(grid_failure("configuration_sha256"));
         }
         let deployment = Config::parse(&text).map_err(|_| grid_failure("configuration"))?;
-        deployment.preflight().map_err(|_| grid_failure("configuration"))?;
-        let after = file.metadata().map_err(|_| grid_failure("configuration_metadata"))?;
-        let named_after = fs::symlink_metadata(path)
+        deployment
+            .preflight()
+            .map_err(|_| grid_failure("configuration"))?;
+        let after = file
+            .metadata()
             .map_err(|_| grid_failure("configuration_metadata"))?;
-        let parent_after = fs::symlink_metadata(parent)
-            .map_err(|_| grid_failure("configuration_parent"))?;
+        let named_after =
+            fs::symlink_metadata(path).map_err(|_| grid_failure("configuration_metadata"))?;
+        let parent_after =
+            fs::symlink_metadata(parent).map_err(|_| grid_failure("configuration_parent"))?;
         private_dir(parent, false).map_err(|_| grid_failure("configuration_parent"))?;
-        if !permitted(&after) || !permitted(&named_after)
-            || stamp(&before) != stamp(&after) || stamp(&after) != stamp(&named_after)
+        if !permitted(&after)
+            || !permitted(&named_after)
+            || stamp(&before) != stamp(&after)
+            || stamp(&after) != stamp(&named_after)
             || stamp(&parent_before) != stamp(&parent_after)
             || fs::canonicalize(path).map_err(|_| grid_failure("configuration_path"))? != path
         {
@@ -980,7 +1034,11 @@ impl Desktop {
     fn spawn(c: std::process::Command) -> io::Result<Self> {
         Self::spawn_held(c, None, None)
     }
-    fn spawn_held(mut c: std::process::Command, hold: Option<&mut GridHold>, admission_manifest: Option<&Path>) -> io::Result<Self> {
+    fn spawn_held(
+        mut c: std::process::Command,
+        hold: Option<&mut GridHold>,
+        admission_manifest: Option<&Path>,
+    ) -> io::Result<Self> {
         use std::os::unix::process::CommandExt;
         #[cfg(target_os = "linux")]
         // SAFETY: the shared helper uses only stack values and async-signal-safe syscalls.
@@ -996,19 +1054,27 @@ impl Desktop {
             .process_group(0)
             .spawn()?;
         if let Some(manifest) = admission_manifest {
-            write_json(manifest, &json!({"pid":child.id(),"processProof":"unproved",
+            write_json(
+                manifest,
+                &json!({"pid":child.id(),"processProof":"unproved",
                 "cleanupAuthority":false,"proofManifest":manifest.with_extension("proof.json"),
-                "scope":"fresh retained child spawn only; PID alone grants no cleanup authority"}))?;
-            println!("{}",json!({"gate":"admission-owned-herdr-spawn","manifest":manifest}));
+                "scope":"fresh retained child spawn only; PID alone grants no cleanup authority"}),
+            )?;
+            println!(
+                "{}",
+                json!({"gate":"admission-owned-herdr-spawn","manifest":manifest})
+            );
         }
         if let Some(hold) = hold {
             hold.pin_child(&child)?;
         }
         let process = herdr::process_evidence(child.id())?;
         if let Some(manifest) = admission_manifest {
-            write_json(&manifest.with_extension("proof.json"),
+            write_json(
+                &manifest.with_extension("proof.json"),
                 &json!({"process":process,"spawnManifest":manifest,
-                    "scope":"captured original child proof; cleanup still requires current identity review"}))?;
+                    "scope":"captured original child proof; cleanup still requires current identity review"}),
+            )?;
         }
         Ok(Self { child, process })
     }
@@ -1328,7 +1394,9 @@ fn retained_codex_relay_join(
         return Err("state_unjoined");
     }
     let manifest_path = goatr::codex_relay::manifest_path(&context.owner.bindings_dir, binding);
-    let Ok(manifest) = goatr::codex_relay::private_read::<goatr::codex_relay::Manifest>(&manifest_path) else {
+    let Ok(manifest) =
+        goatr::codex_relay::private_read::<goatr::codex_relay::Manifest>(&manifest_path)
+    else {
         return Err("manifest_unavailable");
     };
     if Instant::now() >= deadline {
@@ -1341,10 +1409,30 @@ fn retained_codex_relay_join(
         || manifest.herdr.server_id != context.server
         || manifest.herdr.evidence != context.source
         || manifest.owner_epoch.linux_boot_id != context.source.linux_boot_id
-        || manifest.herdr.workspace_id != *creation.resources.workspace_id.as_ref().ok_or("state_unjoined")?
-        || manifest.herdr.pane_id != *creation.resources.pane_id.as_ref().ok_or("state_unjoined")?
-        || manifest.herdr.terminal_id != *creation.resources.terminal_id.as_ref().ok_or("state_unjoined")?
-        || manifest.expected_thread_id != *creation.resources.native_id.as_ref().ok_or("state_unjoined")?
+        || manifest.herdr.workspace_id
+            != *creation
+                .resources
+                .workspace_id
+                .as_ref()
+                .ok_or("state_unjoined")?
+        || manifest.herdr.pane_id
+            != *creation
+                .resources
+                .pane_id
+                .as_ref()
+                .ok_or("state_unjoined")?
+        || manifest.herdr.terminal_id
+            != *creation
+                .resources
+                .terminal_id
+                .as_ref()
+                .ok_or("state_unjoined")?
+        || manifest.expected_thread_id
+            != *creation
+                .resources
+                .native_id
+                .as_ref()
+                .ok_or("state_unjoined")?
         || relay[0].intent.socket_path.as_deref() != manifest.listen_host.to_str()
     {
         return Err("manifest_unavailable");
@@ -1392,7 +1480,9 @@ async fn retained_codex_startup_journal(
     let join_context = context.clone();
     let join = match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        tokio::task::spawn_blocking(move || retained_codex_relay_join(&state_root, &join_context, deadline)),
+        tokio::task::spawn_blocking(move || {
+            retained_codex_relay_join(&state_root, &join_context, deadline)
+        }),
     )
     .await
     {
@@ -1421,7 +1511,11 @@ async fn retained_codex_startup_journal(
         .arg(format!("--boot={boot}"))
         .arg("-n")
         .arg("100")
-        .arg(format!("--since=@{}.{:03}", started / 1_000, started % 1_000))
+        .arg(format!(
+            "--since=@{}.{:03}",
+            started / 1_000,
+            started % 1_000
+        ))
         .arg(format!(
             "--until=@{}.{:03}",
             context.settlement_cutoff / 1_000,
@@ -1461,13 +1555,15 @@ async fn retained_codex_startup_journal(
         stop_journal_reader(&mut child, deadline).await;
         return Err("journal_oversized");
     }
-    let status = match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), child.wait()).await {
-        Ok(Ok(status)) => status,
-        _ => {
-            stop_journal_reader(&mut child, deadline).await;
-            return Err("cleanup_exhausted");
-        }
-    };
+    let status =
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), child.wait()).await
+        {
+            Ok(Ok(status)) => status,
+            _ => {
+                stop_journal_reader(&mut child, deadline).await;
+                return Err("cleanup_exhausted");
+            }
+        };
     if !status.success() {
         return Err("journal_unavailable");
     }
@@ -1475,14 +1571,21 @@ async fn retained_codex_startup_journal(
     let mut service_pid = None;
     let mut invocation = None;
     let mut records = 0u16;
-    for line in collected.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+    for line in collected
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
         records = records.saturating_add(1);
         if records > 100 {
             return Err("journal_oversized");
         }
         let value: Value = serde_json::from_slice(line).map_err(|_| "journal_invalid")?;
         if value["_SYSTEMD_USER_UNIT"].as_str() != Some(&join.unit)
-            || value["_BOOT_ID"].as_str().and_then(journal_hex32).as_deref() != Some(&boot)
+            || value["_BOOT_ID"]
+                .as_str()
+                .and_then(journal_hex32)
+                .as_deref()
+                != Some(&boot)
             || value["_UID"].as_str() != Some(&uid().to_string())
         {
             continue;
@@ -1500,7 +1603,10 @@ async fn retained_codex_startup_journal(
             .as_str()
             .filter(|value| {
                 value.parse::<u32>().is_ok_and(|pid| pid > 0)
-                    && value.parse::<u32>().ok().is_some_and(|pid| pid.to_string() == *value)
+                    && value
+                        .parse::<u32>()
+                        .ok()
+                        .is_some_and(|pid| pid.to_string() == *value)
             })
             .ok_or("journal_invalid")?;
         let invocation_raw = value["_SYSTEMD_INVOCATION_ID"]
@@ -1509,7 +1615,9 @@ async fn retained_codex_startup_journal(
         let current_invocation = journal_hex32(invocation_raw)
             .filter(|canonical| canonical == invocation_raw)
             .ok_or("journal_invalid")?;
-        if service_pid.replace(pid.to_owned()).is_some_and(|prior| prior != pid)
+        if service_pid
+            .replace(pid.to_owned())
+            .is_some_and(|prior| prior != pid)
             || invocation
                 .replace(current_invocation.clone())
                 .is_some_and(|prior| prior != current_invocation)
@@ -1625,11 +1733,10 @@ impl Companion {
         self.finish_guard_drain();
         Ok(())
     }
-    async fn stop_codex_diagnostic(
-        &mut self,
-        cleanup_context: &'static str,
-    ) -> io::Result<()> {
-        if self.retain_process{return Err(grid_failure("cleanup_not_authorized"));}
+    async fn stop_codex_diagnostic(&mut self, cleanup_context: &'static str) -> io::Result<()> {
+        if self.retain_process {
+            return Err(grid_failure("cleanup_not_authorized"));
+        }
         let deadline = Instant::now() + COMPANION_CLEANUP_BUDGET;
         self.codex_cleanup_active = true;
         let stopped = self.stop_process_until(deadline).await;
@@ -1639,7 +1746,8 @@ impl Companion {
         let GuardDrain::Codex {
             worker: drain,
             progress,
-        } = drain else {
+        } = drain
+        else {
             return Err(failure("owned Codex diagnostic stderr drain changed"));
         };
         if self.codex_startup_journal.is_some() {
@@ -1649,7 +1757,9 @@ impl Companion {
                 summary.journal_accepted = false;
             });
         } else {
-            let reason = self.codex_startup_journal_admission.as_ref()
+            let reason = self
+                .codex_startup_journal_admission
+                .as_ref()
                 .and_then(|admission| admission.pins.as_ref().err().copied())
                 .unwrap_or("not_retained");
             progress.journal_unavailable(reason);
@@ -1672,11 +1782,9 @@ impl Companion {
                 summary.journal_accepted = false;
                 summary.completed = false;
             });
-            progress.snapshot().emit(
-                cleanup_context,
-                self.codex_cleanup_signal,
-                "stop_failure",
-            );
+            progress
+                .snapshot()
+                .emit(cleanup_context, self.codex_cleanup_signal, "stop_failure");
             return Err(error);
         }
         while !drain.is_finished() && Instant::now() < deadline {
@@ -1689,11 +1797,9 @@ impl Companion {
                 summary.journal_accepted = false;
                 summary.completed = false;
             });
-            progress.snapshot().emit(
-                cleanup_context,
-                self.codex_cleanup_signal,
-                "drain_deadline",
-            );
+            progress
+                .snapshot()
+                .emit(cleanup_context, self.codex_cleanup_signal, "drain_deadline");
             return Err(failure("owned Codex diagnostic stderr drain incomplete"));
         }
         if drain.join().is_err() {
@@ -1713,13 +1819,8 @@ impl Companion {
             return Err(failure("owned Codex diagnostic stderr drain panicked"));
         }
         if let Some(context) = self.codex_startup_journal.take() {
-            match retained_codex_startup_journal(
-                &self.state_root,
-                &self.binary,
-                &context,
-                deadline,
-            )
-            .await
+            match retained_codex_startup_journal(&self.state_root, &self.binary, &context, deadline)
+                .await
             {
                 Ok(report) => progress.emit_startup_journal_after_drain(report),
                 Err(reason) => progress.journal_unavailable(reason),
@@ -1745,7 +1846,9 @@ impl Companion {
             }
             if Instant::now() >= deadline
                 || self.guard_drain.as_ref().is_none_or(|drain| match drain {
-                    GuardDrain::Codex { worker, .. } | GuardDrain::Other(worker) => worker.is_finished(),
+                    GuardDrain::Codex { worker, .. } | GuardDrain::Other(worker) => {
+                        worker.is_finished()
+                    }
                 })
             {
                 return false;
@@ -2023,7 +2126,7 @@ impl GenerationView {
         // original-Target snapshot obtains the real cursor for the separate page gate.
         let mut sequence = goatr::state::ClientSequence::default();
         sequence.snapshot(snapshot.subscription.clone());
-        let stream_floor=snapshot.history.iter().map(|record|record.order.0).max();
+        let stream_floor = snapshot.history.iter().map(|record| record.order.0).max();
         let records = std::mem::take(&mut snapshot.history);
         let mut view = Self {
             sequence,
@@ -2148,10 +2251,10 @@ impl GenerationView {
             }
             EventBody::HistoryUpsert(value) => {
                 for record in &value.records {
-                    if self.stream_floor.is_none_or(|floor|record.order.0>floor) {
-                        self.streamed_text|=record.role==Role::Assistant
+                    if self.stream_floor.is_none_or(|floor| record.order.0 > floor) {
+                        self.streamed_text |= record.role == Role::Assistant
                             && matches!(&record.text,Some(Content::Text(text)) if !text.text.0.is_empty());
-                        self.streamed_tool|=record.tool.is_some();
+                        self.streamed_tool |= record.tool.is_some();
                     }
                 }
                 self.upsert(value.records)?;
@@ -2200,46 +2303,118 @@ enum GridSubject {
     Pane(Target),
     Shell(ShellTarget),
 }
-const TERMINAL_MARKER:&str="GOATRSTOCKBEGIN";
-const TERMINAL_DELAYED:&str="GOATRSTOCKDELAYED";
-const TERMINAL_DISCLOSURE:&str="Native control may resize every tab in this Herdr session and let Herdr resume deferred agents. Goatr does not send terminal input to known agent panes. With the sole active frontend this can affect every workspace/tab on this server. Queued native bytes cannot be recalled. Release reapplies surviving controllers, not an assumed saved size.";
-#[derive(Clone,Copy,Default)]
-struct TerminalFixtureFacts {unicode:u8,colors:u8,wide_tails:u32,marker:bool,popup:bool,graphics:bool}
+const TERMINAL_MARKER: &str = "GOATRSTOCKBEGIN";
+const TERMINAL_DELAYED: &str = "GOATRSTOCKDELAYED";
+const TERMINAL_DISCLOSURE: &str = "Native control may resize every tab in this Herdr session and let Herdr resume deferred agents. Goatr does not send terminal input to known agent panes. With the sole active frontend this can affect every workspace/tab on this server. Queued native bytes cannot be recalled. Release reapplies surviving controllers, not an assumed saved size.";
+#[derive(Clone, Copy, Default)]
+struct TerminalFixtureFacts {
+    unicode: u8,
+    colors: u8,
+    wide_tails: u32,
+    marker: bool,
+    popup: bool,
+    graphics: bool,
+}
 impl TerminalFixtureFacts {
-    fn complete(self)->bool{self.unicode==31&&self.colors==15&&self.wide_tails>=5&&self.marker&&!self.popup&&!self.graphics}
-    fn evidence(self)->Value {json!({"unicodeCases":self.unicode.count_ones(),"colorCases":self.colors.count_ones(),
+    fn complete(self) -> bool {
+        self.unicode == 31
+            && self.colors == 15
+            && self.wide_tails >= 5
+            && self.marker
+            && !self.popup
+            && !self.graphics
+    }
+    fn evidence(self) -> Value {
+        json!({"unicodeCases":self.unicode.count_ones(),"colorCases":self.colors.count_ones(),
         "cjk":self.unicode&1!=0,"kana":self.unicode&2!=0,"zwj":self.unicode&4!=0,"vs16":self.unicode&8!=0,"flag":self.unicode&16!=0,
         "namedSgrPalette":self.colors&1!=0,"indexed202":self.colors&2!=0,"rgb112233":self.colors&4!=0,"defaultColor":self.colors&8!=0,
         "canonicalWideTails":self.wide_tails,"publicMarker":self.marker,"popupBlocked":self.popup,
-        "graphicsOmitted":self.graphics,"fixtureComplete":self.complete()})}
+        "graphicsOmitted":self.graphics,"fixtureComplete":self.complete()})
+    }
 }
-struct TerminalFixtureWitness {stage:TerminalFixtureFacts,committed:Option<TerminalFixtureFacts>,opening:Option<(u64,bool)>,marker_match:usize,wide_fixture:bool}
+struct TerminalFixtureWitness {
+    stage: TerminalFixtureFacts,
+    committed: Option<TerminalFixtureFacts>,
+    opening: Option<(u64, bool)>,
+    marker_match: usize,
+    wide_fixture: bool,
+}
 impl TerminalFixtureWitness {
-    fn new()->Self{Self{stage:TerminalFixtureFacts::default(),committed:None,opening:None,marker_match:0,wide_fixture:false}}
-    fn begin(&mut self,frame:&GridBegin){self.stage=TerminalFixtureFacts{popup:frame.popup_blocked,graphics:frame.graphics_omitted,..Default::default()};self.marker_match=0;self.wide_fixture=false;}
-    fn cell(&mut self,cell:&GridCell,row_start:bool) {
-        if row_start{self.marker_match=0;}
-        if cell.width.0==0 {if self.wide_fixture{self.stage.wide_tails+=1;}self.wide_fixture=false;return;}
-        self.wide_fixture=false;
-        if cell.attributes.concealed{return;}
-        for byte in cell.text.bytes(){
-            if byte==TERMINAL_MARKER.as_bytes()[self.marker_match]{self.marker_match+=1;}
-            else{self.marker_match=usize::from(byte==TERMINAL_MARKER.as_bytes()[0]);}
-            if self.marker_match==TERMINAL_MARKER.len(){self.stage.marker=true;self.marker_match=0;}
+    fn new() -> Self {
+        Self {
+            stage: TerminalFixtureFacts::default(),
+            committed: None,
+            opening: None,
+            marker_match: 0,
+            wide_fixture: false,
         }
-        let unicode=match cell.text.as_str(){"界"=>1,"ｶﾞ"=>2,"👩‍💻"=>4,"❤️"=>8,"🇺🇸"=>16,_=>0};
-        if unicode!=0&&cell.width.0==2{self.stage.unicode|=unicode;self.wide_fixture=true;}
-        if cell.background!=GridColor::Default||cell.attributes.inverse{return;}
-        self.stage.colors|=match (cell.text.as_str(),&cell.foreground){
-            ("R",GridColor::Indexed{index})if index.0==1=>1,
-            ("I",GridColor::Indexed{index})if index.0==202=>2,
-            ("T",GridColor::Rgb{value})if value.0==0x112233=>4,
-            ("D",GridColor::Default)=>8,_=>0,
+    }
+    fn begin(&mut self, frame: &GridBegin) {
+        self.stage = TerminalFixtureFacts {
+            popup: frame.popup_blocked,
+            graphics: frame.graphics_omitted,
+            ..Default::default()
+        };
+        self.marker_match = 0;
+        self.wide_fixture = false;
+    }
+    fn cell(&mut self, cell: &GridCell, row_start: bool) {
+        if row_start {
+            self.marker_match = 0;
+        }
+        if cell.width.0 == 0 {
+            if self.wide_fixture {
+                self.stage.wide_tails += 1;
+            }
+            self.wide_fixture = false;
+            return;
+        }
+        self.wide_fixture = false;
+        if cell.attributes.concealed {
+            return;
+        }
+        for byte in cell.text.bytes() {
+            if byte == TERMINAL_MARKER.as_bytes()[self.marker_match] {
+                self.marker_match += 1;
+            } else {
+                self.marker_match = usize::from(byte == TERMINAL_MARKER.as_bytes()[0]);
+            }
+            if self.marker_match == TERMINAL_MARKER.len() {
+                self.stage.marker = true;
+                self.marker_match = 0;
+            }
+        }
+        let unicode = match cell.text.as_str() {
+            "界" => 1,
+            "ｶﾞ" => 2,
+            "👩‍💻" => 4,
+            "❤️" => 8,
+            "🇺🇸" => 16,
+            _ => 0,
+        };
+        if unicode != 0 && cell.width.0 == 2 {
+            self.stage.unicode |= unicode;
+            self.wide_fixture = true;
+        }
+        if cell.background != GridColor::Default || cell.attributes.inverse {
+            return;
+        }
+        self.stage.colors |= match (cell.text.as_str(), &cell.foreground) {
+            ("R", GridColor::Indexed { index }) if index.0 == 1 => 1,
+            ("I", GridColor::Indexed { index }) if index.0 == 202 => 2,
+            ("T", GridColor::Rgb { value }) if value.0 == 0x112233 => 4,
+            ("D", GridColor::Default) => 8,
+            _ => 0,
         };
     }
 }
-#[derive(Clone,Copy)]
-enum GridGoal {Commit,Token,TerminalFixture{after:u64},Resized{after:u64,dimensions:(u64,u64)}}
+#[derive(Clone, Copy)]
+enum GridGoal {
+    Commit,
+    Token,
+    TerminalFixture { after: u64 },
+    Resized { after: u64, dimensions: (u64, u64) },
+}
 struct GridWitness {
     opening: Uuid,
     subject: GridSubject,
@@ -2260,11 +2435,11 @@ struct GridWitness {
     token_commit: Option<u64>,
     previous_cell: Option<(u64, u64)>,
     retired: bool,
-    columns:u64,
-    rows:u64,
-    committed_dimensions:Option<(u64,u64)>,
-    wide_pending:bool,
-    fixture:Option<TerminalFixtureWitness>,
+    columns: u64,
+    rows: u64,
+    committed_dimensions: Option<(u64, u64)>,
+    wide_pending: bool,
+    fixture: Option<TerminalFixtureWitness>,
 }
 #[track_caller]
 fn grid_failure(phase: &'static str) -> io::Error {
@@ -2301,7 +2476,11 @@ impl GridWitness {
             token_commit: None,
             previous_cell: None,
             retired: false,
-            columns:0,rows:0,committed_dimensions:None,wide_pending:false,fixture:None,
+            columns: 0,
+            rows: 0,
+            committed_dimensions: None,
+            wide_pending: false,
+            fixture: None,
         }
     }
     fn budget(&mut self, bytes: usize) -> io::Result<()> {
@@ -2319,7 +2498,12 @@ impl GridWitness {
     }
     fn begin(&mut self, frame: &GridBegin, bytes: usize, initial: bool) -> io::Result<()> {
         frame.validate().map_err(|_| grid_failure("descriptor"))?;
-        if matches!(self.subject,GridSubject::Pane(_)) && (frame.columns.0*frame.rows.0>8192 || !frame.graphics_omitted || frame.alternate_screen || frame.popup_blocked) {
+        if matches!(self.subject, GridSubject::Pane(_))
+            && (frame.columns.0 * frame.rows.0 > 8192
+                || !frame.graphics_omitted
+                || frame.alternate_screen
+                || frame.popup_blocked)
+        {
             return Err(grid_failure("ansi_observer_descriptor"));
         }
         let expected = if initial {
@@ -2338,8 +2522,12 @@ impl GridWitness {
         self.seen = 0;
         self.cells = 0;
         self.cell_limit = (frame.columns.0 * frame.rows.0) as usize;
-        self.columns=frame.columns.0;self.rows=frame.rows.0;self.wide_pending=false;
-        if let Some(fixture)=&mut self.fixture{fixture.begin(frame);}
+        self.columns = frame.columns.0;
+        self.rows = frame.rows.0;
+        self.wide_pending = false;
+        if let Some(fixture) = &mut self.fixture {
+            fixture.begin(frame);
+        }
         self.bytes = 0;
         self.matched = 0;
         self.tentative = false;
@@ -2400,18 +2588,24 @@ impl GridWitness {
         self.previous_cell = None;
         Ok(())
     }
-    fn terminal_opening_commit(&self)->io::Result<u64> {
-        match self.fixture.as_ref().and_then(|fixture|fixture.opening) {
-            Some((revision,false))=>Ok(revision),
-            Some((_,true))=>Err(grid_failure("terminal_delayed_marker_already_in_opening")),
-            None=>Err(grid_failure("terminal_opening_not_committed")),
+    fn terminal_opening_commit(&self) -> io::Result<u64> {
+        match self.fixture.as_ref().and_then(|fixture| fixture.opening) {
+            Some((revision, false)) => Ok(revision),
+            Some((_, true)) => Err(grid_failure("terminal_delayed_marker_already_in_opening")),
+            None => Err(grid_failure("terminal_opening_not_committed")),
         }
     }
-    fn terminal_fixture_ready(&self,after:u64)->io::Result<bool> {
-        let opening=self.terminal_opening_commit()?;
-        if opening!=after{return Err(grid_failure("terminal_opening_revision_changed"));}
-        Ok(self.token_commit.is_some_and(|revision|revision>opening)
-            &&self.fixture.as_ref().and_then(|fixture|fixture.committed).is_some_and(TerminalFixtureFacts::complete))
+    fn terminal_fixture_ready(&self, after: u64) -> io::Result<bool> {
+        let opening = self.terminal_opening_commit()?;
+        if opening != after {
+            return Err(grid_failure("terminal_opening_revision_changed"));
+        }
+        Ok(self.token_commit.is_some_and(|revision| revision > opening)
+            && self
+                .fixture
+                .as_ref()
+                .and_then(|fixture| fixture.committed)
+                .is_some_and(TerminalFixtureFacts::complete))
     }
     fn text(&mut self, text: &str) {
         if self.token.is_empty() {
@@ -2462,15 +2656,22 @@ impl GridWitness {
                 }
                 for span in part.spans {
                     for (offset, cell) in span.cells.into_iter().enumerate() {
-                        cell.validate().map_err(|_|grid_failure("selected_cell"))?;
-                        if matches!(self.subject,GridSubject::Shell(_)) && cell.text.len()>128 {return Err(grid_failure("selected_cell"));}
-                        let column=span.column.0+offset as u64;
-                        if span.row.0!=self.cells as u64/self.columns||column!=self.cells as u64%self.columns
-                            || (cell.width.0==0)!=self.wide_pending
-                            || cell.width.0==2&&column+1>=self.columns
-                        {return Err(grid_failure("canonical_selected_coverage"));}
-                        self.wide_pending=cell.width.0==2;
-                        if let Some(fixture)=&mut self.fixture{fixture.cell(&cell,column==0);}
+                        cell.validate().map_err(|_| grid_failure("selected_cell"))?;
+                        if matches!(self.subject, GridSubject::Shell(_)) && cell.text.len() > 128 {
+                            return Err(grid_failure("selected_cell"));
+                        }
+                        let column = span.column.0 + offset as u64;
+                        if span.row.0 != self.cells as u64 / self.columns
+                            || column != self.cells as u64 % self.columns
+                            || (cell.width.0 == 0) != self.wide_pending
+                            || cell.width.0 == 2 && column + 1 >= self.columns
+                        {
+                            return Err(grid_failure("canonical_selected_coverage"));
+                        }
+                        self.wide_pending = cell.width.0 == 2;
+                        if let Some(fixture) = &mut self.fixture {
+                            fixture.cell(&cell, column == 0);
+                        }
                         self.cells = self
                             .cells
                             .checked_add(1)
@@ -2494,15 +2695,18 @@ impl GridWitness {
                 self.budget(bytes)?;
                 if commit.revision.0 != self.revision
                     || self.seen != self.parts
-                    || self.cells != self.cell_limit || self.wide_pending
+                    || self.cells != self.cell_limit
+                    || self.wide_pending
                 {
                     return Err(grid_failure("commit_order"));
                 }
                 self.committed = Some(self.revision);
-                self.committed_dimensions=Some((self.columns,self.rows));
-                if let Some(fixture)=&mut self.fixture {
-                    fixture.committed=Some(fixture.stage);
-                    if fixture.opening.is_none(){fixture.opening=Some((self.revision,self.tentative));}
+                self.committed_dimensions = Some((self.columns, self.rows));
+                if let Some(fixture) = &mut self.fixture {
+                    fixture.committed = Some(fixture.stage);
+                    if fixture.opening.is_none() {
+                        fixture.opening = Some((self.revision, self.tentative));
+                    }
                 }
                 if self.tentative {
                     self.token_commit = Some(self.revision);
@@ -2581,19 +2785,41 @@ impl Phone {
         }
     }
     fn event(&mut self, event: Event) -> io::Result<()> {
-        self.event_sized(event,0)
+        self.event_sized(event, 0)
     }
-    fn event_sized(&mut self,event:Event,bytes:usize)->io::Result<()> {
-        Self::route_event(&mut self.grid,&mut self.events,&mut self.generation,event,bytes)
+    fn event_sized(&mut self, event: Event, bytes: usize) -> io::Result<()> {
+        Self::route_event(
+            &mut self.grid,
+            &mut self.events,
+            &mut self.generation,
+            event,
+            bytes,
+        )
     }
-    fn route_event(grid:&mut Option<GridWitness>,events:&mut u64,generation:&mut Option<GenerationView>,event:Event,bytes:usize)->io::Result<()> {
-        let private=matches!(&event.body,EventBody::GridBegin(_)|EventBody::GridPart(_)|EventBody::GridCommit(_))
-            || matches!(&event.body,EventBody::SyncRequired(_))&&grid.as_ref().is_some_and(|g|g.subscription.as_ref()==Some(&event.subscription));
+    fn route_event(
+        grid: &mut Option<GridWitness>,
+        events: &mut u64,
+        generation: &mut Option<GenerationView>,
+        event: Event,
+        bytes: usize,
+    ) -> io::Result<()> {
+        let private = matches!(
+            &event.body,
+            EventBody::GridBegin(_) | EventBody::GridPart(_) | EventBody::GridCommit(_)
+        ) || matches!(&event.body, EventBody::SyncRequired(_))
+            && grid
+                .as_ref()
+                .is_some_and(|g| g.subscription.as_ref() == Some(&event.subscription));
         if private {
-            return grid.as_mut().ok_or_else(||grid_failure("unowned_grid_event"))?.event(event,bytes);
+            return grid
+                .as_mut()
+                .ok_or_else(|| grid_failure("unowned_grid_event"))?
+                .event(event, bytes);
         }
-        *events+=1;
-        if let Some(view)=generation {view.routed_event(event)?;}
+        *events += 1;
+        if let Some(view) = generation {
+            view.routed_event(event)?;
+        }
         Ok(())
     }
     async fn request(
@@ -2643,9 +2869,9 @@ impl Phone {
             })?
             .map_err(|error| {
                 // Sample the original connection before error projection or cleanup.
-                let close = self.codex_close_capture.then(|| {
-                    closed_connection_reason(self.connection.close_reason())
-                });
+                let close = self
+                    .codex_close_capture
+                    .then(|| closed_connection_reason(self.connection.close_reason()));
                 self.report_frame_read_close();
                 request_failure_with_close(method, phase, "frame_read", error, close)
             })?;
@@ -2863,7 +3089,9 @@ fn request_failure_with_close(
             FailureKind::InvalidRequest | FailureKind::Incompatible => ErrorCode::InvalidRequest,
         });
     // Preserve the caller's I/O classification, while dropping all original error text/data.
-    let close = close.map(|close| format!("; close={close}")).unwrap_or_default();
+    let close = close
+        .map(|close| format!("; close={close}"))
+        .unwrap_or_default();
     super::located_message(
         error.kind(),
         &format!(
@@ -2883,12 +3111,16 @@ async fn partial_creation(
 ) -> io::Result<(Uuid, RequestBody, Receipt)> {
     let before = surface(socket).await?.1;
     let id = Uuid::random();
-    let body = RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: phone.hello.boot_id.clone(),
-    server_id: server.clone(),
-    project_id: config.projects[0].id.clone(),
-    provider,
-    name: Label::new(format!("partial-{provider:?}-{}", &id.0[..8]))
-        .map_err(io::Error::other)?, });
+    let body = RequestBody::SessionCreate(SessionCreateParams {
+        directory_ref: None,
+        placement: None,
+        boot_id: phone.hello.boot_id.clone(),
+        server_id: server.clone(),
+        project_id: config.projects[0].id.clone(),
+        provider,
+        name: Label::new(format!("partial-{provider:?}-{}", &id.0[..8]))
+            .map_err(io::Error::other)?,
+    });
     let mut bytes = encode_payload(&Envelope::Request(Request {
         id: id.clone(),
         body: body.clone(),
@@ -4773,14 +5005,26 @@ fn closed_request_failure(error: &io::Error) -> bool {
     };
     let closed_close = match fields.next() {
         None => true,
-        Some(field) => guard == "frame_read" && matches!(
-            field.strip_prefix("close="),
-            Some("open" | "version_mismatch" | "transport_error" | "connection_closed"
-                | "application_closed" | "reset" | "timed_out" | "locally_closed"
-                | "cids_exhausted")
-        ),
+        Some(field) => {
+            guard == "frame_read"
+                && matches!(
+                    field.strip_prefix("close="),
+                    Some(
+                        "open"
+                            | "version_mismatch"
+                            | "transport_error"
+                            | "connection_closed"
+                            | "application_closed"
+                            | "reset"
+                            | "timed_out"
+                            | "locally_closed"
+                            | "cids_exhausted"
+                    )
+                )
+        }
     };
-    closed_close && fields.next().is_none()
+    closed_close
+        && fields.next().is_none()
         && matches!(
             method,
             "HostSnapshot"
@@ -5878,8 +6122,10 @@ async fn proof(
     s: &SessionSummary,
     _shell: Option<(&str, &str)>,
 ) -> io::Result<NativeProof> {
-    let original=Client::connect(socket).await?.qualify_executable(&config.executables.herdr)?;
-    proof_selected(config,socket,s,None,&original).await
+    let original = Client::connect(socket)
+        .await?
+        .qualify_executable(&config.executables.herdr)?;
+    proof_selected(config, socket, s, None, &original).await
 }
 async fn created_codex_proof(
     config: &Config,
@@ -5905,10 +6151,12 @@ async fn created_codex_proof(
         .binding_id
         .as_ref()
         .ok_or_else(|| failure("successful Codex receipt has no exact binding"))?;
-    let original=Client::connect(socket).await?.qualify_executable(&config.executables.herdr)?;
+    let original = Client::connect(socket)
+        .await?
+        .qualify_executable(&config.executables.herdr)?;
     let proof = tokio::time::timeout_at(
         deadline.into(),
-        proof_selected(config,socket,s,Some((binding,deadline)),&original),
+        proof_selected(config, socket, s, Some((binding, deadline)), &original),
     )
     .await
     .map_err(|_| failure("original native scope deadline; no replay"))??;
@@ -6066,15 +6314,25 @@ async fn proof_selected(
     socket: &Path,
     s: &SessionSummary,
     selected: Option<(&Uuid, Instant)>,
-    original:&Client,
+    original: &Client,
 ) -> io::Result<NativeProof> {
     original.recheck()?;
-    let client=Client::connect(socket).await?;original.recheck()?;
-    let client=client.qualify_executable(&config.executables.herdr)?;
-    if client.evidence!=original.evidence{return Err(failure("native proof snapshot peer differs from original retained source"));}
+    let client = Client::connect(socket).await?;
     original.recheck()?;
-    let (e,snapshot)=client.snapshot().await?;original.recheck()?;
-    if e!=original.evidence{return Err(failure("native proof snapshot returned a replacement source"));}
+    let client = client.qualify_executable(&config.executables.herdr)?;
+    if client.evidence != original.evidence {
+        return Err(failure(
+            "native proof snapshot peer differs from original retained source",
+        ));
+    }
+    original.recheck()?;
+    let (e, snapshot) = client.snapshot().await?;
+    original.recheck()?;
+    if e != original.evidence {
+        return Err(failure(
+            "native proof snapshot returned a replacement source",
+        ));
+    }
     let pane = snapshot.pane(&s.pane_id)?;
     if pane.terminal_id != s.terminal_id || pane.workspace_id != s.workspace_id {
         return Err(failure(
@@ -6082,11 +6340,17 @@ async fn proof_selected(
         ));
     }
     original.recheck()?;
-    let client=Client::connect(socket).await?;original.recheck()?;
-    let client=client.qualify_executable(&config.executables.herdr)?;
-    if client.evidence!=original.evidence{return Err(failure("native proof process-info peer differs from original retained source"));}
+    let client = Client::connect(socket).await?;
     original.recheck()?;
-    let info=client.process_info(&s.pane_id).await?;original.recheck()?;
+    let client = client.qualify_executable(&config.executables.herdr)?;
+    if client.evidence != original.evidence {
+        return Err(failure(
+            "native proof process-info peer differs from original retained source",
+        ));
+    }
+    original.recheck()?;
+    let info = client.process_info(&s.pane_id).await?;
+    original.recheck()?;
     let reporter = herdr::process_evidence(e.pid)?;
     match s.provider {
         Provider::Omp => {
@@ -6223,11 +6487,17 @@ async fn proof_selected(
                 ));
             }
             original.recheck()?;
-            let client=Client::connect(socket).await?;original.recheck()?;
-            let client=client.qualify_executable(&config.executables.herdr)?;
-            if client.evidence!=original.evidence{return Err(failure("OMP post-FINAL snapshot peer differs from original retained source"));}
+            let client = Client::connect(socket).await?;
             original.recheck()?;
-            let (current_herdr,current_surface)=client.snapshot().await?;original.recheck()?;
+            let client = client.qualify_executable(&config.executables.herdr)?;
+            if client.evidence != original.evidence {
+                return Err(failure(
+                    "OMP post-FINAL snapshot peer differs from original retained source",
+                ));
+            }
+            original.recheck()?;
+            let (current_herdr, current_surface) = client.snapshot().await?;
+            original.recheck()?;
             let current_pane = current_surface.pane(&s.pane_id)?;
             if current_herdr != e
                 || current_pane.terminal_id != pane.terminal_id
@@ -6239,11 +6509,17 @@ async fn proof_selected(
                 ));
             }
             original.recheck()?;
-            let client=Client::connect(socket).await?;original.recheck()?;
-            let client=client.qualify_executable(&config.executables.herdr)?;
-            if client.evidence!=original.evidence{return Err(failure("OMP post-FINAL process-info peer differs from original retained source"));}
+            let client = Client::connect(socket).await?;
             original.recheck()?;
-            let current_processes=client.process_info(&s.pane_id).await?;original.recheck()?;
+            let client = client.qualify_executable(&config.executables.herdr)?;
+            if client.evidence != original.evidence {
+                return Err(failure(
+                    "OMP post-FINAL process-info peer differs from original retained source",
+                ));
+            }
+            original.recheck()?;
+            let current_processes = client.process_info(&s.pane_id).await?;
+            original.recheck()?;
             goatr::backends::omp::terminal_owner(&reporter, &owner, &current_processes)?;
             observer.history.lock().refresh()?;
             observer.healthy(&target(s))?;
@@ -7316,8 +7592,7 @@ fn owned_omp_backend_capture_requested() -> bool {
         == Some(std::ffi::OsStr::new("1"))
 }
 fn owned_hello_capture_requested() -> bool {
-    std::env::var_os("GOATR_OWNED_HELLO_CAPTURE").as_deref()
-        == Some(std::ffi::OsStr::new("1"))
+    std::env::var_os("GOATR_OWNED_HELLO_CAPTURE").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 pub(super) fn owned_omp_capture_conflicts() -> bool {
     selected_omp_capture_mode() == OwnedOmpCaptureMode::Conflict
@@ -7376,134 +7651,291 @@ fn owned_herdr_report_binary(capture: bool, workspace: &Path) -> io::Result<Opti
 }
 
 fn require_shared_backends(args: &clap::ArgMatches) -> io::Result<()> {
-    let mut count=0;
-    let mut omp=0;
-    let mut codex=0;
+    let mut count = 0;
+    let mut omp = 0;
+    let mut codex = 0;
     for provider in args.get_many::<String>("backend").into_iter().flatten() {
-        count+=1;
-        omp+=usize::from(provider=="omp");
-        codex+=usize::from(provider=="codex");
+        count += 1;
+        omp += usize::from(provider == "omp");
+        codex += usize::from(provider == "codex");
     }
-    if count!=2 || omp!=1 || codex!=1 {
-        return Err(failure("shared-agent-only requires exactly one OMP and one Codex backend"));
+    if count != 2 || omp != 1 || codex != 1 {
+        return Err(failure(
+            "shared-agent-only requires exactly one OMP and one Codex backend",
+        ));
     }
     Ok(())
 }
-fn project_read_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
-    if !args.get_flag("project-read-only"){return Ok(());}
-    if ["GOATR_OWNED_CODEX_DIAGNOSTIC", "GOATR_OWNED_OMP_CREATION_CAPTURE",
-        "GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
-        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
-        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"]
-        .iter().any(|key|std::env::var_os(key).is_some()) {return Err(failure("project-read-only conflicts with inherited private/provider diagnostic capture"));}
+fn project_read_mode_environment(args: &clap::ArgMatches) -> io::Result<()> {
+    if !args.get_flag("project-read-only") {
+        return Ok(());
+    }
+    if [
+        "GOATR_OWNED_CODEX_DIAGNOSTIC",
+        "GOATR_OWNED_OMP_CREATION_CAPTURE",
+        "GOATR_OWNED_OMP_OFFLINE_CAPTURE",
+        "GOATR_OWNED_OMP_BACKEND_CAPTURE",
+        "GOATR_OWNED_HELLO_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
+        "GOATR_OWNED_OMP_PRODUCER_BUN",
+        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256",
+        "GOATR_OWNED_HERDR_REPORT_BIN",
+        "GOATR_OWNED_HERDR_REPORT_SHA256",
+        "GOATR_OWNED_GRID_OPEN_CAPTURE",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+    {
+        return Err(failure(
+            "project-read-only conflicts with inherited private/provider diagnostic capture",
+        ));
+    }
     Ok(())
 }
 
 fn fresh_shared_evidence(path: &Path) -> io::Result<()> {
-    let parent=path.parent().ok_or_else(||failure("shared-agent evidence parent absent"))?;
-    if fs::canonicalize(parent)?!=parent {
+    let parent = path
+        .parent()
+        .ok_or_else(|| failure("shared-agent evidence parent absent"))?;
+    if fs::canonicalize(parent)? != parent {
         return Err(failure("shared-agent evidence parent must be canonical"));
     }
     fs::DirBuilder::new().mode(0o700).create(path)?;
-    private_dir(path,false)
+    private_dir(path, false)
 }
-fn terminal_frozen_selection(args:&clap::ArgMatches)->io::Result<bool> {
-    match (args.get_one::<String>("expected-goatr-sha256"),args.get_one::<String>("expected-companion-lock-sha256")) {
-        (None,None)=>Ok(false),(Some(_),Some(_))=>Ok(true),
-        _=>Err(failure("terminal-only frozen executable requires both explicit binary and lock hashes")),
+fn terminal_frozen_selection(args: &clap::ArgMatches) -> io::Result<bool> {
+    match (
+        args.get_one::<String>("expected-goatr-sha256"),
+        args.get_one::<String>("expected-companion-lock-sha256"),
+    ) {
+        (None, None) => Ok(false),
+        (Some(_), Some(_)) => Ok(true),
+        _ => Err(failure(
+            "terminal-only frozen executable requires both explicit binary and lock hashes",
+        )),
     }
 }
-fn terminal_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
-    if !args.get_flag("terminal-only"){return Ok(());}
-    terminal_frozen_selection(args)?;
-    if ["GOATR_OWNED_CODEX_DIAGNOSTIC",
-        "GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE",
-        "GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE","GOATR_OWNED_OMP_PRODUCER_METADATA_READER",
-        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
-        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256"]
-        .iter().any(|key|std::env::var_os(key).is_some()) {
-        return Err(failure("terminal-only conflicts with inherited provider/private diagnostic capture"));
-    }
-    Ok(())
-}
-fn background_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
-    let Some(mode)=args.get_one::<String>("background") else{return Ok(())};
-    require_shared_backends(args).map_err(|_|failure("background requires exactly one OMP and one Codex backend"))?;
-    if args.get_one::<u32>("api")!=Some(&34){return Err(failure("background requires the selected original API34 owned emulator; never a paired physical phone"));}
-    if ["GOATR_OWNED_CODEX_DIAGNOSTIC", "GOATR_OWNED_OMP_CREATION_CAPTURE",
-        "GOATR_OWNED_OMP_OFFLINE_CAPTURE","GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
-        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256","GOATR_OWNED_OMP_PRODUCER_BUN",
-        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN","GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"]
-        .iter().any(|key|std::env::var_os(key).is_some()){return Err(failure("background conflicts with inherited private/provider diagnostics"));}
-    for (pin,expected) in [("expected-ntfy-apk-sha256",NTFY_APK_SHA256),("expected-ntfy-signer-sha256",NTFY_SIGNER_SHA256)] {
-        match args.get_one::<String>(pin) {
-            Some(value) if mode=="ntfy"&&value==expected=>{},
-            None if mode=="persistent"=>{},
-            _=>return Err(failure("background ntfy requires the exact qualified official F-Droid1.25.2 APK/signer pair; persistent accepts neither")),
-        }
-    }
-    Ok(())
-}
-fn physical_mode_environment(args:&clap::ArgMatches)->io::Result<()> {
-    if !args.get_flag("physical-mvp") {
-        if args.get_one::<String>("expected-config-sha256").is_some(){return Err(failure("independent seed config pin is physical-mvp only"));}
-        if args.get_one::<String>("expected-controller-sha256").is_some(){return Err(failure("controller hash is physical-mvp only"));}
-        if args.get_one::<PathBuf>("prepared-fresh-install").is_some()||args.get_one::<String>("expected-prepared-install-sha256").is_some(){return Err(failure("prepared install inputs are physical-mvp only"));}
+fn terminal_mode_environment(args: &clap::ArgMatches) -> io::Result<()> {
+    if !args.get_flag("terminal-only") {
         return Ok(());
     }
-    physical::validate_controller_unit(args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("explicit full controller unit missing"))?)?;
-    if args.get_one::<String>("expected-controller-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))) {
-        return Err(prerequisite("independent_controller_unit_pin_unavailable"));
+    terminal_frozen_selection(args)?;
+    if [
+        "GOATR_OWNED_CODEX_DIAGNOSTIC",
+        "GOATR_OWNED_OMP_CREATION_CAPTURE",
+        "GOATR_OWNED_OMP_OFFLINE_CAPTURE",
+        "GOATR_OWNED_OMP_BACKEND_CAPTURE",
+        "GOATR_OWNED_HELLO_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
+        "GOATR_OWNED_OMP_PRODUCER_BUN",
+        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256",
+        "GOATR_OWNED_HERDR_REPORT_BIN",
+        "GOATR_OWNED_HERDR_REPORT_SHA256",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+    {
+        return Err(failure(
+            "terminal-only conflicts with inherited provider/private diagnostic capture",
+        ));
     }
-    match (args.get_one::<PathBuf>("prepared-fresh-install"),args.get_one::<String>("expected-prepared-install-sha256")) {
-        (None,None)=>{},
-        (Some(_),Some(hash)) if hash.len()==64&&hash.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))=>{},
-        _=>return Err(failure("prepared install requires a record and independent lowercase64 SHA256 pair")),
+    Ok(())
+}
+fn background_mode_environment(args: &clap::ArgMatches) -> io::Result<()> {
+    let Some(mode) = args.get_one::<String>("background") else {
+        return Ok(());
+    };
+    require_shared_backends(args)
+        .map_err(|_| failure("background requires exactly one OMP and one Codex backend"))?;
+    if args.get_one::<u32>("api") != Some(&34) {
+        return Err(failure(
+            "background requires the selected original API34 owned emulator; never a paired physical phone",
+        ));
     }
-    require_shared_backends(args).map_err(|_|failure("physical-mvp requires exactly one OMP and one Codex backend"))?;
-    if args.value_source("api")==Some(clap::parser::ValueSource::CommandLine) {
-        return Err(failure("physical-mvp discovers the selected physical API/ABI; explicit --api is forbidden"));
+    if [
+        "GOATR_OWNED_CODEX_DIAGNOSTIC",
+        "GOATR_OWNED_OMP_CREATION_CAPTURE",
+        "GOATR_OWNED_OMP_OFFLINE_CAPTURE",
+        "GOATR_OWNED_OMP_BACKEND_CAPTURE",
+        "GOATR_OWNED_HELLO_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
+        "GOATR_OWNED_OMP_PRODUCER_BUN",
+        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256",
+        "GOATR_OWNED_HERDR_REPORT_BIN",
+        "GOATR_OWNED_HERDR_REPORT_SHA256",
+        "GOATR_OWNED_GRID_OPEN_CAPTURE",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+    {
+        return Err(failure(
+            "background conflicts with inherited private/provider diagnostics",
+        ));
     }
-    if args.get_one::<String>("expected-config-sha256").is_none_or(|pin|pin.len()!=64||!pin.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))) {
-        return Err(prerequisite("independent_seed_config_pin_unavailable"));
-    }
-    if ["GOATR_OWNED_CODEX_DIAGNOSTIC","GOATR_OWNED_OMP_CREATION_CAPTURE","GOATR_OWNED_OMP_OFFLINE_CAPTURE",
-        "GOATR_OWNED_OMP_BACKEND_CAPTURE","GOATR_OWNED_HELLO_CAPTURE","GOATR_OWNED_OMP_PRODUCER_CAPTURE",
-        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER","GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
-        "GOATR_OWNED_OMP_PRODUCER_BUN","GOATR_OWNED_OMP_PRODUCER_BUN_SHA256","GOATR_OWNED_HERDR_REPORT_BIN",
-        "GOATR_OWNED_HERDR_REPORT_SHA256","GOATR_OWNED_GRID_OPEN_CAPTURE"].iter().any(|name|std::env::var_os(name).is_some()) {
-        return Err(failure("physical-mvp refuses inherited private/provider/Hello/grid capture"));
-    }
-    for (name,expected) in [
-        ("expected-ntfy-apk-sha256",NTFY_APK_SHA256),
-        ("expected-ntfy-signer-sha256",NTFY_SIGNER_SHA256),
+    for (pin, expected) in [
+        ("expected-ntfy-apk-sha256", NTFY_APK_SHA256),
+        ("expected-ntfy-signer-sha256", NTFY_SIGNER_SHA256),
     ] {
-        if args.get_one::<String>(name).map(String::as_str)!=Some(expected) {
-            return Err(failure("physical-mvp requires the exact qualified official F-Droid ntfy1.25.2 APK and signer pins"));
+        match args.get_one::<String>(pin) {
+            Some(value) if mode == "ntfy" && value == expected => {}
+            None if mode == "persistent" => {}
+            _ => {
+                return Err(failure(
+                    "background ntfy requires the exact qualified official F-Droid1.25.2 APK/signer pair; persistent accepts neither",
+                ));
+            }
         }
     }
     Ok(())
 }
-fn physical_host_preflight_selection(args:&clap::ArgMatches)->io::Result<Option<physical::ControllerPolicy<'_>>> {
-    let policy=match (args.get_flag("physical-host-preflight"),args.get_flag("physical-host-wake-preflight")) {
-        (false,false)=>return Ok(None),
-        (true,false)=>physical::ControllerPolicy::Zero,
-        (false,true)=>{
-            let unit=args.get_one::<String>("expected-controller-unit").ok_or_else(||failure("Wake diagnostic requires the exact controller unit"))?;
-            physical::validate_controller_unit(unit)?;physical::ControllerPolicy::WakeDiagnostic {unit}
+fn physical_mode_environment(args: &clap::ArgMatches) -> io::Result<()> {
+    if !args.get_flag("physical-mvp") {
+        if args.get_one::<String>("expected-config-sha256").is_some() {
+            return Err(failure("independent seed config pin is physical-mvp only"));
         }
-        (true,true)=>return Err(failure("host preflight policies are mutually exclusive")),
+        if args
+            .get_one::<String>("expected-controller-sha256")
+            .is_some()
+        {
+            return Err(failure("controller hash is physical-mvp only"));
+        }
+        if args.get_one::<PathBuf>("prepared-fresh-install").is_some()
+            || args
+                .get_one::<String>("expected-prepared-install-sha256")
+                .is_some()
+        {
+            return Err(failure("prepared install inputs are physical-mvp only"));
+        }
+        return Ok(());
+    }
+    physical::validate_controller_unit(
+        args.get_one::<String>("expected-controller-unit")
+            .ok_or_else(|| failure("explicit full controller unit missing"))?,
+    )?;
+    if args
+        .get_one::<String>("expected-controller-sha256")
+        .is_none_or(|pin| {
+            pin.len() != 64
+                || !pin
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return Err(prerequisite("independent_controller_unit_pin_unavailable"));
+    }
+    match (
+        args.get_one::<PathBuf>("prepared-fresh-install"),
+        args.get_one::<String>("expected-prepared-install-sha256"),
+    ) {
+        (None, None) => {}
+        (Some(_), Some(hash))
+            if hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {}
+        _ => {
+            return Err(failure(
+                "prepared install requires a record and independent lowercase64 SHA256 pair",
+            ));
+        }
+    }
+    require_shared_backends(args)
+        .map_err(|_| failure("physical-mvp requires exactly one OMP and one Codex backend"))?;
+    if args.value_source("api") == Some(clap::parser::ValueSource::CommandLine) {
+        return Err(failure(
+            "physical-mvp discovers the selected physical API/ABI; explicit --api is forbidden",
+        ));
+    }
+    if args
+        .get_one::<String>("expected-config-sha256")
+        .is_none_or(|pin| {
+            pin.len() != 64
+                || !pin
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(prerequisite("independent_seed_config_pin_unavailable"));
+    }
+    if [
+        "GOATR_OWNED_CODEX_DIAGNOSTIC",
+        "GOATR_OWNED_OMP_CREATION_CAPTURE",
+        "GOATR_OWNED_OMP_OFFLINE_CAPTURE",
+        "GOATR_OWNED_OMP_BACKEND_CAPTURE",
+        "GOATR_OWNED_HELLO_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_CAPTURE",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER",
+        "GOATR_OWNED_OMP_PRODUCER_METADATA_READER_SHA256",
+        "GOATR_OWNED_OMP_PRODUCER_BUN",
+        "GOATR_OWNED_OMP_PRODUCER_BUN_SHA256",
+        "GOATR_OWNED_HERDR_REPORT_BIN",
+        "GOATR_OWNED_HERDR_REPORT_SHA256",
+        "GOATR_OWNED_GRID_OPEN_CAPTURE",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some())
+    {
+        return Err(failure(
+            "physical-mvp refuses inherited private/provider/Hello/grid capture",
+        ));
+    }
+    for (name, expected) in [
+        ("expected-ntfy-apk-sha256", NTFY_APK_SHA256),
+        ("expected-ntfy-signer-sha256", NTFY_SIGNER_SHA256),
+    ] {
+        if args.get_one::<String>(name).map(String::as_str) != Some(expected) {
+            return Err(failure(
+                "physical-mvp requires the exact qualified official F-Droid ntfy1.25.2 APK and signer pins",
+            ));
+        }
+    }
+    Ok(())
+}
+fn physical_host_preflight_selection(
+    args: &clap::ArgMatches,
+) -> io::Result<Option<physical::ControllerPolicy<'_>>> {
+    let policy = match (
+        args.get_flag("physical-host-preflight"),
+        args.get_flag("physical-host-wake-preflight"),
+    ) {
+        (false, false) => return Ok(None),
+        (true, false) => physical::ControllerPolicy::Zero,
+        (false, true) => {
+            let unit = args
+                .get_one::<String>("expected-controller-unit")
+                .ok_or_else(|| failure("Wake diagnostic requires the exact controller unit"))?;
+            physical::validate_controller_unit(unit)?;
+            physical::ControllerPolicy::WakeDiagnostic { unit }
+        }
+        (true, true) => return Err(failure("host preflight policies are mutually exclusive")),
     };
     // ArgMatches also carries derived group IDs with CommandLine provenance; only
     // actual declared arguments can be explicit frontend inputs.
-    let command=feedback_arguments(arguments_base());
-    if command.get_arguments().any(|argument|args.value_source(argument.get_id().as_str())==Some(clap::parser::ValueSource::CommandLine)
-        &&!match policy {
-            physical::ControllerPolicy::Zero=>matches!(argument.get_id().as_str(),"physical-host-preflight"|"evidence-dir"),
-            physical::ControllerPolicy::WakeDiagnostic {..}=>matches!(argument.get_id().as_str(),"physical-host-wake-preflight"|"expected-controller-unit"|"evidence-dir"),
-            physical::ControllerPolicy::UnitWake {..}=>false,
-        }) {
-        return Err(failure("host preflight accepts only its closed selector/unit/evidence inputs; no runtime/device/artifact/effect arguments"));
+    let command = feedback_arguments(arguments_base());
+    if command.get_arguments().any(|argument| {
+        args.value_source(argument.get_id().as_str())
+            == Some(clap::parser::ValueSource::CommandLine)
+            && !match policy {
+                physical::ControllerPolicy::Zero => matches!(
+                    argument.get_id().as_str(),
+                    "physical-host-preflight" | "evidence-dir"
+                ),
+                physical::ControllerPolicy::WakeDiagnostic { .. } => matches!(
+                    argument.get_id().as_str(),
+                    "physical-host-wake-preflight" | "expected-controller-unit" | "evidence-dir"
+                ),
+                physical::ControllerPolicy::UnitWake { .. } => false,
+            }
+    }) {
+        return Err(failure(
+            "host preflight accepts only its closed selector/unit/evidence inputs; no runtime/device/artifact/effect arguments",
+        ));
     }
     Ok(Some(policy))
 }
@@ -8070,7 +8502,7 @@ fn arguments_base() -> Command {
         )
 }
 fn packaged(args: &clap::ArgMatches) -> io::Result<PathBuf> {
-    if args.get_flag("terminal-only")&&terminal_frozen_selection(args)? {
+    if args.get_flag("terminal-only") && terminal_frozen_selection(args)? {
         return dev_continuity::frozen_package(args);
     }
     if args.get_flag("codex-invalidation-diagnostic")
@@ -8130,7 +8562,9 @@ fn parse_codex_thread_start_method_mask(mask: &str) -> Option<(u8, Vec<&'static 
         if !byte.is_ascii_digit() {
             return None;
         }
-        value = value.checked_mul(10)?.checked_add(u16::from(*byte - b'0'))?;
+        value = value
+            .checked_mul(10)?
+            .checked_add(u16::from(*byte - b'0'))?;
         if value > u16::from(u8::MAX) {
             return None;
         }
@@ -8170,15 +8604,21 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
     }
     let guard = fields.next()?.strip_prefix("guard=")?;
     if phase == "owner_progress" {
-        if !matches!(guard, "owner_start_settled" | "owner_child_status_returned" | "owner_native_initialize_entered")
-            || fields.next()? != "code=none"
+        if !matches!(
+            guard,
+            "owner_start_settled"
+                | "owner_child_status_returned"
+                | "owner_native_initialize_entered"
+        ) || fields.next()? != "code=none"
             || fields.next()? != "io=none"
             || fields.next()? != "errno=0"
             || fields.next().is_some()
         {
             return None;
         }
-        return Some(json!({"gate":"owned-codex-invalidation-capture","phase":phase,"guard":guard,"code":"none","io":"none","errno":0,"report":null}));
+        return Some(
+            json!({"gate":"owned-codex-invalidation-capture","phase":phase,"guard":guard,"code":"none","io":"none","errno":0,"report":null}),
+        );
     }
     let relay_startup_guard = matches!(
         guard,
@@ -8250,20 +8690,34 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
     }
     let launch_pending_guard = matches!(
         guard,
-        "launch_deadline_source_unavailable" | "launch_deadline_publication_pending"
-            | "launch_deadline_presence_past" | "launch_deadline_presence_unavailable"
-            | "launch_deadline_relay_not_connected" | "launch_deadline_resume_association_missing"
-            | "launch_deadline_terminal_proof_false" | "launch_deadline_loaded_membership_false"
-            | "launch_deadline_connection_absent" | "launch_deadline_connection_readiness_pending"
-            | "launch_deadline_created_binding_pending" | "launch_deadline_source_recheck_pending"
-            | "launch_deadline_unobserved" | "launch_deadline_drain"
-            | "launch_stopping_source_unavailable" | "launch_stopping_publication_pending"
-            | "launch_stopping_presence_past" | "launch_stopping_presence_unavailable"
-            | "launch_stopping_relay_not_connected" | "launch_stopping_resume_association_missing"
-            | "launch_stopping_terminal_proof_false" | "launch_stopping_loaded_membership_false"
-            | "launch_stopping_connection_absent" | "launch_stopping_connection_readiness_pending"
-            | "launch_stopping_created_binding_pending" | "launch_stopping_source_recheck_pending"
-            | "launch_stopping_unobserved" | "launch_stopping_drain"
+        "launch_deadline_source_unavailable"
+            | "launch_deadline_publication_pending"
+            | "launch_deadline_presence_past"
+            | "launch_deadline_presence_unavailable"
+            | "launch_deadline_relay_not_connected"
+            | "launch_deadline_resume_association_missing"
+            | "launch_deadline_terminal_proof_false"
+            | "launch_deadline_loaded_membership_false"
+            | "launch_deadline_connection_absent"
+            | "launch_deadline_connection_readiness_pending"
+            | "launch_deadline_created_binding_pending"
+            | "launch_deadline_source_recheck_pending"
+            | "launch_deadline_unobserved"
+            | "launch_deadline_drain"
+            | "launch_stopping_source_unavailable"
+            | "launch_stopping_publication_pending"
+            | "launch_stopping_presence_past"
+            | "launch_stopping_presence_unavailable"
+            | "launch_stopping_relay_not_connected"
+            | "launch_stopping_resume_association_missing"
+            | "launch_stopping_terminal_proof_false"
+            | "launch_stopping_loaded_membership_false"
+            | "launch_stopping_connection_absent"
+            | "launch_stopping_connection_readiness_pending"
+            | "launch_stopping_created_binding_pending"
+            | "launch_stopping_source_recheck_pending"
+            | "launch_stopping_unobserved"
+            | "launch_stopping_drain"
     );
     if launch_pending_guard && phase != "creation" {
         return None;
@@ -8320,213 +8774,216 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
     if (phase == "supervisor") != supervisor_guard {
         return None;
     }
-    if !launch_pending_guard && !relay_startup_guard && !matches!(
-        guard,
-        "owner_or_native"
-            | "owner_authorization"
-            | "owner_exit"
-            | "owner_native_process"
-            | "owner_persist"
-            | "owner_proof"
-            | "owner_record_manager"
-            | "owner_record_proof"
-            | "owner_record_shape"
-            | "owner_service_cwd"
-            | "owner_service_environment"
-            | "owner_service_exec_start"
-            | "owner_service_identity"
-            | "owner_service_kernel"
-            | "owner_service_pid"
-            | "owner_service_properties"
-            | "owner_socket_epoch"
-            | "owner_spawn"
-            | "owner_wait"
-            | "native_initialize"
-            | "thread_start_send"
-            | "thread_start_reply"
-            | "thread_start_callback_lost"
-            | "thread_start_id"
-            | "thread_start_acknowledge"
-            | "thread_effect_drop_start_send"
-            | "thread_effect_drop_start_reply"
-            | "thread_effect_drop_acknowledge"
-            | "thread_effect_drop_owner_proof"
-            | "thread_effect_drop_title_send"
-            | "thread_effect_drop_title_reply"
-            | "thread_effect_drop_read_send"
-            | "thread_effect_drop_read_reply"
-            | "thread_effect_drop_final_proof"
-            | "thread_effect_drop_checkpoint_guard"
-            | "physical_or_presence"
-            | "state_before_presence"
-            | "manifest_read"
-            | "presence_observation"
-            | "state_after_presence"
-            | "manifest_encode"
-            | "manifest_changed"
-            | "owner_epoch"
-            | "owner_changed"
-            | "source_identity"
-            | "original_presence_state"
-            | "original_presence_state_relay_bounded_admission_failed"
-            | "original_presence_state_stock_tui_resume_rejected"
-            | "original_presence_state_tui_read"
-            | "original_presence_state_tui_frame"
-            | "original_presence_state_tui_observation"
-            | "original_presence_state_owner_read"
-            | "original_presence_state_owner_frame"
-            | "original_presence_state_owner_observation"
-            | "original_presence_state_manifest_proof"
-            | "original_presence_state_publication_changed"
-            | "original_presence_state_observation_publish"
-            | "original_presence_state_presence_publish"
-            | "original_presence_state_owner_queue"
-            | "original_presence_state_tui_queue"
-            | "original_presence_state_owner_write_timeout"
-            | "original_presence_state_owner_write"
-            | "original_presence_state_tui_write_timeout"
-            | "original_presence_state_tui_write"
-            | "original_presence_state_terminal_tui_write_unpolled_not_pending"
-            | "original_presence_state_terminal_tui_write_ready_not_pending"
-            | "original_presence_state_terminal_tui_write_ready_pending"
-            | "original_presence_state_terminal_tui_write_start_send_not_pending"
-            | "original_presence_state_terminal_tui_write_flush_not_pending"
-            | "original_presence_state_terminal_tui_write_flush_pending"
-            | "original_presence_state_pane_not_found"
-            | "original_presence_state_terminal_proof"
-            | "original_presence_state_terminal_connect"
-            | "original_presence_state_terminal_snapshot_source"
-            | "original_presence_state_terminal_snapshot"
-            | "original_presence_state_terminal_snapshot_timeout"
-            | "original_presence_state_terminal_reporter_process"
-            | "original_presence_state_terminal_process_info_connect"
-            | "original_presence_state_terminal_process_info_source"
-            | "original_presence_state_terminal_process_info"
-            | "original_presence_state_terminal_process_info_timeout"
-            | "original_presence_state_terminal_tui_distribution"
-            | "original_presence_state_terminal_tui_argv"
-            | "original_presence_state_terminal_tui_foreground"
-            | "original_presence_state_terminal_closed"
-            | "original_presence_state_relay_workers_absent"
-            | "original_presence_state_relay_worker_failed"
-            | "original_presence_state_native_relay_closed"
-            | "original_presence_binding"
-            | "original_presence_owner_epoch"
-            | "original_presence_relay"
-            | "original_presence_connection_epoch"
-            | "original_presence_tui"
-            | "original_presence_associated"
-            | "original_presence_resumed"
-            | "observation_pending"
-            | "presence_freshness"
-            | "physical_state"
-            | "topology_source"
-            | "terminal_absent"
-            | "native_report_changed"
-            | "effective_topology_loss"
-            | "effective_topology_revalidation"
-            | "effective_topology_unavailable"
-            | "subscription_connect"
-            | "snapshot_connect"
-            | "snapshot_read"
-            | "subscription_event"
-            | "binding_superseded"
-            | "readiness"
-            | "native_read"
-            | "connection_readiness"
-            | "event_application"
-            | "incarnation_changed"
-            | "frame_closed"
-            | "frame_protocol"
-            | "frame_capacity"
-            | "frame_other"
-            | "frame_read"
-            | "frame_close"
-            | "frame_bytes"
-            | "frame_parse"
-            | "callback_frame"
-            | "event_capacity"
-            | "event_queue"
-            | "reader_terminal"
-            | "initial_installation"
-            | "query_effect_dropped"
-            | "query_rejected_known"
-            | "query_rejected_other"
-            | "query_source_changed"
-            | "query_unavailable"
-            | "result_deadline"
-            | "result_authorization"
-            | "result_shell_changed"
-            | "result_read_failed"
-            | "result_invalid"
-            | "final_source"
-            | "final_root"
-            | "final_root_server_id"
-            | "final_root_incarnation"
-            | "final_root_evidence"
-            | "final_root_socket_path"
-            | "final_root_invalidation"
-            | "workspace_confirm_connect"
-            | "workspace_confirm_evidence_epoch"
-            | "workspace_confirm_snapshot"
-            | "workspace_confirm_pane"
-            | "workspace_confirm_created_workspace"
-            | "workspace_confirm_terminal"
-            | "workspace_confirm_focus"
-            | "workspace_confirm_tab"
-            | "final_source_changed"
-            | "final_connect"
-            | "final_identity"
-            | "final_process_info"
-            | "final_shell_changed"
-            | "final_shell_reporter"
-            | "final_shell_absent"
-            | "final_shell_not_idle"
-            | "final_shell_process"
-            | "final_shell_executable"
-            | "final_shell_reporter_recheck"
-            | "final_result_view"
-            | "final_deadline"
-            | "final_authorization"
-            | "result_rejected"
-            | "result_rejected_kind"
-            | "result_rejected_path"
-            | "result_unsupported"
-            | "pre_thread_deadline_before_reproof"
-            | "pre_thread_owner_reproof"
-            | "pre_thread_deadline_after_reproof"
-            | "pre_thread_stopping"
-            | "reader_inflight"
-            | "reader_frame"
-            | "reader_rate_queue"
-            | "reader_request_queue"
-            | "reader_decode_queue"
-            | "reader_decode_close"
-            | "reader_non_request"
-            | "extra_stream"
-            | "extra_stream_error"
-            | "response_guard"
-            | "response_queue"
-            | "output_guard"
-            | "output_pop_error"
-            | "delivery_metadata"
-            | "output_write"
-            | "delivery_storage"
-            | "output_queue_closed"
-            | "output_drained_after_reader"
-            | "output_finish"
-            | "selected_ctrl_c"
-            | "selected_sigterm"
-            | "selected_admin_ok"
-            | "selected_admin_error"
-            | "selected_transport_ok"
-            | "selected_transport_error"
-            | "selected_topology_ok"
-            | "selected_topology_error"
-            | "sibling_admin_error"
-            | "sibling_transport_error"
-            | "sibling_topology_error"
-    ) {
+    if !launch_pending_guard
+        && !relay_startup_guard
+        && !matches!(
+            guard,
+            "owner_or_native"
+                | "owner_authorization"
+                | "owner_exit"
+                | "owner_native_process"
+                | "owner_persist"
+                | "owner_proof"
+                | "owner_record_manager"
+                | "owner_record_proof"
+                | "owner_record_shape"
+                | "owner_service_cwd"
+                | "owner_service_environment"
+                | "owner_service_exec_start"
+                | "owner_service_identity"
+                | "owner_service_kernel"
+                | "owner_service_pid"
+                | "owner_service_properties"
+                | "owner_socket_epoch"
+                | "owner_spawn"
+                | "owner_wait"
+                | "native_initialize"
+                | "thread_start_send"
+                | "thread_start_reply"
+                | "thread_start_callback_lost"
+                | "thread_start_id"
+                | "thread_start_acknowledge"
+                | "thread_effect_drop_start_send"
+                | "thread_effect_drop_start_reply"
+                | "thread_effect_drop_acknowledge"
+                | "thread_effect_drop_owner_proof"
+                | "thread_effect_drop_title_send"
+                | "thread_effect_drop_title_reply"
+                | "thread_effect_drop_read_send"
+                | "thread_effect_drop_read_reply"
+                | "thread_effect_drop_final_proof"
+                | "thread_effect_drop_checkpoint_guard"
+                | "physical_or_presence"
+                | "state_before_presence"
+                | "manifest_read"
+                | "presence_observation"
+                | "state_after_presence"
+                | "manifest_encode"
+                | "manifest_changed"
+                | "owner_epoch"
+                | "owner_changed"
+                | "source_identity"
+                | "original_presence_state"
+                | "original_presence_state_relay_bounded_admission_failed"
+                | "original_presence_state_stock_tui_resume_rejected"
+                | "original_presence_state_tui_read"
+                | "original_presence_state_tui_frame"
+                | "original_presence_state_tui_observation"
+                | "original_presence_state_owner_read"
+                | "original_presence_state_owner_frame"
+                | "original_presence_state_owner_observation"
+                | "original_presence_state_manifest_proof"
+                | "original_presence_state_publication_changed"
+                | "original_presence_state_observation_publish"
+                | "original_presence_state_presence_publish"
+                | "original_presence_state_owner_queue"
+                | "original_presence_state_tui_queue"
+                | "original_presence_state_owner_write_timeout"
+                | "original_presence_state_owner_write"
+                | "original_presence_state_tui_write_timeout"
+                | "original_presence_state_tui_write"
+                | "original_presence_state_terminal_tui_write_unpolled_not_pending"
+                | "original_presence_state_terminal_tui_write_ready_not_pending"
+                | "original_presence_state_terminal_tui_write_ready_pending"
+                | "original_presence_state_terminal_tui_write_start_send_not_pending"
+                | "original_presence_state_terminal_tui_write_flush_not_pending"
+                | "original_presence_state_terminal_tui_write_flush_pending"
+                | "original_presence_state_pane_not_found"
+                | "original_presence_state_terminal_proof"
+                | "original_presence_state_terminal_connect"
+                | "original_presence_state_terminal_snapshot_source"
+                | "original_presence_state_terminal_snapshot"
+                | "original_presence_state_terminal_snapshot_timeout"
+                | "original_presence_state_terminal_reporter_process"
+                | "original_presence_state_terminal_process_info_connect"
+                | "original_presence_state_terminal_process_info_source"
+                | "original_presence_state_terminal_process_info"
+                | "original_presence_state_terminal_process_info_timeout"
+                | "original_presence_state_terminal_tui_distribution"
+                | "original_presence_state_terminal_tui_argv"
+                | "original_presence_state_terminal_tui_foreground"
+                | "original_presence_state_terminal_closed"
+                | "original_presence_state_relay_workers_absent"
+                | "original_presence_state_relay_worker_failed"
+                | "original_presence_state_native_relay_closed"
+                | "original_presence_binding"
+                | "original_presence_owner_epoch"
+                | "original_presence_relay"
+                | "original_presence_connection_epoch"
+                | "original_presence_tui"
+                | "original_presence_associated"
+                | "original_presence_resumed"
+                | "observation_pending"
+                | "presence_freshness"
+                | "physical_state"
+                | "topology_source"
+                | "terminal_absent"
+                | "native_report_changed"
+                | "effective_topology_loss"
+                | "effective_topology_revalidation"
+                | "effective_topology_unavailable"
+                | "subscription_connect"
+                | "snapshot_connect"
+                | "snapshot_read"
+                | "subscription_event"
+                | "binding_superseded"
+                | "readiness"
+                | "native_read"
+                | "connection_readiness"
+                | "event_application"
+                | "incarnation_changed"
+                | "frame_closed"
+                | "frame_protocol"
+                | "frame_capacity"
+                | "frame_other"
+                | "frame_read"
+                | "frame_close"
+                | "frame_bytes"
+                | "frame_parse"
+                | "callback_frame"
+                | "event_capacity"
+                | "event_queue"
+                | "reader_terminal"
+                | "initial_installation"
+                | "query_effect_dropped"
+                | "query_rejected_known"
+                | "query_rejected_other"
+                | "query_source_changed"
+                | "query_unavailable"
+                | "result_deadline"
+                | "result_authorization"
+                | "result_shell_changed"
+                | "result_read_failed"
+                | "result_invalid"
+                | "final_source"
+                | "final_root"
+                | "final_root_server_id"
+                | "final_root_incarnation"
+                | "final_root_evidence"
+                | "final_root_socket_path"
+                | "final_root_invalidation"
+                | "workspace_confirm_connect"
+                | "workspace_confirm_evidence_epoch"
+                | "workspace_confirm_snapshot"
+                | "workspace_confirm_pane"
+                | "workspace_confirm_created_workspace"
+                | "workspace_confirm_terminal"
+                | "workspace_confirm_focus"
+                | "workspace_confirm_tab"
+                | "final_source_changed"
+                | "final_connect"
+                | "final_identity"
+                | "final_process_info"
+                | "final_shell_changed"
+                | "final_shell_reporter"
+                | "final_shell_absent"
+                | "final_shell_not_idle"
+                | "final_shell_process"
+                | "final_shell_executable"
+                | "final_shell_reporter_recheck"
+                | "final_result_view"
+                | "final_deadline"
+                | "final_authorization"
+                | "result_rejected"
+                | "result_rejected_kind"
+                | "result_rejected_path"
+                | "result_unsupported"
+                | "pre_thread_deadline_before_reproof"
+                | "pre_thread_owner_reproof"
+                | "pre_thread_deadline_after_reproof"
+                | "pre_thread_stopping"
+                | "reader_inflight"
+                | "reader_frame"
+                | "reader_rate_queue"
+                | "reader_request_queue"
+                | "reader_decode_queue"
+                | "reader_decode_close"
+                | "reader_non_request"
+                | "extra_stream"
+                | "extra_stream_error"
+                | "response_guard"
+                | "response_queue"
+                | "output_guard"
+                | "output_pop_error"
+                | "delivery_metadata"
+                | "output_write"
+                | "delivery_storage"
+                | "output_queue_closed"
+                | "output_drained_after_reader"
+                | "output_finish"
+                | "selected_ctrl_c"
+                | "selected_sigterm"
+                | "selected_admin_ok"
+                | "selected_admin_error"
+                | "selected_transport_ok"
+                | "selected_transport_error"
+                | "selected_topology_ok"
+                | "selected_topology_error"
+                | "sibling_admin_error"
+                | "sibling_transport_error"
+                | "sibling_topology_error"
+        )
+    {
         return None;
     }
     let code = fields.next()?.strip_prefix("code=")?;
@@ -8607,22 +9064,34 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
         return None;
     }
     let valid_shell_probe = match guard {
-        "launch_deadline_source_unavailable" | "launch_deadline_publication_pending"
-        | "launch_deadline_presence_past" | "launch_deadline_presence_unavailable"
-        | "launch_deadline_relay_not_connected" | "launch_deadline_resume_association_missing"
-        | "launch_deadline_terminal_proof_false" | "launch_deadline_loaded_membership_false"
-        | "launch_deadline_connection_absent" | "launch_deadline_connection_readiness_pending"
-        | "launch_deadline_created_binding_pending" | "launch_deadline_source_recheck_pending"
-        | "launch_deadline_unobserved" | "launch_deadline_drain"
-        | "launch_stopping_source_unavailable" | "launch_stopping_publication_pending"
-        | "launch_stopping_presence_past" | "launch_stopping_presence_unavailable"
-        | "launch_stopping_relay_not_connected" | "launch_stopping_resume_association_missing"
-        | "launch_stopping_terminal_proof_false" | "launch_stopping_loaded_membership_false"
-        | "launch_stopping_connection_absent" | "launch_stopping_connection_readiness_pending"
-        | "launch_stopping_created_binding_pending" | "launch_stopping_source_recheck_pending"
-        | "launch_stopping_unobserved" | "launch_stopping_drain" => {
-            code == "Timeout" && io == "none" && errno == 0
-        }
+        "launch_deadline_source_unavailable"
+        | "launch_deadline_publication_pending"
+        | "launch_deadline_presence_past"
+        | "launch_deadline_presence_unavailable"
+        | "launch_deadline_relay_not_connected"
+        | "launch_deadline_resume_association_missing"
+        | "launch_deadline_terminal_proof_false"
+        | "launch_deadline_loaded_membership_false"
+        | "launch_deadline_connection_absent"
+        | "launch_deadline_connection_readiness_pending"
+        | "launch_deadline_created_binding_pending"
+        | "launch_deadline_source_recheck_pending"
+        | "launch_deadline_unobserved"
+        | "launch_deadline_drain"
+        | "launch_stopping_source_unavailable"
+        | "launch_stopping_publication_pending"
+        | "launch_stopping_presence_past"
+        | "launch_stopping_presence_unavailable"
+        | "launch_stopping_relay_not_connected"
+        | "launch_stopping_resume_association_missing"
+        | "launch_stopping_terminal_proof_false"
+        | "launch_stopping_loaded_membership_false"
+        | "launch_stopping_connection_absent"
+        | "launch_stopping_connection_readiness_pending"
+        | "launch_stopping_created_binding_pending"
+        | "launch_stopping_source_recheck_pending"
+        | "launch_stopping_unobserved"
+        | "launch_stopping_drain" => code == "Timeout" && io == "none" && errno == 0,
         "query_effect_dropped"
         | "query_rejected_known"
         | "query_rejected_other"
@@ -8631,31 +9100,24 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
         | "result_rejected_path"
         | "result_unsupported" => code == "NotReady" && io == "none" && errno == 0,
         "query_source_changed" => code == "StaleSession" && io == "none" && errno == 0,
-        "result_deadline" | "final_deadline" => {
-            code == "Timeout" && io == "none" && errno == 0
-        }
+        "result_deadline" | "final_deadline" => code == "Timeout" && io == "none" && errno == 0,
         "final_source_changed"
         | "final_identity"
         | "final_root_server_id"
         | "final_root_incarnation"
         | "final_root_evidence"
         | "final_root_socket_path"
-        | "final_root_invalidation" => {
-            code == "StaleSession" && io == "none" && errno == 0
-        }
-        "workspace_confirm_connect" | "workspace_confirm_snapshot"
-        | "workspace_confirm_pane" => {
+        | "final_root_invalidation" => code == "StaleSession" && io == "none" && errno == 0,
+        "workspace_confirm_connect" | "workspace_confirm_snapshot" | "workspace_confirm_pane" => {
             matches!(code, "NotReady" | "ResourceLimit") && io != "none"
         }
         "workspace_confirm_evidence_epoch"
         | "workspace_confirm_created_workspace"
         | "workspace_confirm_terminal"
-        | "workspace_confirm_focus" | "workspace_confirm_tab" => {
-            code == "StaleSession" && io == "invalid_data" && errno == 0
-        }
+        | "workspace_confirm_focus"
+        | "workspace_confirm_tab" => code == "StaleSession" && io == "invalid_data" && errno == 0,
         "result_shell_changed" => {
-            (code == "NotReady" && io == "none" && errno == 0)
-                || (code != "none" && io != "none")
+            (code == "NotReady" && io == "none" && errno == 0) || (code != "none" && io != "none")
         }
         "query_unavailable" | "result_read_failed" | "result_invalid" | "final_connect"
         | "final_process_info" | "final_result_view" => code != "none" && io != "none",
@@ -8670,10 +9132,11 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
                 && (io != "none" || code == "NotReady")
                 && errno == 0
         }
-        "result_authorization" | "final_source" | "final_root" | "final_shell_changed"
-        | "final_authorization" => {
-            code != "none" && io == "none" && errno == 0
-        }
+        "result_authorization"
+        | "final_source"
+        | "final_root"
+        | "final_shell_changed"
+        | "final_authorization" => code != "none" && io == "none" && errno == 0,
         _ => false,
     };
     if shell_probe_guard && !valid_shell_probe {
@@ -8723,13 +9186,23 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
             "reader_decode_queue" => code != "none" && io == "cancelled" && frame == "none",
             "reader_decode_close" => code != "none" && io == "none" && frame == "none",
             "reader_non_request" => code == "InvalidRequest" && io == "none" && frame == "none",
-            "extra_stream" | "extra_stream_error" => code == "none" && io == "none" && frame == "none",
-            "response_guard" | "response_queue" | "output_guard" | "output_pop_error" => code != "none" && io == "none" && frame == "none",
-            "delivery_metadata" => frame.starts_with("frame_") || (code == "none" && io == "other" && frame == "none"),
+            "extra_stream" | "extra_stream_error" => {
+                code == "none" && io == "none" && frame == "none"
+            }
+            "response_guard" | "response_queue" | "output_guard" | "output_pop_error" => {
+                code != "none" && io == "none" && frame == "none"
+            }
+            "delivery_metadata" => {
+                frame.starts_with("frame_") || (code == "none" && io == "other" && frame == "none")
+            }
             "output_write" => frame.starts_with("write_"),
-            "output_finish" => frame.starts_with("write_") || (code == "none" && io == "other" && frame == "none"),
+            "output_finish" => {
+                frame.starts_with("write_") || (code == "none" && io == "other" && frame == "none")
+            }
             "delivery_storage" => code == "none" && io == "other" && frame == "none",
-            "output_queue_closed" | "output_drained_after_reader" => code == "none" && io == "none" && frame == "none",
+            "output_queue_closed" | "output_drained_after_reader" => {
+                code == "none" && io == "none" && frame == "none"
+            }
             _ => false,
         };
         if !valid {
@@ -8737,9 +9210,20 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
         }
     }
     if supervisor_guard
-        && ((matches!(guard, "selected_ctrl_c" | "selected_sigterm") && (code != "none" || io != "cancelled"))
-            || (matches!(guard, "selected_admin_ok" | "selected_transport_ok" | "selected_topology_ok") && (code != "none" || io != "none"))
-            || (!matches!(guard, "selected_ctrl_c" | "selected_sigterm" | "selected_admin_ok" | "selected_transport_ok" | "selected_topology_ok") && code != "none"))
+        && ((matches!(guard, "selected_ctrl_c" | "selected_sigterm")
+            && (code != "none" || io != "cancelled"))
+            || (matches!(
+                guard,
+                "selected_admin_ok" | "selected_transport_ok" | "selected_topology_ok"
+            ) && (code != "none" || io != "none"))
+            || (!matches!(
+                guard,
+                "selected_ctrl_c"
+                    | "selected_sigterm"
+                    | "selected_admin_ok"
+                    | "selected_transport_ok"
+                    | "selected_topology_ok"
+            ) && code != "none"))
     {
         return None;
     }
@@ -8749,7 +9233,10 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
             return None;
         }
         let milestone = fields.next()?.strip_prefix("start=")?;
-        if !matches!(milestone, "unseen" | "matched" | "delivered" | "receiver_closed") {
+        if !matches!(
+            milestone,
+            "unseen" | "matched" | "delivered" | "receiver_closed"
+        ) {
             return None;
         }
         let decoded_frame = match fields.next()?.strip_prefix("decoded=")? {
@@ -8764,9 +9251,15 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
         };
         let result = fields.next()?.strip_prefix("result=")?;
         let start_send_elapsed = fields.next()?.strip_prefix("elapsed=")?;
-        if !matches!(start_send_elapsed, "unobserved" | "lt_quarter" | "quarter_to_half"
-            | "half_to_three_quarters" | "three_quarters_to_budget" | "at_or_over_budget")
-        {
+        if !matches!(
+            start_send_elapsed,
+            "unobserved"
+                | "lt_quarter"
+                | "quarter_to_half"
+                | "half_to_three_quarters"
+                | "three_quarters_to_budget"
+                | "at_or_over_budget"
+        ) {
             return None;
         }
         let complete_data_frame = match fields.next()?.strip_prefix("data=")? {
@@ -8774,14 +9267,14 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
             "1" => true,
             _ => return None,
         };
-        let (methods_before_mask, methods_before) = parse_codex_thread_start_method_mask(
-            fields.next()?.strip_prefix("before=")?,
-        )?;
-        let (methods_after_mask, methods_after) = parse_codex_thread_start_method_mask(
-            fields.next()?.strip_prefix("after=")?,
-        )?;
-        if !matches!(result, "none" | "BackendError" | "NotReady" | "ResourceLimit")
-            || (milestone == "unseen" && result != "none")
+        let (methods_before_mask, methods_before) =
+            parse_codex_thread_start_method_mask(fields.next()?.strip_prefix("before=")?)?;
+        let (methods_after_mask, methods_after) =
+            parse_codex_thread_start_method_mask(fields.next()?.strip_prefix("after=")?)?;
+        if !matches!(
+            result,
+            "none" | "BackendError" | "NotReady" | "ResourceLimit"
+        ) || (milestone == "unseen" && result != "none")
             || (milestone != "unseen" && !decoded_frame)
             || (unmatched_response && !decoded_frame)
             || (decoded_frame && !complete_data_frame)
@@ -8791,7 +9284,9 @@ fn parse_codex_guard_line(line: &[u8]) -> Option<Value> {
         {
             return None;
         }
-        Some(json!({"milestone":milestone,"decodedFrame":decoded_frame,"unmatchedResponse":unmatched_response,"result":result,"startSendElapsed":start_send_elapsed,"completeDataFrame":complete_data_frame,"methodsBefore":methods_before,"methodsAfter":methods_after}))
+        Some(
+            json!({"milestone":milestone,"decodedFrame":decoded_frame,"unmatchedResponse":unmatched_response,"result":result,"startSendElapsed":start_send_elapsed,"completeDataFrame":complete_data_frame,"methodsBefore":methods_before,"methodsAfter":methods_after}),
+        )
     } else {
         None
     };
@@ -8858,9 +9353,8 @@ fn drain_codex_guard(mut stderr: ChildStderr, progress: &CodexDrainProgress) {
                 }
                 summary.eof = true;
                 summary.termination = CodexDrainTermination::Eof;
-                summary.completed = summary.rejected == 0
-                    && summary.oversized == 0
-                    && !summary.output_failed;
+                summary.completed =
+                    summary.rejected == 0 && summary.oversized == 0 && !summary.output_failed;
             });
             return;
         }
@@ -8923,32 +9417,73 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
         return None;
     }
     let guard = fields.next()?.strip_prefix("guard=")?;
-    let coarse_shell_guard = matches!(guard,
-        "consent_absent" | "source_lookup" | "reporter_process" | "connect"
-            | "peer_identity" | "process_info" | "shell_absent" | "reported_process"
-            | "shell_executable" | "source_recheck" | "no_candidate" | "record_absent" | "installed"
+    let coarse_shell_guard = matches!(
+        guard,
+        "consent_absent"
+            | "source_lookup"
+            | "reporter_process"
+            | "connect"
+            | "peer_identity"
+            | "process_info"
+            | "shell_absent"
+            | "reported_process"
+            | "shell_executable"
+            | "source_recheck"
+            | "no_candidate"
+            | "record_absent"
+            | "installed"
     );
     if phase == "coarse_shell" && !coarse_shell_guard {
         return None;
     }
     let launch_preflight_guard = matches!(
         guard,
-        "project_lookup" | "project_path" | "creation_overlay" | "creation_overlay_path"
-            | "diagnostic_extension_args" | "source_lookup" | "topology_source"
-            | "topology_source_changed" | "topology_project" | "topology_focus"
+        "project_lookup"
+            | "project_path"
+            | "creation_overlay"
+            | "creation_overlay_path"
+            | "diagnostic_extension_args"
+            | "source_lookup"
+            | "topology_source"
+            | "topology_source_changed"
+            | "topology_project"
+            | "topology_focus"
             | "creation_placement"
-            | "measurement_absent" | "wrapper_recheck_failure" | "wrapper_recheck_mismatch"
-            | "pane_absent" | "pane_mismatch" | "resource_mismatch" | "resource_pane_absent"
-            | "resource_terminal_absent" | "process_connect" | "process_evidence"
-            | "process_info" | "shell_reporter" | "shell_absent" | "shell_not_idle"
-            | "shell_process" | "shell_executable" | "shell_reporter_recheck"
-            | "original_root" | "root_recheck_source" | "root_recheck_pane"
-            | "root_recheck_workspace" | "root_recheck_terminal" | "root_recheck_focus"
-            | "root_recheck_pane_focused" | "root_recheck_agent"
-            | "root_recheck_agent_session" | "root_recheck_agent_status"
-            | "root_recheck_agents" | "original_shell_process" | "original_shell_mismatch"
-            | "original_executable_recheck" | "original_executable_mismatch" | "launch_connect"
-            | "launch_evidence" | "launch_socket_fence"
+            | "measurement_absent"
+            | "wrapper_recheck_failure"
+            | "wrapper_recheck_mismatch"
+            | "pane_absent"
+            | "pane_mismatch"
+            | "resource_mismatch"
+            | "resource_pane_absent"
+            | "resource_terminal_absent"
+            | "process_connect"
+            | "process_evidence"
+            | "process_info"
+            | "shell_reporter"
+            | "shell_absent"
+            | "shell_not_idle"
+            | "shell_process"
+            | "shell_executable"
+            | "shell_reporter_recheck"
+            | "original_root"
+            | "root_recheck_source"
+            | "root_recheck_pane"
+            | "root_recheck_workspace"
+            | "root_recheck_terminal"
+            | "root_recheck_focus"
+            | "root_recheck_pane_focused"
+            | "root_recheck_agent"
+            | "root_recheck_agent_session"
+            | "root_recheck_agent_status"
+            | "root_recheck_agents"
+            | "original_shell_process"
+            | "original_shell_mismatch"
+            | "original_executable_recheck"
+            | "original_executable_mismatch"
+            | "launch_connect"
+            | "launch_evidence"
+            | "launch_socket_fence"
     );
     if phase == "launch_preflight" && !launch_preflight_guard {
         return None;
@@ -9111,7 +9646,8 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
             | "result_rejected_kind"
             | "result_rejected_path"
             | "result_unsupported"
-    ) && !(phase == "coarse_shell" && coarse_shell_guard) {
+    ) && !(phase == "coarse_shell" && coarse_shell_guard)
+    {
         return None;
     }
     let code = fields.next()?.strip_prefix("code=")?;
@@ -9182,8 +9718,11 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
     if phase == "coarse_shell" {
         let shape = match guard {
             "installed" => code == "none" && io == "none",
-            "consent_absent" | "peer_identity" | "shell_absent" | "no_candidate" | "record_absent" => code == "NotReady" && io == "none",
-            "source_lookup" => matches!(code, "NotFound" | "NotReady" | "ResourceLimit") && io == "none",
+            "consent_absent" | "peer_identity" | "shell_absent" | "no_candidate"
+            | "record_absent" => code == "NotReady" && io == "none",
+            "source_lookup" => {
+                matches!(code, "NotFound" | "NotReady" | "ResourceLimit") && io == "none"
+            }
             _ => matches!(code, "NotReady" | "ResourceLimit") && io != "none",
         };
         if !shape || frame != "none" {
@@ -9212,19 +9751,26 @@ fn parse_omp_guard_line(line: &[u8]) -> Option<Value> {
     } else {
         None
     };
-    let deadline_detail=if phase=="shell_probe"&&guard=="result_deadline" {
+    let deadline_detail = if phase == "shell_probe" && guard == "result_deadline" {
         match fields.next() {
-            None=>None,
-            Some(site)=>Some((site.strip_prefix("deadlineSite=")?,
-                fields.next()?.strip_prefix("observation=")?,fields.next()?.strip_prefix("entryBudget=")?)),
+            None => None,
+            Some(site) => Some((
+                site.strip_prefix("deadlineSite=")?,
+                fields.next()?.strip_prefix("observation=")?,
+                fields.next()?.strip_prefix("entryBudget=")?,
+            )),
         }
-    } else {None};
+    } else {
+        None
+    };
     if fields.next().is_some() {
         return None;
     }
-    let mut value=json!({"gate":"owned-omp-creation-capture","phase":phase,"guard":guard,"code":code,"io":io,"frame":frame,"ack":ack});
-    if let Some((site,observation,budget))=deadline_detail {
-        value["deadlineSite"]=json!(site);value["observation"]=json!(observation);value["entryBudget"]=json!(budget);
+    let mut value = json!({"gate":"owned-omp-creation-capture","phase":phase,"guard":guard,"code":code,"io":io,"frame":frame,"ack":ack});
+    if let Some((site, observation, budget)) = deadline_detail {
+        value["deadlineSite"] = json!(site);
+        value["observation"] = json!(observation);
+        value["entryBudget"] = json!(budget);
     }
     herdr_report_capture::valid_probe_deadline(&value).then_some(value)
 }
@@ -9290,28 +9836,69 @@ fn parse_hello_guard_line(line: &[u8]) -> Option<Value> {
             | ("backend_capabilities", "entered", "none", "none")
             | ("response_write", "entered", "none", "none")
             | ("complete", "completed", "none", "none")
-    ) || (known_code && frame_io && matches!(
-        (phase, guard),
-        ("hello_frame", "read_error") | ("response_write", "write_error")
-    )) || (known_code && io == "none" && matches!(
-        (phase, guard),
-        ("hello_authorization", "rejected") | ("security_guard", "rejected")
-    )) || (phase == "codex_manager_hello" && code == "NotReady" && matches!(
-        guard,
-        "runtime_missing" | "runtime_path" | "runtime_directory" | "socket_before"
-            | "socket_create" | "socket_path" | "connect" | "peer_credentials" | "peer_uid"
-            | "socket_after" | "socket_changed" | "peer_pid" | "process_evidence"
-            | "process_namespace" | "process_stat" | "process_pid" | "process_uid"
-            | "process_boot" | "process_changed"
-    ) && matches!(
-        io,
-        "none" | "not_found" | "permission_denied" | "connection_refused" | "connection_reset"
-            | "connection_aborted" | "not_connected" | "addr_in_use" | "addr_not_available"
-            | "broken_pipe" | "already_exists" | "would_block" | "invalid_input" | "invalid_data"
-            | "timed_out" | "interrupted" | "unexpected_eof" | "unsupported" | "out_of_memory"
-            | "write_zero" | "other"
-    ));
-    accepted.then(|| json!({"gate":"owned-hello-capture","phase":phase,"guard":guard,"code":code,"io":io}))
+    ) || (known_code
+        && frame_io
+        && matches!(
+            (phase, guard),
+            ("hello_frame", "read_error") | ("response_write", "write_error")
+        ))
+        || (known_code
+            && io == "none"
+            && matches!(
+                (phase, guard),
+                ("hello_authorization", "rejected") | ("security_guard", "rejected")
+            ))
+        || (phase == "codex_manager_hello"
+            && code == "NotReady"
+            && matches!(
+                guard,
+                "runtime_missing"
+                    | "runtime_path"
+                    | "runtime_directory"
+                    | "socket_before"
+                    | "socket_create"
+                    | "socket_path"
+                    | "connect"
+                    | "peer_credentials"
+                    | "peer_uid"
+                    | "socket_after"
+                    | "socket_changed"
+                    | "peer_pid"
+                    | "process_evidence"
+                    | "process_namespace"
+                    | "process_stat"
+                    | "process_pid"
+                    | "process_uid"
+                    | "process_boot"
+                    | "process_changed"
+            )
+            && matches!(
+                io,
+                "none"
+                    | "not_found"
+                    | "permission_denied"
+                    | "connection_refused"
+                    | "connection_reset"
+                    | "connection_aborted"
+                    | "not_connected"
+                    | "addr_in_use"
+                    | "addr_not_available"
+                    | "broken_pipe"
+                    | "already_exists"
+                    | "would_block"
+                    | "invalid_input"
+                    | "invalid_data"
+                    | "timed_out"
+                    | "interrupted"
+                    | "unexpected_eof"
+                    | "unsupported"
+                    | "out_of_memory"
+                    | "write_zero"
+                    | "other"
+            ));
+    accepted.then(
+        || json!({"gate":"owned-hello-capture","phase":phase,"guard":guard,"code":code,"io":io}),
+    )
 }
 fn drain_hello_guard(mut stderr: ChildStderr) {
     let mut line = Vec::with_capacity(192);
@@ -9412,28 +9999,66 @@ fn start_serve_with_codex_capture(
         },
     )
 }
-fn admit_first_child_evidence(process:ProcessEvidence,deadline:Instant,observed_at:Instant)->io::Result<ProcessEvidence> {
-    if observed_at>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original child proof completed after its absolute deadline"));}
+fn admit_first_child_evidence(
+    process: ProcessEvidence,
+    deadline: Instant,
+    observed_at: Instant,
+) -> io::Result<ProcessEvidence> {
+    if observed_at >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "original child proof completed after its absolute deadline",
+        ));
+    }
     Ok(process)
 }
-fn first_child_evidence(child:&mut Child,original:&goatr::codex_relay::ProcessStart,executable:(u64,u64),deadline:Instant)->io::Result<ProcessEvidence> {
+fn first_child_evidence(
+    child: &mut Child,
+    original: &goatr::codex_relay::ProcessStart,
+    executable: (u64, u64),
+    deadline: Instant,
+) -> io::Result<ProcessEvidence> {
     loop {
-        if child.try_wait()?.is_some(){return Err(failure("original child exited before its first protected identity proof"));}
-        if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original child inspectability deadline expired"));}
+        if child.try_wait()?.is_some() {
+            return Err(failure(
+                "original child exited before its first protected identity proof",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "original child inspectability deadline expired",
+            ));
+        }
         match original.evidence(child.id()) {
-            Ok(process)=>{
-                if child.try_wait()?.is_some(){return Err(failure("original child exited during its first protected identity proof"));}
+            Ok(process) => {
+                if child.try_wait()?.is_some() {
+                    return Err(failure(
+                        "original child exited during its first protected identity proof",
+                    ));
+                }
                 original.check(child.id())?;
-                let object=fs::metadata(format!("/proc/{}/exe",child.id()))?;
-                if (object.dev(),object.ino())!=executable{return Err(failure("first child proof is not the original executable object"));}
-                return admit_first_child_evidence(process,deadline,Instant::now());
+                let object = fs::metadata(format!("/proc/{}/exe", child.id()))?;
+                if (object.dev(), object.ino()) != executable {
+                    return Err(failure(
+                        "first child proof is not the original executable object",
+                    ));
+                }
+                return admit_first_child_evidence(process, deadline, Instant::now());
             }
-            Err(error) if error.kind()==io::ErrorKind::PermissionDenied=>{
-                if child.try_wait()?.is_some(){return Err(failure("original child exited while awaiting inspectability"));}
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                if child.try_wait()?.is_some() {
+                    return Err(failure(
+                        "original child exited while awaiting inspectability",
+                    ));
+                }
                 original.check(child.id())?;
-                std::thread::sleep(Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())));
+                std::thread::sleep(
+                    Duration::from_millis(20)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
-            Err(error)=>return Err(error),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -9445,8 +10070,11 @@ fn start_serve_with_capture(
     listener: Option<&std::net::TcpListener>,
     mut launch: ServeLaunch<'_>,
 ) -> io::Result<Companion> {
-    let startup_deadline=launch.startup_deadline.unwrap_or_else(||Instant::now()+Duration::from_secs(20));
-    let source=fs::metadata(binary)?;let executable=(source.dev(),source.ino());
+    let startup_deadline = launch
+        .startup_deadline
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(20));
+    let source = fs::metadata(binary)?;
+    let executable = (source.dev(), source.ino());
     let codex_capture = launch.diagnostic_capture
         || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").as_deref()
             == Some(std::ffi::OsStr::new("1"));
@@ -9472,7 +10100,9 @@ fn start_serve_with_capture(
     }
     let omp_capture = omp_receiver_capture || omp_backend_capture;
     if codex_capture && omp_capture {
-        return Err(failure("owned Codex and OMP diagnostic captures are mutually exclusive"));
+        return Err(failure(
+            "owned Codex and OMP diagnostic captures are mutually exclusive",
+        ));
     }
     if hello_capture && (omp_capture || codex_capture) {
         return Err(failure(
@@ -9510,7 +10140,10 @@ fn start_serve_with_capture(
                 .join("config"),
         );
     }
-    if let Some(fixture)=launch.project_read {fixture.current()?;fixture.environment(&mut c);}
+    if let Some(fixture) = launch.project_read {
+        fixture.current()?;
+        fixture.environment(&mut c);
+    }
     c.env("XDG_STATE_HOME", root.join("state"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -9543,9 +10176,21 @@ fn start_serve_with_capture(
     if let Some(capture) = launch.herdr_report_capture {
         capture.configure_companion(&mut c);
     }
-    if Instant::now()>=startup_deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original startup budget expired before spawn"));}
-    if let Some(pin) = launch.unit_authority { pin.serving_controller(Some(startup_deadline))?; }
-    if Instant::now()>=startup_deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original startup budget expired during unit qualification"));}
+    if Instant::now() >= startup_deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "original startup budget expired before spawn",
+        ));
+    }
+    if let Some(pin) = launch.unit_authority {
+        pin.serving_controller(Some(startup_deadline))?;
+    }
+    if Instant::now() >= startup_deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "original startup budget expired during unit qualification",
+        ));
+    }
     let inherited = if let Some(listener) = listener {
         let fd = listener.as_raw_fd();
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -9562,16 +10207,21 @@ fn start_serve_with_capture(
         use std::os::unix::process::CommandExt;
         c.process_group(0);
     }
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     if launch.unit_authority.is_none() {
         unsafe {
             use std::os::unix::process::CommandExt;
             c.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
         }
     }
-    let spawned = if Instant::now()>=startup_deadline {
-        Err(io::Error::new(io::ErrorKind::TimedOut,"original startup budget expired immediately before spawn"))
-    } else { c.spawn() };
+    let spawned = if Instant::now() >= startup_deadline {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "original startup budget expired immediately before spawn",
+        ))
+    } else {
+        c.spawn()
+    };
     let pin = if let (Some(hold), Ok(child)) = (launch.grid_hold.as_deref_mut(), &spawned) {
         hold.pin_child(child)
     } else {
@@ -9585,17 +10235,30 @@ fn start_serve_with_capture(
     }
     let mut child = spawned?;
     if launch.retain_process {
-        write_json(&root.join("admission-companion-spawn.json"),
+        write_json(
+            &root.join("admission-companion-spawn.json"),
             &json!({"pid":child.id(),"package":binary,"adminSocket":socket,
-                "scope":"fresh owned child; process proof pending; no automatic teardown"}))?;
+                "scope":"fresh owned child; process proof pending; no automatic teardown"}),
+        )?;
     }
-    let original=goatr::codex_relay::ProcessStart::capture(child.id())?;
-    let process=first_child_evidence(&mut child,&original,executable,startup_deadline.min(Instant::now()+Duration::from_secs(2)))?;
+    let original = goatr::codex_relay::ProcessStart::capture(child.id())?;
+    let process = first_child_evidence(
+        &mut child,
+        &original,
+        executable,
+        startup_deadline.min(Instant::now() + Duration::from_secs(2)),
+    )?;
     if launch.retain_process {
         let manifest = root.join("admission-companion.json");
-        write_json(&manifest, &json!({"process":process,"package":binary,"adminSocket":socket,
-            "scope":"retained fresh owned companion; cleanup requires original identity review"}))?;
-        println!("{}", json!({"gate":"admission-owned-companion","manifest":manifest}));
+        write_json(
+            &manifest,
+            &json!({"process":process,"package":binary,"adminSocket":socket,
+            "scope":"retained fresh owned companion; cleanup requires original identity review"}),
+        )?;
+        println!(
+            "{}",
+            json!({"gate":"admission-owned-companion","manifest":manifest})
+        );
     }
     let guard_drain = if capture {
         let stderr = child
@@ -9606,15 +10269,13 @@ fn start_serve_with_capture(
             let progress = Arc::new(CodexDrainProgress::default());
             let worker_progress = progress.clone();
             Some(GuardDrain::Codex {
-                worker: std::thread::spawn(move || {
-                    drain_codex_guard(stderr, &worker_progress)
-                }),
+                worker: std::thread::spawn(move || drain_codex_guard(stderr, &worker_progress)),
                 progress,
             })
         } else {
             Some(GuardDrain::Other(std::thread::spawn(move || {
                 if hello_capture {
-                drain_hello_guard(stderr);
+                    drain_hello_guard(stderr);
                 } else if let Some(budget) = drain_budget {
                     drain_omp_guard(stderr, budget);
                 }
@@ -9659,9 +10320,16 @@ async fn healthy(serve: &mut Companion, socket: &Path) -> io::Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
-fn physical_relay_bind_port(ephemeral: bool, physical: bool, mode: OwnedOmpCaptureMode, other_capture: bool) -> io::Result<u16> {
+fn physical_relay_bind_port(
+    ephemeral: bool,
+    physical: bool,
+    mode: OwnedOmpCaptureMode,
+    other_capture: bool,
+) -> io::Result<u16> {
     if ephemeral && (!physical || mode != OwnedOmpCaptureMode::Backend || other_capture) {
-        return Err(failure("ephemeral physical relay requires only the owned OMP Backend capture"));
+        return Err(failure(
+            "ephemeral physical relay requires only the owned OMP Backend capture",
+        ));
     }
     Ok(if ephemeral { 0 } else { 7466 })
 }
@@ -9671,8 +10339,10 @@ fn physical_relay_request(args: &clap::ArgMatches) -> io::Result<u16> {
         args.get_flag("physical-hello-capture"),
         selected_omp_capture_mode(),
         owned_hello_capture_requested()
-            || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").as_deref() == Some(std::ffi::OsStr::new("1"))
-            || std::env::var_os("GOATR_OWNED_OMP_PRODUCER_CAPTURE").as_deref() == Some(std::ffi::OsStr::new("1")),
+            || std::env::var_os("GOATR_OWNED_CODEX_DIAGNOSTIC").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            || std::env::var_os("GOATR_OWNED_OMP_PRODUCER_CAPTURE").as_deref()
+                == Some(std::ffi::OsStr::new("1")),
     )
 }
 async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
@@ -9698,7 +10368,9 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
     )?;
     let config = Config::load(&config_path)?;
     if omp_backend_capture && config.herdr_sockets.len() != 1 {
-        return Err(failure("owned OMP coarse capture requires exactly one configured Herdr socket"));
+        return Err(failure(
+            "owned OMP coarse capture requires exactly one configured Herdr socket",
+        ));
     }
     private_dir(&config.runtime_dir, false)?;
     let root = config
@@ -9800,7 +10472,9 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
             Err(error) => return Err(error),
         }
         if Instant::now() >= deadline {
-            return Err(failure("physical Hello owned serve socket was not observed"));
+            return Err(failure(
+                "physical Hello owned serve socket was not observed",
+            ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -9808,7 +10482,10 @@ async fn physical_hello_capture(args: &clap::ArgMatches, evidence: &Path) -> io:
         &evidence.join(format!("physical-hello-capture-spawn-{}.json", run.0)),
         &json!({"runId":run,"parent":record.parent,"relayOwner":identity(&relay_owner)?,"listener":record,"companion":serve.process,"adminSocket":identity(&socket)?,"config":identity(&config_path)?,"stateHome":identity(&root.join("state"))?,"scope":"original parent and inherited relay FD retained until explicit termination"}),
     )?;
-    println!("{}", json!({"gate":"physical-hello-capture","status":"ready","runId":run,"adminSocket":identity(&socket)?,"scope":"ordinary paired-phone serve; first accepted connection diagnostic only"}));
+    println!(
+        "{}",
+        json!({"gate":"physical-hello-capture","status":"ready","runId":run,"adminSocket":identity(&socket)?,"scope":"ordinary paired-phone serve; first accepted connection diagnostic only"})
+    );
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
@@ -9836,25 +10513,44 @@ async fn pair(
     endpoint: &iroh::Endpoint,
     deadline: Option<Instant>,
 ) -> io::Result<Phone> {
-    if deadline.is_some_and(|deadline|Instant::now()>=deadline){return Err(io::Error::new(io::ErrorKind::TimedOut,"original pairing deadline expired before worker spawn"));}
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "original pairing deadline expired before worker spawn",
+        ));
+    }
     let b = binary.to_owned();
     let r = root.to_owned();
     let s = socket.to_owned();
-    let mut uri = tokio::task::spawn_blocking(move || terminal_pair(&b, Some(&r), Some(&s),deadline))
-        .await
-        .map_err(|_| {
-            failure("phone setup failed: phase=phone_pair; guard=task_join; no retry")
-        })??;
+    let mut uri =
+        tokio::task::spawn_blocking(move || terminal_pair(&b, Some(&r), Some(&s), deadline))
+            .await
+            .map_err(|_| {
+                failure("phone setup failed: phase=phone_pair; guard=task_join; no retry")
+            })??;
     let invite =
         PairInvite::parse(&uri).map_err(|_| failure("actual private pair URI rejected"))?;
     unsafe { uri.as_bytes_mut().fill(0) };
     uri.clear();
     let host = invite.host.clone();
-    if let Some(deadline)=deadline {
-        if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pairing deadline expired before connection"));}
-        tokio::time::timeout_at(deadline.into(),connect(endpoint,&host,Some(invite))).await
-            .map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"original pairing connection deadline"))?
-    } else { connect(endpoint, &host, Some(invite)).await }
+    if let Some(deadline) = deadline {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "original pairing deadline expired before connection",
+            ));
+        }
+        tokio::time::timeout_at(deadline.into(), connect(endpoint, &host, Some(invite)))
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "original pairing connection deadline",
+                )
+            })?
+    } else {
+        connect(endpoint, &host, Some(invite)).await
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -9924,7 +10620,6 @@ pub(super) fn write_feedback_presentation(
     )
 }
 
-
 async fn create(
     phone: &mut Phone,
     config: &Config,
@@ -9949,9 +10644,10 @@ async fn create_feedback(
     evidence: &Path,
     run: &Uuid,
 ) -> io::Result<(NativeProof, Receipt, FeedbackPresentation)> {
-    let (session, receipt, presentation) =
-        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None, None)
-            .await?;
+    let (session, receipt, presentation) = create_session_presented(
+        phone, config, socket, provider, server, evidence, run, true, None, None,
+    )
+    .await?;
     let session = session.ok_or_else(|| non_succeeded_creation_error(provider, &receipt))?;
     let p = proof(config, socket, &session, None).await?;
     Ok((
@@ -9968,11 +10664,15 @@ async fn create_omp_creation_diagnostic(
     run: &Uuid,
 ) -> io::Result<Receipt> {
     let id = Uuid::random();
-    let params = SessionCreateParams { directory_ref: None, placement: None, boot_id: phone.hello.boot_id.clone(),
-    server_id: server.clone(),
-    project_id: config.projects[0].id.clone(),
-    provider: Provider::Omp,
-    name: Label::new(format!("owned-Omp-{}", &id.0[..8])).map_err(io::Error::other)?, };
+    let params = SessionCreateParams {
+        directory_ref: None,
+        placement: None,
+        boot_id: phone.hello.boot_id.clone(),
+        server_id: server.clone(),
+        project_id: config.projects[0].id.clone(),
+        provider: Provider::Omp,
+        name: Label::new(format!("owned-Omp-{}", &id.0[..8])).map_err(io::Error::other)?,
+    };
     let initial = receipt_result(
         phone
             .request_at(
@@ -9988,7 +10688,10 @@ async fn create_omp_creation_diagnostic(
                 ))
             })?,
     )?;
-    let receipt = if matches!(initial.state, ReceiptState::Reserved | ReceiptState::Dispatching) {
+    let receipt = if matches!(
+        initial.state,
+        ReceiptState::Reserved | ReceiptState::Dispatching
+    ) {
         phone.creation_settled(&id, Provider::Omp).await?
     } else {
         initial
@@ -10053,9 +10756,10 @@ async fn create_session_feedback(
     evidence: &Path,
     run: &Uuid,
 ) -> io::Result<(SessionSummary, Receipt, FeedbackPresentation)> {
-    let (session, receipt, presentation) =
-        create_session_presented(phone, config, socket, provider, server, evidence, run, true, None, None)
-            .await?;
+    let (session, receipt, presentation) = create_session_presented(
+        phone, config, socket, provider, server, evidence, run, true, None, None,
+    )
+    .await?;
     let session = session.ok_or_else(|| non_succeeded_creation_error(provider, &receipt))?;
     Ok((
         session,
@@ -10098,17 +10802,25 @@ async fn create_session_presented(
     feedback_presentation: bool,
     mut startup_journal: Option<&mut Companion>,
     admitted: Option<&AdmittedSource>,
-) -> io::Result<(Option<SessionSummary>, Receipt, Option<FeedbackPresentation>)> {
-    if let Some(admitted)=admitted {
-        if &admitted.identity.0!=server {
-            return Err(prerequisite("creation server differs from the admitted original"));
+) -> io::Result<(
+    Option<SessionSummary>,
+    Receipt,
+    Option<FeedbackPresentation>,
+)> {
+    if let Some(admitted) = admitted {
+        if &admitted.identity.0 != server {
+            return Err(prerequisite(
+                "creation server differs from the admitted original",
+            ));
         }
         admitted.recheck()?;
     }
     let (before_source, before) = surface(socket).await?;
-    if let Some(admitted)=admitted {
-        if before_source!=admitted.client.evidence {
-            return Err(prerequisite("original creation socket/process source changed"));
+    if let Some(admitted) = admitted {
+        if before_source != admitted.client.evidence {
+            return Err(prerequisite(
+                "original creation socket/process source changed",
+            ));
         }
         admitted.recheck()?;
     }
@@ -10121,11 +10833,15 @@ async fn create_session_presented(
         .await
         .map_err(GeometryFailure::into_io)?;
     let id = Uuid::random();
-    let params = SessionCreateParams { directory_ref: None, placement: None, boot_id: phone.hello.boot_id.clone(),
-    server_id: server.clone(),
-    project_id: config.projects[0].id.clone(),
-    provider,
-    name: Label::new(format!("owned-{provider:?}-{}", &id.0[..8])).map_err(io::Error::other)?, };
+    let params = SessionCreateParams {
+        directory_ref: None,
+        placement: None,
+        boot_id: phone.hello.boot_id.clone(),
+        server_id: server.clone(),
+        project_id: config.projects[0].id.clone(),
+        provider,
+        name: Label::new(format!("owned-{provider:?}-{}", &id.0[..8])).map_err(io::Error::other)?,
+    };
     // Earlier provider activity can invalidate coarse topology eligibility. Wait only
     // before this action's first submission; dispatch still owns all native guards.
     let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -10139,9 +10855,11 @@ async fn create_session_presented(
                 break false;
             }
         };
-        let original_current=if let Some(admitted)=admitted {
-            admitted.observation(&before_source,&before,&inventory)?
-        } else {true};
+        let original_current = if let Some(admitted) = admitted {
+            admitted.observation(&before_source, &before, &inventory)?
+        } else {
+            true
+        };
         observed = inventory
             .servers
             .iter()
@@ -10158,9 +10876,11 @@ async fn create_session_presented(
         if tokio::time::Instant::now() >= admission_deadline {
             break false;
         }
-        if original_current && observed.is_some_and(|(connectivity, can_create)| {
-            connectivity == ServerConnectivity::Online && can_create
-        }) {
+        if original_current
+            && observed.is_some_and(|(connectivity, can_create)| {
+                connectivity == ServerConnectivity::Online && can_create
+            })
+        {
             break true;
         }
         tokio::time::sleep_until(
@@ -10184,7 +10904,9 @@ async fn create_session_presented(
     if let Some(companion) = startup_journal.as_mut() {
         companion.pin_codex_startup_journal(&id);
     }
-    if let Some(admitted)=admitted {admitted.recheck()?;}
+    if let Some(admitted) = admitted {
+        admitted.recheck()?;
+    }
     let r = receipt_result(
         phone
             .request_at(
@@ -10277,10 +10999,15 @@ async fn prompt_and_stop(
         phone
             .request(
                 id.clone(),
-                RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
-                delivery: None, native_turn_id: None, images: None,
-                target: p.target.clone(),
-                text: PromptText(text), }),
+                RequestBody::PromptSubmit(PromptSubmitParams {
+                    skill: None,
+                    boot_id: phone.hello.boot_id.clone(),
+                    delivery: None,
+                    native_turn_id: None,
+                    images: None,
+                    target: p.target.clone(),
+                    text: PromptText(text),
+                }),
             )
             .await?
             .map_err(|e| failure(&format!("actual native prompt rejected: {:?}", e.code)))?,
@@ -10295,26 +11022,36 @@ async fn prompt_and_stop(
     let desktop = format!("goatr-desktop-{}-{:?}", &run.0[..8], p.provider);
     inputs.marker(phone, p, &desktop).await?;
     wait_history(phone, &p.target, &desktop, false).await?;
-    let stop=stop_current_work(phone,p).await?;
-    let Value::Object(stop)=stop else {return Err(failure("Stop evidence object absent"));};
-    let mut result=json!({"prompt":id,"receipt":receipt,"mobileMarker":marker,"desktopMarker":desktop,
+    let stop = stop_current_work(phone, p).await?;
+    let Value::Object(stop) = stop else {
+        return Err(failure("Stop evidence object absent"));
+    };
+    let mut result = json!({"prompt":id,"receipt":receipt,"mobileMarker":marker,"desktopMarker":desktop,
         "historyIds":history.history.iter().map(|r|&r.id).collect::<Vec<_>>(),
         "toolObserved":history.history.iter().any(|r|r.tool.is_some()),
         "scope":"real native operations, payloads not retained; no OMP acknowledgment/winner fabricated"});
-    result.as_object_mut().expect("prompt evidence").extend(stop);
+    result
+        .as_object_mut()
+        .expect("prompt evidence")
+        .extend(stop);
     Ok(result)
 }
-async fn stop_current_work(phone: &mut Phone,p: &NativeProof) -> io::Result<Value> {
+async fn stop_current_work(phone: &mut Phone, p: &NativeProof) -> io::Result<Value> {
     let stop_prompt = Uuid::random();
     phone
         .request(
             stop_prompt.clone(),
-            RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
-            delivery: None, native_turn_id: None, images: None,
-            target: p.target.clone(),
-            text: PromptText(
-                "Run the native shell tool sleep 30, then report done; no file changes.".into(),
-            ), }),
+            RequestBody::PromptSubmit(PromptSubmitParams {
+                skill: None,
+                boot_id: phone.hello.boot_id.clone(),
+                delivery: None,
+                native_turn_id: None,
+                images: None,
+                target: p.target.clone(),
+                text: PromptText(
+                    "Run the native shell tool sleep 30, then report done; no file changes.".into(),
+                ),
+            }),
         )
         .await?
         .map_err(|_| failure("actual native current-work prompt rejected"))?;
@@ -10422,41 +11159,59 @@ async fn stop_current_work(phone: &mut Phone,p: &NativeProof) -> io::Result<Valu
     )
 }
 
-const SHARED_HISTORY_LIMIT:u64=2;
-const SHARED_HISTORY_ADVANCES:usize=31;
+const SHARED_HISTORY_LIMIT: u64 = 2;
+const SHARED_HISTORY_ADVANCES: usize = 31;
 struct SharedAgentContext<'a> {
     inputs: NativeInputs<'a>,
     companion: &'a Companion,
     endpoint: &'a iroh::Endpoint,
     source: &'a AdmittedSource,
 }
-fn shared_summary_matches(summary: &SessionSummary,original: &NativeProof) -> bool {
-    target(summary)==original.target && summary.provider==original.provider
-        && summary.native_id==original.native && summary.workspace_id==original.workspace
-        && summary.pane_id==original.pane && summary.terminal_id==original.terminal
+fn shared_summary_matches(summary: &SessionSummary, original: &NativeProof) -> bool {
+    target(summary) == original.target
+        && summary.provider == original.provider
+        && summary.native_id == original.native
+        && summary.workspace_id == original.workspace
+        && summary.pane_id == original.pane
+        && summary.terminal_id == original.terminal
 }
-fn shared_user_record<'a>(records: &'a [HistoryRecord],marker: &str) -> io::Result<Option<&'a HistoryRecord>> {
-    let mut matching=records.iter().filter(|record|record.role==Role::User && record.complete
-        && matches!(&record.text,Some(Content::Text(text)) if text.text.0.contains(marker)));
-    let first=matching.next();
+fn shared_user_record<'a>(
+    records: &'a [HistoryRecord],
+    marker: &str,
+) -> io::Result<Option<&'a HistoryRecord>> {
+    let mut matching = records.iter().filter(|record| {
+        record.role == Role::User
+            && record.complete
+            && matches!(&record.text,Some(Content::Text(text)) if text.text.0.contains(marker))
+    });
+    let first = matching.next();
     if matching.next().is_some() {
-        return Err(failure("shared-agent original prompt appeared more than once; no replay"));
+        return Err(failure(
+            "shared-agent original prompt appeared more than once; no replay",
+        ));
     }
     Ok(first)
 }
 async fn shared_prompt(
-    phone: &mut Phone,p: &NativeProof,inputs: &NativeInputs<'_>,marker: &str,
-) -> io::Result<(Receipt,Id,Value)> {
-    inputs.idle(phone,p).await?;
-    inputs.current(phone,p).await?;
-    let initial=phone.start_generation(&p.target).await?;
-    if !shared_summary_matches(&initial.state.summary,p)
-        || initial.state.summary.connectivity!=SessionConnectivity::Ready
-        || initial.state.summary.status!=SessionStatus::Idle || !initial.pending_requests.is_empty() {
-        return Err(prerequisite("shared-agent original is not Ready/Idle before its fresh prompt"));
+    phone: &mut Phone,
+    p: &NativeProof,
+    inputs: &NativeInputs<'_>,
+    marker: &str,
+) -> io::Result<(Receipt, Id, Value)> {
+    inputs.idle(phone, p).await?;
+    inputs.current(phone, p).await?;
+    let initial = phone.start_generation(&p.target).await?;
+    if !shared_summary_matches(&initial.state.summary, p)
+        || initial.state.summary.connectivity != SessionConnectivity::Ready
+        || initial.state.summary.status != SessionStatus::Idle
+        || !initial.pending_requests.is_empty()
+    {
+        return Err(prerequisite(
+            "shared-agent original is not Ready/Idle before its fresh prompt",
+        ));
     }
-    let deadline=tokio::time::Instant::now()+Duration::from_secs(180);
-    let action=Uuid::random();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    let action = Uuid::random();
     let receipt=receipt_result(phone.request(action.clone(),RequestBody::PromptSubmit(PromptSubmitParams {
         delivery: None, native_turn_id: None, images: None,
         skill:None,boot_id:phone.hello.boot_id.clone(),target:p.target.clone(),
@@ -10464,162 +11219,287 @@ async fn shared_prompt(
             "In this exact existing session, run the native shell tool once to execute printf '%s\\n' '{marker}'. Do not write files or create/switch sessions. Then repeat {marker} in your reply."
         )),
     })).await?.map_err(|_|failure("shared-agent original prompt rejected; no retry"))?)?;
-    let receipt=if matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Dispatching) {
-        tokio::time::timeout_at(deadline,phone.settled(&action)).await
-            .map_err(|_|prerequisite("shared-agent original prompt receipt did not settle"))??
-    } else {receipt};
-    if receipt.action_id!=action || receipt.target.as_ref()!=Some(&p.target)
-        || receipt.method!=ActionMethod::PromptSubmit || receipt.error.is_some()
-        || !matches!(receipt.state,ReceiptState::Dispatched|ReceiptState::Succeeded) {
-        return Err(prerequisite("shared-agent original prompt did not dispatch"));
+    let receipt = if matches!(
+        receipt.state,
+        ReceiptState::Reserved | ReceiptState::Dispatching
+    ) {
+        tokio::time::timeout_at(deadline, phone.settled(&action))
+            .await
+            .map_err(|_| prerequisite("shared-agent original prompt receipt did not settle"))??
+    } else {
+        receipt
+    };
+    if receipt.action_id != action
+        || receipt.target.as_ref() != Some(&p.target)
+        || receipt.method != ActionMethod::PromptSubmit
+        || receipt.error.is_some()
+        || !matches!(
+            receipt.state,
+            ReceiptState::Dispatched | ReceiptState::Succeeded
+        )
+    {
+        return Err(prerequisite(
+            "shared-agent original prompt did not dispatch",
+        ));
     }
-    let user=loop {
+    let user = loop {
         p.recheck_processes()?;
-        let view=phone.generation.as_ref().ok_or_else(||failure("shared-agent original stream absent"))?;
-        if view.failed || !shared_summary_matches(&view.snapshot.state.summary,p) {
-            return Err(failure("shared-agent original stream changed; no resnapshot"));
+        let view = phone
+            .generation
+            .as_ref()
+            .ok_or_else(|| failure("shared-agent original stream absent"))?;
+        if view.failed || !shared_summary_matches(&view.snapshot.state.summary, p) {
+            return Err(failure(
+                "shared-agent original stream changed; no resnapshot",
+            ));
         }
-        let tool=dev_continuity::completed_tool_output_state(&view.snapshot.history,marker);
-        if tool==dev_continuity::ToolOutputMarkerState::Rejected {
-            return Err(prerequisite("shared-agent completed native tool output failed or was ambiguous"));
+        let tool = dev_continuity::completed_tool_output_state(&view.snapshot.history, marker);
+        if tool == dev_continuity::ToolOutputMarkerState::Rejected {
+            return Err(prerequisite(
+                "shared-agent completed native tool output failed or was ambiguous",
+            ));
         }
-        let assistant=view.snapshot.history.iter().any(|record|record.role==Role::Assistant&&record.complete
-            && matches!(&record.text,Some(Content::Text(text)) if text.text.0.contains(marker)));
-        if view.streamed_text && view.streamed_tool && assistant
-            && tool==dev_continuity::ToolOutputMarkerState::Ready
-            && view.snapshot.state.summary.connectivity==SessionConnectivity::Ready
-            && view.snapshot.state.summary.status==SessionStatus::Idle
+        let assistant = view.snapshot.history.iter().any(|record| {
+            record.role == Role::Assistant
+                && record.complete
+                && matches!(&record.text,Some(Content::Text(text)) if text.text.0.contains(marker))
+        });
+        if view.streamed_text
+            && view.streamed_tool
+            && assistant
+            && tool == dev_continuity::ToolOutputMarkerState::Ready
+            && view.snapshot.state.summary.connectivity == SessionConnectivity::Ready
+            && view.snapshot.state.summary.status == SessionStatus::Idle
             && view.snapshot.pending_requests.is_empty()
-            && let Some(user)=shared_user_record(&view.snapshot.history,marker)? {
+            && let Some(user) = shared_user_record(&view.snapshot.history, marker)?
+        {
             break user.id.clone();
         }
         tokio::time::timeout_at(deadline,phone.generation_event()).await
             .map_err(|_|prerequisite("shared-agent real text/tool stream did not complete within its observation budget"))??;
     };
-    let latest=phone.finish_generation(&p.target).await?;
-    if !shared_summary_matches(&latest.state.summary,p)
-        || shared_user_record(&latest.history,marker)?.map(|record|&record.id)!=Some(&user) {
-        return Err(failure("shared-agent latest snapshot lost or duplicated its original prompt"));
+    let latest = phone.finish_generation(&p.target).await?;
+    if !shared_summary_matches(&latest.state.summary, p)
+        || shared_user_record(&latest.history, marker)?.map(|record| &record.id) != Some(&user)
+    {
+        return Err(failure(
+            "shared-agent latest snapshot lost or duplicated its original prompt",
+        ));
     }
-    inputs.current(phone,p).await?;
-    let evidence=json!({"action":action,"receiptState":receipt.state,"originalUserRecord":user,
+    inputs.current(phone, p).await?;
+    let evidence = json!({"action":action,"receiptState":receipt.state,"originalUserRecord":user,
         "textEventsObserved":true,"toolEventsObserved":true,"completedNativeToolOutputObserved":true});
-    Ok((receipt,user,evidence))
+    Ok((receipt, user, evidence))
 }
-async fn shared_history_witness(phone: &mut Phone,p: &NativeProof,inputs: &NativeInputs<'_>) -> io::Result<Id> {
-    inputs.idle(phone,p).await?;
-    let mut witness=if p.provider==Provider::Codex {
-        let mut witness=paging_proof::Witness::connect(p,inputs).await?;
-        witness.admit(p,false).await?;
+async fn shared_history_witness(
+    phone: &mut Phone,
+    p: &NativeProof,
+    inputs: &NativeInputs<'_>,
+) -> io::Result<Id> {
+    inputs.idle(phone, p).await?;
+    let mut witness = if p.provider == Provider::Codex {
+        let mut witness = paging_proof::Witness::connect(p, inputs).await?;
+        witness.admit(p, false).await?;
         Some(witness)
-    } else {None};
-    let initial=phone.start_generation(&p.target).await?;
-    if !shared_summary_matches(&initial.state.summary,p)
-        || initial.state.summary.connectivity!=SessionConnectivity::Ready
-        || initial.state.summary.status!=SessionStatus::Idle || !initial.pending_requests.is_empty() {
-        return Err(prerequisite("shared-agent history witness lacks original idle state"));
+    } else {
+        None
+    };
+    let initial = phone.start_generation(&p.target).await?;
+    if !shared_summary_matches(&initial.state.summary, p)
+        || initial.state.summary.connectivity != SessionConnectivity::Ready
+        || initial.state.summary.status != SessionStatus::Idle
+        || !initial.pending_requests.is_empty()
+    {
+        return Err(prerequisite(
+            "shared-agent history witness lacks original idle state",
+        ));
     }
-    let marker=format!("goatr-shared-earlier-{}-{:?}",&inputs.run.0[..8],p.provider);
-    let command=format!("printf '%s\\n' '{marker}'");
-    let started=Instant::now();
-    let deadline=history_command_deadline(false,p.provider,started+Duration::from_secs(30),started);
-    phone.history_command=Some(HistoryCommandTrace::default());
-    if let Some(observer)=&p.omp_observer {
+    let marker = format!(
+        "goatr-shared-earlier-{}-{:?}",
+        &inputs.run.0[..8],
+        p.provider
+    );
+    let command = format!("printf '%s\\n' '{marker}'");
+    let started = Instant::now();
+    let deadline = history_command_deadline(
+        false,
+        p.provider,
+        started + Duration::from_secs(30),
+        started,
+    );
+    phone.history_command = Some(HistoryCommandTrace::default());
+    if let Some(observer) = &p.omp_observer {
         observer.healthy(&p.target)?;
-        observer.state.lock().register(&command,&marker,deadline)?;
+        observer
+            .state
+            .lock()
+            .register(&command, &marker, deadline)?;
     }
-    let completion=tokio::time::timeout_at(deadline.into(),async {
-        inputs.send(phone,p,NativeInput::Prompt(&format!("!{command}")),None,"shared_earlier_witness").await?;
-        if let Some(witness)=witness.as_mut() {
-            let ((snapshot,id),(native,turn))=tokio::try_join!(
-                inputs.shell_completed(phone,p,&command,&marker),
-                witness.completed(p,&command,&marker,deadline.into())
+    let completion = tokio::time::timeout_at(deadline.into(), async {
+        inputs
+            .send(
+                phone,
+                p,
+                NativeInput::Prompt(&format!("!{command}")),
+                None,
+                "shared_earlier_witness",
+            )
+            .await?;
+        if let Some(witness) = witness.as_mut() {
+            let ((snapshot, id), (native, turn)) = tokio::try_join!(
+                inputs.shell_completed(phone, p, &command, &marker),
+                witness.completed(p, &command, &marker, deadline.into())
             )?;
-            if id!=native || snapshot.history.iter().find(|record|record.id==id)
-                .and_then(|record|record.turn_id.as_ref())!=Some(&turn) {
-                return Err(failure("shared-agent independent native completion IDs disagree"));
+            if id != native
+                || snapshot
+                    .history
+                    .iter()
+                    .find(|record| record.id == id)
+                    .and_then(|record| record.turn_id.as_ref())
+                    != Some(&turn)
+            {
+                return Err(failure(
+                    "shared-agent independent native completion IDs disagree",
+                ));
             }
             Ok(id)
         } else {
-            if p.omp_observer.is_none() {return Err(prerequisite("shared-agent independent OMP observer absent"));}
-            Ok(inputs.shell_completed(phone,p,&command,&marker).await?.1)
+            if p.omp_observer.is_none() {
+                return Err(prerequisite("shared-agent independent OMP observer absent"));
+            }
+            Ok(inputs.shell_completed(phone, p, &command, &marker).await?.1)
         }
-    }).await;
-    phone.history_command=None;
-    let id=completion.map_err(|_|prerequisite("shared-agent earlier native witness deadline; no command replay"))??;
+    })
+    .await;
+    phone.history_command = None;
+    let id = completion.map_err(|_| {
+        prerequisite("shared-agent earlier native witness deadline; no command replay")
+    })??;
     phone.finish_generation(&p.target).await?;
     p.recheck_processes()?;
     Ok(id)
 }
 fn shared_history_page(
-    page: &SessionHistoryResult,view: &Uuid,source: RecordSource,
-    previous: Option<u64>,seen: &mut HashSet<Id>,
+    page: &SessionHistoryResult,
+    view: &Uuid,
+    source: RecordSource,
+    previous: Option<u64>,
+    seen: &mut HashSet<Id>,
 ) -> io::Result<Option<u64>> {
-    if page.view_id!=*view || page.records.len()>SHARED_HISTORY_LIMIT as usize
-        || page.records.windows(2).any(|pair|pair[0].order.0>=pair[1].order.0)
-        || previous.is_some_and(|oldest|page.records.last().is_some_and(|row|row.order.0>=oldest)) {
-        return Err(failure("shared-agent native browse view/order/page bound changed"));
+    if page.view_id != *view
+        || page.records.len() > SHARED_HISTORY_LIMIT as usize
+        || page
+            .records
+            .windows(2)
+            .any(|pair| pair[0].order.0 >= pair[1].order.0)
+        || previous
+            .is_some_and(|oldest| page.records.last().is_some_and(|row| row.order.0 >= oldest))
+    {
+        return Err(failure(
+            "shared-agent native browse view/order/page bound changed",
+        ));
     }
     for row in &page.records {
-        if !row.complete || row.source!=source || !seen.insert(row.id.clone()) {
-            return Err(failure("shared-agent older page was incomplete, duplicated or not native"));
+        if !row.complete || row.source != source || !seen.insert(row.id.clone()) {
+            return Err(failure(
+                "shared-agent older page was incomplete, duplicated or not native",
+            ));
         }
     }
-    Ok(page.records.first().map(|row|row.order.0).or(previous))
+    Ok(page.records.first().map(|row| row.order.0).or(previous))
 }
 async fn shared_history(
-    phone: &mut Phone,p: &NativeProof,inputs: &NativeInputs<'_>,witness: &Id,
+    phone: &mut Phone,
+    p: &NativeProof,
+    inputs: &NativeInputs<'_>,
+    witness: &Id,
 ) -> io::Result<Value> {
-    inputs.current(phone,p).await?;
-    let deadline=tokio::time::Instant::now()+Duration::from_secs(120);
-    let ResultBody::SessionHistory(head)=tokio::time::timeout_at(deadline,phone.rpc(
-        RequestBody::SessionHistory(SessionHistoryParams{target:p.target.clone(),view_id:None,cursor:None,
-            limit:Some(Uint(SHARED_HISTORY_LIMIT))}),"shared_history_head"
-    )).await.map_err(|_|prerequisite("shared-agent native browse deadline"))?? else {
+    inputs.current(phone, p).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let ResultBody::SessionHistory(head) = tokio::time::timeout_at(
+        deadline,
+        phone.rpc(
+            RequestBody::SessionHistory(SessionHistoryParams {
+                target: p.target.clone(),
+                view_id: None,
+                cursor: None,
+                limit: Some(Uint(SHARED_HISTORY_LIMIT)),
+            }),
+            "shared_history_head",
+        ),
+    )
+    .await
+    .map_err(|_| prerequisite("shared-agent native browse deadline"))??
+    else {
         return Err(failure("shared-agent history head result mismatch"));
     };
-    let source=if p.provider==Provider::Omp {RecordSource::Persisted} else {RecordSource::NativePage};
-    let mut seen=HashSet::new();
-    let mut boundary=shared_history_page(&head,&head.view_id,source,None,&mut seen)?;
-    let mut cursor=head.next_cursor;
-    let mut cursors=HashSet::new();
-    let mut older_pages=0;
-    let mut witnessed=false;
+    let source = if p.provider == Provider::Omp {
+        RecordSource::Persisted
+    } else {
+        RecordSource::NativePage
+    };
+    let mut seen = HashSet::new();
+    let mut boundary = shared_history_page(&head, &head.view_id, source, None, &mut seen)?;
+    let mut cursor = head.next_cursor;
+    let mut cursors = HashSet::new();
+    let mut older_pages = 0;
+    let mut witnessed = false;
     for _ in 0..SHARED_HISTORY_ADVANCES {
-        let Some(next)=cursor else {break};
-        if !cursors.insert(next.clone()) {return Err(failure("shared-agent native cursor cycle"));}
+        let Some(next) = cursor else { break };
+        if !cursors.insert(next.clone()) {
+            return Err(failure("shared-agent native cursor cycle"));
+        }
         p.recheck_processes()?;
-        let ResultBody::SessionHistory(page)=tokio::time::timeout_at(deadline,phone.rpc(
-            RequestBody::SessionHistory(SessionHistoryParams{target:p.target.clone(),view_id:Some(head.view_id.clone()),
-                cursor:Some(next),limit:Some(Uint(SHARED_HISTORY_LIMIT))}),"shared_history_older"
-        )).await.map_err(|_|prerequisite("shared-agent native browse deadline"))?? else {
+        let ResultBody::SessionHistory(page) = tokio::time::timeout_at(
+            deadline,
+            phone.rpc(
+                RequestBody::SessionHistory(SessionHistoryParams {
+                    target: p.target.clone(),
+                    view_id: Some(head.view_id.clone()),
+                    cursor: Some(next),
+                    limit: Some(Uint(SHARED_HISTORY_LIMIT)),
+                }),
+                "shared_history_older",
+            ),
+        )
+        .await
+        .map_err(|_| prerequisite("shared-agent native browse deadline"))??
+        else {
             return Err(failure("shared-agent older history result mismatch"));
         };
-        boundary=shared_history_page(&page,&head.view_id,source,boundary,&mut seen)?;
+        boundary = shared_history_page(&page, &head.view_id, source, boundary, &mut seen)?;
         if !page.records.is_empty() {
-            older_pages+=1;
-            witnessed|=page.records.iter().any(|row|&row.id==witness);
+            older_pages += 1;
+            witnessed |= page.records.iter().any(|row| &row.id == witness);
         }
-        cursor=page.next_cursor;
-        if older_pages>=2 && witnessed {
-            inputs.current(phone,p).await?;
-            return Ok(json!({"viewId":head.view_id,"genuineOlderPages":older_pages,
+        cursor = page.next_cursor;
+        if older_pages >= 2 && witnessed {
+            inputs.current(phone, p).await?;
+            return Ok(
+                json!({"viewId":head.view_id,"genuineOlderPages":older_pages,
                 "earlierNativeRecord":witness,"source":source,"boundedRecords":seen.len(),
-                "nativeFixtureCommands":1,"retentionBoundaryClaimed":false}));
+                "nativeFixtureCommands":1,"retentionBoundaryClaimed":false}),
+            );
         }
     }
-    Err(prerequisite("shared-agent two genuine older pages and independently witnessed earlier record unavailable within bound"))
+    Err(prerequisite(
+        "shared-agent two genuine older pages and independently witnessed earlier record unavailable within bound",
+    ))
 }
-async fn shared_agent_flow(mut phone: Phone,selected: &[Provider],context: SharedAgentContext<'_>) -> io::Result<bool> {
-    let inputs=&context.inputs;
-    let host=phone.hello.host_id.clone();
-    let boot=phone.hello.boot_id.clone();
-    let device=phone.hello.device_id.clone();
-    let mut originals=Vec::new();
-    let mut observations=Vec::new();
-    let mut completed=HashSet::new();
-    let mut active=None;
-    let mut phase="creation";
+async fn shared_agent_flow(
+    mut phone: Phone,
+    selected: &[Provider],
+    context: SharedAgentContext<'_>,
+) -> io::Result<bool> {
+    let inputs = &context.inputs;
+    let host = phone.hello.host_id.clone();
+    let boot = phone.hello.boot_id.clone();
+    let device = phone.hello.device_id.clone();
+    let mut originals = Vec::new();
+    let mut observations = Vec::new();
+    let mut completed = HashSet::new();
+    let mut active = None;
+    let mut phase = "creation";
     let result:io::Result<()>=async {
         dev_continuity::zero_native_caps(inputs.herdr)?;
         for provider in selected.iter().copied() {
@@ -10717,7 +11597,7 @@ async fn shared_agent_flow(mut phone: Phone,selected: &[Provider],context: Share
         phone.connection.close(0u32.into(),b"finite shared-agent scenario complete; no action replay");
         Ok(())
     }.await;
-    let available=result.is_ok();
+    let available = result.is_ok();
     let results=selected.iter().map(|provider|json!({"gate":"shared-agent-only","runId":inputs.run,
         "provider":provider,"status":if completed.contains(provider)&&available {"passed"} else {"unavailable"},
         "reason":if available {"completed"} else if active.is_none()||active==Some(*provider) {
@@ -10725,14 +11605,21 @@ async fn shared_agent_flow(mut phone: Phone,selected: &[Provider],context: Share
         } else {"scenario_stopped_after_other_boundary"},
         "phase":if available {"complete"} else {phase},
     })).collect::<Vec<_>>();
-    let boundary=result.as_ref().err().map(super::helper_error_metadata);
-    write_json(&inputs.evidence.join(format!("shared-agent-{}.json",inputs.run.0)),&json!({
-        "runId":inputs.run,"results":results,"boundary":boundary,"observations":observations,
-        "originals":originals.iter().map(NativeProof::evidence).collect::<Vec<_>>(),
-        "resourcesRetained":true,"androidAcceptance":false,"retentionBoundaryClaimed":false,
-        "scope":"fresh normally created originals only; no replay, native cleanup, cold substitute or manufactured history",
-    }))?;
-    for result in results {println!("{result}");}
+    let boundary = result.as_ref().err().map(super::helper_error_metadata);
+    write_json(
+        &inputs
+            .evidence
+            .join(format!("shared-agent-{}.json", inputs.run.0)),
+        &json!({
+            "runId":inputs.run,"results":results,"boundary":boundary,"observations":observations,
+            "originals":originals.iter().map(NativeProof::evidence).collect::<Vec<_>>(),
+            "resourcesRetained":true,"androidAcceptance":false,"retentionBoundaryClaimed":false,
+            "scope":"fresh normally created originals only; no replay, native cleanup, cold substitute or manufactured history",
+        }),
+    )?;
+    for result in results {
+        println!("{result}");
+    }
     Ok(available)
 }
 async fn grid_run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
@@ -10797,23 +11684,29 @@ async fn grid_run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> 
 }
 impl Phone {
     async fn grid_open(&mut self, subject: GridSubject) -> io::Result<()> {
-        self.grid_subscribe(GridWitness::pending(Uuid::random(),subject)).await
+        self.grid_subscribe(GridWitness::pending(Uuid::random(), subject))
+            .await
     }
-    async fn grid_subscribe(&mut self,witness:GridWitness)->io::Result<()> {
+    async fn grid_subscribe(&mut self, witness: GridWitness) -> io::Result<()> {
         if self.grid.is_some() || self.generation.is_some() {
             return Err(grid_failure("viewer_busy"));
         }
-        let id=witness.opening.clone();
+        let id = witness.opening.clone();
         let body = match &witness.subject {
             GridSubject::Pane(target) => {
-                if !self.hello.features.agent_ansi{return Err(grid_failure("ansi_observer_unavailable"));}
+                if !self.hello.features.agent_ansi {
+                    return Err(grid_failure("ansi_observer_unavailable"));
+                }
                 RequestBody::TerminalGridSubscribe(TerminalGridSubscribeParams {
                     target: target.clone(),
                     ansi_observer: true,
                 })
             }
             GridSubject::Shell(target) => {
-                RequestBody::ShellGridSubscribe(ShellGridSubscribeParams { target: target.clone(), history: false })
+                RequestBody::ShellGridSubscribe(ShellGridSubscribeParams {
+                    target: target.clone(),
+                    history: false,
+                })
             }
         };
         self.grid = Some(witness);
@@ -10822,7 +11715,7 @@ impl Phone {
             .map_err(|_| grid_failure("opening_rejected"))?;
         self.grid_wait(GridGoal::Commit).await
     }
-    async fn grid_wait(&mut self, goal:GridGoal) -> io::Result<()> {
+    async fn grid_wait(&mut self, goal: GridGoal) -> io::Result<()> {
         let phase_end = Instant::now() + Duration::from_secs(45);
         loop {
             let witness = self
@@ -10833,11 +11726,15 @@ impl Phone {
                 return Err(grid_failure("viewer_retired"));
             }
             if match goal {
-                GridGoal::Commit=>witness.committed.is_some(),
-                GridGoal::Token=>witness.token_commit.is_some_and(|revision|revision>0),
-                GridGoal::TerminalFixture{after}=>witness.terminal_fixture_ready(after)?,
-                GridGoal::Resized{after,dimensions}=>witness.committed.is_some_and(|revision|revision>after)
-                    &&witness.committed_dimensions.is_some_and(|actual|actual!=dimensions),
+                GridGoal::Commit => witness.committed.is_some(),
+                GridGoal::Token => witness.token_commit.is_some_and(|revision| revision > 0),
+                GridGoal::TerminalFixture { after } => witness.terminal_fixture_ready(after)?,
+                GridGoal::Resized { after, dimensions } => {
+                    witness.committed.is_some_and(|revision| revision > after)
+                        && witness
+                            .committed_dimensions
+                            .is_some_and(|actual| actual != dimensions)
+                }
             } {
                 return Ok(());
             }
@@ -10849,12 +11746,12 @@ impl Phone {
             .await
             .map_err(|_| grid_failure("observation_deadline"))?
             .map_err(|error| {
-                let close=closed_connection_reason(self.connection.close_reason());
-                let method=match &witness.subject {
-                    GridSubject::Shell(_)=>Method::ShellGridSubscribe,
-                    GridSubject::Pane(_)=>Method::TerminalGridSubscribe,
+                let close = closed_connection_reason(self.connection.close_reason());
+                let method = match &witness.subject {
+                    GridSubject::Shell(_) => Method::ShellGridSubscribe,
+                    GridSubject::Pane(_) => Method::TerminalGridSubscribe,
                 };
-                request_failure_with_close(method,"grid_wait","frame_read",error,Some(close))
+                request_failure_with_close(method, "grid_wait", "frame_read", error, Some(close))
             })?;
             match decode_payload(&bytes, None).map_err(|_| grid_failure("grid_codec"))? {
                 Envelope::Event(event) => self.event_sized(event, bytes.len())?,
@@ -10985,7 +11882,7 @@ fn grid_receipt(
             receipt.method == ActionMethod::ShellInput
                 && receipt.shell_target.as_ref() == Some(target)
                 && receipt.target.is_none()
-                && receipt.state==ReceiptState::Dispatched
+                && receipt.state == ReceiptState::Dispatched
                 && matches!(&receipt.result,Some(ActionResult::ShellDispatch(result))if result.progress.complete())
         }
     };
@@ -11155,10 +12052,8 @@ fn grid_source_handoff(
 ) -> io::Result<GridSourceHandoff> {
     use futures_util::FutureExt;
     // Consume only a temporary Pin reborrow. Pending preserves the exact original reader.
-    if !fin_seen {
-        if let Some(result) = frame.now_or_never() {
-            return Ok(GridSourceHandoff::Frame(result));
-        }
+    if !fin_seen && let Some(result) = frame.now_or_never() {
+        return Ok(GridSourceHandoff::Frame(result));
     }
     grid_source_deadlines(loss, grid)?;
     if !grid
@@ -11586,19 +12481,42 @@ async fn grid_source_loss(
         .await?
         .ok_or_else(|| grid_failure("source_witness_resource_limit"))?;
         native.initial_commit().await?;
-        Ok::<_,io::Error>(native)
-    }.await;
-    let native=match setup{Ok(native)=>native,Err(error)=>return grid_source_blocked(evidence,run,error).await};
-    let subscription=match phone.grid.as_ref().and_then(|g|g.subscription.clone()){
-        Some(subscription)=>subscription,None=>return grid_source_blocked(evidence,run,grid_failure("source_viewer_original")).await,
+        Ok::<_, io::Error>(native)
+    }
+    .await;
+    let native = match setup {
+        Ok(native) => native,
+        Err(error) => return grid_source_blocked(evidence, run, error).await,
     };
-    let ready=Uuid::random();
-    let mut loss=GridSourceLoss {run:run.clone(),ready:ready.clone(),trigger:None,native_eof:false,
-        iroh_closed:false,sync_required:false,deadline:None};
-    let pipe=match control.get_ref().0.get_ref().metadata(){
-        Ok(pipe)=>pipe,Err(error)=>return grid_source_blocked(evidence,run,grid_context("source_control_original",error)).await,
+    let subscription = match phone.grid.as_ref().and_then(|g| g.subscription.clone()) {
+        Some(subscription) => subscription,
+        None => {
+            return grid_source_blocked(evidence, run, grid_failure("source_viewer_original"))
+                .await;
+        }
     };
-    let record=json!({"gate":"grid","phase":"source_loss_ready","run":run,"ready":ready,
+    let ready = Uuid::random();
+    let mut loss = GridSourceLoss {
+        run: run.clone(),
+        ready: ready.clone(),
+        trigger: None,
+        native_eof: false,
+        iroh_closed: false,
+        sync_required: false,
+        deadline: None,
+    };
+    let pipe = match control.get_ref().0.get_ref().metadata() {
+        Ok(pipe) => pipe,
+        Err(error) => {
+            return grid_source_blocked(
+                evidence,
+                run,
+                grid_context("source_control_original", error),
+            )
+            .await;
+        }
+    };
+    let record = json!({"gate":"grid","phase":"source_loss_ready","run":run,"ready":ready,
         "serverId":server,"serverIncarnation":incarnation,"shellTarget":target,"subscription":subscription,
         "nativeSource":source,"nativeProcess":desktop,"nativeScope":native_scope,
         "control":"original_private_stdin_pipe","pipeDevice":pipe.dev(),"pipeInode":pipe.ino(),
@@ -11774,16 +12692,26 @@ async fn grid_source_loss(
                 )
                 .await;
                 match wake {
-                    GridSourceWake::Native((native,result))=>match result {
-                        Ok(true)=>{
-                            held_native=Some(native);
-                            if let Err(error)=loss.upstream_eof(){return grid_source_blocked(evidence,run,error).await;}
-                            if let Some(deadline)=loss.deadline{observation.as_mut().reset(deadline);}
-                            else{return grid_source_blocked(evidence,run,grid_failure("source_observation_cutoff")).await;}
+                    GridSourceWake::Native((native, result)) => match result {
+                        Ok(true) => {
+                            held_native = Some(native);
+                            if let Err(error) = loss.upstream_eof() {
+                                return grid_source_blocked(evidence, run, error).await;
+                            }
+                            if let Some(deadline) = loss.deadline {
+                                observation.as_mut().reset(deadline);
+                            } else {
+                                return grid_source_blocked(
+                                    evidence,
+                                    run,
+                                    grid_failure("source_observation_cutoff"),
+                                )
+                                .await;
+                            }
                         }
-                        Ok(false)=>native_wait=Box::pin(grid_source_native(native).fuse()),
-                        Err(error)=>{
-                            let result=grid_source_blocked(evidence,run,error).await;
+                        Ok(false) => native_wait = Box::pin(grid_source_native(native).fuse()),
+                        Err(error) => {
+                            let result = grid_source_blocked(evidence, run, error).await;
                             drop(native);
                             return result;
                         }
@@ -11829,20 +12757,41 @@ async fn grid_source_loss(
                 continue;
             }
         };
-        let event=match decode_payload(&bytes,None).map_err(|_|grid_failure("source_phone_codec")){
-            Ok(Envelope::Event(event))=>event,
-            Ok(_)=>return grid_source_blocked(evidence,run,grid_failure("source_phone_correlation")).await,
-            Err(error)=>return grid_source_blocked(evidence,run,error).await,
-        };
-        if event.subscription==subscription&&matches!(&event.body,EventBody::SyncRequired(_)){
-            let Some(witness)=grid.as_mut()else{return grid_source_blocked(evidence,run,grid_failure("source_viewer_missing")).await;};
-            if witness.retired||event.seq.0!=witness.next_seq{return grid_source_blocked(evidence,run,grid_failure("source_sync_order")).await;}
-            witness.retired=true;witness.deadline=None;
-            if let Err(error)=loss.downstream(true){return grid_source_blocked(evidence,run,error).await;}
-        }else if let Err(error)=Phone::route_event(grid,events,generation,event,bytes.len()){
-            return grid_source_blocked(evidence,run,error).await;
+        let event =
+            match decode_payload(&bytes, None).map_err(|_| grid_failure("source_phone_codec")) {
+                Ok(Envelope::Event(event)) => event,
+                Ok(_) => {
+                    return grid_source_blocked(
+                        evidence,
+                        run,
+                        grid_failure("source_phone_correlation"),
+                    )
+                    .await;
+                }
+                Err(error) => return grid_source_blocked(evidence, run, error).await,
+            };
+        if event.subscription == subscription && matches!(&event.body, EventBody::SyncRequired(_)) {
+            let Some(witness) = grid.as_mut() else {
+                return grid_source_blocked(evidence, run, grid_failure("source_viewer_missing"))
+                    .await;
+            };
+            if witness.retired || event.seq.0 != witness.next_seq {
+                return grid_source_blocked(evidence, run, grid_failure("source_sync_order")).await;
+            }
+            witness.retired = true;
+            witness.deadline = None;
+            if let Err(error) = loss.downstream(true) {
+                return grid_source_blocked(evidence, run, error).await;
+            }
+        } else if let Err(error) = Phone::route_event(grid, events, generation, event, bytes.len())
+        {
+            return grid_source_blocked(evidence, run, error).await;
         }
-        if let Some(deadline)=grid.as_ref().and_then(|g|g.deadline){transaction.as_mut().reset(tokio::time::Instant::from_std(deadline));}
+        if let Some(deadline) = grid.as_ref().and_then(|g| g.deadline) {
+            transaction
+                .as_mut()
+                .reset(tokio::time::Instant::from_std(deadline));
+        }
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -11901,13 +12850,13 @@ async fn grid_flow(
             .host()
             .await
             .map_err(|_| grid_failure("source_inventory"))?;
-        if let Ok((server, incarnation)) = grid_source(&inventory, &initial, &root, None) {
-            if selected.iter().all(|p| match p {
+        if let Ok((server, incarnation)) = grid_source(&inventory, &initial, root, None)
+            && selected.iter().all(|p| match p {
                 Provider::Omp => server.can_create.omp,
                 Provider::Codex => server.can_create.codex,
-            }) {
-                break (server.server_id.clone(), incarnation.clone());
-            }
+            })
+        {
+            break (server.server_id.clone(), incarnation.clone());
         }
         if Instant::now() >= admission {
             return Err(grid_failure("selected_provider_unavailable"));
@@ -12016,10 +12965,15 @@ async fn grid_flow(
         let receipt = phone
             .grid_action(
                 action.clone(),
-                RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: boot.clone(),
-                delivery: None, native_turn_id: None, images: None,
-                target: proof.target.clone(),
-                text: PromptText(format!("Reply only with {token}; no tools.")), }),
+                RequestBody::PromptSubmit(PromptSubmitParams {
+                    skill: None,
+                    boot_id: boot.clone(),
+                    delivery: None,
+                    native_turn_id: None,
+                    images: None,
+                    target: proof.target.clone(),
+                    text: PromptText(format!("Reply only with {token}; no tools.")),
+                }),
                 false,
             )
             .await?;
@@ -12041,7 +12995,7 @@ async fn grid_flow(
         if now_source != source {
             return Err(grid_failure("native_rejoin"));
         }
-        grid_source(&inventory, &now, &root, Some((&server, &incarnation)))?;
+        grid_source(&inventory, &now, root, Some((&server, &incarnation)))?;
         phone.grid_wait(GridGoal::Token).await?;
         write_json(
             &evidence.join(format!("grid-provider-result-{}-{provider:?}.json", run.0)),
@@ -12068,7 +13022,7 @@ async fn grid_flow(
         .host()
         .await
         .map_err(|_| grid_failure("shell_inventory"))?;
-    grid_source(&inventory, &now, &root, Some((&server, &incarnation)))?;
+    grid_source(&inventory, &now, root, Some((&server, &incarnation)))?;
     let mut shells = inventory.shells.iter().filter(|s| {
         s.server_id == server
             && s.pane_id == root.pane_id
@@ -12104,7 +13058,7 @@ async fn grid_flow(
     grid_source(
         &current_inventory,
         &current_native,
-        &root,
+        root,
         Some((&server, &incarnation)),
     )?;
     if current_source != source
@@ -12140,7 +13094,11 @@ async fn grid_flow(
         .arm(&token)?;
     let action = Uuid::random();
     let boot = phone.hello.boot_id.clone();
-    let subscription=phone.grid.as_ref().and_then(|grid|grid.subscription.clone()).ok_or_else(||grid_failure("shell_input_original_subscription"))?;
+    let subscription = phone
+        .grid
+        .as_ref()
+        .and_then(|grid| grid.subscription.clone())
+        .ok_or_else(|| grid_failure("shell_input_original_subscription"))?;
     write_json(
         &evidence.join(format!("grid-action-{}.json", action.0)),
         &json!({
@@ -12230,28 +13188,52 @@ async fn grid_flow(
     )?;
     Ok(true)
 }
-fn admission_reason(provider: Provider, backends: &[Backend], server: Option<&Server>, hierarchy: &[NativeHierarchy]) -> &'static str {
-    if backends.iter().filter(|backend| backend.provider == provider).count() != 1 {
+fn admission_reason(
+    provider: Provider,
+    backends: &[Backend],
+    server: Option<&Server>,
+    hierarchy: &[NativeHierarchy],
+) -> &'static str {
+    if backends
+        .iter()
+        .filter(|backend| backend.provider == provider)
+        .count()
+        != 1
+    {
         return "backend_missing_or_ambiguous";
     }
-    if backends.iter().any(|backend| backend.provider == provider
-        && backend.availability == Availability::Unavailable) {
+    if backends.iter().any(|backend| {
+        backend.provider == provider && backend.availability == Availability::Unavailable
+    }) {
         return "backend_unavailable";
     }
-    let Some(server) = server else { return "source_missing_or_ambiguous" };
-    if server.connectivity != ServerConnectivity::Online { return "source_not_online" }
-    if hierarchy.iter().filter(|source| source.server_id == server.server_id
-        && source.freshness == NativeFreshness::Current).count() != 1 {
+    let Some(server) = server else {
+        return "source_missing_or_ambiguous";
+    };
+    if server.connectivity != ServerConnectivity::Online {
+        return "source_not_online";
+    }
+    if hierarchy
+        .iter()
+        .filter(|source| {
+            source.server_id == server.server_id && source.freshness == NativeFreshness::Current
+        })
+        .count()
+        != 1
+    {
         return "source_not_current";
     }
-    if match provider { Provider::Omp => server.can_create.omp, Provider::Codex => server.can_create.codex } {
+    if match provider {
+        Provider::Omp => server.can_create.omp,
+        Provider::Codex => server.can_create.codex,
+    } {
         "eligible"
     } else {
         "creation_unavailable"
     }
 }
 struct AdmittedSource {
-    identity: (Uuid,Uuid),
+    identity: (Uuid, Uuid),
     client: Client,
     process: ProcessEvidence,
     native: Snapshot,
@@ -12259,35 +13241,76 @@ struct AdmittedSource {
 impl AdmittedSource {
     fn recheck(&self) -> io::Result<()> {
         self.client.recheck()?;
-        if herdr::process_evidence(self.process.pid)?!=self.process {
-            return Err(prerequisite("original admitted Herdr process/namespace changed"));
+        if herdr::process_evidence(self.process.pid)? != self.process {
+            return Err(prerequisite(
+                "original admitted Herdr process/namespace changed",
+            ));
         }
         Ok(())
     }
-    fn observation(&self,actual: &ServerEvidence,native: &Snapshot,inventory: &HostSnapshotResult) -> io::Result<bool> {
+    fn observation(
+        &self,
+        actual: &ServerEvidence,
+        native: &Snapshot,
+        inventory: &HostSnapshotResult,
+    ) -> io::Result<bool> {
         self.recheck()?;
-        creation_source_observation(&self.identity,&self.client.evidence,&self.native,actual,native,inventory)
-            .map_err(prerequisite)
+        creation_source_observation(
+            &self.identity,
+            &self.client.evidence,
+            &self.native,
+            actual,
+            native,
+            inventory,
+        )
+        .map_err(prerequisite)
     }
 }
 fn creation_source_observation(
-    identity: &(Uuid,Uuid),original: &ServerEvidence,initial: &Snapshot,
-    actual: &ServerEvidence,native: &Snapshot,inventory: &HostSnapshotResult,
-) -> Result<bool,&'static str> {
-    if actual!=original {return Err("original creation socket/process source changed");}
-    if !initial.workspaces.iter().all(|row|native.workspaces.iter().any(|current|current.workspace_id==row.workspace_id))
-        || !initial.tabs.iter().all(|row|native.tabs.iter().any(|current|current.tab_id==row.tab_id&&current.workspace_id==row.workspace_id))
-        || !initial.panes.iter().all(|row|native.panes.iter().any(|current|current.pane_id==row.pane_id
-            &&current.terminal_id==row.terminal_id&&current.workspace_id==row.workspace_id&&current.tab_id==row.tab_id)) {
+    identity: &(Uuid, Uuid),
+    original: &ServerEvidence,
+    initial: &Snapshot,
+    actual: &ServerEvidence,
+    native: &Snapshot,
+    inventory: &HostSnapshotResult,
+) -> Result<bool, &'static str> {
+    if actual != original {
+        return Err("original creation socket/process source changed");
+    }
+    if !initial.workspaces.iter().all(|row| {
+        native
+            .workspaces
+            .iter()
+            .any(|current| current.workspace_id == row.workspace_id)
+    }) || !initial.tabs.iter().all(|row| {
+        native
+            .tabs
+            .iter()
+            .any(|current| current.tab_id == row.tab_id && current.workspace_id == row.workspace_id)
+    }) || !initial.panes.iter().all(|row| {
+        native.panes.iter().any(|current| {
+            current.pane_id == row.pane_id
+                && current.terminal_id == row.terminal_id
+                && current.workspace_id == row.workspace_id
+                && current.tab_id == row.tab_id
+        })
+    }) {
         return Err("original creation snapshot binding changed");
     }
-    let mut servers=inventory.servers.iter().filter(|server|server.server_id==identity.0);
-    let Some(server)=servers.next() else {return Ok(false)};
-    if servers.next().is_some() {return Err("original creation server is ambiguous");}
-    match admission_source(inventory,&server.name.0,native,Some(identity)) {
-        Ok(_)=>Ok(true),
-        Err("source_replaced")=>Err("original creation server incarnation changed"),
-        Err(_)=>Ok(false),
+    let mut servers = inventory
+        .servers
+        .iter()
+        .filter(|server| server.server_id == identity.0);
+    let Some(server) = servers.next() else {
+        return Ok(false);
+    };
+    if servers.next().is_some() {
+        return Err("original creation server is ambiguous");
+    }
+    match admission_source(inventory, &server.name.0, native, Some(identity)) {
+        Ok(_) => Ok(true),
+        Err("source_replaced") => Err("original creation server incarnation changed"),
+        Err(_) => Ok(false),
     }
 }
 struct AdmissionSource<'a> {
@@ -12301,7 +13324,9 @@ impl AdmissionSource<'_> {
         self.desktop.recheck()?;
         let client = Client::connect(self.socket).await?;
         if client.evidence != *self.original {
-            return Err(prerequisite("original admission socket/process source changed"));
+            return Err(prerequisite(
+                "original admission socket/process source changed",
+            ));
         }
         self.recheck(&client)?;
         Ok(client)
@@ -12317,50 +13342,103 @@ fn admission_source<'a>(
     native: &Snapshot,
     pinned: Option<&(Uuid, Uuid)>,
 ) -> Result<(&'a Server, &'a Uuid), &'static str> {
-    let mut servers = inventory.servers.iter().filter(|server| server.name.0 == name);
+    let mut servers = inventory
+        .servers
+        .iter()
+        .filter(|server| server.name.0 == name);
     let server = servers.next().ok_or("source_missing_or_ambiguous")?;
     if servers.next().is_some()
-        || inventory.servers.iter().filter(|candidate|candidate.server_id==server.server_id).count()!=1 {
+        || inventory
+            .servers
+            .iter()
+            .filter(|candidate| candidate.server_id == server.server_id)
+            .count()
+            != 1
+    {
         return Err("source_missing_or_ambiguous");
     }
-    let mut graphs = inventory.hierarchy.iter().filter(|graph|graph.server_id==server.server_id);
+    let mut graphs = inventory
+        .hierarchy
+        .iter()
+        .filter(|graph| graph.server_id == server.server_id);
     let graph = graphs.next().ok_or("source_not_current")?;
-    if graphs.next().is_some() { return Err("source_not_current"); }
-    if pinned.is_some_and(|(id, incarnation)| *id!=server.server_id || *incarnation!=graph.server_incarnation) {
-        return Err("source_replaced");
-    }
-    if graph.freshness!=NativeFreshness::Current || graph.reason.is_some()
-        || graph.workspaces.len()!=native.workspaces.len()
-        || graph.tabs.len()!=native.tabs.len() || graph.panes.len()!=native.panes.len()
-        || !native.workspaces.iter().all(|row|graph.workspaces.iter().any(|shown|shown.workspace_id==row.workspace_id))
-        || !native.tabs.iter().all(|row|graph.tabs.iter().any(|shown|shown.tab_id==row.tab_id&&shown.workspace_id==row.workspace_id))
-        || !native.panes.iter().all(|row|graph.panes.iter().any(|shown|shown.pane_id==row.pane_id
-            &&shown.terminal_id==row.terminal_id&&shown.tab_id==row.tab_id&&shown.workspace_id==row.workspace_id)) {
+    if graphs.next().is_some() {
         return Err("source_not_current");
     }
-    Ok((server,&graph.server_incarnation))
+    if pinned.is_some_and(|(id, incarnation)| {
+        *id != server.server_id || *incarnation != graph.server_incarnation
+    }) {
+        return Err("source_replaced");
+    }
+    if graph.freshness != NativeFreshness::Current
+        || graph.reason.is_some()
+        || graph.workspaces.len() != native.workspaces.len()
+        || graph.tabs.len() != native.tabs.len()
+        || graph.panes.len() != native.panes.len()
+        || !native.workspaces.iter().all(|row| {
+            graph
+                .workspaces
+                .iter()
+                .any(|shown| shown.workspace_id == row.workspace_id)
+        })
+        || !native.tabs.iter().all(|row| {
+            graph
+                .tabs
+                .iter()
+                .any(|shown| shown.tab_id == row.tab_id && shown.workspace_id == row.workspace_id)
+        })
+        || !native.panes.iter().all(|row| {
+            graph.panes.iter().any(|shown| {
+                shown.pane_id == row.pane_id
+                    && shown.terminal_id == row.terminal_id
+                    && shown.tab_id == row.tab_id
+                    && shown.workspace_id == row.workspace_id
+            })
+        })
+    {
+        return Err("source_not_current");
+    }
+    Ok((server, &graph.server_incarnation))
 }
-async fn creation_admission(phone: &mut Phone, selected: &[Provider], name: &str, evidence: &Path, run: &Uuid, mut owned: AdmissionSource<'_>) -> io::Result<Option<AdmittedSource>> {
+async fn creation_admission(
+    phone: &mut Phone,
+    selected: &[Provider],
+    name: &str,
+    evidence: &Path,
+    run: &Uuid,
+    mut owned: AdmissionSource<'_>,
+) -> io::Result<Option<AdmittedSource>> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut pinned = None;
     loop {
         let original = owned.connect().await?;
         let inventory = phone.host().await?;
         owned.recheck(&original)?;
-        let (server, source_reason) = match admission_source(&inventory,name,&owned.native,pinned.as_ref()) {
+        let (server, source_reason) = match admission_source(
+            &inventory,
+            name,
+            &owned.native,
+            pinned.as_ref(),
+        ) {
             Ok((server, incarnation)) => {
                 if pinned.is_none() {
-                    let manifest=evidence.join(format!("admission-binding-{}.json",run.0));
-                    write_json(&manifest,&json!({"runId":run,"serverId":server.server_id,
+                    let manifest = evidence.join(format!("admission-binding-{}.json", run.0));
+                    write_json(
+                        &manifest,
+                        &json!({"runId":run,"serverId":server.server_id,
                         "serverIncarnation":incarnation,"originalSource":owned.original,
                         "originalProcess":owned.desktop.process,"socket":owned.socket,
-                        "scope":"first coherent inventory joined across original kernel process/socket proof; never retargeted"}))?;
-                    println!("{}",json!({"gate":"admission-binding","manifest":manifest}));
-                    pinned=Some((server.server_id.clone(),incarnation.clone()));
+                        "scope":"first coherent inventory joined across original kernel process/socket proof; never retargeted"}),
+                    )?;
+                    println!(
+                        "{}",
+                        json!({"gate":"admission-binding","manifest":manifest})
+                    );
+                    pinned = Some((server.server_id.clone(), incarnation.clone()));
                 }
-                (Some(server),None)
+                (Some(server), None)
             }
-            Err(reason) => (None,Some(reason)),
+            Err(reason) => (None, Some(reason)),
         };
         let results = selected.iter().map(|provider| {
             let reason = source_reason.unwrap_or_else(||admission_reason(*provider, &phone.hello.backends, server, &inventory.hierarchy));
@@ -12370,301 +13448,777 @@ async fn creation_admission(phone: &mut Phone, selected: &[Provider], name: &str
                 "serverIncarnation":pinned.as_ref().map(|(_,incarnation)|incarnation),
                 "scope":"Hello/current source/creation eligibility only; no provider created or input sent"})
         }).collect::<Vec<_>>();
-        let eligible = results.iter().all(|result|result["status"]=="eligible");
-        if eligible || source_reason==Some("source_replaced") || Instant::now() >= deadline {
-            write_json(&evidence.join(format!("admission-{}.json",run.0)), &json!({"runId":run,"results":results}))?;
-            for result in results { println!("{result}"); }
+        let eligible = results.iter().all(|result| result["status"] == "eligible");
+        if eligible || source_reason == Some("source_replaced") || Instant::now() >= deadline {
+            write_json(
+                &evidence.join(format!("admission-{}.json", run.0)),
+                &json!({"runId":run,"results":results}),
+            )?;
+            for result in results {
+                println!("{result}");
+            }
             return Ok(if eligible {
-                pinned.map(|identity|AdmittedSource{identity,client:original,process:owned.desktop.process.clone(),native:owned.native})
-            } else {None});
+                pinned.map(|identity| AdmittedSource {
+                    identity,
+                    client: original,
+                    process: owned.desktop.process.clone(),
+                    native: owned.native,
+                })
+            } else {
+                None
+            });
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
-fn terminal_native_pane<'a>(native:&'a Snapshot,route:&ShellSummary)->io::Result<&'a herdr::Pane> {
-    let pane=native.pane(&route.pane_id)?;
-    if pane.terminal_id!=route.terminal_id||pane.workspace_id!=route.workspace_id||pane.tab_id!=route.tab_id
-        ||pane.agent.is_some()||pane.display_agent.is_some()||pane.agent_session.is_some()||pane.restore_error.is_some()
-        ||native.agents.iter().any(|agent|agent.pane_id==pane.pane_id||agent.terminal_id==pane.terminal_id)
-        ||native.agents.iter().any(|agent|agent.launch_pending)||native.panes.iter().any(|pane|pane.restore_error.is_some())
-    {return Err(prerequisite("terminal-only original non-agent route or full unsafe-state screen changed"));}
+fn terminal_native_pane<'a>(
+    native: &'a Snapshot,
+    route: &ShellSummary,
+) -> io::Result<&'a herdr::Pane> {
+    let pane = native.pane(&route.pane_id)?;
+    if pane.terminal_id != route.terminal_id
+        || pane.workspace_id != route.workspace_id
+        || pane.tab_id != route.tab_id
+        || pane.agent.is_some()
+        || pane.display_agent.is_some()
+        || pane.agent_session.is_some()
+        || pane.restore_error.is_some()
+        || native
+            .agents
+            .iter()
+            .any(|agent| agent.pane_id == pane.pane_id || agent.terminal_id == pane.terminal_id)
+        || native.agents.iter().any(|agent| agent.launch_pending)
+        || native.panes.iter().any(|pane| pane.restore_error.is_some())
+    {
+        return Err(prerequisite(
+            "terminal-only original non-agent route or full unsafe-state screen changed",
+        ));
+    }
     Ok(pane)
 }
-fn terminal_select(inventory:&HostSnapshotResult,native:&Snapshot,name:&str,pinned:Option<&(Uuid,Uuid)>)->io::Result<Option<(ShellSummary,Uuid)>> {
-    let (server,incarnation)=match admission_source(inventory,name,native,pinned){
-        Ok(found)=>found,Err("source_replaced")=>return Err(prerequisite("terminal-only original server incarnation changed")),
-        Err(_)=>return Ok(None),
+fn terminal_select(
+    inventory: &HostSnapshotResult,
+    native: &Snapshot,
+    name: &str,
+    pinned: Option<&(Uuid, Uuid)>,
+) -> io::Result<Option<(ShellSummary, Uuid)>> {
+    let (server, incarnation) = match admission_source(inventory, name, native, pinned) {
+        Ok(found) => found,
+        Err("source_replaced") => {
+            return Err(prerequisite(
+                "terminal-only original server incarnation changed",
+            ));
+        }
+        Err(_) => return Ok(None),
     };
-    if server.connectivity!=ServerConnectivity::Online{return Ok(None);}
-    if native.workspaces.len()!=1||native.tabs.len()!=1||native.panes.len()!=1||!native.agents.is_empty(){
-        return Err(prerequisite("terminal-only fresh startup must contain exactly one ordinary original root"));
+    if server.connectivity != ServerConnectivity::Online {
+        return Ok(None);
     }
-    let pane=&native.panes[0];
-    let mut rows=inventory.shells.iter().filter(|shell|shell.server_id==server.server_id
-        &&shell.pane_id==pane.pane_id&&shell.terminal_id==pane.terminal_id
-        &&shell.workspace_id==pane.workspace_id&&shell.tab_id==pane.tab_id);
-    let Some(shell)=rows.next() else{return Ok(None)};
-    if rows.next().is_some(){return Err(prerequisite("terminal-only shell route is ambiguous"));}
-    terminal_native_pane(native,shell)?;
-    let graph=inventory.hierarchy.iter().find(|graph|graph.server_id==server.server_id).ok_or_else(||prerequisite("terminal-only current hierarchy absent"))?;
-    if !graph.panes.iter().any(|shown|shown.pane_id==pane.pane_id&&shown.shell_target.as_ref()==Some(&shell.target)
-        &&shown.target.is_none()&&shown.unbound_row_id.is_none())
-        ||shell.connectivity!=SessionConnectivity::Ready||!shell.capabilities.read||!shell.capabilities.grid
-    {return Ok(None);}
-    Ok(Some((shell.clone(),incarnation.clone())))
+    if native.workspaces.len() != 1
+        || native.tabs.len() != 1
+        || native.panes.len() != 1
+        || !native.agents.is_empty()
+    {
+        return Err(prerequisite(
+            "terminal-only fresh startup must contain exactly one ordinary original root",
+        ));
+    }
+    let pane = &native.panes[0];
+    let mut rows = inventory.shells.iter().filter(|shell| {
+        shell.server_id == server.server_id
+            && shell.pane_id == pane.pane_id
+            && shell.terminal_id == pane.terminal_id
+            && shell.workspace_id == pane.workspace_id
+            && shell.tab_id == pane.tab_id
+    });
+    let Some(shell) = rows.next() else {
+        return Ok(None);
+    };
+    if rows.next().is_some() {
+        return Err(prerequisite("terminal-only shell route is ambiguous"));
+    }
+    terminal_native_pane(native, shell)?;
+    let graph = inventory
+        .hierarchy
+        .iter()
+        .find(|graph| graph.server_id == server.server_id)
+        .ok_or_else(|| prerequisite("terminal-only current hierarchy absent"))?;
+    if !graph.panes.iter().any(|shown| {
+        shown.pane_id == pane.pane_id
+            && shown.shell_target.as_ref() == Some(&shell.target)
+            && shown.target.is_none()
+            && shown.unbound_row_id.is_none()
+    }) || shell.connectivity != SessionConnectivity::Ready
+        || !shell.capabilities.read
+        || !shell.capabilities.grid
+    {
+        return Ok(None);
+    }
+    Ok(Some((shell.clone(), incarnation.clone())))
 }
-async fn terminal_current(phone:&mut Phone,source:&AdmittedSource,socket:&Path,desktop:&mut Desktop,route:&ShellSummary)->io::Result<Snapshot> {
-    desktop.recheck()?;source.recheck()?;
-    let (actual,native)=surface(socket).await?;
-    let inventory=phone.host().await?;
-    if !source.observation(&actual,&native,&inventory)?{return Err(prerequisite("terminal-only original current source unavailable"));}
-    let selected=terminal_select(&inventory,&native,&inventory.servers.iter().find(|server|server.server_id==source.identity.0).ok_or_else(||prerequisite("terminal-only original server disappeared"))?.name.0,Some(&source.identity))?
-        .ok_or_else(||prerequisite("terminal-only original logical viewer authority unavailable"))?.0;
-    if selected.target!=route.target{return Err(prerequisite("terminal-only original shell generation changed"));}
-    terminal_native_pane(&native,route)?;desktop.recheck()?;source.recheck()?;Ok(native)
+async fn terminal_current(
+    phone: &mut Phone,
+    source: &AdmittedSource,
+    socket: &Path,
+    desktop: &mut Desktop,
+    route: &ShellSummary,
+) -> io::Result<Snapshot> {
+    desktop.recheck()?;
+    source.recheck()?;
+    let (actual, native) = surface(socket).await?;
+    let inventory = phone.host().await?;
+    if !source.observation(&actual, &native, &inventory)? {
+        return Err(prerequisite(
+            "terminal-only original current source unavailable",
+        ));
+    }
+    let selected = terminal_select(
+        &inventory,
+        &native,
+        &inventory
+            .servers
+            .iter()
+            .find(|server| server.server_id == source.identity.0)
+            .ok_or_else(|| prerequisite("terminal-only original server disappeared"))?
+            .name
+            .0,
+        Some(&source.identity),
+    )?
+    .ok_or_else(|| prerequisite("terminal-only original logical viewer authority unavailable"))?
+    .0;
+    if selected.target != route.target {
+        return Err(prerequisite(
+            "terminal-only original shell generation changed",
+        ));
+    }
+    terminal_native_pane(&native, route)?;
+    desktop.recheck()?;
+    source.recheck()?;
+    Ok(native)
 }
-fn terminal_idle_pid(info:&herdr::PaneProcessInfo)->Option<u32> {
-    let pid=info.shell_pid?;
-    (info.foreground_process_group_id==Some(pid)&&!info.foreground_processes.is_empty()
-        &&info.foreground_processes.iter().all(|process|process.pid==pid)).then_some(pid)
+fn terminal_idle_pid(info: &herdr::PaneProcessInfo) -> Option<u32> {
+    let pid = info.shell_pid?;
+    (info.foreground_process_group_id == Some(pid)
+        && !info.foreground_processes.is_empty()
+        && info
+            .foreground_processes
+            .iter()
+            .all(|process| process.pid == pid))
+    .then_some(pid)
 }
-struct TerminalShellProcess {process:ProcessEvidence,reported_pid:u32,executable:File,path:PathBuf,cwd:(u64,u64)}
+struct TerminalShellProcess {
+    process: ProcessEvidence,
+    reported_pid: u32,
+    executable: File,
+    path: PathBuf,
+    cwd: (u64, u64),
+}
 impl TerminalShellProcess {
-    fn capture(reporter:&ProcessEvidence,info:&herdr::PaneProcessInfo,project:&Path)->io::Result<Option<Self>> {
-        let Some(pid)=terminal_idle_pid(info) else{return Ok(None)};
-        let process=herdr::reported_process(reporter,pid)?;
+    fn capture(
+        reporter: &ProcessEvidence,
+        info: &herdr::PaneProcessInfo,
+        project: &Path,
+    ) -> io::Result<Option<Self>> {
+        let Some(pid) = terminal_idle_pid(info) else {
+            return Ok(None);
+        };
+        let process = herdr::reported_process(reporter, pid)?;
         dev_continuity::zero_native_caps(&process)?;
-        let proc_path=PathBuf::from(format!("/proc/{}/exe",process.pid));
-        let path=fs::read_link(&proc_path)?;
-        if !path.starts_with("/nix/store")||!matches!(path.file_name().and_then(|value|value.to_str()),Some("bash"|"zsh")){
-            return Err(prerequisite("terminal-only fixture requires a proved installed bash/zsh ELF"));
+        let proc_path = PathBuf::from(format!("/proc/{}/exe", process.pid));
+        let path = fs::read_link(&proc_path)?;
+        if !path.starts_with("/nix/store")
+            || !matches!(
+                path.file_name().and_then(|value| value.to_str()),
+                Some("bash" | "zsh")
+            )
+        {
+            return Err(prerequisite(
+                "terminal-only fixture requires a proved installed bash/zsh ELF",
+            ));
         }
-        let mut executable=File::open(&proc_path)?;let mut magic=[0;4];executable.read_exact(&mut magic)?;
-        if magic!=[0x7f,b'E',b'L',b'F']{return Err(prerequisite("terminal-only shell executable is not an ELF"));}
-        let held=executable.metadata()?;let selected=fs::metadata(&path)?;
-        if !held.is_file()||(held.dev(),held.ino())!=(selected.dev(),selected.ino()){
-            return Err(prerequisite("terminal-only selected shell executable object unavailable"));
+        let mut executable = File::open(&proc_path)?;
+        let mut magic = [0; 4];
+        executable.read_exact(&mut magic)?;
+        if magic != [0x7f, b'E', b'L', b'F'] {
+            return Err(prerequisite("terminal-only shell executable is not an ELF"));
         }
-        let approved=fs::metadata(project)?;let cwd=fs::metadata(format!("/proc/{}/cwd",process.pid))?;
-        if !approved.is_dir()||(cwd.dev(),cwd.ino())!=(approved.dev(),approved.ino()){
-            return Err(prerequisite("terminal-only fresh shell actual cwd differs from owned project"));
+        let held = executable.metadata()?;
+        let selected = fs::metadata(&path)?;
+        if !held.is_file() || (held.dev(), held.ino()) != (selected.dev(), selected.ino()) {
+            return Err(prerequisite(
+                "terminal-only selected shell executable object unavailable",
+            ));
         }
-        let proof=Self{process,reported_pid:pid,executable,path,cwd:(cwd.dev(),cwd.ino())};proof.recheck()?;
-        if herdr::process_evidence(reporter.pid)?!=*reporter{return Err(prerequisite("terminal-only original reporting process changed"));}
+        let approved = fs::metadata(project)?;
+        let cwd = fs::metadata(format!("/proc/{}/cwd", process.pid))?;
+        if !approved.is_dir() || (cwd.dev(), cwd.ino()) != (approved.dev(), approved.ino()) {
+            return Err(prerequisite(
+                "terminal-only fresh shell actual cwd differs from owned project",
+            ));
+        }
+        let proof = Self {
+            process,
+            reported_pid: pid,
+            executable,
+            path,
+            cwd: (cwd.dev(), cwd.ino()),
+        };
+        proof.recheck()?;
+        if herdr::process_evidence(reporter.pid)? != *reporter {
+            return Err(prerequisite(
+                "terminal-only original reporting process changed",
+            ));
+        }
         Ok(Some(proof))
     }
-    fn recheck_idle(&self,reporter:&ProcessEvidence,info:&herdr::PaneProcessInfo,pane:&Id)->io::Result<()> {
-        if &info.pane_id!=pane||terminal_idle_pid(info)!=Some(self.reported_pid)
-            ||herdr::reported_process(reporter,self.reported_pid)?!=self.process
-        {return Err(prerequisite("terminal-only original shell foreground/membership changed before input"));}
+    fn recheck_idle(
+        &self,
+        reporter: &ProcessEvidence,
+        info: &herdr::PaneProcessInfo,
+        pane: &Id,
+    ) -> io::Result<()> {
+        if &info.pane_id != pane
+            || terminal_idle_pid(info) != Some(self.reported_pid)
+            || herdr::reported_process(reporter, self.reported_pid)? != self.process
+        {
+            return Err(prerequisite(
+                "terminal-only original shell foreground/membership changed before input",
+            ));
+        }
         self.recheck()?;
-        if herdr::process_evidence(reporter.pid)?!=*reporter{return Err(prerequisite("terminal-only original idle reporter changed"));}
+        if herdr::process_evidence(reporter.pid)? != *reporter {
+            return Err(prerequisite("terminal-only original idle reporter changed"));
+        }
         Ok(())
     }
-    fn recheck(&self)->io::Result<()> {
-        if herdr::process_evidence(self.process.pid)?!=self.process{return Err(prerequisite("terminal-only original shell process changed"));}
-        let current=fs::metadata(format!("/proc/{}/exe",self.process.pid))?;let held=self.executable.metadata()?;
-        let cwd=fs::metadata(format!("/proc/{}/cwd",self.process.pid))?;
-        if (current.dev(),current.ino())!=(held.dev(),held.ino())||(cwd.dev(),cwd.ino())!=self.cwd{
-            return Err(prerequisite("terminal-only shell executable/cwd object changed"));
+    fn recheck(&self) -> io::Result<()> {
+        if herdr::process_evidence(self.process.pid)? != self.process {
+            return Err(prerequisite("terminal-only original shell process changed"));
+        }
+        let current = fs::metadata(format!("/proc/{}/exe", self.process.pid))?;
+        let held = self.executable.metadata()?;
+        let cwd = fs::metadata(format!("/proc/{}/cwd", self.process.pid))?;
+        if (current.dev(), current.ino()) != (held.dev(), held.ino())
+            || (cwd.dev(), cwd.ino()) != self.cwd
+        {
+            return Err(prerequisite(
+                "terminal-only shell executable/cwd object changed",
+            ));
         }
         dev_continuity::zero_native_caps(&self.process)
     }
 }
-fn terminal_fixture_command()->String {
-    fn octal(value:&str)->String {use std::fmt::Write;let mut encoded=String::with_capacity(value.len()*4);for byte in value.bytes(){write!(&mut encoded,"\\{byte:03o}").expect("String write");}encoded}
-    // Public fixture text is encoded even in the command, so echoed input cannot prove output.
-    let first="\u{1b}[2J\u{1b}[HGOATRSTOCKBEGIN\nGOATRUC: 界|ｶﾞ|👩‍💻|❤️|🇺🇸\nGOATRCOLOR: \u{1b}[31mR\u{1b}[0m|\u{1b}[38;5;202mI\u{1b}[0m|\u{1b}[38;2;17;34;51mT\u{1b}[0m|D\n";
-    format!("builtin printf '{}'; builtin command sleep 20; builtin printf '{}'",octal(first),octal("\nGOATRSTOCKDELAYED\n"))
-}
-async fn terminal_fixture(phone:&mut Phone,config:&Config,socket:&Path,desktop:&mut Desktop,source:&AdmittedSource,route:&ShellSummary,evidence:&Path,run:&Uuid)->io::Result<TerminalShellProcess> {
-    let deadline=Instant::now()+Duration::from_secs(30);
-    let shell=loop {
-        let native=terminal_current(phone,source,socket,desktop,route).await?;
-        let pane=terminal_native_pane(&native,route)?;
-        if native.focused_workspace_id.as_ref()!=Some(&pane.workspace_id)||native.focused_tab_id.as_ref()!=Some(&pane.tab_id)||native.focused_pane_id.as_ref()!=Some(&pane.pane_id){
-            return Err(prerequisite("terminal-only startup root is not the original foreground selection"));
+fn terminal_fixture_command() -> String {
+    fn octal(value: &str) -> String {
+        use std::fmt::Write;
+        let mut encoded = String::with_capacity(value.len() * 4);
+        for byte in value.bytes() {
+            write!(&mut encoded, "\\{byte:03o}").expect("String write");
         }
-        let client=Client::connect(socket).await?;
-        if client.evidence!=source.client.evidence{return Err(prerequisite("terminal-only process-info original source changed"));}
-        let info=client.process_info(&route.pane_id).await?;
-        if let Some(shell)=TerminalShellProcess::capture(&source.process,&info,&config.projects[0].path)?{break shell;}
-        if Instant::now()>=deadline{return Err(prerequisite("terminal-only fresh original shell did not become provably idle"));}
+        encoded
+    }
+    // Public fixture text is encoded even in the command, so echoed input cannot prove output.
+    let first = "\u{1b}[2J\u{1b}[HGOATRSTOCKBEGIN\nGOATRUC: 界|ｶﾞ|👩‍💻|❤️|🇺🇸\nGOATRCOLOR: \u{1b}[31mR\u{1b}[0m|\u{1b}[38;5;202mI\u{1b}[0m|\u{1b}[38;2;17;34;51mT\u{1b}[0m|D\n";
+    format!(
+        "builtin printf '{}'; builtin command sleep 20; builtin printf '{}'",
+        octal(first),
+        octal("\nGOATRSTOCKDELAYED\n")
+    )
+}
+struct TerminalContext<'a> {
+    config: &'a Config,
+    socket: &'a Path,
+    evidence: &'a Path,
+    run: &'a Uuid,
+}
+async fn terminal_fixture(
+    phone: &mut Phone,
+    context: &TerminalContext<'_>,
+    desktop: &mut Desktop,
+    source: &AdmittedSource,
+    route: &ShellSummary,
+) -> io::Result<TerminalShellProcess> {
+    let &TerminalContext {
+        config,
+        socket,
+        evidence,
+        run,
+    } = context;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let shell = loop {
+        let native = terminal_current(phone, source, socket, desktop, route).await?;
+        let pane = terminal_native_pane(&native, route)?;
+        if native.focused_workspace_id.as_ref() != Some(&pane.workspace_id)
+            || native.focused_tab_id.as_ref() != Some(&pane.tab_id)
+            || native.focused_pane_id.as_ref() != Some(&pane.pane_id)
+        {
+            return Err(prerequisite(
+                "terminal-only startup root is not the original foreground selection",
+            ));
+        }
+        let client = Client::connect(socket).await?;
+        if client.evidence != source.client.evidence {
+            return Err(prerequisite(
+                "terminal-only process-info original source changed",
+            ));
+        }
+        let info = client.process_info(&route.pane_id).await?;
+        if let Some(shell) =
+            TerminalShellProcess::capture(&source.process, &info, &config.projects[0].path)?
+        {
+            break shell;
+        }
+        if Instant::now() >= deadline {
+            return Err(prerequisite(
+                "terminal-only fresh original shell did not become provably idle",
+            ));
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let native=terminal_current(phone,source,socket,desktop,route).await?;
-    terminal_native_pane(&native,route)?;shell.recheck()?;
-    let client=Client::connect(socket).await?;
-    if client.evidence!=source.client.evidence{return Err(prerequisite("terminal-only fixture input original source changed"));}
-    let input=Uuid::random();let intent=evidence.join(format!("terminal-fixture-{}-{}.json",run.0,input.0));
-    let metadata=shell.executable.metadata()?;
-    write_json(&intent,&json!({"runId":run,"inputId":input,"method":"pane.send_input","state":"dispatching",
+    let native = terminal_current(phone, source, socket, desktop, route).await?;
+    terminal_native_pane(&native, route)?;
+    shell.recheck()?;
+    let client = Client::connect(socket).await?;
+    if client.evidence != source.client.evidence {
+        return Err(prerequisite(
+            "terminal-only fixture input original source changed",
+        ));
+    }
+    let input = Uuid::random();
+    let intent = evidence.join(format!("terminal-fixture-{}-{}.json", run.0, input.0));
+    let metadata = shell.executable.metadata()?;
+    write_json(
+        &intent,
+        &json!({"runId":run,"inputId":input,"method":"pane.send_input","state":"dispatching",
         "shellTarget":route.target,"serverId":route.server_id,"workspaceId":route.workspace_id,"tabId":route.tab_id,
         "paneId":route.pane_id,"terminalId":route.terminal_id,"originalHerdr":source.process,"source":source.client.evidence,
         "shell":shell.process,"shellExecutable":{"path":shell.path,"device":metadata.dev(),"inode":metadata.ino(),"bytes":metadata.len()},
         "fixture":"fixed public printf Unicode/color/delayed-output only; payload not retained","ackMeans":"queued, not execution",
-        "uncertainRule":"never repeat or correct input; retain resources"}))?;
+        "uncertainRule":"never repeat or correct input; retain resources"}),
+    )?;
     // All readiness RPCs/connections precede this last foreground query. Its returned original
     // process/group/membership proof and synchronous source/object rechecks directly precede input.
-    let final_guard:io::Result<()>=async {
-        let foreground=Client::connect(socket).await?;
-        if foreground.evidence!=source.client.evidence{return Err(prerequisite("terminal-only final foreground source changed"));}
-        let info=foreground.process_info(&route.pane_id).await?;
-        terminal_native_pane(&native,route)?;desktop.recheck()?;source.recheck()?;client.recheck()?;
-        shell.recheck_idle(&source.process,&info,&route.pane_id)?;
-        if Instant::now()>=deadline{return Err(prerequisite("terminal-only original fixture deadline passed before input"));}
+    let final_guard: io::Result<()> = async {
+        let foreground = Client::connect(socket).await?;
+        if foreground.evidence != source.client.evidence {
+            return Err(prerequisite(
+                "terminal-only final foreground source changed",
+            ));
+        }
+        let info = foreground.process_info(&route.pane_id).await?;
+        terminal_native_pane(&native, route)?;
+        desktop.recheck()?;
+        source.recheck()?;
+        client.recheck()?;
+        shell.recheck_idle(&source.process, &info, &route.pane_id)?;
+        if Instant::now() >= deadline {
+            return Err(prerequisite(
+                "terminal-only original fixture deadline passed before input",
+            ));
+        }
         Ok(())
-    }.await;
-    if let Err(error)=final_guard {
-        write_native_outcome(&intent,&json!({"runId":run,"inputId":input,"state":"not_dispatched","category":"final_idle_guard",
-            "queueAcknowledged":false,"executionProved":false,"replayAllowed":false}))?;
+    }
+    .await;
+    if let Err(error) = final_guard {
+        write_native_outcome(
+            &intent,
+            &json!({"runId":run,"inputId":input,"state":"not_dispatched","category":"final_idle_guard",
+            "queueAcknowledged":false,"executionProved":false,"replayAllowed":false}),
+        )?;
         return Err(error);
     }
-    let outcome=client.request("pane.send_input",json!({"pane_id":route.pane_id,"text":terminal_fixture_command(),"keys":["Enter"]}),"ok").await;
-    let ack=outcome.is_ok();
-    let post=if ack{terminal_current(phone,source,socket,desktop,route).await.and_then(|_|shell.recheck())}else{Err(failure("terminal-only fixture input entered outcome unavailable"))};
-    write_native_outcome(&intent,&json!({"runId":run,"inputId":input,"state":if ack&&post.is_ok(){"acknowledged"}else{"uncertain"},
-        "queueAcknowledged":ack,"sameOriginalAfter":post.is_ok(),"executionProved":false,"payloadRetained":false,"replayAllowed":false}))?;
-    if !ack||post.is_err(){return Err(failure("terminal-only fixture outcome uncertain; no correction/replay, originals retained"));}
+    let outcome = client
+        .request(
+            "pane.send_input",
+            json!({"pane_id":route.pane_id,"text":terminal_fixture_command(),"keys":["Enter"]}),
+            "ok",
+        )
+        .await;
+    let ack = outcome.is_ok();
+    let post = if ack {
+        terminal_current(phone, source, socket, desktop, route)
+            .await
+            .and_then(|_| shell.recheck())
+    } else {
+        Err(failure(
+            "terminal-only fixture input entered outcome unavailable",
+        ))
+    };
+    write_native_outcome(
+        &intent,
+        &json!({"runId":run,"inputId":input,"state":if ack&&post.is_ok(){"acknowledged"}else{"uncertain"},
+        "queueAcknowledged":ack,"sameOriginalAfter":post.is_ok(),"executionProved":false,"payloadRetained":false,"replayAllowed":false}),
+    )?;
+    if !ack || post.is_err() {
+        return Err(failure(
+            "terminal-only fixture outcome uncertain; no correction/replay, originals retained",
+        ));
+    }
     Ok(shell)
 }
-fn terminal_resize_receipt(receipt:&Receipt,id:&Uuid,boot:&Uuid,target:&ShellTarget,columns:u64,rows:u64)->io::Result<()> {
-    receipt.validate().map_err(|_|grid_failure("terminal_resize_receipt"))?;
-    if &receipt.action_id!=id||&receipt.boot_id!=boot||receipt.method!=ActionMethod::ShellResize
-        ||receipt.shell_target.as_ref()!=Some(target)||receipt.target.is_some()||receipt.creation.is_some()
-        ||receipt.state!=ReceiptState::Succeeded||receipt.error.is_some()
-        ||!matches!(&receipt.result,Some(ActionResult::ShellResize(result))if result.columns.0==columns&&result.rows.0==rows)
-    {return Err(grid_failure("terminal_resize_authoritative_dimensions"));}
+fn terminal_resize_receipt(
+    receipt: &Receipt,
+    id: &Uuid,
+    boot: &Uuid,
+    target: &ShellTarget,
+    columns: u64,
+    rows: u64,
+) -> io::Result<()> {
+    receipt
+        .validate()
+        .map_err(|_| grid_failure("terminal_resize_receipt"))?;
+    if &receipt.action_id != id
+        || &receipt.boot_id != boot
+        || receipt.method != ActionMethod::ShellResize
+        || receipt.shell_target.as_ref() != Some(target)
+        || receipt.target.is_some()
+        || receipt.creation.is_some()
+        || receipt.state != ReceiptState::Succeeded
+        || receipt.error.is_some()
+        || !matches!(&receipt.result,Some(ActionResult::ShellResize(result))if result.columns.0==columns&&result.rows.0==rows)
+    {
+        return Err(grid_failure("terminal_resize_authoritative_dimensions"));
+    }
     Ok(())
 }
-fn terminal_input_scope(receipt:&Receipt,id:&Uuid,boot:&Uuid,target:&ShellTarget)->io::Result<()> {
-    receipt.validate().map_err(|_|grid_failure("terminal_input_receipt"))?;
-    if receipt.action_id!=*id||receipt.boot_id!=*boot||receipt.method!=ActionMethod::ShellInput
-        ||receipt.shell_target.as_ref()!=Some(target)||receipt.target.is_some()||receipt.creation.is_some()
-    {return Err(grid_failure("terminal_input_original_receipt"));}Ok(())
+fn terminal_input_scope(
+    receipt: &Receipt,
+    id: &Uuid,
+    boot: &Uuid,
+    target: &ShellTarget,
+) -> io::Result<()> {
+    receipt
+        .validate()
+        .map_err(|_| grid_failure("terminal_input_receipt"))?;
+    if receipt.action_id != *id
+        || receipt.boot_id != *boot
+        || receipt.method != ActionMethod::ShellInput
+        || receipt.shell_target.as_ref() != Some(target)
+        || receipt.target.is_some()
+        || receipt.creation.is_some()
+    {
+        return Err(grid_failure("terminal_input_original_receipt"));
+    }
+    Ok(())
 }
-async fn terminal_goatr_input(phone:&mut Phone,route:&ShellSummary,subscription:&Uuid,input:ShellInput,evidence:&Path,run:&Uuid,reader_safe:&mut bool)->io::Result<Receipt> {
-    let action=Uuid::random();let boot=phone.hello.boot_id.clone();
-    let kind=match &input{ShellInput::Text{..}=>"text_commit",ShellInput::Keys{..}=>"keys"};
-    let intent=evidence.join(format!("terminal-input-{}-{}.json",run.0,action.0));
-    write_json(&intent,&json!({"runId":run,"actionId":action,"bootId":boot,"method":"shell.input","shellTarget":route.target,
+async fn terminal_goatr_input(
+    phone: &mut Phone,
+    route: &ShellSummary,
+    subscription: &Uuid,
+    input: ShellInput,
+    evidence: &Path,
+    run: &Uuid,
+    reader_safe: &mut bool,
+) -> io::Result<Receipt> {
+    let action = Uuid::random();
+    let boot = phone.hello.boot_id.clone();
+    let kind = match &input {
+        ShellInput::Text { .. } => "text_commit",
+        ShellInput::Keys { .. } => "keys",
+    };
+    let intent = evidence.join(format!("terminal-input-{}-{}.json", run.0, action.0));
+    write_json(
+        &intent,
+        &json!({"runId":run,"actionId":action,"bootId":boot,"method":"shell.input","shellTarget":route.target,
         "subscription":subscription,"inputKind":kind,"state":"dispatching","payloadRetained":false,"replayAllowed":false,
-        "outcomeMeaning":"complete original native socket frame only; no PTY acceptance/flush/consume acknowledgment"}))?;
-    *reader_safe=false;
-    let outcome=phone.request_at(action.clone(),RequestBody::ShellInput(ShellInputParams{boot_id:boot.clone(),target:route.target.clone(),subscription:subscription.clone(),input}),"terminal_input").await;
-    let receipt=match outcome {
-        Ok(Ok(ResultBody::ShellInput(result)))=>result.receipt,
-        Ok(Err(error))=>{
-            *reader_safe=true;
-            write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"request_rejected","code":error.code,"replayAllowed":false}))?;
+        "outcomeMeaning":"complete original native socket frame only; no PTY acceptance/flush/consume acknowledgment"}),
+    )?;
+    *reader_safe = false;
+    let outcome = phone
+        .request_at(
+            action.clone(),
+            RequestBody::ShellInput(ShellInputParams {
+                boot_id: boot.clone(),
+                target: route.target.clone(),
+                subscription: subscription.clone(),
+                input,
+            }),
+            "terminal_input",
+        )
+        .await;
+    let receipt = match outcome {
+        Ok(Ok(ResultBody::ShellInput(result))) => result.receipt,
+        Ok(Err(error)) => {
+            *reader_safe = true;
+            write_native_outcome(
+                &intent,
+                &json!({"runId":run,"actionId":action,"state":"request_rejected","code":error.code,"replayAllowed":false}),
+            )?;
             return Err(grid_failure("terminal_input_request_rejected"));
         }
-        _=>{
-            write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"uncertain","replayAllowed":false}))?;
+        _ => {
+            write_native_outcome(
+                &intent,
+                &json!({"runId":run,"actionId":action,"state":"uncertain","replayAllowed":false}),
+            )?;
             return Err(grid_failure("terminal_input_entered_unknown"));
         }
     };
-    terminal_input_scope(&receipt,&action,&boot,&route.target)?;
-    let receipt=if matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Dispatching) {
+    terminal_input_scope(&receipt, &action, &boot, &route.target)?;
+    let receipt = if matches!(
+        receipt.state,
+        ReceiptState::Reserved | ReceiptState::Dispatching
+    ) {
         phone.settled(&action).await?
-    }else{receipt};
-    terminal_input_scope(&receipt,&action,&boot,&route.target)?;*reader_safe=true;
-    write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"receipt":receipt,"payloadRetained":false,"replayAllowed":false}))?;
-    grid_receipt(&receipt,&action,&boot,&GridSubject::Shell(route.target.clone()))?;Ok(receipt)
+    } else {
+        receipt
+    };
+    terminal_input_scope(&receipt, &action, &boot, &route.target)?;
+    *reader_safe = true;
+    write_native_outcome(
+        &intent,
+        &json!({"runId":run,"actionId":action,"receipt":receipt,"payloadRetained":false,"replayAllowed":false}),
+    )?;
+    grid_receipt(
+        &receipt,
+        &action,
+        &boot,
+        &GridSubject::Shell(route.target.clone()),
+    )?;
+    Ok(receipt)
 }
-fn terminal_creation_scope(receipt:&Receipt,id:&Uuid,boot:&Uuid)->io::Result<()> {
-    receipt.validate().map_err(|_|grid_failure("terminal_create_receipt"))?;
-    if receipt.action_id!=*id||receipt.boot_id!=*boot||receipt.method!=ActionMethod::TerminalCreate
-        ||receipt.target.is_some()||receipt.shell_target.is_some()||receipt.creation.is_some()
-    {return Err(grid_failure("terminal_create_original_receipt"));}Ok(())
+fn terminal_creation_scope(receipt: &Receipt, id: &Uuid, boot: &Uuid) -> io::Result<()> {
+    receipt
+        .validate()
+        .map_err(|_| grid_failure("terminal_create_receipt"))?;
+    if receipt.action_id != *id
+        || receipt.boot_id != *boot
+        || receipt.method != ActionMethod::TerminalCreate
+        || receipt.target.is_some()
+        || receipt.shell_target.is_some()
+        || receipt.creation.is_some()
+    {
+        return Err(grid_failure("terminal_create_original_receipt"));
+    }
+    Ok(())
 }
-async fn terminal_goatr_create(phone:&mut Phone,config:&Config,socket:&Path,desktop:&mut Desktop,source:&AdmittedSource,route:&ShellSummary,evidence:&Path,run:&Uuid)->io::Result<Value> {
-    let before=terminal_current(phone,source,socket,desktop,route).await?;
-    let action=Uuid::random();let boot=phone.hello.boot_id.clone();let project=&config.projects[0];
-    let intent=evidence.join(format!("terminal-create-{}-{}.json",run.0,action.0));
-    write_json(&intent,&json!({"runId":run,"actionId":action,"bootId":boot,"method":"terminal.create","serverId":route.server_id,
+async fn terminal_goatr_create(
+    phone: &mut Phone,
+    context: &TerminalContext<'_>,
+    desktop: &mut Desktop,
+    source: &AdmittedSource,
+    route: &ShellSummary,
+) -> io::Result<Value> {
+    let &TerminalContext {
+        config,
+        socket,
+        evidence,
+        run,
+    } = context;
+    let before = terminal_current(phone, source, socket, desktop, route).await?;
+    let action = Uuid::random();
+    let boot = phone.hello.boot_id.clone();
+    let project = &config.projects[0];
+    let intent = evidence.join(format!("terminal-create-{}-{}.json", run.0, action.0));
+    write_json(
+        &intent,
+        &json!({"runId":run,"actionId":action,"bootId":boot,"method":"terminal.create","serverId":route.server_id,
         "workspaceId":route.workspace_id,"projectId":project.id,"source":ArtifactSource::Shell{target:route.target.clone()},"directory":"configured project root",
-        "state":"dispatching","focus":false,"replayAllowed":false,"resourceCleanup":"retain originals for coordinator review"}))?;
-    let outcome=phone.request_at(action.clone(),RequestBody::TerminalCreate(TerminalCreateParams{boot_id:boot.clone(),server_id:route.server_id.clone(),
-        workspace_id:route.workspace_id.clone(),project_id:project.id.clone(),directory_ref:None,source:Some(ArtifactSource::Shell{target:route.target.clone()})}),"terminal_create").await;
-    let receipt=match outcome {
-        Ok(Ok(ResultBody::TerminalCreate(result)))=>result.receipt,
-        Ok(Err(error))=>{
-            write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"request_rejected","code":error.code,"replayAllowed":false}))?;
+        "state":"dispatching","focus":false,"replayAllowed":false,"resourceCleanup":"retain originals for coordinator review"}),
+    )?;
+    let outcome = phone
+        .request_at(
+            action.clone(),
+            RequestBody::TerminalCreate(TerminalCreateParams {
+                boot_id: boot.clone(),
+                server_id: route.server_id.clone(),
+                workspace_id: route.workspace_id.clone(),
+                project_id: project.id.clone(),
+                directory_ref: None,
+                source: Some(ArtifactSource::Shell {
+                    target: route.target.clone(),
+                }),
+            }),
+            "terminal_create",
+        )
+        .await;
+    let receipt = match outcome {
+        Ok(Ok(ResultBody::TerminalCreate(result))) => result.receipt,
+        Ok(Err(error)) => {
+            write_native_outcome(
+                &intent,
+                &json!({"runId":run,"actionId":action,"state":"request_rejected","code":error.code,"replayAllowed":false}),
+            )?;
             return Err(grid_failure("terminal_create_request_rejected"));
         }
-        _=>{
-            write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"state":"uncertain","replayAllowed":false}))?;
+        _ => {
+            write_native_outcome(
+                &intent,
+                &json!({"runId":run,"actionId":action,"state":"uncertain","replayAllowed":false}),
+            )?;
             return Err(grid_failure("terminal_create_entered_unknown"));
         }
     };
-    terminal_creation_scope(&receipt,&action,&boot)?;
-    let receipt=if matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Dispatching){phone.settled(&action).await?}else{receipt};
-    terminal_creation_scope(&receipt,&action,&boot)?;
+    terminal_creation_scope(&receipt, &action, &boot)?;
+    let receipt = if matches!(
+        receipt.state,
+        ReceiptState::Reserved | ReceiptState::Dispatching
+    ) {
+        phone.settled(&action).await?
+    } else {
+        receipt
+    };
+    terminal_creation_scope(&receipt, &action, &boot)?;
     // Preserve known resource IDs BEFORE any independent read can fail. Nothing is corrected or closed.
-    write_native_outcome(&intent,&json!({"runId":run,"actionId":action,"receipt":receipt,"replayAllowed":false}))?;
-    let Some(ActionResult::ShellCreation(result))=&receipt.result else{return Err(grid_failure("terminal_create_resource_facts"));};
-    let resources=&result.resources;
-    if receipt.state!=ReceiptState::Succeeded||receipt.error.is_some()||!resources.complete()
-        ||resources.server_id.as_ref()!=Some(&route.server_id)||resources.workspace_id.as_ref()!=Some(&route.workspace_id)
-        ||resources.pane_id.as_ref()==Some(&route.pane_id)||resources.terminal_id.as_ref()==Some(&route.terminal_id)||resources.tab_id.as_ref()==Some(&route.tab_id)
-    {return Err(grid_failure("terminal_create_actual_cwd_or_original_workspace_unproved"));}
-    let target=resources.created_target.as_ref().ok_or_else(||grid_failure("terminal_create_target"))?;
-    let end=Instant::now()+Duration::from_secs(30);
-    let created=loop {
-        desktop.recheck()?;source.recheck()?;
-        let (actual,native)=surface(socket).await?;let inventory=phone.host().await?;
-        if !source.observation(&actual,&native,&inventory)?{return Err(prerequisite("terminal-only created resource current source unavailable"));}
-        terminal_native_pane(&native,route)?;
-        if native.focused_workspace_id!=before.focused_workspace_id||native.focused_tab_id!=before.focused_tab_id||native.focused_pane_id!=before.focused_pane_id {
+    write_native_outcome(
+        &intent,
+        &json!({"runId":run,"actionId":action,"receipt":receipt,"replayAllowed":false}),
+    )?;
+    let Some(ActionResult::ShellCreation(result)) = &receipt.result else {
+        return Err(grid_failure("terminal_create_resource_facts"));
+    };
+    let resources = &result.resources;
+    if receipt.state != ReceiptState::Succeeded
+        || receipt.error.is_some()
+        || !resources.complete()
+        || resources.server_id.as_ref() != Some(&route.server_id)
+        || resources.workspace_id.as_ref() != Some(&route.workspace_id)
+        || resources.pane_id.as_ref() == Some(&route.pane_id)
+        || resources.terminal_id.as_ref() == Some(&route.terminal_id)
+        || resources.tab_id.as_ref() == Some(&route.tab_id)
+    {
+        return Err(grid_failure(
+            "terminal_create_actual_cwd_or_original_workspace_unproved",
+        ));
+    }
+    let target = resources
+        .created_target
+        .as_ref()
+        .ok_or_else(|| grid_failure("terminal_create_target"))?;
+    let end = Instant::now() + Duration::from_secs(30);
+    let created = loop {
+        desktop.recheck()?;
+        source.recheck()?;
+        let (actual, native) = surface(socket).await?;
+        let inventory = phone.host().await?;
+        if !source.observation(&actual, &native, &inventory)? {
+            return Err(prerequisite(
+                "terminal-only created resource current source unavailable",
+            ));
+        }
+        terminal_native_pane(&native, route)?;
+        if native.focused_workspace_id != before.focused_workspace_id
+            || native.focused_tab_id != before.focused_tab_id
+            || native.focused_pane_id != before.focused_pane_id
+        {
             return Err(grid_failure("terminal_create_native_focus_changed"));
         }
-        if let Some(created)=inventory.shells.iter().find(|shell|&shell.target==target&&shell.connectivity==SessionConnectivity::Ready&&shell.capabilities.read&&shell.capabilities.input) {
-            if resources.pane_id.as_ref()!=Some(&created.pane_id)||resources.terminal_id.as_ref()!=Some(&created.terminal_id)
-                ||resources.tab_id.as_ref()!=Some(&created.tab_id)||created.workspace_id!=route.workspace_id||created.server_id!=route.server_id
-            {return Err(grid_failure("terminal_create_inventory_resource_join"));}
-            terminal_native_pane(&native,created)?;
-            let client=Client::connect(socket).await?;
-            if client.evidence!=source.client.evidence{return Err(grid_failure("terminal_create_process_info_source"));}
-            let info=client.process_info(&created.pane_id).await?;
-            if let Some(shell)=TerminalShellProcess::capture(&source.process,&info,&project.path)? {break shell;}
+        if let Some(created) = inventory.shells.iter().find(|shell| {
+            &shell.target == target
+                && shell.connectivity == SessionConnectivity::Ready
+                && shell.capabilities.read
+                && shell.capabilities.input
+        }) {
+            if resources.pane_id.as_ref() != Some(&created.pane_id)
+                || resources.terminal_id.as_ref() != Some(&created.terminal_id)
+                || resources.tab_id.as_ref() != Some(&created.tab_id)
+                || created.workspace_id != route.workspace_id
+                || created.server_id != route.server_id
+            {
+                return Err(grid_failure("terminal_create_inventory_resource_join"));
+            }
+            terminal_native_pane(&native, created)?;
+            let client = Client::connect(socket).await?;
+            if client.evidence != source.client.evidence {
+                return Err(grid_failure("terminal_create_process_info_source"));
+            }
+            let info = client.process_info(&created.pane_id).await?;
+            if let Some(shell) =
+                TerminalShellProcess::capture(&source.process, &info, &project.path)?
+            {
+                break shell;
+            }
         }
-        if Instant::now()>=end{return Err(prerequisite("terminal-only created original shell process/cwd inventory join unavailable"));}
+        if Instant::now() >= end {
+            return Err(prerequisite(
+                "terminal-only created original shell process/cwd inventory join unavailable",
+            ));
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let executable=created.executable.metadata()?;
-    let manifest=evidence.join(format!("terminal-created-ownership-{}-{}.json",run.0,action.0));
-    write_json(&manifest,&json!({"runId":run,"actionId":action,"receipt":receipt,"serverId":source.identity.0,"serverIncarnation":source.identity.1,
+    let executable = created.executable.metadata()?;
+    let manifest = evidence.join(format!(
+        "terminal-created-ownership-{}-{}.json",
+        run.0, action.0
+    ));
+    write_json(
+        &manifest,
+        &json!({"runId":run,"actionId":action,"receipt":receipt,"serverId":source.identity.0,"serverIncarnation":source.identity.1,
         "originalHerdr":source.process,"socketSource":source.client.evidence,"createdShell":created.process,
         "cwdObject":{"device":created.cwd.0,"inode":created.cwd.1},"shellExecutable":{"device":executable.dev(),"inode":executable.ino(),"bytes":executable.len()},
-        "nativeFocusUnchanged":true,"providerLaunched":false,"inputSentToNewShell":false,"cleanup":"retained; coordinator original-identity review required"}))?;
-    Ok(json!({"receipt":receipt,"ownershipManifest":manifest,"sameOriginalWorkspace":true,"actualKernelCwdMatchedConfiguredRoot":true,
-        "nativeFocusUnchanged":true,"inputSentToNewShell":false}))
+        "nativeFocusUnchanged":true,"providerLaunched":false,"inputSentToNewShell":false,"cleanup":"retained; coordinator original-identity review required"}),
+    )?;
+    Ok(
+        json!({"receipt":receipt,"ownershipManifest":manifest,"sameOriginalWorkspace":true,"actualKernelCwdMatchedConfiguredRoot":true,
+        "nativeFocusUnchanged":true,"inputSentToNewShell":false}),
+    )
 }
 
-async fn terminal_flow(phone:&mut Phone,config:&Config,socket:&Path,desktop:&mut Desktop,original:&ServerEvidence,initial:Snapshot,name:&str,evidence:&Path,run:&Uuid)->io::Result<bool> {
-    let end=Instant::now()+Duration::from_secs(30);
-    let (source,route)=loop {
-        desktop.recheck()?;dev_continuity::zero_native_caps(&desktop.process)?;
-        let client=Client::connect(socket).await?;
-        if client.evidence!=*original{return Err(prerequisite("terminal-only original startup source changed"));}
-        let (actual,native)=surface(socket).await?;let inventory=phone.host().await?;
-        if actual!=*original{return Err(prerequisite("terminal-only original source observation changed"));}
-        if let Some((route,incarnation))=terminal_select(&inventory,&native,name,None)? {
-            let identity=(route.server_id.clone(),incarnation);
-            creation_source_observation(&identity,original,&initial,&actual,&native,&inventory).map_err(prerequisite)?.then_some(()).ok_or_else(||prerequisite("terminal-only original source not current"))?;
-            let source=AdmittedSource{identity,client,process:desktop.process.clone(),native:initial};
-            write_json(&evidence.join(format!("terminal-binding-{}.json",run.0)),&json!({"runId":run,"serverId":source.identity.0,"serverIncarnation":source.identity.1,
-                "shellTarget":route.target,"workspaceId":route.workspace_id,"tabId":route.tab_id,"paneId":route.pane_id,"terminalId":route.terminal_id,
-                "source":original,"herdr":source.process,"scope":"actual Hello/current original source and logical shell; no provider eligibility dependency"}))?;
-            break (source,route);
+async fn terminal_flow(
+    phone: &mut Phone,
+    context: &TerminalContext<'_>,
+    desktop: &mut Desktop,
+    original: &ServerEvidence,
+    initial: Snapshot,
+    name: &str,
+) -> io::Result<bool> {
+    let &TerminalContext {
+        socket,
+        evidence,
+        run,
+        ..
+    } = context;
+    let end = Instant::now() + Duration::from_secs(30);
+    let (source, route) = loop {
+        desktop.recheck()?;
+        dev_continuity::zero_native_caps(&desktop.process)?;
+        let client = Client::connect(socket).await?;
+        if client.evidence != *original {
+            return Err(prerequisite(
+                "terminal-only original startup source changed",
+            ));
         }
-        if Instant::now()>=end{return Err(prerequisite("terminal-only ordinary current shell admission unavailable"));}
+        let (actual, native) = surface(socket).await?;
+        let inventory = phone.host().await?;
+        if actual != *original {
+            return Err(prerequisite(
+                "terminal-only original source observation changed",
+            ));
+        }
+        if let Some((route, incarnation)) = terminal_select(&inventory, &native, name, None)? {
+            let identity = (route.server_id.clone(), incarnation);
+            creation_source_observation(
+                &identity, original, &initial, &actual, &native, &inventory,
+            )
+            .map_err(prerequisite)?
+            .then_some(())
+            .ok_or_else(|| prerequisite("terminal-only original source not current"))?;
+            let source = AdmittedSource {
+                identity,
+                client,
+                process: desktop.process.clone(),
+                native: initial,
+            };
+            write_json(
+                &evidence.join(format!("terminal-binding-{}.json", run.0)),
+                &json!({"runId":run,"serverId":source.identity.0,"serverIncarnation":source.identity.1,
+                "shellTarget":route.target,"workspaceId":route.workspace_id,"tabId":route.tab_id,"paneId":route.pane_id,"terminalId":route.terminal_id,
+                "source":original,"herdr":source.process,"scope":"actual Hello/current original source and logical shell; no provider eligibility dependency"}),
+            )?;
+            break (source, route);
+        }
+        if Instant::now() >= end {
+            return Err(prerequisite(
+                "terminal-only ordinary current shell admission unavailable",
+            ));
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let mut reader_safe=false;let mut delayed_marker_observed=false;let mut input_echo_observed=false;
+    let mut reader_safe = false;
+    let mut delayed_marker_observed = false;
+    let mut input_echo_observed = false;
     let outcome:io::Result<Value>=async {
-        let shell=terminal_fixture(phone,config,socket,desktop,&source,&route,evidence,run).await?;
+        let shell=terminal_fixture(phone,context,desktop,&source,&route).await?;
         terminal_current(phone,&source,socket,desktop,&route).await?;shell.recheck()?;
         write_json(&evidence.join(format!("terminal-begin-consent-{}.json",run.0)),&json!({"runId":run,"consented":true,
             "explicitFlags":["consent-owned-providers","automate-native-inputs"],"disclosure":TERMINAL_DISCLOSURE,"beforeSubscribe":true,
@@ -12731,7 +14285,9 @@ async fn terminal_flow(phone:&mut Phone,config:&Config,socket:&Path,desktop:&mut
             "sourceLossAndRevoke":"unproved","physicalPhone":"unproved","phase4InputImeHardware":"unproved",
             "defaultOrRawLogsRead":false,"providerSessionsCreated":0}))
     }.await;
-    let observation_saved=write_json(&evidence.join(format!("terminal-observation-{}.json",run.0)),&json!({"runId":run,
+    let observation_saved = write_json(
+        &evidence.join(format!("terminal-observation-{}.json", run.0)),
+        &json!({"runId":run,
         "openingAccepted":phone.grid.as_ref().is_some_and(|grid|grid.subscription.is_some()),
         "committedRevision":phone.grid.as_ref().and_then(|grid|grid.committed),
         "openingCommit":phone.grid.as_ref().and_then(|grid|grid.fixture.as_ref()).and_then(|fixture|fixture.opening).map(|(revision,_)|revision),
@@ -12740,256 +14296,1051 @@ async fn terminal_flow(phone:&mut Phone,config:&Config,socket:&Path,desktop:&mut
         "delayedMarkerCommitted":delayed_marker_observed,"goatrInputEchoObserved":input_echo_observed,
         "streamRetired":phone.grid.as_ref().is_some_and(|grid|grid.retired),
         "committedFixtureFacts":phone.grid.as_ref().and_then(|grid|grid.fixture.as_ref()).and_then(|fixture|fixture.committed).map(TerminalFixtureFacts::evidence),
-        "nativeTag19":"unproved","contentRetained":false}));
-    let had_subscription=phone.grid.as_ref().and_then(|grid|grid.subscription.as_ref()).is_some();
-    let release_requested=had_subscription&&reader_safe;
-    let release=if release_requested {phone.grid_unsubscribe().await}else{
-        if had_subscription{phone.connection.close(0u32.into(),b"original terminal viewer retired");}Ok(())
+        "nativeTag19":"unproved","contentRetained":false}),
+    );
+    let had_subscription = phone
+        .grid
+        .as_ref()
+        .and_then(|grid| grid.subscription.as_ref())
+        .is_some();
+    let release_requested = had_subscription && reader_safe;
+    let release = if release_requested {
+        phone.grid_unsubscribe().await
+    } else {
+        if had_subscription {
+            phone
+                .connection
+                .close(0u32.into(), b"original terminal viewer retired");
+        }
+        Ok(())
     };
-    write_json(&evidence.join(format!("terminal-release-{}.json",run.0)),&json!({"runId":run,"protocolUnsubscribeRequested":release_requested,"protocolUnsubscribeConfirmed":release_requested&&release.is_ok(),
+    write_json(
+        &evidence.join(format!("terminal-release-{}.json", run.0)),
+        &json!({"runId":run,"protocolUnsubscribeRequested":release_requested,"protocolUnsubscribeConfirmed":release_requested&&release.is_ok(),
         "originalReaderTrustedForCleanup":reader_safe,
         "nativeDeactivationAck":"not_provided","nativeResources":"retained; no pane close/signals/stop",
-        "scope":"temporary local client viewer release only; no claim of a native deactivation or size-restoration acknowledgment"}))?;
-    let mut record=outcome?;observation_saved?;release?;
-    record["terminalCreate"]=terminal_goatr_create(phone,config,socket,desktop,&source,&route,evidence,run).await?;
-    write_json(&evidence.join(format!("terminal-result-{}.json",run.0)),&record)?;println!("{record}");Ok(true)
+        "scope":"temporary local client viewer release only; no claim of a native deactivation or size-restoration acknowledgment"}),
+    )?;
+    let mut record = outcome?;
+    observation_saved?;
+    release?;
+    record["terminalCreate"] =
+        terminal_goatr_create(phone, context, desktop, &source, &route).await?;
+    write_json(
+        &evidence.join(format!("terminal-result-{}.json", run.0)),
+        &record,
+    )?;
+    println!("{record}");
+    Ok(true)
 }
 async fn checkpoint(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
     checkpoint_held(args, evidence, None, None).await
 }
 // This fixture input is public and independently crypto-qualified by the coordinator.
 // The helper checks bytes/objects only; it never signs, unlocks or reads a source repository.
-const PROJECT_PUBLIC_COMMIT:&str="a55cd979cab6a0a47d4c757ac97b97d8535ee9eb";
-const PROJECT_PUBLIC_TREE:&str="fb2fbdd55eed2884f345b23ab25bdfa0f6ce31f8";
-const PROJECT_PACK_LIMIT:usize=16*1024*1024;
-fn project_hash(text:&str)->bool {text.len()==64&&text.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))}
-fn project_stamp(metadata:&fs::Metadata)->(u64,u64,u64,i64,i64,i64,i64,u32,u32) {
-    (metadata.dev(),metadata.ino(),metadata.len(),metadata.mtime(),metadata.mtime_nsec(),metadata.ctime(),metadata.ctime_nsec(),metadata.mode(),metadata.uid())
+const PROJECT_PUBLIC_COMMIT: &str = "a55cd979cab6a0a47d4c757ac97b97d8535ee9eb";
+const PROJECT_PUBLIC_TREE: &str = "fb2fbdd55eed2884f345b23ab25bdfa0f6ce31f8";
+const PROJECT_PACK_LIMIT: usize = 16 * 1024 * 1024;
+fn project_hash(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
-fn project_input(path:&Path,maximum:usize,pack:bool)->io::Result<Vec<u8>> {
-    let before=fs::symlink_metadata(path)?;
-    if !path.is_absolute()||fs::canonicalize(path)?!=path||!before.is_file()||before.file_type().is_symlink()
-        ||![0,uid()].contains(&before.uid())||before.mode()&0o222!=0||before.len()>maximum as u64
-        ||pack&&(before.nlink()!=1||before.mode()&0o7777!=0o400){return Err(prerequisite("owned project-read immutable input identity unavailable"));}
-    if pack {private_dir(path.parent().ok_or_else(||failure("public seed parent absent"))?,false)?;}
-    let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK|libc::O_CLOEXEC).open(path)?;
-    if project_stamp(&file.metadata()?)!=project_stamp(&before){return Err(prerequisite("owned project-read immutable input replaced"));}
-    let mut bytes=vec![0u8;before.len() as usize];file.read_exact(&mut bytes)?;let mut extra=[0u8;1];
-    if file.read(&mut extra)?!=0||project_stamp(&file.metadata()?)!=project_stamp(&before)||project_stamp(&fs::symlink_metadata(path)?)!=project_stamp(&before){return Err(prerequisite("owned project-read immutable input changed"));}
+fn project_stamp(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64, u32, u32) {
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+        metadata.mode(),
+        metadata.uid(),
+    )
+}
+fn project_input(path: &Path, maximum: usize, pack: bool) -> io::Result<Vec<u8>> {
+    let before = fs::symlink_metadata(path)?;
+    if !path.is_absolute()
+        || fs::canonicalize(path)? != path
+        || !before.is_file()
+        || before.file_type().is_symlink()
+        || ![0, uid()].contains(&before.uid())
+        || before.mode() & 0o222 != 0
+        || before.len() > maximum as u64
+        || pack && (before.nlink() != 1 || before.mode() & 0o7777 != 0o400)
+    {
+        return Err(prerequisite(
+            "owned project-read immutable input identity unavailable",
+        ));
+    }
+    if pack {
+        private_dir(
+            path.parent()
+                .ok_or_else(|| failure("public seed parent absent"))?,
+            false,
+        )?;
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    if project_stamp(&file.metadata()?) != project_stamp(&before) {
+        return Err(prerequisite("owned project-read immutable input replaced"));
+    }
+    let mut bytes = vec![0u8; before.len() as usize];
+    file.read_exact(&mut bytes)?;
+    let mut extra = [0u8; 1];
+    if file.read(&mut extra)? != 0
+        || project_stamp(&file.metadata()?) != project_stamp(&before)
+        || project_stamp(&fs::symlink_metadata(path)?) != project_stamp(&before)
+    {
+        return Err(prerequisite("owned project-read immutable input changed"));
+    }
     Ok(bytes)
 }
-fn project_file_hash(path:&Path)->io::Result<String> {
-    use sha2::{Digest,Sha256};
-    let before=fs::symlink_metadata(path)?;
-    if !before.is_file()||before.file_type().is_symlink()||before.len()>128*1024*1024||before.mode()&0o222!=0||![0,uid()].contains(&before.uid()){return Err(prerequisite("immutable selected Git image unavailable"));}
-    let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?;let mut hash=Sha256::new();let mut buffer=[0u8;65536];
-    loop {let count=file.read(&mut buffer)?;if count==0{break;}hash.update(&buffer[..count]);}
-    if project_stamp(&file.metadata()?)!=project_stamp(&before)||project_stamp(&fs::symlink_metadata(path)?)!=project_stamp(&before){return Err(prerequisite("immutable selected Git image changed"));}Ok(hex(&hash.finalize()))
+fn project_file_hash(path: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file()
+        || before.file_type().is_symlink()
+        || before.len() > 128 * 1024 * 1024
+        || before.mode() & 0o222 != 0
+        || ![0, uid()].contains(&before.uid())
+    {
+        return Err(prerequisite("immutable selected Git image unavailable"));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    if project_stamp(&file.metadata()?) != project_stamp(&before)
+        || project_stamp(&fs::symlink_metadata(path)?) != project_stamp(&before)
+    {
+        return Err(prerequisite("immutable selected Git image changed"));
+    }
+    Ok(hex(&hash.finalize()))
 }
-struct ProjectFixtureGit {executable:PathBuf,exec_path:PathBuf,manifest_sha:String,image_sha:String,stamp:(u64,u64,u64,i64,i64,i64,i64,u32,u32)}
+struct ProjectFixtureGit {
+    executable: PathBuf,
+    exec_path: PathBuf,
+    manifest_sha: String,
+    image_sha: String,
+    stamp: (u64, u64, u64, i64, i64, i64, i64, u32, u32),
+}
 impl ProjectFixtureGit {
-    fn qualify(binary:&Path)->io::Result<Self> {
-        let binary=fs::canonicalize(binary)?;
-        if !binary.starts_with("/nix/store"){return Err(prerequisite("project-read-only requires the selected immutable packaged companion manifest"));}
-        let path=binary.parent().and_then(Path::parent).ok_or_else(||failure("selected package root absent"))?.join("share/goatr/manifest.json");
-        let bytes=project_input(&path,1024*1024,false)?;let manifest:Value=serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        let compiled=option_env!("GOATR_READ_GIT_MANIFEST").ok_or_else(||prerequisite("project-read-only helper requires the same locked Nix Git manifest"))?;
-        let selected:Value=serde_json::from_slice(&project_input(Path::new(compiled),1024*1024,false)?).map_err(io::Error::other)?;
-        if manifest["kind"]!="direct-rust"||manifest["lockSha256"]!=transport::lock_sha256()||manifest["readGit"]!=selected["readGit"]||manifest["readGit"]["available"]!=true{return Err(prerequisite("selected companion/helper immutable Git identity join unavailable"));}
-        let git=&manifest["readGit"];
-        let executable=PathBuf::from(git["executable"].as_str().ok_or_else(||failure("selected Git image absent"))?);
-        let exec_path=PathBuf::from(git["execPath"].as_str().ok_or_else(||failure("selected Git exec root absent"))?);
-        let image_sha=git["executableSha256"].as_str().filter(|value|project_hash(value)).ok_or_else(||failure("selected Git digest absent"))?.to_owned();
-        if !executable.starts_with("/nix/store")||fs::canonicalize(&executable)?!=executable||project_file_hash(&executable)?!=image_sha{return Err(prerequisite("selected fixture Git is not the exact manifest image"));}
-        let mut image=File::open(&executable)?;let mut magic=[0u8;4];image.read_exact(&mut magic)?;if &magic!=b"\x7fELF"{return Err(prerequisite("selected fixture Git must be a direct ELF, never a wrapper or PATH fallback"));}
-        let stamp=project_stamp(&fs::symlink_metadata(&executable)?);
-        Ok(Self {executable,exec_path,manifest_sha:hex(&sha256(&bytes)),image_sha,stamp})
+    fn qualify(binary: &Path) -> io::Result<Self> {
+        let binary = fs::canonicalize(binary)?;
+        if !binary.starts_with("/nix/store") {
+            return Err(prerequisite(
+                "project-read-only requires the selected immutable packaged companion manifest",
+            ));
+        }
+        let path = binary
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| failure("selected package root absent"))?
+            .join("share/goatr/manifest.json");
+        let bytes = project_input(&path, 1024 * 1024, false)?;
+        let manifest: Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        let compiled = option_env!("GOATR_READ_GIT_MANIFEST").ok_or_else(|| {
+            prerequisite("project-read-only helper requires the same locked Nix Git manifest")
+        })?;
+        let selected: Value =
+            serde_json::from_slice(&project_input(Path::new(compiled), 1024 * 1024, false)?)
+                .map_err(io::Error::other)?;
+        if manifest["kind"] != "direct-rust"
+            || manifest["lockSha256"] != transport::lock_sha256()
+            || manifest["readGit"] != selected["readGit"]
+            || manifest["readGit"]["available"] != true
+        {
+            return Err(prerequisite(
+                "selected companion/helper immutable Git identity join unavailable",
+            ));
+        }
+        let git = &manifest["readGit"];
+        let executable = PathBuf::from(
+            git["executable"]
+                .as_str()
+                .ok_or_else(|| failure("selected Git image absent"))?,
+        );
+        let exec_path = PathBuf::from(
+            git["execPath"]
+                .as_str()
+                .ok_or_else(|| failure("selected Git exec root absent"))?,
+        );
+        let image_sha = git["executableSha256"]
+            .as_str()
+            .filter(|value| project_hash(value))
+            .ok_or_else(|| failure("selected Git digest absent"))?
+            .to_owned();
+        if !executable.starts_with("/nix/store")
+            || fs::canonicalize(&executable)? != executable
+            || project_file_hash(&executable)? != image_sha
+        {
+            return Err(prerequisite(
+                "selected fixture Git is not the exact manifest image",
+            ));
+        }
+        let mut image = File::open(&executable)?;
+        let mut magic = [0u8; 4];
+        image.read_exact(&mut magic)?;
+        if &magic != b"\x7fELF" {
+            return Err(prerequisite(
+                "selected fixture Git must be a direct ELF, never a wrapper or PATH fallback",
+            ));
+        }
+        let stamp = project_stamp(&fs::symlink_metadata(&executable)?);
+        Ok(Self {
+            executable,
+            exec_path,
+            manifest_sha: hex(&sha256(&bytes)),
+            image_sha,
+            stamp,
+        })
     }
-    async fn run(&self,fixture:&ProjectReadFixture,cwd:&Path,args:&[&str],input:Option<&[u8]>,deadline:tokio::time::Instant,limit:usize)->io::Result<Vec<u8>> {
-        use tokio::io::{AsyncReadExt,AsyncWriteExt};use std::os::unix::process::CommandExt as _;
+    async fn run(
+        &self,
+        fixture: &ProjectReadFixture,
+        cwd: &Path,
+        args: &[&str],
+        input: Option<&[u8]>,
+        deadline: tokio::time::Instant,
+        limit: usize,
+    ) -> io::Result<Vec<u8>> {
+        use std::os::unix::process::CommandExt as _;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         fixture.current()?;
-        if !cwd.starts_with(&fixture.read)||fs::canonicalize(cwd)?!=cwd||project_stamp(&fs::symlink_metadata(&self.executable)?)!=self.stamp{return Err(prerequisite("owned fixture cwd or immutable Git image changed"));}
-        let directory=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(cwd)?;
-        let raw=directory.as_raw_fd();let mut command=tokio::process::Command::new(&self.executable);
-        command.args(["--no-pager","-c","core.fsmonitor=false","-c","core.untrackedCache=false","-c","core.preloadIndex=false","-c","gc.auto=0","-c","maintenance.auto=false","-c","pack.threads=1","-c","protocol.allow=never"])
-            .arg("-c").arg(format!("core.hooksPath={}",fixture.hooks.display())).args(args)
-            .env_clear().env("HOME",&fixture.home).env("XDG_CONFIG_HOME",&fixture.home).env("LC_ALL","C")
-            .env("GIT_CONFIG_GLOBAL",&fixture.global).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_ATTR_NOSYSTEM","1")
-            .env("GIT_OPTIONAL_LOCKS","0").env("GIT_NO_LAZY_FETCH","1").env("GIT_TERMINAL_PROMPT","0").env("GIT_EXEC_PATH",&self.exec_path)
-            .stdin(if input.is_some(){Stdio::piped()}else{Stdio::null()}).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        if !cwd.starts_with(&fixture.read)
+            || fs::canonicalize(cwd)? != cwd
+            || project_stamp(&fs::symlink_metadata(&self.executable)?) != self.stamp
+        {
+            return Err(prerequisite(
+                "owned fixture cwd or immutable Git image changed",
+            ));
+        }
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(cwd)?;
+        let raw = directory.as_raw_fd();
+        let mut command = tokio::process::Command::new(&self.executable);
+        command
+            .args([
+                "--no-pager",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                "-c",
+                "core.preloadIndex=false",
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "pack.threads=1",
+                "-c",
+                "protocol.allow=never",
+            ])
+            .arg("-c")
+            .arg(format!("core.hooksPath={}", fixture.hooks.display()))
+            .args(args)
+            .env_clear()
+            .env("HOME", &fixture.home)
+            .env("XDG_CONFIG_HOME", &fixture.home)
+            .env("LC_ALL", "C")
+            .env("GIT_CONFIG_GLOBAL", &fixture.global)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_ATTR_NOSYSTEM", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_EXEC_PATH", &self.exec_path)
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
         command.as_std_mut().process_group(0);
-        unsafe{command.pre_exec(move||{goatr::codex_relay::drop_inherited_capabilities()?;if libc::fchdir(raw)!=0{return Err(io::Error::last_os_error());}Ok(())});}
-        let mut child=command.spawn()?;let stdout=child.stdout.take().ok_or_else(||failure("owned Git output pipe absent"))?;
-        let mut stdin=child.stdin.take();
-        let transfer=async {
-            let write=async {if let (Some(mut stdin),Some(input))=(stdin.take(),input){stdin.write_all(input).await?;stdin.shutdown().await?;drop(stdin);}Ok::<(),io::Error>(())};
-            let read=async {let mut bytes=Vec::new();stdout.take(limit as u64+1).read_to_end(&mut bytes).await?;if bytes.len()>limit{return Err(failure("owned fixture Git output exceeded its bound"));}Ok::<Vec<u8>,io::Error>(bytes)};
-            let (_,bytes,status)=tokio::try_join!(write,read,child.wait())?;
-            if !status.success(){return Err(prerequisite("owned public seed or fixture Git command refused; no fallback"));}Ok(bytes)
+        unsafe {
+            command.pre_exec(move || {
+                goatr::codex_relay::drop_inherited_capabilities()?;
+                if libc::fchdir(raw) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| failure("owned Git output pipe absent"))?;
+        let mut stdin = child.stdin.take();
+        let transfer = async {
+            let write = async {
+                if let (Some(mut stdin), Some(input)) = (stdin.take(), input) {
+                    stdin.write_all(input).await?;
+                    stdin.shutdown().await?;
+                    drop(stdin);
+                }
+                Ok::<(), io::Error>(())
+            };
+            let read = async {
+                let mut bytes = Vec::new();
+                stdout
+                    .take(limit as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .await?;
+                if bytes.len() > limit {
+                    return Err(failure("owned fixture Git output exceeded its bound"));
+                }
+                Ok::<Vec<u8>, io::Error>(bytes)
+            };
+            let (_, bytes, status) = tokio::try_join!(write, read, child.wait())?;
+            if !status.success() {
+                return Err(prerequisite(
+                    "owned public seed or fixture Git command refused; no fallback",
+                ));
+            }
+            Ok(bytes)
         };
-        let bytes=tokio::time::timeout_at(deadline,transfer).await.map_err(|_|prerequisite("owned fixture Git aggregate preparation deadline"))??;
-        fixture.current()?;Ok(bytes)
+        let bytes = tokio::time::timeout_at(deadline, transfer)
+            .await
+            .map_err(|_| prerequisite("owned fixture Git aggregate preparation deadline"))??;
+        fixture.current()?;
+        Ok(bytes)
     }
 }
-struct ProjectSeedPin {pack:PathBuf,pack_sha:String,commit:String,tree:String,signature_sha:String}
+struct ProjectSeedPin {
+    pack: PathBuf,
+    pack_sha: String,
+    commit: String,
+    tree: String,
+    signature_sha: String,
+}
 impl ProjectSeedPin {
-    fn parse(args:&clap::ArgMatches)->io::Result<Option<Self>> {
-        let Some(pack)=args.get_one::<PathBuf>("project-read-seed-pack")else{return Ok(None)};
-        let get=|key|args.get_one::<String>(key).cloned().ok_or_else(||prerequisite("complete prequalified public signed seed pins required"));
-        let pin=Self {pack:pack.clone(),pack_sha:get("project-read-seed-pack-sha256")?,commit:get("project-read-seed-commit")?,tree:get("project-read-seed-tree")?,signature_sha:get("project-read-seed-signature-sha256")?};
-        if !project_hash(&pin.pack_sha)||!project_hash(&pin.signature_sha)||pin.commit!=PROJECT_PUBLIC_COMMIT||pin.tree!=PROJECT_PUBLIC_TREE{return Err(prerequisite("fixture seed must be the explicitly qualified existing public Goatr commit/tree"));}Ok(Some(pin))
+    fn parse(args: &clap::ArgMatches) -> io::Result<Option<Self>> {
+        let Some(pack) = args.get_one::<PathBuf>("project-read-seed-pack") else {
+            return Ok(None);
+        };
+        let get = |key| {
+            args.get_one::<String>(key).cloned().ok_or_else(|| {
+                prerequisite("complete prequalified public signed seed pins required")
+            })
+        };
+        let pin = Self {
+            pack: pack.clone(),
+            pack_sha: get("project-read-seed-pack-sha256")?,
+            commit: get("project-read-seed-commit")?,
+            tree: get("project-read-seed-tree")?,
+            signature_sha: get("project-read-seed-signature-sha256")?,
+        };
+        if !project_hash(&pin.pack_sha)
+            || !project_hash(&pin.signature_sha)
+            || pin.commit != PROJECT_PUBLIC_COMMIT
+            || pin.tree != PROJECT_PUBLIC_TREE
+        {
+            return Err(prerequisite(
+                "fixture seed must be the explicitly qualified existing public Goatr commit/tree",
+            ));
+        }
+        Ok(Some(pin))
     }
 }
-struct ProjectReadFixture {read:PathBuf,creation_only:PathBuf,global:PathBuf,home:PathBuf,hooks:PathBuf,folder:String,binary:PathBuf,pin:Option<ProjectSeedPin>,root_object:(u64,u64),creation_object:(u64,u64)}
-struct ProjectReadFacts {renamed:String,original:String,conflict:String,binary:String,submodule:String,linked:PathBuf}
+struct ProjectReadFixture {
+    read: PathBuf,
+    creation_only: PathBuf,
+    global: PathBuf,
+    home: PathBuf,
+    hooks: PathBuf,
+    folder: String,
+    binary: PathBuf,
+    pin: Option<ProjectSeedPin>,
+    root_object: (u64, u64),
+    creation_object: (u64, u64),
+}
+struct ProjectReadFacts {
+    renamed: String,
+    original: String,
+    conflict: String,
+    binary: String,
+    submodule: String,
+    linked: PathBuf,
+}
 impl ProjectReadFixture {
-    fn prepare(args:&clap::ArgMatches,root:&Path,binary:&Path,run:&Uuid)->io::Result<Self> {
-        let read=root.join("project");let creation_only=root.join("creation-only");fs::DirBuilder::new().mode(0o700).create(&creation_only)?;
-        let home=read.join(format!(".goatr-fixture-home-{}",&run.0[..8]));let hooks=home.join("hooks");
-        fs::DirBuilder::new().mode(0o700).create(&home)?;fs::DirBuilder::new().mode(0o700).create(&hooks)?;
-        let global=home.join("global.config");OpenOptions::new().write(true).create_new(true).mode(0o600).open(&global)?.sync_all()?;
-        let a=fs::symlink_metadata(&read)?;let b=fs::symlink_metadata(&creation_only)?;
-        Ok(Self {read,creation_only,global,home,hooks,folder:format!("goatr-owned-review-{}",&run.0[..8]),binary:binary.to_owned(),pin:ProjectSeedPin::parse(args)?,root_object:(a.dev(),a.ino()),creation_object:(b.dev(),b.ino())})
+    fn prepare(
+        args: &clap::ArgMatches,
+        root: &Path,
+        binary: &Path,
+        run: &Uuid,
+    ) -> io::Result<Self> {
+        let read = root.join("project");
+        let creation_only = root.join("creation-only");
+        fs::DirBuilder::new().mode(0o700).create(&creation_only)?;
+        let home = read.join(format!(".goatr-fixture-home-{}", &run.0[..8]));
+        let hooks = home.join("hooks");
+        fs::DirBuilder::new().mode(0o700).create(&home)?;
+        fs::DirBuilder::new().mode(0o700).create(&hooks)?;
+        let global = home.join("global.config");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&global)?
+            .sync_all()?;
+        let a = fs::symlink_metadata(&read)?;
+        let b = fs::symlink_metadata(&creation_only)?;
+        Ok(Self {
+            read,
+            creation_only,
+            global,
+            home,
+            hooks,
+            folder: format!("goatr-owned-review-{}", &run.0[..8]),
+            binary: binary.to_owned(),
+            pin: ProjectSeedPin::parse(args)?,
+            root_object: (a.dev(), a.ino()),
+            creation_object: (b.dev(), b.ino()),
+        })
     }
-    fn current(&self)->io::Result<()> {
-        for (path,object) in [(&self.read,self.root_object),(&self.creation_only,self.creation_object)] {
-            private_dir(path,false)?;let metadata=fs::symlink_metadata(path)?;
-            if fs::canonicalize(path)?!=*path||(metadata.dev(),metadata.ino())!=object{return Err(prerequisite("owned project fixture root replaced"));}
-        }Ok(())
+    fn current(&self) -> io::Result<()> {
+        for (path, object) in [
+            (&self.read, self.root_object),
+            (&self.creation_only, self.creation_object),
+        ] {
+            private_dir(path, false)?;
+            let metadata = fs::symlink_metadata(path)?;
+            if fs::canonicalize(path)? != *path || (metadata.dev(), metadata.ino()) != object {
+                return Err(prerequisite("owned project fixture root replaced"));
+            }
+        }
+        Ok(())
     }
-    fn environment(&self,command:&mut std::process::Command) {command.env("GIT_CONFIG_GLOBAL",&self.global).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_ATTR_NOSYSTEM","1");}
-    async fn seed(&self,git:&ProjectFixtureGit,cwd:&Path,pack:&[u8],pin:&ProjectSeedPin,deadline:tokio::time::Instant)->io::Result<()> {
-        git.run(self,cwd,&["init","--quiet","--object-format=sha1"],None,deadline,4096).await?;
-        git.run(self,cwd,&["unpack-objects","-q"],Some(pack),deadline,4096).await?;
-        git.run(self,cwd,&["fsck","--strict","--no-reflogs","--no-dangling",&pin.commit],None,deadline,65536).await?;
-        git.run(self,cwd,&["update-ref","refs/heads/goatr-fixture",&pin.commit],None,deadline,4096).await?;
-        git.run(self,cwd,&["symbolic-ref","HEAD","refs/heads/goatr-fixture"],None,deadline,4096).await?;
-        git.run(self,cwd,&["read-tree","--reset","-u",&pin.commit],None,deadline,4096).await?;Ok(())
+    fn environment(&self, command: &mut std::process::Command) {
+        command
+            .env("GIT_CONFIG_GLOBAL", &self.global)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_ATTR_NOSYSTEM", "1");
     }
-    async fn build(&self,evidence:&Path,run:&Uuid)->io::Result<ProjectReadFacts> {
-        self.current()?;let pin=self.pin.as_ref().ok_or_else(||prerequisite("project-read-only requires the independently crypto-qualified existing public signed object pack and complete byte/object pins; no provider created"))?;
-        let git=ProjectFixtureGit::qualify(&self.binary)?;
-        let pack=project_input(&pin.pack,PROJECT_PACK_LIMIT,true)?;
-        if hex(&sha256(&pack))!=pin.pack_sha||pack.len()<12||&pack[..4]!=b"PACK"{return Err(prerequisite("qualified complete public seed pack byte pin mismatch"));}
-        let deadline=tokio::time::Instant::now()+Duration::from_secs(30);
-        self.seed(&git,&self.read,&pack,pin,deadline).await?;
-        let commit=git.run(self,&self.read,&["cat-file","commit",&pin.commit],None,deadline,128*1024).await?;
-        let (tree,signature)=project_commit_fields(&commit)?;
-        if tree!=pin.tree||hex(&sha256(signature.as_bytes()))!=pin.signature_sha{return Err(prerequisite("existing public commit tree or signature-block bytes mismatch"));}
-        let rows=git.run(self,&self.read,&["ls-tree","-r","-z",&pin.tree],None,deadline,256*1024).await?;
-        let files=project_seed_files(&rows)?;
-        if files.len()<3{return Err(prerequisite("qualified existing public seed needs three distinct regular blob fixtures"));}
-        let folder=self.read.join(&self.folder);fs::DirBuilder::new().mode(0o700).create(&folder)?;
-        let pages=folder.join("pages");fs::DirBuilder::new().mode(0o700).create(&pages)?;
-        for index in 0..105 {fs::write(pages.join(format!("row-{index:03}")),b"public bounded page\n")?;}
-        fs::write(folder.join("complete.txt"),vec![b'x';65536+7])?;fs::write(folder.join("binary.bin"),b"binary\0first")?;
-        fs::write(folder.join("empty.txt"),b"")?;File::create(folder.join("large.bin"))?.set_len(1024*1024+1)?;
-        let renamed=format!("{}.goatr-renamed",files[0].0);fs::rename(self.read.join(&files[0].0),self.read.join(&renamed))?;
-        let binary=format!("{}/binary.bin",self.folder);
-        git.run(self,&self.read,&["add","--force","--",&files[0].0,&renamed,&binary],None,deadline,4096).await?;
-        fs::write(self.read.join(&binary),b"binary\0second")?;
-        OpenOptions::new().append(true).open(self.read.join(&files[1].0))?.write_all(b"\nGOATR owned unstaged reference fixture\n")?;
-        let zero="0".repeat(pin.commit.len());let conflict=files[2].0.clone();
-        let index=format!("0 {zero}\t{conflict}\n100644 {} 1\t{conflict}\n100644 {} 2\t{conflict}\n100644 {} 3\t{conflict}\n",files[2].1,files[0].1,files[1].1);
-        git.run(self,&self.read,&["update-index","--index-info"],Some(index.as_bytes()),deadline,4096).await?;
-        let nested=folder.join("submodule");fs::DirBuilder::new().mode(0o700).create(&nested)?;self.seed(&git,&nested,&pack,pin,deadline).await?;
-        fs::write(nested.join("GOATR_UNTRACKED_NATIVE"),b"owned submodule dirtiness\n")?;
-        let submodule=format!("{}/submodule",self.folder);let cache=format!("160000,{},{}",pin.commit,submodule);
-        git.run(self,&self.read,&["update-index","--add","--cacheinfo",&cache],None,deadline,4096).await?;
-        let linked=folder.join("linked-worktree");let linked_text=linked.to_str().ok_or_else(||failure("owned linked fixture path unrepresentable"))?;
-        git.run(self,&self.read,&["worktree","add","--detach","--no-checkout",linked_text,&pin.commit],None,deadline,4096).await?;
-        fs::write(self.creation_only.join("outside.config"),b"[core]\nquotePath=false\n")?;
-        write_json(&evidence.join(format!("project-read-seed-{}.json",run.0)),&json!({"runId":run,"packSha256":pin.pack_sha,"existingCommit":pin.commit,"existingTree":pin.tree,"signatureBlockSha256":pin.signature_sha,
+    async fn seed(
+        &self,
+        git: &ProjectFixtureGit,
+        cwd: &Path,
+        pack: &[u8],
+        pin: &ProjectSeedPin,
+        deadline: tokio::time::Instant,
+    ) -> io::Result<()> {
+        git.run(
+            self,
+            cwd,
+            &["init", "--quiet", "--object-format=sha1"],
+            None,
+            deadline,
+            4096,
+        )
+        .await?;
+        git.run(
+            self,
+            cwd,
+            &["unpack-objects", "-q"],
+            Some(pack),
+            deadline,
+            4096,
+        )
+        .await?;
+        git.run(
+            self,
+            cwd,
+            &[
+                "fsck",
+                "--strict",
+                "--no-reflogs",
+                "--no-dangling",
+                &pin.commit,
+            ],
+            None,
+            deadline,
+            65536,
+        )
+        .await?;
+        git.run(
+            self,
+            cwd,
+            &["update-ref", "refs/heads/goatr-fixture", &pin.commit],
+            None,
+            deadline,
+            4096,
+        )
+        .await?;
+        git.run(
+            self,
+            cwd,
+            &["symbolic-ref", "HEAD", "refs/heads/goatr-fixture"],
+            None,
+            deadline,
+            4096,
+        )
+        .await?;
+        git.run(
+            self,
+            cwd,
+            &["read-tree", "--reset", "-u", &pin.commit],
+            None,
+            deadline,
+            4096,
+        )
+        .await?;
+        Ok(())
+    }
+    async fn build(&self, evidence: &Path, run: &Uuid) -> io::Result<ProjectReadFacts> {
+        self.current()?;
+        let pin=self.pin.as_ref().ok_or_else(||prerequisite("project-read-only requires the independently crypto-qualified existing public signed object pack and complete byte/object pins; no provider created"))?;
+        let git = ProjectFixtureGit::qualify(&self.binary)?;
+        let pack = project_input(&pin.pack, PROJECT_PACK_LIMIT, true)?;
+        if hex(&sha256(&pack)) != pin.pack_sha || pack.len() < 12 || &pack[..4] != b"PACK" {
+            return Err(prerequisite(
+                "qualified complete public seed pack byte pin mismatch",
+            ));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        self.seed(&git, &self.read, &pack, pin, deadline).await?;
+        let commit = git
+            .run(
+                self,
+                &self.read,
+                &["cat-file", "commit", &pin.commit],
+                None,
+                deadline,
+                128 * 1024,
+            )
+            .await?;
+        let (tree, signature) = project_commit_fields(&commit)?;
+        if tree != pin.tree || hex(&sha256(signature.as_bytes())) != pin.signature_sha {
+            return Err(prerequisite(
+                "existing public commit tree or signature-block bytes mismatch",
+            ));
+        }
+        let rows = git
+            .run(
+                self,
+                &self.read,
+                &["ls-tree", "-r", "-z", &pin.tree],
+                None,
+                deadline,
+                256 * 1024,
+            )
+            .await?;
+        let files = project_seed_files(&rows)?;
+        if files.len() < 3 {
+            return Err(prerequisite(
+                "qualified existing public seed needs three distinct regular blob fixtures",
+            ));
+        }
+        let folder = self.read.join(&self.folder);
+        fs::DirBuilder::new().mode(0o700).create(&folder)?;
+        let pages = folder.join("pages");
+        fs::DirBuilder::new().mode(0o700).create(&pages)?;
+        for index in 0..105 {
+            fs::write(
+                pages.join(format!("row-{index:03}")),
+                b"public bounded page\n",
+            )?;
+        }
+        fs::write(folder.join("complete.txt"), vec![b'x'; 65536 + 7])?;
+        fs::write(folder.join("binary.bin"), b"binary\0first")?;
+        fs::write(folder.join("empty.txt"), b"")?;
+        File::create(folder.join("large.bin"))?.set_len(1024 * 1024 + 1)?;
+        let renamed = format!("{}.goatr-renamed", files[0].0);
+        fs::rename(self.read.join(&files[0].0), self.read.join(&renamed))?;
+        let binary = format!("{}/binary.bin", self.folder);
+        git.run(
+            self,
+            &self.read,
+            &["add", "--force", "--", &files[0].0, &renamed, &binary],
+            None,
+            deadline,
+            4096,
+        )
+        .await?;
+        fs::write(self.read.join(&binary), b"binary\0second")?;
+        OpenOptions::new()
+            .append(true)
+            .open(self.read.join(&files[1].0))?
+            .write_all(b"\nGOATR owned unstaged reference fixture\n")?;
+        let zero = "0".repeat(pin.commit.len());
+        let conflict = files[2].0.clone();
+        let index = format!(
+            "0 {zero}\t{conflict}\n100644 {} 1\t{conflict}\n100644 {} 2\t{conflict}\n100644 {} 3\t{conflict}\n",
+            files[2].1, files[0].1, files[1].1
+        );
+        git.run(
+            self,
+            &self.read,
+            &["update-index", "--index-info"],
+            Some(index.as_bytes()),
+            deadline,
+            4096,
+        )
+        .await?;
+        let nested = folder.join("submodule");
+        fs::DirBuilder::new().mode(0o700).create(&nested)?;
+        self.seed(&git, &nested, &pack, pin, deadline).await?;
+        fs::write(
+            nested.join("GOATR_UNTRACKED_NATIVE"),
+            b"owned submodule dirtiness\n",
+        )?;
+        let submodule = format!("{}/submodule", self.folder);
+        let cache = format!("160000,{},{}", pin.commit, submodule);
+        git.run(
+            self,
+            &self.read,
+            &["update-index", "--add", "--cacheinfo", &cache],
+            None,
+            deadline,
+            4096,
+        )
+        .await?;
+        let linked = folder.join("linked-worktree");
+        let linked_text = linked
+            .to_str()
+            .ok_or_else(|| failure("owned linked fixture path unrepresentable"))?;
+        git.run(
+            self,
+            &self.read,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                "--no-checkout",
+                linked_text,
+                &pin.commit,
+            ],
+            None,
+            deadline,
+            4096,
+        )
+        .await?;
+        fs::write(
+            self.creation_only.join("outside.config"),
+            b"[core]\nquotePath=false\n",
+        )?;
+        write_json(
+            &evidence.join(format!("project-read-seed-{}.json", run.0)),
+            &json!({"runId":run,"packSha256":pin.pack_sha,"existingCommit":pin.commit,"existingTree":pin.tree,"signatureBlockSha256":pin.signature_sha,
             "byteObjectPinsChecked":true,"cryptoVerification":"separate coordinator-qualified existing public evidence; not performed or fabricated by helper","newCommitsOrTags":false,"sourceRepositoryOrCredentialsRead":false,
-            "fixtureGitManifestSha256":git.manifest_sha,"fixtureGitImageSha256":git.image_sha,"fixtureRoot":self.read,"creationOnlySibling":self.creation_only,"scope":"owned blob/index/working-tree/gitlink/worktree setup only; no phone producer mutations; retained, no automatic cleanup"}))?;
-        Ok(ProjectReadFacts {renamed,original:files[0].0.clone(),conflict,binary,submodule,linked})
+            "fixtureGitManifestSha256":git.manifest_sha,"fixtureGitImageSha256":git.image_sha,"fixtureRoot":self.read,"creationOnlySibling":self.creation_only,"scope":"owned blob/index/working-tree/gitlink/worktree setup only; no phone producer mutations; retained, no automatic cleanup"}),
+        )?;
+        Ok(ProjectReadFacts {
+            renamed,
+            original: files[0].0.clone(),
+            conflict,
+            binary,
+            submodule,
+            linked,
+        })
     }
 }
-fn project_commit_fields(bytes:&[u8])->io::Result<(String,String)> {
-    let text=std::str::from_utf8(bytes).map_err(io::Error::other)?;let header=text.split_once("\n\n").ok_or_else(||failure("complete existing commit header absent"))?.0;
-    let tree=header.lines().next().and_then(|line|line.strip_prefix("tree ")).ok_or_else(||failure("existing commit tree absent"))?.to_owned();
-    let mut signature=String::new();let mut capturing=false;
+fn project_commit_fields(bytes: &[u8]) -> io::Result<(String, String)> {
+    let text = std::str::from_utf8(bytes).map_err(io::Error::other)?;
+    let header = text
+        .split_once("\n\n")
+        .ok_or_else(|| failure("complete existing commit header absent"))?
+        .0;
+    let tree = header
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("tree "))
+        .ok_or_else(|| failure("existing commit tree absent"))?
+        .to_owned();
+    let mut signature = String::new();
+    let mut capturing = false;
     for line in header.lines().skip(1) {
-        if let Some(first)=line.strip_prefix("gpgsig "){if capturing||!signature.is_empty(){return Err(failure("ambiguous existing signature block"));}signature.push_str(first);capturing=true;}
-        else if capturing {if let Some(next)=line.strip_prefix(' '){signature.push('\n');signature.push_str(next);}else{capturing=false;}}
+        if let Some(first) = line.strip_prefix("gpgsig ") {
+            if capturing || !signature.is_empty() {
+                return Err(failure("ambiguous existing signature block"));
+            }
+            signature.push_str(first);
+            capturing = true;
+        } else if capturing {
+            if let Some(next) = line.strip_prefix(' ') {
+                signature.push('\n');
+                signature.push_str(next);
+            } else {
+                capturing = false;
+            }
+        }
     }
-    if !signature.starts_with("-----BEGIN PGP SIGNATURE-----\n")||!signature.ends_with("-----END PGP SIGNATURE-----"){return Err(prerequisite("qualified existing PGP signature block unavailable"));}
-    Ok((tree,signature))
+    if !signature.starts_with("-----BEGIN PGP SIGNATURE-----\n")
+        || !signature.ends_with("-----END PGP SIGNATURE-----")
+    {
+        return Err(prerequisite(
+            "qualified existing PGP signature block unavailable",
+        ));
+    }
+    Ok((tree, signature))
 }
-fn project_seed_files(bytes:&[u8])->io::Result<Vec<(String,String)>> {
-    if bytes.len()>256*1024||bytes.last()!=Some(&0){return Err(failure("bounded complete public seed tree absent"));}
-    let text=std::str::from_utf8(bytes).map_err(io::Error::other)?;let mut files=Vec::new();let mut blobs=HashSet::new();
+fn project_seed_files(bytes: &[u8]) -> io::Result<Vec<(String, String)>> {
+    if bytes.len() > 256 * 1024 || bytes.last() != Some(&0) {
+        return Err(failure("bounded complete public seed tree absent"));
+    }
+    let text = std::str::from_utf8(bytes).map_err(io::Error::other)?;
+    let mut files = Vec::new();
+    let mut blobs = HashSet::new();
     for row in text.split_terminator('\0') {
-        let (metadata,path)=row.split_once('\t').ok_or_else(||failure("public seed row invalid"))?;let mut fields=metadata.split(' ');
-        let mode=fields.next().ok_or_else(||failure("public seed mode absent"))?;let kind=fields.next().ok_or_else(||failure("public seed type absent"))?;let oid=fields.next().ok_or_else(||failure("public seed object absent"))?;
-        if fields.next().is_some()||path.is_empty()||path.len()>4096||Path::new(path).is_absolute()||path.chars().any(char::is_control)||Path::new(path).components().any(|part|!matches!(part,std::path::Component::Normal(_)))
-            ||!matches!(mode,"100644"|"100755")||kind!="blob"||oid.len()!=40||!oid.bytes().all(|byte|byte.is_ascii_hexdigit()){return Err(prerequisite("public seed requires bounded ordinary regular tree objects; no unsafe alias or submodule adoption"));}
-        if files.len()<3&&mode=="100644"&&blobs.insert(oid){files.push((path.to_owned(),oid.to_owned()));}
-    }Ok(files)
+        let (metadata, path) = row
+            .split_once('\t')
+            .ok_or_else(|| failure("public seed row invalid"))?;
+        let mut fields = metadata.split(' ');
+        let mode = fields
+            .next()
+            .ok_or_else(|| failure("public seed mode absent"))?;
+        let kind = fields
+            .next()
+            .ok_or_else(|| failure("public seed type absent"))?;
+        let oid = fields
+            .next()
+            .ok_or_else(|| failure("public seed object absent"))?;
+        if fields.next().is_some()
+            || path.is_empty()
+            || path.len() > 4096
+            || Path::new(path).is_absolute()
+            || path.chars().any(char::is_control)
+            || Path::new(path)
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            || !matches!(mode, "100644" | "100755")
+            || kind != "blob"
+            || oid.len() != 40
+            || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(prerequisite(
+                "public seed requires bounded ordinary regular tree objects; no unsafe alias or submodule adoption",
+            ));
+        }
+        if files.len() < 3 && mode == "100644" && blobs.insert(oid) {
+            files.push((path.to_owned(), oid.to_owned()));
+        }
+    }
+    Ok(files)
 }
-struct ProjectReadRun<'a> {fixture:&'a ProjectReadFixture,config:&'a Config,socket:&'a Path,desktop:&'a Desktop,source:&'a AdmittedSource,evidence:&'a Path,run:&'a Uuid}
-async fn project_create(phone:&mut Phone,context:&ProjectReadRun<'_>,provider:Provider,project:&ConfiguredProject)->io::Result<NativeProof> {
-    context.fixture.current()?;context.source.recheck()?;dev_continuity::zero_native_caps(&context.desktop.process)?;
-    let action=Uuid::random();let params=SessionCreateParams {boot_id:phone.hello.boot_id.clone(),server_id:context.source.identity.0.clone(),project_id:project.id.clone(),provider,
-        name:Label::new(format!("owned-read-{provider:?}-{}",&action.0[..8])).map_err(io::Error::other)?,directory_ref:None,placement:None};
-    write_json(&context.evidence.join(format!("project-read-create-intent-{}-{}.json",context.run.0,action.0)),&json!({"runId":context.run,"actionId":action,"provider":provider,"projectId":project.id,"readGrant":project.allow_read_tools,"scope":"one first native creation; entered results status-only; never mutation replay or automatic close"}))?;
-    let initial=receipt_result(phone.request_at(action.clone(),RequestBody::SessionCreate(params),"project_read_create").await?.map_err(|error|failure(&format!("project-read creation refused: {:?}",error.code)))?)?;
-    let receipt=if matches!(initial.state,ReceiptState::Reserved|ReceiptState::Dispatching){phone.creation_settled(&action,provider).await?}else{initial};
-    write_json(&context.evidence.join(format!("project-read-create-receipt-{}-{}.json",context.run.0,action.0)),&json!({"runId":context.run,"receipt":receipt,"resourcesRetained":true}))?;
-    if receipt.state!=ReceiptState::Succeeded{return Err(non_succeeded_creation_error(provider,&receipt));}
-    context.source.recheck()?;let inventory=phone.host().await?;
-    let session=inventory.sessions.iter().find(|session|receipt.creation.as_ref().is_some_and(|creation|created_session_matches(&creation.resources,session,provider))).ok_or_else(||prerequisite("exact owned read original is not NativeReady"))?;
-    let original=proof(context.config,context.socket,session,None).await?;original.recheck_processes()?;
-    write_json(&context.evidence.join(format!("project-read-original-{}-{}.json",context.run.0,action.0)),&json!({"runId":context.run,"proof":original.evidence(),"creationAction":action,"scope":"original process/session or shared owner/thread only; no prompt, PTY or replay"}))?;
+struct ProjectReadRun<'a> {
+    fixture: &'a ProjectReadFixture,
+    config: &'a Config,
+    socket: &'a Path,
+    desktop: &'a Desktop,
+    source: &'a AdmittedSource,
+    evidence: &'a Path,
+    run: &'a Uuid,
+}
+async fn project_create(
+    phone: &mut Phone,
+    context: &ProjectReadRun<'_>,
+    provider: Provider,
+    project: &ConfiguredProject,
+) -> io::Result<NativeProof> {
+    context.fixture.current()?;
+    context.source.recheck()?;
+    dev_continuity::zero_native_caps(&context.desktop.process)?;
+    let action = Uuid::random();
+    let params = SessionCreateParams {
+        boot_id: phone.hello.boot_id.clone(),
+        server_id: context.source.identity.0.clone(),
+        project_id: project.id.clone(),
+        provider,
+        name: Label::new(format!("owned-read-{provider:?}-{}", &action.0[..8]))
+            .map_err(io::Error::other)?,
+        directory_ref: None,
+        placement: None,
+    };
+    write_json(
+        &context.evidence.join(format!(
+            "project-read-create-intent-{}-{}.json",
+            context.run.0, action.0
+        )),
+        &json!({"runId":context.run,"actionId":action,"provider":provider,"projectId":project.id,"readGrant":project.allow_read_tools,"scope":"one first native creation; entered results status-only; never mutation replay or automatic close"}),
+    )?;
+    let initial = receipt_result(
+        phone
+            .request_at(
+                action.clone(),
+                RequestBody::SessionCreate(params),
+                "project_read_create",
+            )
+            .await?
+            .map_err(|error| {
+                failure(&format!("project-read creation refused: {:?}", error.code))
+            })?,
+    )?;
+    let receipt = if matches!(
+        initial.state,
+        ReceiptState::Reserved | ReceiptState::Dispatching
+    ) {
+        phone.creation_settled(&action, provider).await?
+    } else {
+        initial
+    };
+    write_json(
+        &context.evidence.join(format!(
+            "project-read-create-receipt-{}-{}.json",
+            context.run.0, action.0
+        )),
+        &json!({"runId":context.run,"receipt":receipt,"resourcesRetained":true}),
+    )?;
+    if receipt.state != ReceiptState::Succeeded {
+        return Err(non_succeeded_creation_error(provider, &receipt));
+    }
+    context.source.recheck()?;
+    let inventory = phone.host().await?;
+    let session = inventory
+        .sessions
+        .iter()
+        .find(|session| {
+            receipt.creation.as_ref().is_some_and(|creation| {
+                created_session_matches(&creation.resources, session, provider)
+            })
+        })
+        .ok_or_else(|| prerequisite("exact owned read original is not NativeReady"))?;
+    let original = proof(context.config, context.socket, session, None).await?;
+    original.recheck_processes()?;
+    write_json(
+        &context.evidence.join(format!(
+            "project-read-original-{}-{}.json",
+            context.run.0, action.0
+        )),
+        &json!({"runId":context.run,"proof":original.evidence(),"creationAction":action,"scope":"original process/session or shared owner/thread only; no prompt, PTY or replay"}),
+    )?;
     Ok(original)
 }
-async fn project_refused(phone:&mut Phone,body:RequestBody)->io::Result<()> {
-    match phone.request_at(Uuid::random(),body,"project_read_refusal").await? {
-        Err(error)if matches!(error.code,ErrorCode::NotReady|ErrorCode::StaleSession|ErrorCode::CursorExpired|ErrorCode::NotFound)=>Ok(()),
-        _=>Err(failure("owned project negative did not refuse at its actual supported boundary")),
-    }
-}
-async fn project_list(phone:&mut Phone,source:&ArtifactSource,parent:Option<Uuid>)->io::Result<Vec<ArtifactEntry>> {
-    let mut cursor=None;let mut rows=Vec::new();let mut seen=HashSet::new();
-    loop {
-        let body=RequestBody::ArtifactsList(ArtifactsListParams {source:source.clone(),parent:if cursor.is_none(){parent.clone()}else{None},cursor:cursor.clone(),limit:Uint(100)});
-        let ResultBody::ArtifactsList(page)=phone.rpc(body,"project_read_list").await?else{return Err(failure("actual artifact page result absent"))};
-        if &page.source!=source{return Err(failure("artifact original source changed"));}
-        for row in page.entries {if rows.len()==1000||!seen.insert(uuid::Uuid::parse_str(&row.reference.0).map_err(io::Error::other)?){return Err(failure("artifact complete listing exceeded or repeated its bound"));}rows.push(row);}
-        match page.next_cursor {None=>return Ok(rows),Some(next)if Some(&next)!=cursor.as_ref()=>cursor=Some(next),_=>return Err(failure("artifact cursor made no progress"))}
-    }
-}
-async fn project_open(phone:&mut Phone,source:&ArtifactSource,row:&ArtifactEntry)->io::Result<ArtifactsOpenResult> {
-    let ResultBody::ArtifactsOpen(open)=phone.rpc(RequestBody::ArtifactsOpen(ArtifactsOpenParams {source:source.clone(),file:row.reference.clone()}),"project_read_open").await?else{return Err(failure("actual artifact snapshot absent"))};
-    if &open.source!=source||open.name!=row.name||Some(open.size)!=row.size{return Err(failure("artifact snapshot differs from the selected immutable row"));}Ok(open)
-}
-async fn project_close(phone:&mut Phone,source:&ArtifactSource,read:&Uuid)->io::Result<()> {
-    let ResultBody::ArtifactsClose(closed)=phone.rpc(RequestBody::ArtifactsClose(ArtifactsCloseParams {source:source.clone(),read_id:read.clone()}),"project_read_close").await?else{return Err(failure("artifact memory close result absent"))};
-    if closed.source!=*source||closed.read_id!=*read||!closed.closed{return Err(failure("selected artifact read owner was not released"));}Ok(())
-}
-async fn project_artifacts(phone:&mut Phone,source:&ArtifactSource,fixture:&ProjectReadFixture)->io::Result<()> {
-    use base64::Engine as _;use sha2::{Digest,Sha256};
-    let root=project_list(phone,source,None).await?;let folder=root.iter().find(|row|row.name==fixture.folder&&row.kind==ArtifactKind::Directory).ok_or_else(||failure("owned bounded artifact directory absent"))?;
-    let rows=project_list(phone,source,Some(folder.reference.clone())).await?;
-    let pages=rows.iter().find(|row|row.name=="pages"&&row.kind==ArtifactKind::Directory).ok_or_else(||failure("owned paginated artifact directory absent"))?;
-    if project_list(phone,source,Some(pages.reference.clone())).await?.len()!=105{return Err(failure("real native artifact cursor did not return the complete two-page directory"));}
-    for (name,kind) in [("complete.txt",ArtifactPreviewKind::Text),("empty.txt",ArtifactPreviewKind::Text),("binary.bin",ArtifactPreviewKind::Binary),("large.bin",ArtifactPreviewKind::Unavailable)] {
-        let row=rows.iter().find(|row|row.name==name&&row.kind==ArtifactKind::File).ok_or_else(||failure("owned artifact fixture row absent"))?;
-        let open=project_open(phone,source,row).await?;if open.preview_kind!=kind{return Err(failure("text, binary and unavailable complete snapshots were conflated"));}
-        let mut offset=0u64;let mut hash=Sha256::new();
-        loop {
-            let ResultBody::ArtifactsRead(chunk)=phone.rpc(RequestBody::ArtifactsRead(ArtifactsReadParams {source:source.clone(),read_id:open.read_id.clone(),offset:Uint(offset),limit:Uint(65536)}),"project_read_chunk").await?else{return Err(failure("artifact chunk absent"))};
-            let mut bytes=base64::engine::general_purpose::STANDARD.decode(&chunk.data.0).map_err(io::Error::other)?;
-            if chunk.source!=*source||chunk.read_id!=open.read_id||chunk.offset.0!=offset||bytes.len()>65536||offset+bytes.len() as u64>open.size.0||bytes.is_empty()&&!chunk.eof{return Err(failure("artifact exact chunk offset/size ownership mismatch"));}
-            offset+=bytes.len() as u64;hash.update(&bytes);bytes.fill(0);if chunk.eof{break;}
+async fn project_refused(phone: &mut Phone, body: RequestBody) -> io::Result<()> {
+    match phone
+        .request_at(Uuid::random(), body, "project_read_refusal")
+        .await?
+    {
+        Err(error)
+            if matches!(
+                error.code,
+                ErrorCode::NotReady
+                    | ErrorCode::StaleSession
+                    | ErrorCode::CursorExpired
+                    | ErrorCode::NotFound
+            ) =>
+        {
+            Ok(())
         }
-        let mut local=File::open(fixture.read.join(&fixture.folder).join(name))?;let mut local_hash=Sha256::new();let mut buffer=[0u8;65536];let size=local.metadata()?.len();
-        loop {let count=local.read(&mut buffer)?;if count==0{break;}local_hash.update(&buffer[..count]);}
-        if offset!=open.size.0||size!=offset||hex(&hash.finalize())!=open.sha256||hex(&local_hash.finalize())!=open.sha256{return Err(failure("complete artifact host export-equivalent size/digest mismatch"));}
-        project_close(phone,source,&open.read_id).await?;
-    }Ok(())
+        _ => Err(failure(
+            "owned project negative did not refuse at its actual supported boundary",
+        )),
+    }
 }
-fn project_changes_facts(result:&ChangesReadResult,original:&NativeProof,facts:&ProjectReadFacts,pin:&ProjectSeedPin)->io::Result<()> {
+async fn project_list(
+    phone: &mut Phone,
+    source: &ArtifactSource,
+    parent: Option<Uuid>,
+) -> io::Result<Vec<ArtifactEntry>> {
+    let mut cursor = None;
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+    loop {
+        let body = RequestBody::ArtifactsList(ArtifactsListParams {
+            source: source.clone(),
+            parent: if cursor.is_none() {
+                parent.clone()
+            } else {
+                None
+            },
+            cursor: cursor.clone(),
+            limit: Uint(100),
+        });
+        let ResultBody::ArtifactsList(page) = phone.rpc(body, "project_read_list").await? else {
+            return Err(failure("actual artifact page result absent"));
+        };
+        if &page.source != source {
+            return Err(failure("artifact original source changed"));
+        }
+        for row in page.entries {
+            if rows.len() == 1000
+                || !seen.insert(uuid::Uuid::parse_str(&row.reference.0).map_err(io::Error::other)?)
+            {
+                return Err(failure(
+                    "artifact complete listing exceeded or repeated its bound",
+                ));
+            }
+            rows.push(row);
+        }
+        match page.next_cursor {
+            None => return Ok(rows),
+            Some(next) if Some(&next) != cursor.as_ref() => cursor = Some(next),
+            _ => return Err(failure("artifact cursor made no progress")),
+        }
+    }
+}
+async fn project_open(
+    phone: &mut Phone,
+    source: &ArtifactSource,
+    row: &ArtifactEntry,
+) -> io::Result<ArtifactsOpenResult> {
+    let ResultBody::ArtifactsOpen(open) = phone
+        .rpc(
+            RequestBody::ArtifactsOpen(ArtifactsOpenParams {
+                source: source.clone(),
+                file: row.reference.clone(),
+            }),
+            "project_read_open",
+        )
+        .await?
+    else {
+        return Err(failure("actual artifact snapshot absent"));
+    };
+    if &open.source != source || open.name != row.name || Some(open.size) != row.size {
+        return Err(failure(
+            "artifact snapshot differs from the selected immutable row",
+        ));
+    }
+    Ok(open)
+}
+async fn project_close(phone: &mut Phone, source: &ArtifactSource, read: &Uuid) -> io::Result<()> {
+    let ResultBody::ArtifactsClose(closed) = phone
+        .rpc(
+            RequestBody::ArtifactsClose(ArtifactsCloseParams {
+                source: source.clone(),
+                read_id: read.clone(),
+            }),
+            "project_read_close",
+        )
+        .await?
+    else {
+        return Err(failure("artifact memory close result absent"));
+    };
+    if closed.source != *source || closed.read_id != *read || !closed.closed {
+        return Err(failure("selected artifact read owner was not released"));
+    }
+    Ok(())
+}
+async fn project_artifacts(
+    phone: &mut Phone,
+    source: &ArtifactSource,
+    fixture: &ProjectReadFixture,
+) -> io::Result<()> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let root = project_list(phone, source, None).await?;
+    let folder = root
+        .iter()
+        .find(|row| row.name == fixture.folder && row.kind == ArtifactKind::Directory)
+        .ok_or_else(|| failure("owned bounded artifact directory absent"))?;
+    let rows = project_list(phone, source, Some(folder.reference.clone())).await?;
+    let pages = rows
+        .iter()
+        .find(|row| row.name == "pages" && row.kind == ArtifactKind::Directory)
+        .ok_or_else(|| failure("owned paginated artifact directory absent"))?;
+    if project_list(phone, source, Some(pages.reference.clone()))
+        .await?
+        .len()
+        != 105
+    {
+        return Err(failure(
+            "real native artifact cursor did not return the complete two-page directory",
+        ));
+    }
+    for (name, kind) in [
+        ("complete.txt", ArtifactPreviewKind::Text),
+        ("empty.txt", ArtifactPreviewKind::Text),
+        ("binary.bin", ArtifactPreviewKind::Binary),
+        ("large.bin", ArtifactPreviewKind::Unavailable),
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row.name == name && row.kind == ArtifactKind::File)
+            .ok_or_else(|| failure("owned artifact fixture row absent"))?;
+        let open = project_open(phone, source, row).await?;
+        if open.preview_kind != kind {
+            return Err(failure(
+                "text, binary and unavailable complete snapshots were conflated",
+            ));
+        }
+        let mut offset = 0u64;
+        let mut hash = Sha256::new();
+        loop {
+            let ResultBody::ArtifactsRead(chunk) = phone
+                .rpc(
+                    RequestBody::ArtifactsRead(ArtifactsReadParams {
+                        source: source.clone(),
+                        read_id: open.read_id.clone(),
+                        offset: Uint(offset),
+                        limit: Uint(65536),
+                    }),
+                    "project_read_chunk",
+                )
+                .await?
+            else {
+                return Err(failure("artifact chunk absent"));
+            };
+            let mut bytes = base64::engine::general_purpose::STANDARD
+                .decode(&chunk.data.0)
+                .map_err(io::Error::other)?;
+            if chunk.source != *source
+                || chunk.read_id != open.read_id
+                || chunk.offset.0 != offset
+                || bytes.len() > 65536
+                || offset + bytes.len() as u64 > open.size.0
+                || bytes.is_empty() && !chunk.eof
+            {
+                return Err(failure(
+                    "artifact exact chunk offset/size ownership mismatch",
+                ));
+            }
+            offset += bytes.len() as u64;
+            hash.update(&bytes);
+            bytes.fill(0);
+            if chunk.eof {
+                break;
+            }
+        }
+        let mut local = File::open(fixture.read.join(&fixture.folder).join(name))?;
+        let mut local_hash = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        let size = local.metadata()?.len();
+        loop {
+            let count = local.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            local_hash.update(&buffer[..count]);
+        }
+        if offset != open.size.0
+            || size != offset
+            || hex(&hash.finalize()) != open.sha256
+            || hex(&local_hash.finalize()) != open.sha256
+        {
+            return Err(failure(
+                "complete artifact host export-equivalent size/digest mismatch",
+            ));
+        }
+        project_close(phone, source, &open.read_id).await?;
+    }
+    Ok(())
+}
+fn project_changes_facts(
+    result: &ChangesReadResult,
+    original: &NativeProof,
+    facts: &ProjectReadFacts,
+    pin: &ProjectSeedPin,
+) -> io::Result<()> {
     if result.target!=original.target||result.changes.repository_context.as_ref().and_then(|context|context.latest_commit.as_ref()).map(|commit|&commit.oid)!=Some(&pin.commit)
         ||!result.changes.entries.iter().any(|entry|matches!(entry,ChangeEntry::Tracked {path,original_path:Some(old),index:ChangeState::Renamed,..} if path==&facts.renamed&&old==&facts.original))
         ||!result.changes.entries.iter().any(|entry|matches!(entry,ChangeEntry::Tracked {path,index:ChangeState::Unmerged,..} if path==&facts.conflict))
@@ -12998,8 +15349,16 @@ fn project_changes_facts(result:&ChangesReadResult,original:&NativeProof,facts:&
         ||result.changes.staged_patch.is_empty()||result.changes.unstaged_patch.is_empty(){return Err(failure("actual native staged/unstaged/rename/binary/conflict/submodule/reference facts incomplete"));}
     Ok(())
 }
-async fn project_read_flow(mut phone:Phone,selected:&[Provider],context:ProjectReadRun<'_>)->io::Result<bool> {
-    let mut completed=HashSet::new();let mut observations=Vec::new();let mut proved_read_originals=0;let mut proved_creation_originals=0;let mut pinned_files_panes=0;
+async fn project_read_flow(
+    mut phone: Phone,
+    selected: &[Provider],
+    context: ProjectReadRun<'_>,
+) -> io::Result<bool> {
+    let mut completed = HashSet::new();
+    let mut observations = Vec::new();
+    let mut proved_read_originals = 0;
+    let mut proved_creation_originals = 0;
+    let mut pinned_files_panes = 0;
     let outcome:io::Result<()>=async {
         if context.config.allow_terminal_control||context.config.projects.len()!=2||!context.config.projects[0].allow_read_tools||context.config.projects[1].allow_read_tools{return Err(failure("owned project read and creation-only grants were not independent"));}
         let facts=context.fixture.build(context.evidence,context.run).await?;let pin=context.fixture.pin.as_ref().ok_or_else(||failure("qualified public seed pin absent"))?;
@@ -13053,11 +15412,22 @@ async fn project_read_flow(mut phone:Phone,selected:&[Provider],context:ProjectR
         creation.recheck_processes()?;context.source.recheck()?;
         Ok(())
     }.await;
-    let available=outcome.is_ok();let results=selected.iter().map(|provider|json!({"gate":"project-read-only","provider":provider,"status":if available&&completed.contains(provider){"passed"}else{"unavailable"},"reason":if available{"completed"}else{"original_read_boundary_or_fixture_prerequisite_unavailable"},"originalsRetained":true,"terminalInputOrGrid":false,"androidSafOrUiProof":false})).collect::<Vec<_>>();
-    write_json(&context.evidence.join(format!("project-read-results-{}.json",context.run.0)),&json!({"runId":context.run,"results":results,"observations":observations,"provedCounts":{"readGrantedOriginals":proved_read_originals,"creationOnlyOriginals":proved_creation_originals,"startupFilesPanes":pinned_files_panes},"expectedCounts":{"readGrantedProviders":2,"creationOnlyOmpOriginal":1,"ordinaryStartupFilesPane":1},"scope":"host framed workflows and immutable native reference facts only; no Android SAF/UI/native-input acceptance claimed; all entered results retained/status-only; entered unproved resources are recorded separately, never inferred absent"}))?;
-    for result in results {println!("{result}");}phone.connection.close(0u32.into(),b"finite project read complete");outcome.map(|()|true)
+    let available = outcome.is_ok();
+    let results=selected.iter().map(|provider|json!({"gate":"project-read-only","provider":provider,"status":if available&&completed.contains(provider){"passed"}else{"unavailable"},"reason":if available{"completed"}else{"original_read_boundary_or_fixture_prerequisite_unavailable"},"originalsRetained":true,"terminalInputOrGrid":false,"androidSafOrUiProof":false})).collect::<Vec<_>>();
+    write_json(
+        &context
+            .evidence
+            .join(format!("project-read-results-{}.json", context.run.0)),
+        &json!({"runId":context.run,"results":results,"observations":observations,"provedCounts":{"readGrantedOriginals":proved_read_originals,"creationOnlyOriginals":proved_creation_originals,"startupFilesPanes":pinned_files_panes},"expectedCounts":{"readGrantedProviders":2,"creationOnlyOmpOriginal":1,"ordinaryStartupFilesPane":1},"scope":"host framed workflows and immutable native reference facts only; no Android SAF/UI/native-input acceptance claimed; all entered results retained/status-only; entered unproved resources are recorded separately, never inferred absent"}),
+    )?;
+    for result in results {
+        println!("{result}");
+    }
+    phone
+        .connection
+        .close(0u32.into(), b"finite project read complete");
+    outcome.map(|()| true)
 }
-
 
 async fn checkpoint_held(
     args: &clap::ArgMatches,
@@ -13065,14 +15435,20 @@ async fn checkpoint_held(
     mut grid_hold: Option<&mut GridHold>,
     qualified_config: Option<Config>,
 ) -> io::Result<bool> {
-    let project_read_only=args.get_flag("project-read-only");
-    let finite_admission=args.get_flag("admission-only")||args.get_flag("shared-agent-only")||project_read_only||args.get_one::<String>("background").is_some();
-    let terminal_only=args.get_flag("terminal-only");
+    let project_read_only = args.get_flag("project-read-only");
+    let finite_admission = args.get_flag("admission-only")
+        || args.get_flag("shared-agent-only")
+        || project_read_only
+        || args.get_one::<String>("background").is_some();
+    let terminal_only = args.get_flag("terminal-only");
     terminal_mode_environment(args)?;
     project_read_mode_environment(args)?;
     background_mode_environment(args)?;
-    if args.get_one::<String>("background").is_some(){ui::background_preflight(args).await?;}
-    let retain_process=finite_admission||terminal_only||args.get_flag("omp-creation-diagnostic");
+    if args.get_one::<String>("background").is_some() {
+        ui::background_preflight(args).await?;
+    }
+    let retain_process =
+        finite_admission || terminal_only || args.get_flag("omp-creation-diagnostic");
     if args.get_flag("grid") != grid_hold.is_some()
         || args.get_flag("grid") != qualified_config.is_some()
     {
@@ -13083,10 +15459,24 @@ async fn checkpoint_held(
             "explicit --consent-owned-providers required before owned desktop/provider effects",
         ));
     }
-    let selected=if terminal_only {Vec::new()}else{args
-        .get_many::<String>("backend")
-        .ok_or_else(||failure("select --backend omp --backend codex; missing backend is not silently skipped"))?
-        .map(|provider|if provider=="omp"{Provider::Omp}else{Provider::Codex}).collect::<Vec<_>>()};
+    let selected = if terminal_only {
+        Vec::new()
+    } else {
+        args.get_many::<String>("backend")
+            .ok_or_else(|| {
+                failure(
+                    "select --backend omp --backend codex; missing backend is not silently skipped",
+                )
+            })?
+            .map(|provider| {
+                if provider == "omp" {
+                    Provider::Omp
+                } else {
+                    Provider::Codex
+                }
+            })
+            .collect::<Vec<_>>()
+    };
     if args.get_flag("paging-proof") && selected != vec![Provider::Codex] {
         return Err(failure("paging proof requires only one Codex backend"));
     }
@@ -13121,25 +15511,28 @@ async fn checkpoint_held(
             || std::env::var_os("GOATR_OWNED_HERDR_REPORT_BIN").is_some()
             || std::env::var_os("GOATR_OWNED_HERDR_REPORT_SHA256").is_some())
     {
-        return Err(failure("finite owned mode conflicts with provider/private diagnostic capture"));
+        return Err(failure(
+            "finite owned mode conflicts with provider/private diagnostic capture",
+        ));
     }
     let deployment = match qualified_config {
         Some(deployment) => deployment,
         None => Config::load(args.get_one::<PathBuf>("config").ok_or_else(||failure("actual deployment --config with preserved installed outer wrappers/source roots required"))?)?,
     };
     for p in &selected {
-        if !finite_admission
-            && let Some(reason) = deployment.backend_reason(*p)? {
+        if !finite_admission && let Some(reason) = deployment.backend_reason(*p)? {
             return Err(prerequisite(reason));
         }
     }
-    if !terminal_only&&!deployment.allow_scoped_shell_probe {
+    if !terminal_only && !deployment.allow_scoped_shell_probe {
         return Err(failure(
             "explicit local scoped probe consent must be saved by actual setup before stock creation gate",
         ));
     }
-    if terminal_only&&!deployment.allow_terminal_control {
-        return Err(prerequisite("terminal-only requires explicit saved local allow_terminal_control=true"));
+    if terminal_only && !deployment.allow_terminal_control {
+        return Err(prerequisite(
+            "terminal-only requires explicit saved local allow_terminal_control=true",
+        ));
     }
     let binary = packaged(args)?;
     let workspace = fs::canonicalize(
@@ -13209,16 +15602,28 @@ async fn checkpoint_held(
         ));
     }
     let private_herdr = owned_herdr_report_binary(omp_receiver_capture, &workspace)?;
-    let project_fixture=if project_read_only {Some(ProjectReadFixture::prepare(args,&root,&binary,&run)?)}else{None};
+    let project_fixture = if project_read_only {
+        Some(ProjectReadFixture::prepare(args, &root, &binary, &run)?)
+    } else {
+        None
+    };
     let mut config = deployment.clone();
     config.runtime_dir = root.join("runtime");
     config.runtime_dir_agent = config.runtime_dir.clone();
     config.herdr_sockets = vec![herdr_socket.clone()];
-    if project_read_only {config.allow_terminal_control=false;config.allow_attachments=false;}
+    if project_read_only {
+        config.allow_terminal_control = false;
+        config.allow_attachments = false;
+    }
     if terminal_only {
-        config.allow_scoped_shell_probe=false;config.allow_attachments=false;
-        config.omp_registry_dir=None;config.omp_blob_root=None;config.omp_session_roots.clear();
-        config.omp_skills_package_root=None;config.executables.omp=None;config.executables.codex=None;
+        config.allow_scoped_shell_probe = false;
+        config.allow_attachments = false;
+        config.omp_registry_dir = None;
+        config.omp_blob_root = None;
+        config.omp_session_roots.clear();
+        config.omp_skills_package_root = None;
+        config.executables.omp = None;
+        config.executables.codex = None;
     }
     if let Some(private_herdr) = private_herdr {
         // Every owned-run proof below observes this exact private diagnostic binary.
@@ -13236,9 +15641,14 @@ async fn checkpoint_held(
         label: Label::new("Owned checkpoint project").map_err(io::Error::other)?,
         path: root.join("project"),
     }];
-    if let Some(fixture)=&project_fixture {
-        config.projects[0].allow_read_tools=true;
-        config.projects.push(ConfiguredProject {id:Uuid::random(),label:Label::new("Owned creation-only sibling").map_err(io::Error::other)?,path:fixture.creation_only.clone(),allow_read_tools:false});
+    if let Some(fixture) = &project_fixture {
+        config.projects[0].allow_read_tools = true;
+        config.projects.push(ConfiguredProject {
+            id: Uuid::random(),
+            label: Label::new("Owned creation-only sibling").map_err(io::Error::other)?,
+            path: fixture.creation_only.clone(),
+            allow_read_tools: false,
+        });
     }
     if selected.contains(&Provider::Codex) {
         let owner = CodexOwner {
@@ -13284,14 +15694,14 @@ async fn checkpoint_held(
     )?;
     drop(config_lock);
     if args.get_flag("shared-agent-only") {
-        config=Config::load(&config_path)?;
+        config = Config::load(&config_path)?;
         for provider in &selected {
-            if let Some(reason)=config.backend_reason(*provider)? {
+            if let Some(reason) = config.backend_reason(*provider)? {
                 return Err(prerequisite(reason));
             }
         }
     }
-    let listener = if args.get_flag("paging-proof")||terminal_only {
+    let listener = if args.get_flag("paging-proof") || terminal_only {
         None
     } else {
         Some(Arc::new(std::net::TcpListener::bind((
@@ -13361,8 +15771,12 @@ async fn checkpoint_held(
         &json!({"runId":run,"herdrReportCapture":herdr_report_capture.is_some(),"ompBackendCapture":omp_backend_capture,"root":identity(&root)?,"adminParent":identity(&admin)?,"adminSocket":socket,"herdrSocket":herdr_socket,"herdrName":name,"config":identity(&config_path)?,"runtimeUnchanged":runtime,"package":binary,"packageSha256":binary_sha256(&binary)?,"companionLockSha256":transport::lock_sha256(),"OMPownedPort":port,"listener":listener_record,"listenerSource":listener_source,"nativeCreationResources":"retained; never automatically rollback/kill desktop work","stage":"owned roots/exact kernel listener source before process effects"}),
     )?;
     let mut command = std::process::Command::new(&config.executables.herdr);
-    if let Some(fixture)=&project_fixture {fixture.environment(&mut command);}
-    if terminal_only{command.env_remove("HERDR_RENDER_PROF");}
+    if let Some(fixture) = &project_fixture {
+        fixture.environment(&mut command);
+    }
+    if terminal_only {
+        command.env_remove("HERDR_RENDER_PROF");
+    }
     command
         .args(["--session", &name, "server"])
         .current_dir(&config.projects[0].path)
@@ -13389,8 +15803,10 @@ async fn checkpoint_held(
         .map_err(io::Error::other)?;
         command.env("PATH", path);
     }
-    let spawn_manifest = retain_process.then(||evidence.join(format!("herdr-spawn-{}.json",run.0)));
-    let mut desktop = Desktop::spawn_held(command, grid_hold.as_deref_mut(), spawn_manifest.as_deref())?;
+    let spawn_manifest =
+        retain_process.then(|| evidence.join(format!("herdr-spawn-{}.json", run.0)));
+    let mut desktop =
+        Desktop::spawn_held(command, grid_hold.as_deref_mut(), spawn_manifest.as_deref())?;
     if let Some(capture) = &herdr_report_capture {
         capture.pin(&desktop.process);
     }
@@ -13399,8 +15815,11 @@ async fn checkpoint_held(
         &json!({"runId":run,"process":desktop.process,"executable":config.executables.herdr,"outerSha256":binary_sha256(&config.executables.herdr)?,"socket":herdr_socket,"cwd":config.projects[0].path,"XDG_CONFIG_HOME":admin.join("config"),"XDG_RUNTIME_DIR":runtime}),
     )?;
     if retain_process {
-        println!("{}",json!({"gate":"admission-owned-herdr",
-            "manifest":evidence.join(format!("herdr-{}.json",run.0))}));
+        println!(
+            "{}",
+            json!({"gate":"admission-owned-herdr",
+            "manifest":evidence.join(format!("herdr-{}.json",run.0))})
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(20);
     let (source_evidence, admission_native) = loop {
@@ -13415,16 +15834,21 @@ async fn checkpoint_held(
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     if retain_process {
-        let manifest = evidence.join(format!("admission-source-{}.json",run.0));
-        write_json(&manifest, &json!({"runId":run,"herdr":desktop.process,
+        let manifest = evidence.join(format!("admission-source-{}.json", run.0));
+        write_json(
+            &manifest,
+            &json!({"runId":run,"herdr":desktop.process,
             "source":source_evidence,"socket":identity(&herdr_socket)?,
-            "scope":"retained fresh owned Herdr; original kernel process and validated socket source"}))?;
-        println!("{}",json!({"gate":"admission-source","manifest":manifest}));
+            "scope":"retained fresh owned Herdr; original kernel process and validated socket source"}),
+        )?;
+        println!("{}", json!({"gate":"admission-source","manifest":manifest}));
         if source_evidence.linux_boot_id != desktop.process.linux_boot_id
             || source_evidence.pid != desktop.process.pid
             || source_evidence.pid_start_ticks != desktop.process.start_ticks
         {
-            return Err(prerequisite("owned Herdr source does not match original child"));
+            return Err(prerequisite(
+                "owned Herdr source does not match original child",
+            ));
         }
     }
     let mut serve = if args.get_flag("grid") || retain_process {
@@ -13463,13 +15887,18 @@ async fn checkpoint_held(
         &json!({"runId":run,"process":serve.process,"adminSocket":identity(&socket)?,"absoluteConfig":config_path,"OMPownedPort":port,"serveArgument":"--admin-socket identical on pair/list/revoke/restart","scope":"ordinary configured packaged serve, not hidden transport smoke"}),
     )?;
     if retain_process {
-        let manifest = evidence.join(format!("admission-ownership-{}.json",run.0));
-        write_json(&manifest,
+        let manifest = evidence.join(format!("admission-ownership-{}.json", run.0));
+        write_json(
+            &manifest,
             &json!({"runId":run,"herdr":desktop.process,"source":source_evidence,
                 "herdrSocket":identity(&herdr_socket)?,"companion":serve.process,
                 "adminSocket":identity(&socket)?,"root":root,"config":config_path,
-                "scope":"retained fresh originals; no automatic teardown; review exact identities before cleanup"}))?;
-        println!("{}",json!({"gate":"admission-ownership","manifest":manifest}));
+                "scope":"retained fresh originals; no automatic teardown; review exact identities before cleanup"}),
+        )?;
+        println!(
+            "{}",
+            json!({"gate":"admission-ownership","manifest":manifest})
+        );
     }
     let ready = json!({"gate":"owned-runtime-ready","runId":run,"root":root,"herdrSocket":herdr_socket,"OMPownedPort":port,"scope":if terminal_only{"retained provider-independent owned stock source; no provider relay or readiness dependency"}else{"sanitized resource rendezvous; relay is live, no provider readiness claimed"}});
     if args.get_flag("grid") {
@@ -13481,10 +15910,25 @@ async fn checkpoint_held(
         .bind()
         .await
         .map_err(io::Error::other)?;
-    let mut phone = pair(&binary, &root, &socket, &endpoint,None).await?;
+    let mut phone = pair(&binary, &root, &socket, &endpoint, None).await?;
     if terminal_only {
-        let result=terminal_flow(&mut phone,&config,&herdr_socket,&mut desktop,&source_evidence,admission_native,&name,evidence,&run).await;
-        phone.connection.close(0u32.into(),b"finite terminal workflow complete");
+        let result = terminal_flow(
+            &mut phone,
+            &TerminalContext {
+                config: &config,
+                socket: &herdr_socket,
+                evidence,
+                run: &run,
+            },
+            &mut desktop,
+            &source_evidence,
+            admission_native,
+            &name,
+        )
+        .await;
+        phone
+            .connection
+            .close(0u32.into(), b"finite terminal workflow complete");
         return result;
     }
     if args.get_flag("grid") {
@@ -13497,46 +15941,128 @@ async fn checkpoint_held(
             evidence,
             &run,
             &selected,
-            grid_hold
-                .as_deref_mut()
-                .ok_or_else(|| grid_failure("retention_missing"))?,
+            grid_hold.ok_or_else(|| grid_failure("retention_missing"))?,
         )
         .await;
     }
     if finite_admission {
-        let server=creation_admission(&mut phone, &selected, &name, evidence, &run,
-            AdmissionSource{socket:&herdr_socket,desktop:&mut desktop,original:&source_evidence,native:admission_native}).await?;
+        let server = creation_admission(
+            &mut phone,
+            &selected,
+            &name,
+            evidence,
+            &run,
+            AdmissionSource {
+                socket: &herdr_socket,
+                desktop: &mut desktop,
+                original: &source_evidence,
+                native: admission_native,
+            },
+        )
+        .await?;
         if args.get_flag("admission-only") {
-            phone.connection.close(0u32.into(), b"finite admission complete");
+            phone
+                .connection
+                .close(0u32.into(), b"finite admission complete");
             return Ok(server.is_some());
         }
-        if args.get_one::<String>("background").is_some(){
-            let server=server.ok_or_else(||prerequisite("background finite both-provider admission unavailable"))?;
-            let mut originals=Vec::with_capacity(2);
-            for provider in selected.iter().copied(){
+        if args.get_one::<String>("background").is_some() {
+            let server = server.ok_or_else(|| {
+                prerequisite("background finite both-provider admission unavailable")
+            })?;
+            let mut originals = Vec::with_capacity(2);
+            for provider in selected.iter().copied() {
                 server.recheck()?;
-                let (original,receipt)=create(&mut phone,&config,&herdr_socket,provider,&server.identity.0,evidence,&run).await?;
-                if provider==Provider::Codex&&let Some(mcp)=&native_mcp {
+                let (original, receipt) = create(
+                    &mut phone,
+                    &config,
+                    &herdr_socket,
+                    provider,
+                    &server.identity.0,
+                    evidence,
+                    &run,
+                )
+                .await?;
+                if provider == Provider::Codex
+                    && let Some(mcp) = &native_mcp
+                {
                     mcp.bind_owner(&original)?;
                 }
-                write_json(&evidence.join(format!("background-original-{}-{provider:?}.json",run.0)),&json!({"runId":run,"mode":args.get_one::<String>("background"),"creationReceipt":receipt,"proof":original.evidence(),"resourcesRetained":true,"cleanupAuthorized":false}))?;
+                write_json(
+                    &evidence.join(format!("background-original-{}-{provider:?}.json", run.0)),
+                    &json!({"runId":run,"mode":args.get_one::<String>("background"),"creationReceipt":receipt,"proof":original.evidence(),"resourcesRetained":true,"cleanupAuthorized":false}),
+                )?;
                 originals.push(original);
             }
-            ui::background(args,evidence,ui::Context {binary:&binary,root:&root,socket:&socket,config:&config,herdr_socket:&herdr_socket,herdr_process:&desktop.process,
-                mcp:native_mcp.as_ref(),serve:&mut serve,listener:listener.as_deref().ok_or_else(||failure("background owned listener absent"))?,endpoint:&endpoint,phone:&mut phone,native:&mut originals,history_witnesses:&[],feedback_presentation:&[]},&run).await?;
+            ui::background(
+                args,
+                evidence,
+                ui::Context {
+                    binary: &binary,
+                    root: &root,
+                    socket: &socket,
+                    config: &config,
+                    herdr_socket: &herdr_socket,
+                    herdr_process: &desktop.process,
+                    mcp: native_mcp.as_ref(),
+                    serve: &mut serve,
+                    listener: listener
+                        .as_deref()
+                        .ok_or_else(|| failure("background owned listener absent"))?,
+                    endpoint: &endpoint,
+                    phone: &mut phone,
+                    native: &mut originals,
+                    history_witnesses: &[],
+                    feedback_presentation: &[],
+                },
+                &run,
+            )
+            .await?;
             return Ok(true);
         }
-        if let Some(fixture)=&project_fixture {
-            let server=server.ok_or_else(||prerequisite("project-read-only finite creation admission unavailable"))?;
-            return project_read_flow(phone,&selected,ProjectReadRun {fixture,config:&config,socket:&herdr_socket,desktop:&desktop,source:&server,evidence,run:&run}).await;
+        if let Some(fixture) = &project_fixture {
+            let server = server.ok_or_else(|| {
+                prerequisite("project-read-only finite creation admission unavailable")
+            })?;
+            return project_read_flow(
+                phone,
+                &selected,
+                ProjectReadRun {
+                    fixture,
+                    config: &config,
+                    socket: &herdr_socket,
+                    desktop: &desktop,
+                    source: &server,
+                    evidence,
+                    run: &run,
+                },
+            )
+            .await;
         }
-        let server=server.ok_or_else(||prerequisite("shared-agent creation admission unavailable"))?;
-        return shared_agent_flow(phone, &selected, SharedAgentContext {
-            inputs:NativeInputs{enabled:true,paging_proof:false,config:&config,socket:&herdr_socket,
-                herdr:&desktop.process,evidence,run:&run,mcp:None,plan:RefCell::new(None),
-                mcp_dialogs:RefCell::new(HashMap::new())},
-            companion:&serve,endpoint:&endpoint,source:&server,
-        }).await;
+        let server =
+            server.ok_or_else(|| prerequisite("shared-agent creation admission unavailable"))?;
+        return shared_agent_flow(
+            phone,
+            &selected,
+            SharedAgentContext {
+                inputs: NativeInputs {
+                    enabled: true,
+                    paging_proof: false,
+                    config: &config,
+                    socket: &herdr_socket,
+                    herdr: &desktop.process,
+                    evidence,
+                    run: &run,
+                    mcp: None,
+                    plan: RefCell::new(None),
+                    mcp_dialogs: RefCell::new(HashMap::new()),
+                },
+                companion: &serve,
+                endpoint: &endpoint,
+                source: &server,
+            },
+        )
+        .await;
     }
     phone.codex_close_capture = args.get_flag("codex-invalidation-diagnostic");
     if let Some(budget) = serve.omp_capture_budget.clone() {
@@ -13578,23 +16104,18 @@ async fn checkpoint_held(
     let mut history_witnesses = Vec::new();
     for p in selected.iter().copied() {
         if omp_creation_diagnostic {
-            let receipt = create_omp_creation_diagnostic(
-                &mut phone,
-                &config,
-                &server,
-                evidence,
-                &run,
-            )
-            .await?;
-            let (stage, stage_state) = receipt
-                .creation
-                .as_ref()
-                .map_or(("none".to_owned(), "none".to_owned()), |creation| {
+            let receipt =
+                create_omp_creation_diagnostic(&mut phone, &config, &server, evidence, &run)
+                    .await?;
+            let (stage, stage_state) = receipt.creation.as_ref().map_or(
+                ("none".to_owned(), "none".to_owned()),
+                |creation| {
                     (
                         format!("{:?}", creation.stage),
                         format!("{:?}", creation.stage_state),
                     )
-                });
+                },
+            );
             let error_code = receipt
                 .error
                 .as_ref()
@@ -13603,9 +16124,14 @@ async fn checkpoint_held(
                 .connection
                 .close(0u32.into(), b"OMP creation diagnostic complete");
             let probe_disposition = if receipt.creation.as_ref().is_some_and(|creation| {
-                creation.stage == CreationStage::Workspace && receipt.state != ReceiptState::Succeeded
+                creation.stage == CreationStage::Workspace
+                    && receipt.state != ReceiptState::Succeeded
             }) {
-                if serve.finish_retained_omp_capture().await { "observed" } else { "unavailable" }
+                if serve.finish_retained_omp_capture().await {
+                    "observed"
+                } else {
+                    "unavailable"
+                }
             } else {
                 "not_required_by_receipt"
             };
@@ -13750,10 +16276,9 @@ async fn checkpoint_held(
             Ok(())
             }
             .await;
-            phone.connection.close(
-                0u32.into(),
-                b"Codex invalidation diagnostic complete",
-            );
+            phone
+                .connection
+                .close(0u32.into(), b"Codex invalidation diagnostic complete");
             let cleanup = serve
                 .stop_codex_diagnostic(if result.is_err() {
                     "after_helper_failure"
@@ -13923,14 +16448,19 @@ async fn checkpoint_held(
     let mut replay = Vec::new();
     for p in &native {
         let id = Uuid::random();
-        let req = RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
-        delivery: None, native_turn_id: None, images: None,
-        target: p.target.clone(),
-        text: PromptText(format!(
-            "Reply only goatr-once-{}-{:?}",
-            &run.0[..8],
-            p.provider
-        )), });
+        let req = RequestBody::PromptSubmit(PromptSubmitParams {
+            skill: None,
+            boot_id: phone.hello.boot_id.clone(),
+            delivery: None,
+            native_turn_id: None,
+            images: None,
+            target: p.target.clone(),
+            text: PromptText(format!(
+                "Reply only goatr-once-{}-{:?}",
+                &run.0[..8],
+                p.provider
+            )),
+        });
         let receipt = receipt_result(
             phone
                 .request(id.clone(), req.clone())
@@ -14291,31 +16821,53 @@ pub(super) struct LiveAdmission {
     unit: Option<goatr::codex_relay::UnitWakePin>,
 }
 pub(super) fn admit_arguments() -> io::Result<LiveAdmission> {
-    let args = feedback_arguments(arguments_base()).try_get_matches_from(std::env::args_os())
-        .map_err(|error|io::Error::new(io::ErrorKind::InvalidInput,error.to_string()))?;
+    let args = feedback_arguments(arguments_base())
+        .try_get_matches_from(std::env::args_os())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     let diagnostic = physical_host_preflight_selection(&args)?;
     physical_mode_environment(&args)?;
-    let expected = if args.get_flag("physical-mvp") || matches!(diagnostic,Some(physical::ControllerPolicy::WakeDiagnostic {..})) {
-        args.get_one::<String>("expected-controller-unit").map(String::as_str)
-    } else { None };
-    let unit = goatr::codex_relay::prepare_current_executable(true,expected)?;
-    Ok(LiveAdmission {args,unit})
+    let expected = if args.get_flag("physical-mvp")
+        || matches!(
+            diagnostic,
+            Some(physical::ControllerPolicy::WakeDiagnostic { .. })
+        ) {
+        args.get_one::<String>("expected-controller-unit")
+            .map(String::as_str)
+    } else {
+        None
+    };
+    let unit = goatr::codex_relay::prepare_current_executable(true, expected)?;
+    Ok(LiveAdmission { args, unit })
 }
 pub(super) async fn run(admitted: Option<LiveAdmission>) -> io::Result<bool> {
-    let LiveAdmission {args,unit}=match admitted {
-        Some(admitted)=>admitted,
-        None=>LiveAdmission {args:arguments(),unit:None},
+    let LiveAdmission { args, unit } = match admitted {
+        Some(admitted) => admitted,
+        None => LiveAdmission {
+            args: arguments(),
+            unit: None,
+        },
     };
-    if let Some(policy)=physical_host_preflight_selection(&args)? {
-        let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required host preflight evidence"))?;
+    if let Some(policy) = physical_host_preflight_selection(&args)? {
+        let evidence = std::path::absolute(
+            args.get_one::<PathBuf>("evidence-dir")
+                .expect("required host preflight evidence"),
+        )?;
         fresh_shared_evidence(&evidence)?;
-        return physical::host_preflight(&evidence,policy,unit);
+        return physical::host_preflight(&evidence, policy, unit);
     }
     physical_mode_environment(&args)?;
     if args.get_flag("physical-mvp") {
-        let evidence=std::path::absolute(args.get_one::<PathBuf>("evidence-dir").expect("required physical evidence"))?;
+        let evidence = std::path::absolute(
+            args.get_one::<PathBuf>("evidence-dir")
+                .expect("required physical evidence"),
+        )?;
         fresh_shared_evidence(&evidence)?;
-        physical::run(&args,&evidence,unit.ok_or_else(||failure("full mode lost its synchronous admitted unit context"))?).await?;
+        physical::run(
+            &args,
+            &evidence,
+            unit.ok_or_else(|| failure("full mode lost its synchronous admitted unit context"))?,
+        )
+        .await?;
         return Ok(true);
     }
     terminal_mode_environment(&args)?;
@@ -14327,62 +16879,92 @@ pub(super) async fn run(admitted: Option<LiveAdmission>) -> io::Result<bool> {
         args.get_one::<PathBuf>("evidence-dir")
             .expect("required evidence"),
     )?;
-    if args.get_flag("shared-agent-only")||args.get_flag("terminal-only")||args.get_flag("project-read-only")||args.get_one::<String>("background").is_some() {
-        if args.get_flag("shared-agent-only"){require_shared_backends(&args)?;}
-        if args.get_flag("project-read-only"){require_shared_backends(&args).map_err(|_|failure("project-read-only requires exactly one OMP and one Codex backend"))?;}
+    if args.get_flag("shared-agent-only")
+        || args.get_flag("terminal-only")
+        || args.get_flag("project-read-only")
+        || args.get_one::<String>("background").is_some()
+    {
+        if args.get_flag("shared-agent-only") {
+            require_shared_backends(&args)?;
+        }
+        if args.get_flag("project-read-only") {
+            require_shared_backends(&args).map_err(|_| {
+                failure("project-read-only requires exactly one OMP and one Codex backend")
+            })?;
+        }
         fresh_shared_evidence(&evidence)?;
     }
     if args.get_flag("physical-hello-capture") {
         return physical_hello_capture(&args, &evidence).await;
     }
     private_dir(&evidence, true)?;
-    if args.get_one::<String>("background").is_some(){
-        let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let result=tokio::select!{
+    if args.get_one::<String>("background").is_some() {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result = tokio::select! {
             result=checkpoint(&args,&evidence)=>result,
             _=tokio::signal::ctrl_c()=>Err(failure("background cancelled; original providers/receipts retained; no replay or automatic native cleanup")),
             _=terminate.recv()=>Err(failure("background cancelled; original providers/receipts retained; no replay or automatic native cleanup")),
         };
-        if let Err(error)=&result {
+        if let Err(error) = &result {
             let unavailable=args.get_many::<String>("backend").into_iter().flatten().map(|provider|json!({"gate":"background","mode":args.get_one::<String>("background"),"provider":provider,"status":"unavailable","reason":"preparation_or_real_delivery_boundary","boundary":super::helper_error_metadata(error),"resourcesRetained":true,"cleanupAuthorized":false})).collect::<Vec<_>>();
-            write_json(&evidence.join(format!("background-unavailable-{}.json",Uuid::random().0)),&json!({"results":unavailable}))?;
-            for row in unavailable{println!("{row}");}
+            write_json(
+                &evidence.join(format!("background-unavailable-{}.json", Uuid::random().0)),
+                &json!({"results":unavailable}),
+            )?;
+            for row in unavailable {
+                println!("{row}");
+            }
         }
         return result;
     }
     if args.get_flag("project-read-only") {
-        let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let result=tokio::select! {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result = tokio::select! {
             result=checkpoint(&args,&evidence)=>result,
             _=tokio::signal::ctrl_c()=>Err(failure("project-read-only cancelled; originals and entered receipts retained, never replayed")),
             _=terminate.recv()=>Err(failure("project-read-only cancelled; originals and entered receipts retained, never replayed")),
         };
-        if let Err(error)=&result {
+        if let Err(error) = &result {
             let results=args.get_many::<String>("backend").into_iter().flatten().map(|provider|json!({"gate":"project-read-only","provider":provider,"status":"unavailable","reason":"preparation_or_original_read_boundary","boundary":super::helper_error_metadata(error),"scope":"retained originals/receipts; no input, replay, native closure or cleanup; not Android SAF/UI proof"})).collect::<Vec<_>>();
-            write_json(&evidence.join(format!("project-read-unavailable-{}.json",Uuid::random().0)),&json!({"results":results}))?;
-            for result in results {println!("{result}");}
+            write_json(
+                &evidence.join(format!(
+                    "project-read-unavailable-{}.json",
+                    Uuid::random().0
+                )),
+                &json!({"results":results}),
+            )?;
+            for result in results {
+                println!("{result}");
+            }
         }
         return result;
     }
 
     if args.get_flag("terminal-only") {
-        let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let result=tokio::select!{
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result = tokio::select! {
             result=checkpoint(&args,&evidence)=>result,
             _=tokio::signal::ctrl_c()=>Err(failure("terminal-only cancelled; original resources retained, no input replay")),
             _=terminate.recv()=>Err(failure("terminal-only cancelled; original resources retained, no input replay")),
         };
-        if let Err(error)=&result {
-            let record=json!({"gate":"terminal-only","status":"unavailable","reason":"preparation_or_observation",
+        if let Err(error) = &result {
+            let record = json!({"gate":"terminal-only","status":"unavailable","reason":"preparation_or_observation",
                 "boundary":super::helper_error_metadata(error),"resources":"retained originals; no stop/closure/rollback",
                 "nativeTag19":"unproved","phase4Input":"unproved","scope":"finite single-controller stock interoperability only"});
-            write_json(&evidence.join(format!("terminal-unavailable-{}.json",Uuid::random().0)),&record)?;
+            write_json(
+                &evidence.join(format!("terminal-unavailable-{}.json", Uuid::random().0)),
+                &record,
+            )?;
             println!("{record}");
         }
         return result;
     }
     if args.get_flag("admission-only") {
-        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let result = tokio::select! {
             result=checkpoint(&args,&evidence)=>result,
             _=tokio::signal::ctrl_c()=>Err(failure("admission cancelled; fresh owned resources retained")),
@@ -14393,29 +16975,43 @@ pub(super) async fn run(admitted: Option<LiveAdmission>) -> io::Result<bool> {
                 json!({"gate":"admission-only","provider":provider,"status":"unavailable",
                     "reason":"preparation_unavailable","scope":"no provider creation or input admitted"})
             ).collect::<Vec<_>>();
-            write_json(&evidence.join(format!("admission-unavailable-{}.json",Uuid::random().0)),
-                &json!({"results":results}))?;
-            for result in results { println!("{result}"); }
-            return Err(prerequisite("finite admission preparation unavailable; fresh ownership evidence retained"));
+            write_json(
+                &evidence.join(format!("admission-unavailable-{}.json", Uuid::random().0)),
+                &json!({"results":results}),
+            )?;
+            for result in results {
+                println!("{result}");
+            }
+            return Err(prerequisite(
+                "finite admission preparation unavailable; fresh ownership evidence retained",
+            ));
         }
         return result;
     }
     if args.get_flag("shared-agent-only") {
-        let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let result=tokio::select! {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let result = tokio::select! {
             result=checkpoint(&args,&evidence)=>result,
             _=tokio::signal::ctrl_c()=>Err(failure("shared-agent cancelled; original receipts/resources retained")),
             _=terminate.recv()=>Err(failure("shared-agent cancelled; original receipts/resources retained")),
         };
-        if let Err(error)=result {
+        if let Err(error) = result {
             let results=args.get_many::<String>("backend").into_iter().flatten().map(|provider|
                 json!({"gate":"shared-agent-only","provider":provider,"status":"unavailable",
                     "reason":"preparation_or_cancellation","boundary":super::helper_error_metadata(&error),
                     "scope":"retained original jobs/receipts; inspect only, never replay or automatic cleanup"})
             ).collect::<Vec<_>>();
-            write_json(&evidence.join(format!("shared-agent-unavailable-{}.json",Uuid::random().0)),
-                &json!({"results":results}))?;
-            for result in results {println!("{result}");}
+            write_json(
+                &evidence.join(format!(
+                    "shared-agent-unavailable-{}.json",
+                    Uuid::random().0
+                )),
+                &json!({"results":results}),
+            )?;
+            for result in results {
+                println!("{result}");
+            }
             return Ok(false);
         }
         return result;
@@ -14464,100 +17060,293 @@ pub(super) async fn run(admitted: Option<LiveAdmission>) -> io::Result<bool> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::os::{fd::{AsRawFd,FromRawFd},unix::{net::UnixStream as FileWakeChannel,process::CommandExt}};
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{net::UnixStream as FileWakeChannel, process::CommandExt},
+    };
     struct FileWakeFixtureChild(Child);
     impl FileWakeFixtureChild {
-        fn exit(&mut self)->std::process::ExitStatus {
-            let deadline=Instant::now()+Duration::from_secs(5);
-            loop{if let Some(status)=self.0.try_wait().unwrap(){return status;}assert!(Instant::now()<deadline,"owned fixture exit timed out");std::thread::sleep(Duration::from_millis(10));}
+        fn exit(&mut self) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    return status;
+                }
+                assert!(Instant::now() < deadline, "owned fixture exit timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
-    impl Drop for FileWakeFixtureChild {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-    fn file_wake_endpoint(key:&str)->Option<FileWakeChannel> {
-        let fd=std::env::var(key).ok()?.parse::<i32>().unwrap();assert!(fd>2);let channel=unsafe{FileWakeChannel::from_raw_fd(fd)};
-        channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();Some(channel)
+    impl Drop for FileWakeFixtureChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
-    fn file_wake_state(channel:&mut FileWakeChannel,expected:u8){let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,[expected]);}
+    fn file_wake_endpoint(key: &str) -> Option<FileWakeChannel> {
+        let fd = std::env::var(key).ok()?.parse::<i32>().unwrap();
+        assert!(fd > 2);
+        let channel = unsafe { FileWakeChannel::from_raw_fd(fd) };
+        channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        channel
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        Some(channel)
+    }
+    fn file_wake_state(channel: &mut FileWakeChannel, expected: u8) {
+        let mut state = [0];
+        channel.read_exact(&mut state).unwrap();
+        assert_eq!(state, [expected]);
+    }
     #[test]
     fn terminal_pair_deadline_reaps_the_original_cli_before_returning() {
-        if let Some(mut channel)=file_wake_endpoint("GOATR_PAIR_DEADLINE_TEST_FD") {
-            let parent=std::env::var("GOATR_PAIR_DEADLINE_DRIVER_PARENT").unwrap().parse::<u32>().unwrap();
-            if unsafe{libc::getppid()} as u32!=parent {
+        if let Some(mut channel) = file_wake_endpoint("GOATR_PAIR_DEADLINE_TEST_FD") {
+            let parent = std::env::var("GOATR_PAIR_DEADLINE_DRIVER_PARENT")
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            if unsafe { libc::getppid() } as u32 != parent {
                 // This is the actual terminal helper subprocess; its PID travels only over fixed IPC.
                 assert!(goatr::codex_relay::current_capabilities().unwrap().zero());
-                channel.write_all(&std::process::id().to_be_bytes()).unwrap();
-                let mut hold=[0];let _=channel.read_exact(&mut hold);return;
+                channel
+                    .write_all(&std::process::id().to_be_bytes())
+                    .unwrap();
+                let mut hold = [0];
+                let _ = channel.read_exact(&mut hold);
+                return;
             }
-            let binary=std::env::current_exe().unwrap();
-            let deadline=Instant::now()+Duration::from_secs(3);
-            let error=terminal_pair(&binary,None,None,Some(deadline)).unwrap_err();
-            assert_eq!(error.kind(),io::ErrorKind::TimedOut);
-            assert_eq!(terminal_pair(Path::new("/nonexistent-goatr-pair-deadline-helper"),None,None,Some(Instant::now())).unwrap_err().kind(),io::ErrorKind::TimedOut);
-            channel.write_all(b"T").unwrap();return;
+            let binary = std::env::current_exe().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let error = terminal_pair(&binary, None, None, Some(deadline)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert_eq!(
+                terminal_pair(
+                    Path::new("/nonexistent-goatr-pair-deadline-helper"),
+                    None,
+                    None,
+                    Some(Instant::now())
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::TimedOut
+            );
+            channel.write_all(b"T").unwrap();
+            return;
         }
-        let test=concat!(module_path!(),"::terminal_pair_deadline_reaps_the_original_cli_before_returning");
-        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
-        let (mut channel,endpoint)=FileWakeChannel::pair().unwrap();
-        channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-        let fd=endpoint.as_raw_fd();assert!(fd>2);let mut command=std::process::Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact",test,"--test-threads=1"]).env("GOATR_PAIR_DEADLINE_TEST_FD",fd.to_string())
-            .env("GOATR_PAIR_DEADLINE_DRIVER_PARENT",std::process::id().to_string())
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        unsafe{command.pre_exec(move||{goatr::codex_relay::drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
-        let mut driver=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);
-        let mut bytes=[0;4];channel.read_exact(&mut bytes).unwrap();let pid=u32::from_be_bytes(bytes);
-        let original=goatr::codex_relay::ProcessStart::capture(pid).unwrap();original.evidence(pid).unwrap();
-        file_wake_state(&mut channel,b'T');
-        assert_eq!(fs::symlink_metadata(format!("/proc/{pid}")).unwrap_err().kind(),io::ErrorKind::NotFound);
+        let test = concat!(
+            module_path!(),
+            "::terminal_pair_deadline_reaps_the_original_cli_before_returning"
+        );
+        let test = test
+            .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .unwrap();
+        let (mut channel, endpoint) = FileWakeChannel::pair().unwrap();
+        channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        channel
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let fd = endpoint.as_raw_fd();
+        assert!(fd > 2);
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--test-threads=1"])
+            .env("GOATR_PAIR_DEADLINE_TEST_FD", fd.to_string())
+            .env(
+                "GOATR_PAIR_DEADLINE_DRIVER_PARENT",
+                std::process::id().to_string(),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                goatr::codex_relay::drop_inherited_capabilities()?;
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut driver = FileWakeFixtureChild(command.spawn().unwrap());
+        drop(endpoint);
+        let mut bytes = [0; 4];
+        channel.read_exact(&mut bytes).unwrap();
+        let pid = u32::from_be_bytes(bytes);
+        let original = goatr::codex_relay::ProcessStart::capture(pid).unwrap();
+        original.evidence(pid).unwrap();
+        file_wake_state(&mut channel, b'T');
+        assert_eq!(
+            fs::symlink_metadata(format!("/proc/{pid}"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
         assert!(driver.exit().success());
     }
     #[test]
     fn first_child_final_admission_refuses_exact_or_late_absolute_deadline_with_real_evidence() {
-        let process=herdr::process_evidence(std::process::id()).unwrap();let start=Instant::now();let deadline=start+Duration::from_secs(1);
-        assert_eq!(admit_first_child_evidence(process.clone(),deadline,start).unwrap(),process);
-        for observed in [deadline,deadline+Duration::from_secs(2)] {
-            assert_eq!(admit_first_child_evidence(process.clone(),deadline,observed).unwrap_err().kind(),io::ErrorKind::TimedOut);
+        let process = herdr::process_evidence(std::process::id()).unwrap();
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(1);
+        assert_eq!(
+            admit_first_child_evidence(process.clone(), deadline, start).unwrap(),
+            process
+        );
+        for observed in [deadline, deadline + Duration::from_secs(2)] {
+            assert_eq!(
+                admit_first_child_evidence(process.clone(), deadline, observed)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::TimedOut
+            );
         }
     }
     #[test]
     fn privileged_frontend_routes_malformed_and_mixed_selectors_before_shortcuts() {
-        for selector in ["--physical-mvp","--physical-mvp=false","--physical-mvp=malformed",
-            "--expected-controller-unit=goatr-host-wake-invalid.service","--expected-controller-sha256=bad"] {
-            for shortcut in ["--owned-mcp-stdio","--review-fixture","--terminal-only"] {
-                let args=["smoke",shortcut,selector];
-                assert!(args.iter().any(|arg|crate::early_live_argument(std::ffi::OsStr::new(arg))));
-                assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
+        for selector in [
+            "--physical-mvp",
+            "--physical-mvp=false",
+            "--physical-mvp=malformed",
+            "--expected-controller-unit=goatr-host-wake-invalid.service",
+            "--expected-controller-sha256=bad",
+        ] {
+            for shortcut in ["--owned-mcp-stdio", "--review-fixture", "--terminal-only"] {
+                let args = ["smoke", shortcut, selector];
+                assert!(
+                    args.iter()
+                        .any(|arg| crate::early_live_argument(std::ffi::OsStr::new(arg)))
+                );
+                assert!(
+                    feedback_arguments(arguments_base())
+                        .try_get_matches_from(args)
+                        .is_err()
+                );
             }
         }
     }
     #[test]
     fn first_child_identity_wait_is_read_only_bounded_and_pins_dumpability_transition() {
-        if let Some(mut channel)=file_wake_endpoint("GOATR_SERVE_DUMP_TEST_FD") {
-            goatr::codex_relay::drop_inherited_capabilities().unwrap();assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);
-            channel.write_all(b"0").unwrap();file_wake_state(&mut channel,b'1');
-            assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,1,0,0,0)},0);channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
+        if let Some(mut channel) = file_wake_endpoint("GOATR_SERVE_DUMP_TEST_FD") {
+            goatr::codex_relay::drop_inherited_capabilities().unwrap();
+            assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) }, 0);
+            channel.write_all(b"0").unwrap();
+            file_wake_state(&mut channel, b'1');
+            assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) }, 0);
+            channel.write_all(b"1").unwrap();
+            file_wake_state(&mut channel, b'2');
+            return;
         }
-        let test=concat!(module_path!(),"::first_child_identity_wait_is_read_only_bounded_and_pins_dumpability_transition");
-        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();let executable=std::env::current_exe().unwrap();let metadata=fs::metadata(&executable).unwrap();
-        let (mut channel,endpoint)=FileWakeChannel::pair().unwrap();channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-        let fd=endpoint.as_raw_fd();assert!(fd>2);let object=(metadata.dev(),metadata.ino());let mut command=std::process::Command::new(executable);
-        command.args(["--exact",test,"--test-threads=1"]).env("GOATR_SERVE_DUMP_TEST_FD",fd.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        unsafe{command.pre_exec(move||{goatr::codex_relay::drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(io::Error::last_os_error());}Ok(())});}
-        let mut child=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);let pid=child.0.id();file_wake_state(&mut channel,b'0');
-        let original=goatr::codex_relay::ProcessStart::capture(pid).unwrap();assert_eq!(original.evidence(pid).unwrap_err().kind(),io::ErrorKind::PermissionDenied);
-        let other=goatr::codex_relay::ProcessStart::capture(std::process::id()).unwrap();
-        assert!(first_child_evidence(&mut child.0,&other,object,Instant::now()+Duration::from_secs(1)).is_err());
-        assert_eq!(first_child_evidence(&mut child.0,&original,object,Instant::now()).unwrap_err().kind(),io::ErrorKind::TimedOut);
+        let test = concat!(
+            module_path!(),
+            "::first_child_identity_wait_is_read_only_bounded_and_pins_dumpability_transition"
+        );
+        let test = test
+            .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let metadata = fs::metadata(&executable).unwrap();
+        let (mut channel, endpoint) = FileWakeChannel::pair().unwrap();
+        channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        channel
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let fd = endpoint.as_raw_fd();
+        assert!(fd > 2);
+        let object = (metadata.dev(), metadata.ino());
+        let mut command = std::process::Command::new(executable);
+        command
+            .args(["--exact", test, "--test-threads=1"])
+            .env("GOATR_SERVE_DUMP_TEST_FD", fd.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                goatr::codex_relay::drop_inherited_capabilities()?;
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = FileWakeFixtureChild(command.spawn().unwrap());
+        drop(endpoint);
+        let pid = child.0.id();
+        file_wake_state(&mut channel, b'0');
+        let original = goatr::codex_relay::ProcessStart::capture(pid).unwrap();
+        assert_eq!(
+            original.evidence(pid).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let other = goatr::codex_relay::ProcessStart::capture(std::process::id()).unwrap();
+        assert!(
+            first_child_evidence(
+                &mut child.0,
+                &other,
+                object,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            first_child_evidence(&mut child.0, &original, object, Instant::now())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
         std::thread::scope(|scope| {
-            let (send,receive)=std::sync::mpsc::sync_channel(1);let child=&mut child.0;let original=&original;
-            scope.spawn(move||{send.send(first_child_evidence(child,original,object,Instant::now()+Duration::from_secs(3))).unwrap();});
-            assert!(matches!(receive.recv_timeout(Duration::from_millis(50)),Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
-            channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'1');
-            let proof=receive.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();assert_eq!(proof.pid,pid);
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            let child = &mut child.0;
+            let original = &original;
+            scope.spawn(move || {
+                send.send(first_child_evidence(
+                    child,
+                    original,
+                    object,
+                    Instant::now() + Duration::from_secs(3),
+                ))
+                .unwrap();
+            });
+            assert!(matches!(
+                receive.recv_timeout(Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            channel.write_all(b"1").unwrap();
+            file_wake_state(&mut channel, b'1');
+            let proof = receive
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .unwrap();
+            assert_eq!(proof.pid, pid);
         });
-        assert!(first_child_evidence(&mut child.0,&original,(object.0,object.1+1),Instant::now()+Duration::from_secs(1)).is_err());
-        channel.write_all(b"2").unwrap();assert!(child.exit().success());
-        assert!(first_child_evidence(&mut child.0,&original,object,Instant::now()+Duration::from_secs(1)).is_err());
+        assert!(
+            first_child_evidence(
+                &mut child.0,
+                &original,
+                (object.0, object.1 + 1),
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        channel.write_all(b"2").unwrap();
+        assert!(child.exit().success());
+        assert!(
+            first_child_evidence(
+                &mut child.0,
+                &original,
+                object,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_err()
+        );
     }
     #[test]
     fn unavailable_codex_terminal_capture_is_not_a_smoke_option() {
@@ -14566,293 +17355,837 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
-    fn background_args(mode:&str)->Vec<String> {
-        let mut args=vec!["smoke".into(),format!("--background={mode}"),"--backend=omp".into(),"--backend=codex".into(),
-            "--goatr=/nix/store/example/bin/goatr".into(),"--config=/private/config.toml".into(),"--workspace-root=/workspace".into(),
-            "--evidence-dir=/private/fresh".into(),"--consent-owned-providers".into(),"--automate-native-inputs".into(),
-            "--serial=emulator-5594".into(),"--emulator-owner=/private/run.json".into(),"--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
-        for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
-        if mode=="ntfy" {
+    fn background_args(mode: &str) -> Vec<String> {
+        let mut args = vec![
+            "smoke".into(),
+            format!("--background={mode}"),
+            "--backend=omp".into(),
+            "--backend=codex".into(),
+            "--goatr=/nix/store/example/bin/goatr".into(),
+            "--config=/private/config.toml".into(),
+            "--workspace-root=/workspace".into(),
+            "--evidence-dir=/private/fresh".into(),
+            "--consent-owned-providers".into(),
+            "--automate-native-inputs".into(),
+            "--serial=emulator-5594".into(),
+            "--emulator-owner=/private/run.json".into(),
+            "--apk=/private/app.apk".into(),
+            "--test-apk=/private/test.apk".into(),
+        ];
+        for field in [
+            "expected-goatr-sha256",
+            "expected-companion-lock-sha256",
+            "expected-apk-sha256",
+            "expected-test-apk-sha256",
+        ] {
+            args.push(format!("--{field}={}", "1".repeat(64)));
+        }
+        if mode == "ntfy" {
             args.push(format!("--expected-ntfy-apk-sha256={NTFY_APK_SHA256}"));
-            args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
+            args.push(format!(
+                "--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"
+            ));
         }
         args
     }
-    fn physical_mvp_args()->Vec<String> {
-        let mut args=vec!["smoke".into(),"--physical-mvp".into(),"--backend=omp".into(),"--backend=codex".into(),
-            "--goatr=/private/frozen-goatr".into(),"--config=/private/config.toml".into(),"--workspace-root=/private/workspace".into(),
-            "--evidence-dir=/private/fresh".into(),"--consent-owned-providers".into(),"--serial=owned-physical-serial".into(),
-            "--apk=/private/app.apk".into(),"--test-apk=/private/test.apk".into()];
-        for field in ["expected-goatr-sha256","expected-companion-lock-sha256","expected-apk-sha256","expected-test-apk-sha256"]{args.push(format!("--{field}={}","1".repeat(64)));}
-        args.push(format!("--expected-config-sha256={}","3".repeat(64)));
-        args.push(format!("--expected-controller-unit=goatr-host-wake-{}.service",Uuid::random().0));args.push(format!("--expected-controller-sha256={}","4".repeat(64)));
+    fn physical_mvp_args() -> Vec<String> {
+        let mut args = vec![
+            "smoke".into(),
+            "--physical-mvp".into(),
+            "--backend=omp".into(),
+            "--backend=codex".into(),
+            "--goatr=/private/frozen-goatr".into(),
+            "--config=/private/config.toml".into(),
+            "--workspace-root=/private/workspace".into(),
+            "--evidence-dir=/private/fresh".into(),
+            "--consent-owned-providers".into(),
+            "--serial=owned-physical-serial".into(),
+            "--apk=/private/app.apk".into(),
+            "--test-apk=/private/test.apk".into(),
+        ];
+        for field in [
+            "expected-goatr-sha256",
+            "expected-companion-lock-sha256",
+            "expected-apk-sha256",
+            "expected-test-apk-sha256",
+        ] {
+            args.push(format!("--{field}={}", "1".repeat(64)));
+        }
+        args.push(format!("--expected-config-sha256={}", "3".repeat(64)));
+        args.push(format!(
+            "--expected-controller-unit=goatr-host-wake-{}.service",
+            Uuid::random().0
+        ));
+        args.push(format!("--expected-controller-sha256={}", "4".repeat(64)));
         args.push(format!("--expected-ntfy-apk-sha256={NTFY_APK_SHA256}"));
-        args.push(format!("--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"));
+        args.push(format!(
+            "--expected-ntfy-signer-sha256={NTFY_SIGNER_SHA256}"
+        ));
         args
     }
-    fn host_preflight_args(wake:bool)->Vec<String> {
-        let mut args=vec!["smoke".to_owned(),"--evidence-dir=/private/fresh".to_owned()];
+    fn host_preflight_args(wake: bool) -> Vec<String> {
+        let mut args = vec![
+            "smoke".to_owned(),
+            "--evidence-dir=/private/fresh".to_owned(),
+        ];
         if wake {
-            args.push("--physical-host-wake-preflight".to_owned());args.push(format!("--expected-controller-unit=goatr-host-wake-{}.service",Uuid::random().0));
-        }else{args.push("--physical-host-preflight".to_owned());}
+            args.push("--physical-host-wake-preflight".to_owned());
+            args.push(format!(
+                "--expected-controller-unit=goatr-host-wake-{}.service",
+                Uuid::random().0
+            ));
+        } else {
+            args.push("--physical-host-preflight".to_owned());
+        }
         args
     }
     #[test]
     fn physical_host_wake_preflight_requires_canonical_unit_and_never_selects_zero_or_runtime() {
-        let args=host_preflight_args(true);let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
-        let unit=parsed.get_one::<String>("expected-controller-unit").unwrap();
-        assert_eq!(physical_host_preflight_selection(&parsed).unwrap(),Some(physical::ControllerPolicy::WakeDiagnostic {unit}));
-        for prefix in ["--expected-controller-unit=","--evidence-dir="] {
-            let missing=args.iter().filter(|argument|!argument.starts_with(prefix)).cloned().collect::<Vec<_>>();
-            assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(missing).unwrap_err().kind(),clap::error::ErrorKind::MissingRequiredArgument);
+        let args = host_preflight_args(true);
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(&args)
+            .unwrap();
+        let unit = parsed
+            .get_one::<String>("expected-controller-unit")
+            .unwrap();
+        assert_eq!(
+            physical_host_preflight_selection(&parsed).unwrap(),
+            Some(physical::ControllerPolicy::WakeDiagnostic { unit })
+        );
+        for prefix in ["--expected-controller-unit=", "--evidence-dir="] {
+            let missing = args
+                .iter()
+                .filter(|argument| !argument.starts_with(prefix))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(missing)
+                    .unwrap_err()
+                    .kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
         }
-        for invalid in [unit.to_uppercase(),format!("/private/{unit}"),unit.replace(".service",".scope"),"goatr-host-wake-invalid.service".to_owned()] {
-            let mut bad=args.iter().filter(|argument|!argument.starts_with("--expected-controller-unit=")).cloned().collect::<Vec<_>>();
-            bad.push(format!("--expected-controller-unit={invalid}"));let parsed=feedback_arguments(arguments_base()).try_get_matches_from(bad).unwrap();
+        for invalid in [
+            unit.to_uppercase(),
+            format!("/private/{unit}"),
+            unit.replace(".service", ".scope"),
+            "goatr-host-wake-invalid.service".to_owned(),
+        ] {
+            let mut bad = args
+                .iter()
+                .filter(|argument| !argument.starts_with("--expected-controller-unit="))
+                .cloned()
+                .collect::<Vec<_>>();
+            bad.push(format!("--expected-controller-unit={invalid}"));
+            let parsed = feedback_arguments(arguments_base())
+                .try_get_matches_from(bad)
+                .unwrap();
             assert!(physical_host_preflight_selection(&parsed).is_err());
         }
-        let mut old=host_preflight_args(false);old.push(format!("--expected-controller-unit={unit}"));
-        assert!(feedback_arguments(arguments_base()).try_get_matches_from(old).map_or(true,|parsed|physical_host_preflight_selection(&parsed).is_err()));
-        let no_selector=args.iter().filter(|argument|argument.as_str()!="--physical-host-wake-preflight").cloned().collect::<Vec<_>>();
-        assert!(feedback_arguments(arguments_base()).try_get_matches_from(no_selector).map_or(true,|parsed|physical_host_preflight_selection(&parsed).is_err()));
+        let mut old = host_preflight_args(false);
+        old.push(format!("--expected-controller-unit={unit}"));
+        assert!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(old)
+                .map_or(true, |parsed| physical_host_preflight_selection(&parsed)
+                    .is_err())
+        );
+        let no_selector = args
+            .iter()
+            .filter(|argument| argument.as_str() != "--physical-host-wake-preflight")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(no_selector)
+                .map_or(true, |parsed| physical_host_preflight_selection(&parsed)
+                    .is_err())
+        );
     }
     #[test]
     fn physical_host_preflight_policy_accepts_only_selector_and_fresh_evidence() {
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--physical-host-preflight","--evidence-dir=/private/fresh"]).unwrap();
-        assert_eq!(physical_host_preflight_selection(&parsed).unwrap(),Some(physical::ControllerPolicy::Zero));
-        assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::DefaultValue));
-        assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--physical-host-preflight"]).unwrap_err().kind(),clap::error::ErrorKind::MissingRequiredArgument);
-        let ordinary=feedback_arguments(arguments_base()).try_get_matches_from(["smoke","--evidence-dir=/private/fresh"]).unwrap();
-        assert!(physical_host_preflight_selection(&ordinary).unwrap().is_none());
-        for ordinary in [physical_mvp_args(),background_args("persistent"),background_args("ntfy")] {
-            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(ordinary).unwrap();
-            assert!(physical_host_preflight_selection(&parsed).unwrap().is_none());
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from([
+                "smoke",
+                "--physical-host-preflight",
+                "--evidence-dir=/private/fresh",
+            ])
+            .unwrap();
+        assert_eq!(
+            physical_host_preflight_selection(&parsed).unwrap(),
+            Some(physical::ControllerPolicy::Zero)
+        );
+        assert_eq!(
+            parsed.value_source("api"),
+            Some(clap::parser::ValueSource::DefaultValue)
+        );
+        assert_eq!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(["smoke", "--physical-host-preflight"])
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let ordinary = feedback_arguments(arguments_base())
+            .try_get_matches_from(["smoke", "--evidence-dir=/private/fresh"])
+            .unwrap();
+        assert!(
+            physical_host_preflight_selection(&ordinary)
+                .unwrap()
+                .is_none()
+        );
+        for ordinary in [
+            physical_mvp_args(),
+            background_args("persistent"),
+            background_args("ntfy"),
+        ] {
+            let parsed = feedback_arguments(arguments_base())
+                .try_get_matches_from(ordinary)
+                .unwrap();
+            assert!(
+                physical_host_preflight_selection(&parsed)
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
     #[test]
     fn physical_host_preflight_policy_refuses_effect_inputs_and_complete_runtime_modes() {
-        for selector in ["--api=30","--api=34","--backend=omp","--config=/private/config","--goatr=/private/goatr",
-            "--workspace-root=/private/workspace","--serial=74110723","--apk=/private/app.apk","--test-apk=/private/test.apk",
-            "--expected-goatr-sha256=pin","--expected-companion-lock-sha256=pin","--expected-apk-sha256=pin",
-            "--expected-test-apk-sha256=pin","--expected-config-sha256=pin","--expected-ntfy-apk-sha256=pin","--expected-ntfy-signer-sha256=pin",
-            "--consent-owned-providers","--automate-native-inputs","--physical-mvp","--background=persistent","--background=ntfy",
-            "--admission-only","--shared-agent-only","--terminal-only","--project-read-only","--grid","--grid-lease=/private/lease",
-            "--ui","--camera","--ime","--setup","--prepare-emulator","--emulator-owner=/private/owner",
-            "--paging-proof","--codex-invalidation-diagnostic","--omp-creation-diagnostic","--physical-hello-capture",
-            "--physical-relay-ephemeral","--development-continuity","--development-owner-feedback","--development-android-only",
-            "--keep-foreground-for-feedback","--defer-retention-crossing","--admin-socket=/private/socket","--disposable-uid=1901",
-            "--project-read-seed-pack=/private/pack","--review-fixture","--owned-mcp-stdio=/private/lease",
-            "--prepared-fresh-install=/private/creator.json","--expected-prepared-install-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--physical-host-preflight","--physical-host-wake-preflight",
-            "--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=1",
-            "--physical-host-wake-preflight=true","--physical-host-wake-preflight=false","--physical-host-wake-preflight=1"] {
-            for wake in [false,true] {
-                let mut args=host_preflight_args(wake);args.push(selector.to_owned());
-                let admitted=feedback_arguments(arguments_base()).try_get_matches_from(args).is_ok_and(|parsed|physical_host_preflight_selection(&parsed).is_ok_and(|selected|selected.is_some()));
-                assert!(!admitted,"{selector}/{wake}");
+        for selector in [
+            "--api=30",
+            "--api=34",
+            "--backend=omp",
+            "--config=/private/config",
+            "--goatr=/private/goatr",
+            "--workspace-root=/private/workspace",
+            "--serial=74110723",
+            "--apk=/private/app.apk",
+            "--test-apk=/private/test.apk",
+            "--expected-goatr-sha256=pin",
+            "--expected-companion-lock-sha256=pin",
+            "--expected-apk-sha256=pin",
+            "--expected-test-apk-sha256=pin",
+            "--expected-config-sha256=pin",
+            "--expected-ntfy-apk-sha256=pin",
+            "--expected-ntfy-signer-sha256=pin",
+            "--consent-owned-providers",
+            "--automate-native-inputs",
+            "--physical-mvp",
+            "--background=persistent",
+            "--background=ntfy",
+            "--admission-only",
+            "--shared-agent-only",
+            "--terminal-only",
+            "--project-read-only",
+            "--grid",
+            "--grid-lease=/private/lease",
+            "--ui",
+            "--camera",
+            "--ime",
+            "--setup",
+            "--prepare-emulator",
+            "--emulator-owner=/private/owner",
+            "--paging-proof",
+            "--codex-invalidation-diagnostic",
+            "--omp-creation-diagnostic",
+            "--physical-hello-capture",
+            "--physical-relay-ephemeral",
+            "--development-continuity",
+            "--development-owner-feedback",
+            "--development-android-only",
+            "--keep-foreground-for-feedback",
+            "--defer-retention-crossing",
+            "--admin-socket=/private/socket",
+            "--disposable-uid=1901",
+            "--project-read-seed-pack=/private/pack",
+            "--review-fixture",
+            "--owned-mcp-stdio=/private/lease",
+            "--prepared-fresh-install=/private/creator.json",
+            "--expected-prepared-install-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--physical-host-preflight",
+            "--physical-host-wake-preflight",
+            "--physical-host-preflight=true",
+            "--physical-host-preflight=false",
+            "--physical-host-preflight=1",
+            "--physical-host-wake-preflight=true",
+            "--physical-host-wake-preflight=false",
+            "--physical-host-wake-preflight=1",
+        ] {
+            for wake in [false, true] {
+                let mut args = host_preflight_args(wake);
+                args.push(selector.to_owned());
+                let admitted = feedback_arguments(arguments_base())
+                    .try_get_matches_from(args)
+                    .is_ok_and(|parsed| {
+                        physical_host_preflight_selection(&parsed)
+                            .is_ok_and(|selected| selected.is_some())
+                    });
+                assert!(!admitted, "{selector}/{wake}");
             }
         }
-        for complete in [physical_mvp_args(),background_args("persistent"),background_args("ntfy")] {
-            for wake in [false,true] {
-                let mut args=complete.clone();args.extend(host_preflight_args(wake).into_iter().skip(2));
-                assert!(feedback_arguments(arguments_base()).try_get_matches_from(args)
-                    .map_or(true,|parsed|physical_host_preflight_selection(&parsed).is_err()));
+        for complete in [
+            physical_mvp_args(),
+            background_args("persistent"),
+            background_args("ntfy"),
+        ] {
+            for wake in [false, true] {
+                let mut args = complete.clone();
+                args.extend(host_preflight_args(wake).into_iter().skip(2));
+                assert!(
+                    feedback_arguments(arguments_base())
+                        .try_get_matches_from(args)
+                        .map_or(true, |parsed| physical_host_preflight_selection(&parsed)
+                            .is_err())
+                );
             }
         }
     }
     #[test]
     fn physical_host_preflight_early_frontend_routes_malformed_and_mixed_selectors_to_rejection() {
-        for selector in ["--physical-host-preflight","--physical-host-preflight=true","--physical-host-preflight=false","--physical-host-preflight=garbage",
-            "--physical-host-wake-preflight","--physical-host-wake-preflight=true","--physical-host-wake-preflight=false","--physical-host-wake-preflight=garbage"] {
-            for shortcut in [vec!["--owned-mcp-stdio","/private/lease"],vec!["--review-fixture"],vec!["--terminal-only"],vec!["--project-read-only"]] {
-                for first in [true,false] {
-                    let mut args=vec!["smoke","--evidence-dir=/private/fresh"];
-                    if selector.starts_with("--physical-host-wake-preflight"){args.push("--expected-controller-unit=goatr-host-wake-00000000-0000-4000-8000-000000000000.service");}
-                    if first{args.push(selector);}args.extend(shortcut.iter().copied());if !first{args.push(selector);}
-                    assert!(args.iter().skip(1).any(|argument|super::super::early_live_argument(std::ffi::OsStr::new(argument))));
-                    let admitted=feedback_arguments(arguments_base()).try_get_matches_from(args).is_ok_and(|parsed|physical_host_preflight_selection(&parsed).is_ok_and(|selected|selected.is_some()));
+        for selector in [
+            "--physical-host-preflight",
+            "--physical-host-preflight=true",
+            "--physical-host-preflight=false",
+            "--physical-host-preflight=garbage",
+            "--physical-host-wake-preflight",
+            "--physical-host-wake-preflight=true",
+            "--physical-host-wake-preflight=false",
+            "--physical-host-wake-preflight=garbage",
+        ] {
+            for shortcut in [
+                vec!["--owned-mcp-stdio", "/private/lease"],
+                vec!["--review-fixture"],
+                vec!["--terminal-only"],
+                vec!["--project-read-only"],
+            ] {
+                for first in [true, false] {
+                    let mut args = vec!["smoke", "--evidence-dir=/private/fresh"];
+                    if selector.starts_with("--physical-host-wake-preflight") {
+                        args.push("--expected-controller-unit=goatr-host-wake-00000000-0000-4000-8000-000000000000.service");
+                    }
+                    if first {
+                        args.push(selector);
+                    }
+                    args.extend(shortcut.iter().copied());
+                    if !first {
+                        args.push(selector);
+                    }
+                    assert!(
+                        args.iter()
+                            .skip(1)
+                            .any(|argument| super::super::early_live_argument(
+                                std::ffi::OsStr::new(argument)
+                            ))
+                    );
+                    let admitted = feedback_arguments(arguments_base())
+                        .try_get_matches_from(args)
+                        .is_ok_and(|parsed| {
+                            physical_host_preflight_selection(&parsed)
+                                .is_ok_and(|selected| selected.is_some())
+                        });
                     assert!(!admitted);
                 }
             }
         }
-        for existing in ["--physical-mvp","--physical-mvp=false","--background=ntfy"] {
-            assert!(super::super::early_live_argument(std::ffi::OsStr::new(existing)));
+        for existing in [
+            "--physical-mvp",
+            "--physical-mvp=false",
+            "--background=ntfy",
+        ] {
+            assert!(super::super::early_live_argument(std::ffi::OsStr::new(
+                existing
+            )));
         }
-        assert!(!super::super::early_live_argument(std::ffi::OsStr::new("--review-fixture")));
+        assert!(!super::super::early_live_argument(std::ffi::OsStr::new(
+            "--review-fixture"
+        )));
     }
     #[test]
     fn physical_mvp_cli_requires_all_frozen_inputs_and_accepts_both_backend_orders() {
-        let args=physical_mvp_args();
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+        let args = physical_mvp_args();
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(&args)
+            .unwrap();
         physical_mode_environment(&parsed).unwrap();
-        assert!(parsed.get_flag("physical-mvp"));assert!(!parsed.get_flag("automate-native-inputs"));
-        assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::DefaultValue));
-        for required in ["--goatr=","--config=","--workspace-root=","--evidence-dir=","--serial=","--apk=","--test-apk=",
-            "--expected-goatr-sha256=","--expected-companion-lock-sha256=","--expected-apk-sha256=","--expected-test-apk-sha256=",
-            "--expected-config-sha256=","--expected-ntfy-apk-sha256=","--expected-ntfy-signer-sha256=","--consent-owned-providers","--expected-controller-unit=","--expected-controller-sha256="] {
-            let missing=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(missing).is_err(),"{required}");
+        assert!(parsed.get_flag("physical-mvp"));
+        assert!(!parsed.get_flag("automate-native-inputs"));
+        assert_eq!(
+            parsed.value_source("api"),
+            Some(clap::parser::ValueSource::DefaultValue)
+        );
+        for required in [
+            "--goatr=",
+            "--config=",
+            "--workspace-root=",
+            "--evidence-dir=",
+            "--serial=",
+            "--apk=",
+            "--test-apk=",
+            "--expected-goatr-sha256=",
+            "--expected-companion-lock-sha256=",
+            "--expected-apk-sha256=",
+            "--expected-test-apk-sha256=",
+            "--expected-config-sha256=",
+            "--expected-ntfy-apk-sha256=",
+            "--expected-ntfy-signer-sha256=",
+            "--consent-owned-providers",
+            "--expected-controller-unit=",
+            "--expected-controller-sha256=",
+        ] {
+            let missing = args
+                .iter()
+                .filter(|arg| !arg.starts_with(required))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(missing)
+                    .is_err(),
+                "{required}"
+            );
         }
-        let mut reversed=args.clone();reversed.swap(2,3);
-        physical_mode_environment(&feedback_arguments(arguments_base()).try_get_matches_from(reversed).unwrap()).unwrap();
-        for providers in [vec!["--backend=omp"],vec!["--backend=omp","--backend=omp"],vec!["--backend=codex","--backend=omp","--backend=codex"]] {
-            let mut invalid=args.iter().filter(|arg|!arg.starts_with("--backend=")).cloned().collect::<Vec<_>>();
+        let mut reversed = args.clone();
+        reversed.swap(2, 3);
+        physical_mode_environment(
+            &feedback_arguments(arguments_base())
+                .try_get_matches_from(reversed)
+                .unwrap(),
+        )
+        .unwrap();
+        for providers in [
+            vec!["--backend=omp"],
+            vec!["--backend=omp", "--backend=omp"],
+            vec!["--backend=codex", "--backend=omp", "--backend=codex"],
+        ] {
+            let mut invalid = args
+                .iter()
+                .filter(|arg| !arg.starts_with("--backend="))
+                .cloned()
+                .collect::<Vec<_>>();
             invalid.extend(providers.into_iter().map(str::to_owned));
-            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(invalid).unwrap();assert!(require_shared_backends(&parsed).is_err());
+            let parsed = feedback_arguments(arguments_base())
+                .try_get_matches_from(invalid)
+                .unwrap();
+            assert!(require_shared_backends(&parsed).is_err());
         }
     }
     #[test]
     fn prepared_install_cli_is_an_explicit_physical_only_pair_not_an_adoption_default() {
-        let base=physical_mvp_args();let mut valid=base.clone();valid.extend(["--prepared-fresh-install=/private/creator.json".to_owned(),format!("--expected-prepared-install-sha256={}","a".repeat(64))]);
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&valid).unwrap();physical_mode_environment(&parsed).unwrap();
-        assert!(parsed.get_one::<PathBuf>("prepared-fresh-install").is_some());
-        let absent=feedback_arguments(arguments_base()).try_get_matches_from(&base).unwrap();physical_mode_environment(&absent).unwrap();assert!(absent.get_one::<PathBuf>("prepared-fresh-install").is_none());
-        for extra in [vec!["--prepared-fresh-install=/private/creator.json".to_owned()],vec![format!("--expected-prepared-install-sha256={}","a".repeat(64))],
-            vec!["--prepared-fresh-install=/private/creator.json".to_owned(),format!("--expected-prepared-install-sha256={}","A".repeat(64))],
-            vec!["--prepared-fresh-install=/private/creator.json".to_owned(),"--expected-prepared-install-sha256=short".to_owned()]] {
-            let mut bad=base.clone();bad.extend(extra);assert!(feedback_arguments(arguments_base()).try_get_matches_from(bad).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()));
+        let base = physical_mvp_args();
+        let mut valid = base.clone();
+        valid.extend([
+            "--prepared-fresh-install=/private/creator.json".to_owned(),
+            format!("--expected-prepared-install-sha256={}", "a".repeat(64)),
+        ]);
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(&valid)
+            .unwrap();
+        physical_mode_environment(&parsed).unwrap();
+        assert!(
+            parsed
+                .get_one::<PathBuf>("prepared-fresh-install")
+                .is_some()
+        );
+        let absent = feedback_arguments(arguments_base())
+            .try_get_matches_from(&base)
+            .unwrap();
+        physical_mode_environment(&absent).unwrap();
+        assert!(
+            absent
+                .get_one::<PathBuf>("prepared-fresh-install")
+                .is_none()
+        );
+        for extra in [
+            vec!["--prepared-fresh-install=/private/creator.json".to_owned()],
+            vec![format!(
+                "--expected-prepared-install-sha256={}",
+                "a".repeat(64)
+            )],
+            vec![
+                "--prepared-fresh-install=/private/creator.json".to_owned(),
+                format!("--expected-prepared-install-sha256={}", "A".repeat(64)),
+            ],
+            vec![
+                "--prepared-fresh-install=/private/creator.json".to_owned(),
+                "--expected-prepared-install-sha256=short".to_owned(),
+            ],
+        ] {
+            let mut bad = base.clone();
+            bad.extend(extra);
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(bad)
+                    .map_or(true, |parsed| physical_mode_environment(&parsed).is_err())
+            );
         }
-        for mut other in [host_preflight_args(false),host_preflight_args(true),background_args("persistent"),background_args("ntfy"),
-            vec!["smoke".to_owned(),"--evidence-dir=/private/fresh".to_owned()]] {
-            other.extend(["--prepared-fresh-install=/private/creator.json".to_owned(),format!("--expected-prepared-install-sha256={}","a".repeat(64))]);
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(other).map_or(true,|parsed| {
-                match physical_host_preflight_selection(&parsed){Err(_)=>true,Ok(Some(_))=>false,Ok(None)=>physical_mode_environment(&parsed).is_err()}
-            }));
+        for mut other in [
+            host_preflight_args(false),
+            host_preflight_args(true),
+            background_args("persistent"),
+            background_args("ntfy"),
+            vec![
+                "smoke".to_owned(),
+                "--evidence-dir=/private/fresh".to_owned(),
+            ],
+        ] {
+            other.extend([
+                "--prepared-fresh-install=/private/creator.json".to_owned(),
+                format!("--expected-prepared-install-sha256={}", "a".repeat(64)),
+            ]);
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(other)
+                    .map_or(true, |parsed| {
+                        match physical_host_preflight_selection(&parsed) {
+                            Err(_) => true,
+                            Ok(Some(_)) => false,
+                            Ok(None) => physical_mode_environment(&parsed).is_err(),
+                        }
+                    })
+            );
         }
-        for selector in ["--prepared-fresh-install=/private/creator.json","--expected-prepared-install-sha256=bad"] {
-            for shortcut in ["--owned-mcp-stdio","--review-fixture","--terminal-only"] {
-                let args=["smoke",shortcut,selector];assert!(args.iter().any(|arg|crate::early_live_argument(std::ffi::OsStr::new(arg))));
-                assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
+        for selector in [
+            "--prepared-fresh-install=/private/creator.json",
+            "--expected-prepared-install-sha256=bad",
+        ] {
+            for shortcut in ["--owned-mcp-stdio", "--review-fixture", "--terminal-only"] {
+                let args = ["smoke", shortcut, selector];
+                assert!(
+                    args.iter()
+                        .any(|arg| crate::early_live_argument(std::ffi::OsStr::new(arg)))
+                );
+                assert!(
+                    feedback_arguments(arguments_base())
+                        .try_get_matches_from(args)
+                        .is_err()
+                );
             }
         }
     }
     #[test]
     fn full_physical_unit_wake_requires_independent_controller_pin_and_rejects_all_other_modes() {
-        let valid=physical_mvp_args();physical_mode_environment(&feedback_arguments(arguments_base()).try_get_matches_from(&valid).unwrap()).unwrap();
-        for value in ["".to_owned(),"A".repeat(64),"a".repeat(63),"g".repeat(64)] {
-            let mut args=valid.iter().filter(|argument|!argument.starts_with("--expected-controller-sha256=")).cloned().collect::<Vec<_>>();
+        let valid = physical_mvp_args();
+        physical_mode_environment(
+            &feedback_arguments(arguments_base())
+                .try_get_matches_from(&valid)
+                .unwrap(),
+        )
+        .unwrap();
+        for value in [
+            "".to_owned(),
+            "A".repeat(64),
+            "a".repeat(63),
+            "g".repeat(64),
+        ] {
+            let mut args = valid
+                .iter()
+                .filter(|argument| !argument.starts_with("--expected-controller-sha256="))
+                .cloned()
+                .collect::<Vec<_>>();
             args.push(format!("--expected-controller-sha256={value}"));
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).map_or(true,|parsed|physical_mode_environment(&parsed).is_err()));
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(args)
+                    .map_or(true, |parsed| physical_mode_environment(&parsed).is_err())
+            );
         }
-        for mut args in [host_preflight_args(false),host_preflight_args(true),background_args("persistent"),background_args("ntfy"),vec!["smoke".to_owned(),"--evidence-dir=/private/fresh".to_owned()]] {
-            args.push(format!("--expected-controller-sha256={}","4".repeat(64)));
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).map_or(true,|parsed| {
-                match physical_host_preflight_selection(&parsed) {Err(_)=>true,Ok(Some(_))=>false,Ok(None)=>physical_mode_environment(&parsed).is_err()}
-            }));
+        for mut args in [
+            host_preflight_args(false),
+            host_preflight_args(true),
+            background_args("persistent"),
+            background_args("ntfy"),
+            vec![
+                "smoke".to_owned(),
+                "--evidence-dir=/private/fresh".to_owned(),
+            ],
+        ] {
+            args.push(format!("--expected-controller-sha256={}", "4".repeat(64)));
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(args)
+                    .map_or(true, |parsed| {
+                        match physical_host_preflight_selection(&parsed) {
+                            Err(_) => true,
+                            Ok(Some(_)) => false,
+                            Ok(None) => physical_mode_environment(&parsed).is_err(),
+                        }
+                    })
+            );
         }
-        for selector in ["--expected-controller-unit=malformed","--expected-controller-sha256=bad"] {
-            let args=["smoke","--owned-mcp-stdio","/private/lease",selector];
-            assert!(args.iter().any(|argument|crate::early_live_argument(std::ffi::OsStr::new(argument))));
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
+        for selector in [
+            "--expected-controller-unit=malformed",
+            "--expected-controller-sha256=bad",
+        ] {
+            let args = ["smoke", "--owned-mcp-stdio", "/private/lease", selector];
+            assert!(
+                args.iter()
+                    .any(|argument| crate::early_live_argument(std::ffi::OsStr::new(argument)))
+            );
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(args)
+                    .is_err()
+            );
         }
     }
     #[test]
     fn physical_mvp_rejects_removed_old_product_audit_interface() {
-        for removed in ["--old-product-audit=/private/obsolete.json","--expected-old-product-audit-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] {
-            let mut args=physical_mvp_args();args.push(removed.to_owned());
-            assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap_err().kind(),clap::error::ErrorKind::UnknownArgument);
+        for removed in [
+            "--old-product-audit=/private/obsolete.json",
+            "--expected-old-product-audit-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            let mut args = physical_mvp_args();
+            args.push(removed.to_owned());
+            assert_eq!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(args)
+                    .unwrap_err()
+                    .kind(),
+                clap::error::ErrorKind::UnknownArgument
+            );
         }
     }
     #[test]
-    fn physical_mvp_seed_pin_accepts_independent_lowercase_claims_but_rejects_invalid_and_unrelated_inputs() {
-        for pin in ["1".repeat(64),"abcdef0123456789".repeat(4)] {
-            let mut args=physical_mvp_args();args.retain(|arg|!arg.starts_with("--expected-config-sha256="));args.push(format!("--expected-config-sha256={pin}"));
-            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();physical_mode_environment(&parsed).unwrap();
+    fn physical_mvp_seed_pin_accepts_independent_lowercase_claims_but_rejects_invalid_and_unrelated_inputs()
+     {
+        for pin in ["1".repeat(64), "abcdef0123456789".repeat(4)] {
+            let mut args = physical_mvp_args();
+            args.retain(|arg| !arg.starts_with("--expected-config-sha256="));
+            args.push(format!("--expected-config-sha256={pin}"));
+            let parsed = feedback_arguments(arguments_base())
+                .try_get_matches_from(args)
+                .unwrap();
+            physical_mode_environment(&parsed).unwrap();
         }
-        for pin in [String::new(),"a".repeat(63),"a".repeat(65),"A".repeat(64),"g".repeat(64)] {
-            let mut args=physical_mvp_args();args.retain(|arg|!arg.starts_with("--expected-config-sha256="));args.push(format!("--expected-config-sha256={pin}"));
-            let admitted=match feedback_arguments(arguments_base()).try_get_matches_from(args) {
-                Ok(parsed)=>physical_mode_environment(&parsed).is_ok(),
-                Err(_)=>false,
+        for pin in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            let mut args = physical_mvp_args();
+            args.retain(|arg| !arg.starts_with("--expected-config-sha256="));
+            args.push(format!("--expected-config-sha256={pin}"));
+            let admitted = match feedback_arguments(arguments_base()).try_get_matches_from(args) {
+                Ok(parsed) => physical_mode_environment(&parsed).is_ok(),
+                Err(_) => false,
             };
             assert!(!admitted);
         }
-        let missing=physical_mvp_args().into_iter().filter(|arg|!arg.starts_with("--expected-config-sha256=")).collect::<Vec<_>>();
-        assert_eq!(feedback_arguments(arguments_base()).try_get_matches_from(missing).unwrap_err().kind(),clap::error::ErrorKind::MissingRequiredArgument);
-        for mut unrelated in [vec!["smoke".to_owned()],background_args("persistent"),background_args("ntfy")] {
-            unrelated.push(format!("--expected-config-sha256={}","1".repeat(64)));
-            let admitted=match feedback_arguments(arguments_base()).try_get_matches_from(unrelated) {
-                Ok(parsed)=>physical_mode_environment(&parsed).is_ok(),
-                Err(_)=>false,
-            };
+        let missing = physical_mvp_args()
+            .into_iter()
+            .filter(|arg| !arg.starts_with("--expected-config-sha256="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(missing)
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        for mut unrelated in [
+            vec!["smoke".to_owned()],
+            background_args("persistent"),
+            background_args("ntfy"),
+        ] {
+            unrelated.push(format!("--expected-config-sha256={}", "1".repeat(64)));
+            let admitted =
+                match feedback_arguments(arguments_base()).try_get_matches_from(unrelated) {
+                    Ok(parsed) => physical_mode_environment(&parsed).is_ok(),
+                    Err(_) => false,
+                };
             assert!(!admitted);
         }
     }
     #[test]
     fn physical_mvp_rejects_explicit_api30_and_explicit_default34_by_value_source() {
-        for api in ["30","34"] {
-            let mut args=physical_mvp_args();args.push(format!("--api={api}"));
-            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();
-            assert_eq!(parsed.value_source("api"),Some(clap::parser::ValueSource::CommandLine));
-            let error=physical_mode_environment(&parsed).unwrap_err();
+        for api in ["30", "34"] {
+            let mut args = physical_mvp_args();
+            args.push(format!("--api={api}"));
+            let parsed = feedback_arguments(arguments_base())
+                .try_get_matches_from(args)
+                .unwrap();
+            assert_eq!(
+                parsed.value_source("api"),
+                Some(clap::parser::ValueSource::CommandLine)
+            );
+            let error = physical_mode_environment(&parsed).unwrap_err();
             assert!(error.to_string().contains("explicit --api is forbidden"));
         }
     }
     #[test]
     fn physical_mvp_rejects_all_legacy_owners_private_native_modes_and_direct_input() {
-        for selector in ["--background=persistent","--admission-only","--shared-agent-only","--terminal-only","--project-read-only",
-            "--grid","--grid-lease=/private/lease.json","--ui","--camera","--ime","--setup","--prepare-emulator",
-            "--emulator-owner=/private/emulator.json","--paging-proof","--codex-invalidation-diagnostic","--omp-creation-diagnostic",
-            "--physical-hello-capture","--physical-relay-ephemeral","--development-continuity","--development-owner-feedback",
-            "--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing",
-            "--admin-socket=/private/admin.sock","--disposable-uid=1901","--automate-native-inputs"] {
-            let mut args=physical_mvp_args();args.push(selector.into());
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err(),"{selector}");
+        for selector in [
+            "--background=persistent",
+            "--admission-only",
+            "--shared-agent-only",
+            "--terminal-only",
+            "--project-read-only",
+            "--grid",
+            "--grid-lease=/private/lease.json",
+            "--ui",
+            "--camera",
+            "--ime",
+            "--setup",
+            "--prepare-emulator",
+            "--emulator-owner=/private/emulator.json",
+            "--paging-proof",
+            "--codex-invalidation-diagnostic",
+            "--omp-creation-diagnostic",
+            "--physical-hello-capture",
+            "--physical-relay-ephemeral",
+            "--development-continuity",
+            "--development-owner-feedback",
+            "--development-android-only",
+            "--keep-foreground-for-feedback",
+            "--defer-retention-crossing",
+            "--admin-socket=/private/admin.sock",
+            "--disposable-uid=1901",
+            "--automate-native-inputs",
+        ] {
+            let mut args = physical_mvp_args();
+            args.push(selector.into());
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(args)
+                    .is_err(),
+                "{selector}"
+            );
         }
     }
     #[test]
     fn physical_mvp_requires_exact_official_ntfy_pins_without_leaking_them_to_other_modes() {
-        let apk="b4baa6f668bd57ad5df3b4e0e769165dcf25c5ee19fdb04f78077ee819616f2a";
-        let signer="76e94d8e04706c5b99064c23210d8ca9910608abae8f3e972b41e388391646e0";
+        let apk = "b4baa6f668bd57ad5df3b4e0e769165dcf25c5ee19fdb04f78077ee819616f2a";
+        let signer = "76e94d8e04706c5b99064c23210d8ca9910608abae8f3e972b41e388391646e0";
         // Former upstream release and actual older installed F-Droid artifact are reject inputs only.
-        let upstream_apk="8a1075c0963caa1e0dc404996531bc641cb2b982f92a4bc692d4999f9eb53f39";
-        let upstream_signer="6e145d7ae685eff75468e5067e03a6c3645453343e4e181dac8b6b17ff67489d";
-        let older_fdroid_apk="be6ea2f315fa86bc9c7d977dece15882e9db4a8fc12d6dd2fe7f655540a3ec43";
-        let arbitrary="0".repeat(64);
-        for physical in [true,false] {
-            let mut args=if physical{physical_mvp_args()}else{background_args("ntfy")};
-            args.retain(|arg|!arg.starts_with("--expected-ntfy-"));
-            args.extend([format!("--expected-ntfy-apk-sha256={apk}"),format!("--expected-ntfy-signer-sha256={signer}")]);
-            let check:fn(&clap::ArgMatches)->io::Result<()>=if physical{physical_mode_environment}else{background_mode_environment};
-            check(&feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap()).unwrap();
-            for (candidate_apk,candidate_signer) in [
-                (upstream_apk,upstream_signer),(apk,upstream_signer),(upstream_apk,signer),(older_fdroid_apk,signer),
-                (arbitrary.as_str(),signer),(apk,arbitrary.as_str()),("not-a-sha",signer),(apk,"not-a-sha"),(signer,apk),
+        let upstream_apk = "8a1075c0963caa1e0dc404996531bc641cb2b982f92a4bc692d4999f9eb53f39";
+        let upstream_signer = "6e145d7ae685eff75468e5067e03a6c3645453343e4e181dac8b6b17ff67489d";
+        let older_fdroid_apk = "be6ea2f315fa86bc9c7d977dece15882e9db4a8fc12d6dd2fe7f655540a3ec43";
+        let arbitrary = "0".repeat(64);
+        for physical in [true, false] {
+            let mut args = if physical {
+                physical_mvp_args()
+            } else {
+                background_args("ntfy")
+            };
+            args.retain(|arg| !arg.starts_with("--expected-ntfy-"));
+            args.extend([
+                format!("--expected-ntfy-apk-sha256={apk}"),
+                format!("--expected-ntfy-signer-sha256={signer}"),
+            ]);
+            let check: fn(&clap::ArgMatches) -> io::Result<()> = if physical {
+                physical_mode_environment
+            } else {
+                background_mode_environment
+            };
+            check(
+                &feedback_arguments(arguments_base())
+                    .try_get_matches_from(&args)
+                    .unwrap(),
+            )
+            .unwrap();
+            for (candidate_apk, candidate_signer) in [
+                (upstream_apk, upstream_signer),
+                (apk, upstream_signer),
+                (upstream_apk, signer),
+                (older_fdroid_apk, signer),
+                (arbitrary.as_str(), signer),
+                (apk, arbitrary.as_str()),
+                ("not-a-sha", signer),
+                (apk, "not-a-sha"),
+                (signer, apk),
             ] {
-                let mut rejected=args.clone();rejected.retain(|arg|!arg.starts_with("--expected-ntfy-"));
-                rejected.extend([format!("--expected-ntfy-apk-sha256={candidate_apk}"),format!("--expected-ntfy-signer-sha256={candidate_signer}")]);
-                let parsed=feedback_arguments(arguments_base()).try_get_matches_from(rejected).unwrap();
-                assert!(check(&parsed).is_err(),"physical={physical} must reject a nonfixture or mixed identity");
+                let mut rejected = args.clone();
+                rejected.retain(|arg| !arg.starts_with("--expected-ntfy-"));
+                rejected.extend([
+                    format!("--expected-ntfy-apk-sha256={candidate_apk}"),
+                    format!("--expected-ntfy-signer-sha256={candidate_signer}"),
+                ]);
+                let parsed = feedback_arguments(arguments_base())
+                    .try_get_matches_from(rejected)
+                    .unwrap();
+                assert!(
+                    check(&parsed).is_err(),
+                    "physical={physical} must reject a nonfixture or mixed identity"
+                );
             }
-            for missing in ["--expected-ntfy-apk-sha256=","--expected-ntfy-signer-sha256="] {
-                let mut rejected=args.clone();rejected.retain(|arg|!arg.starts_with(missing));
+            for missing in [
+                "--expected-ntfy-apk-sha256=",
+                "--expected-ntfy-signer-sha256=",
+            ] {
+                let mut rejected = args.clone();
+                rejected.retain(|arg| !arg.starts_with(missing));
                 match feedback_arguments(arguments_base()).try_get_matches_from(rejected) {
-                    Ok(parsed)=>assert!(check(&parsed).is_err()),
-                    Err(error)=>assert_eq!(error.kind(),clap::error::ErrorKind::MissingRequiredArgument),
+                    Ok(parsed) => assert!(check(&parsed).is_err()),
+                    Err(error) => assert_eq!(
+                        error.kind(),
+                        clap::error::ErrorKind::MissingRequiredArgument
+                    ),
                 }
             }
         }
-        for (candidate_apk,candidate_signer) in [(apk,signer),(upstream_apk,upstream_signer),(apk,upstream_signer)] {
-            let pins=[format!("--expected-ntfy-apk-sha256={candidate_apk}"),format!("--expected-ntfy-signer-sha256={candidate_signer}")];
-            for supplied in [vec![pins[0].clone()],vec![pins[1].clone()],pins.to_vec()] {
-                let mut unrelated=vec!["smoke".to_owned()];unrelated.extend(supplied.clone());
-                assert!(feedback_arguments(arguments_base()).try_get_matches_from(unrelated).is_err());
-                let mut persistent=background_args("persistent");persistent.extend(supplied);
-                let parsed=feedback_arguments(arguments_base()).try_get_matches_from(persistent).unwrap();
+        for (candidate_apk, candidate_signer) in [
+            (apk, signer),
+            (upstream_apk, upstream_signer),
+            (apk, upstream_signer),
+        ] {
+            let pins = [
+                format!("--expected-ntfy-apk-sha256={candidate_apk}"),
+                format!("--expected-ntfy-signer-sha256={candidate_signer}"),
+            ];
+            for supplied in [vec![pins[0].clone()], vec![pins[1].clone()], pins.to_vec()] {
+                let mut unrelated = vec!["smoke".to_owned()];
+                unrelated.extend(supplied.clone());
+                assert!(
+                    feedback_arguments(arguments_base())
+                        .try_get_matches_from(unrelated)
+                        .is_err()
+                );
+                let mut persistent = background_args("persistent");
+                persistent.extend(supplied);
+                let parsed = feedback_arguments(arguments_base())
+                    .try_get_matches_from(persistent)
+                    .unwrap();
                 assert!(background_mode_environment(&parsed).is_err());
             }
         }
     }
     #[test]
     fn finite_background_parser_accepts_both_explicit_modes_and_refuses_effectful_mixed_routes() {
-        for mode in ["persistent","ntfy"] {
-            let args=background_args(mode);
-            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
-            assert_eq!(parsed.get_one::<String>("background").map(String::as_str),Some(mode));
+        for mode in ["persistent", "ntfy"] {
+            let args = background_args(mode);
+            let parsed = feedback_arguments(arguments_base())
+                .try_get_matches_from(&args)
+                .unwrap();
+            assert_eq!(
+                parsed.get_one::<String>("background").map(String::as_str),
+                Some(mode)
+            );
             background_mode_environment(&parsed).unwrap();
-            for required in ["--goatr=","--config=","--workspace-root=","--evidence-dir=","--emulator-owner=","--serial=","--apk=","--test-apk=","--expected-apk-sha256=","--expected-test-apk-sha256="] {
-                let reduced=args.iter().filter(|arg|!arg.starts_with(required)).cloned().collect::<Vec<_>>();
-                assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err());
+            for required in [
+                "--goatr=",
+                "--config=",
+                "--workspace-root=",
+                "--evidence-dir=",
+                "--emulator-owner=",
+                "--serial=",
+                "--apk=",
+                "--test-apk=",
+                "--expected-apk-sha256=",
+                "--expected-test-apk-sha256=",
+            ] {
+                let reduced = args
+                    .iter()
+                    .filter(|arg| !arg.starts_with(required))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert!(
+                    feedback_arguments(arguments_base())
+                        .try_get_matches_from(reduced)
+                        .is_err()
+                );
             }
             for conflict in [
                 "--review-fixture",
@@ -14888,85 +18221,306 @@ mod tests {
                         .is_err()
                 );
             }
-            for backends in [vec!["--backend=omp"],vec!["--backend=codex"],vec!["--backend=omp","--backend=omp"]] {
-                let mut invalid=args.iter().filter(|arg|!arg.starts_with("--backend=")).cloned().collect::<Vec<_>>();
+            for backends in [
+                vec!["--backend=omp"],
+                vec!["--backend=codex"],
+                vec!["--backend=omp", "--backend=omp"],
+            ] {
+                let mut invalid = args
+                    .iter()
+                    .filter(|arg| !arg.starts_with("--backend="))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 invalid.extend(backends.into_iter().map(str::to_owned));
-                let parsed=feedback_arguments(arguments_base()).try_get_matches_from(invalid).unwrap();
+                let parsed = feedback_arguments(arguments_base())
+                    .try_get_matches_from(invalid)
+                    .unwrap();
                 assert!(background_mode_environment(&parsed).is_err());
             }
         }
-        let missing=background_args("ntfy").into_iter().filter(|arg|!arg.starts_with("--expected-ntfy-")).collect::<Vec<_>>();
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(missing).unwrap();
+        let missing = background_args("ntfy")
+            .into_iter()
+            .filter(|arg| !arg.starts_with("--expected-ntfy-"))
+            .collect::<Vec<_>>();
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(missing)
+            .unwrap();
         assert!(background_mode_environment(&parsed).is_err());
-        let mut unwanted=background_args("persistent");unwanted.extend(["--expected-ntfy-apk-sha256=bad".into(),"--expected-ntfy-signer-sha256=bad".into()]);
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(unwanted).unwrap();
+        let mut unwanted = background_args("persistent");
+        unwanted.extend([
+            "--expected-ntfy-apk-sha256=bad".into(),
+            "--expected-ntfy-signer-sha256=bad".into(),
+        ]);
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(unwanted)
+            .unwrap();
         assert!(background_mode_environment(&parsed).is_err());
     }
 
-    fn project_read_args()->Vec<String> {
-        ["smoke","--project-read-only","--backend","omp","--backend","codex","--goatr","/nix/store/example/bin/goatr","--config","/private/config.toml","--workspace-root","/workspace","--evidence-dir","/private/fresh","--consent-owned-providers"].into_iter().map(str::to_owned).collect()
+    fn project_read_args() -> Vec<String> {
+        [
+            "smoke",
+            "--project-read-only",
+            "--backend",
+            "omp",
+            "--backend",
+            "codex",
+            "--goatr",
+            "/nix/store/example/bin/goatr",
+            "--config",
+            "/private/config.toml",
+            "--workspace-root",
+            "/workspace",
+            "--evidence-dir",
+            "/private/fresh",
+            "--consent-owned-providers",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     }
     #[test]
-    fn project_read_cli_requires_both_original_backends_and_explicit_fresh_owned_scope_without_input() {
-        let args=project_read_args();let matches=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();require_shared_backends(&matches).unwrap();assert!(!matches.get_flag("automate-native-inputs"));assert!(ProjectSeedPin::parse(&matches).unwrap().is_none());
-        for required in ["--goatr","--config","--workspace-root","--evidence-dir","--consent-owned-providers"] {
-            let mut reduced=args.clone();let index=reduced.iter().position(|arg|arg==required).unwrap();reduced.drain(index..index+if required=="--consent-owned-providers"{1}else{2});
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err());
+    fn project_read_cli_requires_both_original_backends_and_explicit_fresh_owned_scope_without_input()
+     {
+        let args = project_read_args();
+        let matches = feedback_arguments(arguments_base())
+            .try_get_matches_from(&args)
+            .unwrap();
+        require_shared_backends(&matches).unwrap();
+        assert!(!matches.get_flag("automate-native-inputs"));
+        assert!(ProjectSeedPin::parse(&matches).unwrap().is_none());
+        for required in [
+            "--goatr",
+            "--config",
+            "--workspace-root",
+            "--evidence-dir",
+            "--consent-owned-providers",
+        ] {
+            let mut reduced = args.clone();
+            let index = reduced.iter().position(|arg| arg == required).unwrap();
+            reduced.drain(
+                index
+                    ..index
+                        + if required == "--consent-owned-providers" {
+                            1
+                        } else {
+                            2
+                        },
+            );
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(reduced)
+                    .is_err()
+            );
         }
-        let mut single=args.clone();let index=single.iter().position(|arg|arg=="codex").unwrap();single.drain(index-1..=index);
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(single).unwrap();assert!(require_shared_backends(&parsed).is_err());
-        let mut duplicate=args.clone();*duplicate.iter_mut().find(|arg|arg.as_str()=="codex").unwrap()="omp".into();let parsed=feedback_arguments(arguments_base()).try_get_matches_from(duplicate).unwrap();assert!(require_shared_backends(&parsed).is_err());
-        for conflict in ["--admission-only","--shared-agent-only","--terminal-only","--grid","--ui","--camera","--ime","--setup","--prepare-emulator","--paging-proof","--automate-native-inputs","--codex-invalidation-diagnostic","--omp-creation-diagnostic","--physical-hello-capture","--physical-relay-ephemeral","--development-continuity","--development-owner-feedback","--development-android-only","--keep-foreground-for-feedback","--defer-retention-crossing"] {
-            let mut args=args.clone();args.push(conflict.into());assert!(feedback_arguments(arguments_base()).try_get_matches_from(args).is_err());
+        let mut single = args.clone();
+        let index = single.iter().position(|arg| arg == "codex").unwrap();
+        single.drain(index - 1..=index);
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(single)
+            .unwrap();
+        assert!(require_shared_backends(&parsed).is_err());
+        let mut duplicate = args.clone();
+        *duplicate
+            .iter_mut()
+            .find(|arg| arg.as_str() == "codex")
+            .unwrap() = "omp".into();
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(duplicate)
+            .unwrap();
+        assert!(require_shared_backends(&parsed).is_err());
+        for conflict in [
+            "--admission-only",
+            "--shared-agent-only",
+            "--terminal-only",
+            "--grid",
+            "--ui",
+            "--camera",
+            "--ime",
+            "--setup",
+            "--prepare-emulator",
+            "--paging-proof",
+            "--automate-native-inputs",
+            "--codex-invalidation-diagnostic",
+            "--omp-creation-diagnostic",
+            "--physical-hello-capture",
+            "--physical-relay-ephemeral",
+            "--development-continuity",
+            "--development-owner-feedback",
+            "--development-android-only",
+            "--keep-foreground-for-feedback",
+            "--defer-retention-crossing",
+        ] {
+            let mut args = args.clone();
+            args.push(conflict.into());
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(args)
+                    .is_err()
+            );
         }
     }
     #[test]
     fn project_read_seed_pins_are_complete_and_never_claim_signature_verification() {
-        let mut args=project_read_args();args.extend(["--project-read-seed-pack".into(),"/private/existing-public.pack".into()]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(&args).is_err());
-        args.extend(["--project-read-seed-pack-sha256".into(),"1".repeat(64),"--project-read-seed-commit".into(),PROJECT_PUBLIC_COMMIT.into(),"--project-read-seed-tree".into(),PROJECT_PUBLIC_TREE.into(),"--project-read-seed-signature-sha256".into(),"2".repeat(64)]);
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();assert!(ProjectSeedPin::parse(&parsed).unwrap().is_some());
-        let index=args.iter().position(|arg|arg=="--project-read-seed-commit").unwrap()+1;args[index]="3".repeat(40);
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(args).unwrap();assert!(ProjectSeedPin::parse(&parsed).is_err());
+        let mut args = project_read_args();
+        args.extend([
+            "--project-read-seed-pack".into(),
+            "/private/existing-public.pack".into(),
+        ]);
+        assert!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(&args)
+                .is_err()
+        );
+        args.extend([
+            "--project-read-seed-pack-sha256".into(),
+            "1".repeat(64),
+            "--project-read-seed-commit".into(),
+            PROJECT_PUBLIC_COMMIT.into(),
+            "--project-read-seed-tree".into(),
+            PROJECT_PUBLIC_TREE.into(),
+            "--project-read-seed-signature-sha256".into(),
+            "2".repeat(64),
+        ]);
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(&args)
+            .unwrap();
+        assert!(ProjectSeedPin::parse(&parsed).unwrap().is_some());
+        let index = args
+            .iter()
+            .position(|arg| arg == "--project-read-seed-commit")
+            .unwrap()
+            + 1;
+        args[index] = "3".repeat(40);
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(args)
+            .unwrap();
+        assert!(ProjectSeedPin::parse(&parsed).is_err());
         // Byte-field parsing is deliberately NOT a fake cryptographic verifier.
-        let signature="-----BEGIN PGP SIGNATURE-----\npublic parser fixture\n-----END PGP SIGNATURE-----";
-        let commit=format!("tree {PROJECT_PUBLIC_TREE}\nauthor public fixture\ngpgsig {}\n\npublic subject\n",signature.replace('\n',"\n "));
-        let (tree,block)=project_commit_fields(commit.as_bytes()).unwrap();assert_eq!(tree,PROJECT_PUBLIC_TREE);assert_eq!(block,signature);
+        let signature =
+            "-----BEGIN PGP SIGNATURE-----\npublic parser fixture\n-----END PGP SIGNATURE-----";
+        let commit = format!(
+            "tree {PROJECT_PUBLIC_TREE}\nauthor public fixture\ngpgsig {}\n\npublic subject\n",
+            signature.replace('\n', "\n ")
+        );
+        let (tree, block) = project_commit_fields(commit.as_bytes()).unwrap();
+        assert_eq!(tree, PROJECT_PUBLIC_TREE);
+        assert_eq!(block, signature);
         assert!(project_commit_fields(b"tree missing\n\nunsigned subject\n").is_err());
     }
     #[test]
     fn project_read_input_type_alias_mode_and_byte_bounds_are_checked_before_read() {
-        struct Fixture(PathBuf);impl Drop for Fixture{fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
-        let parent=fs::canonicalize(std::env::temp_dir()).unwrap();let fixture=Fixture(parent.join(format!("goatr-public-seed-input-{}",Uuid::random().0)));
-        fs::DirBuilder::new().mode(0o700).create(&fixture.0).unwrap();let path=fixture.0.join("existing-public.pack");fs::write(&path,b"public immutable bytes").unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o400)).unwrap();
-        assert_eq!(project_input(&path,64,true).unwrap(),b"public immutable bytes");assert!(project_input(&path,4,true).is_err());
-        let alias=fixture.0.join("alias");std::os::unix::fs::symlink(&path,&alias).unwrap();assert!(project_input(&alias,64,true).is_err());
-        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();assert!(project_input(&path,64,true).is_err());
-        let fifo=fixture.0.join("fifo");let name=std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o400)},0);assert!(project_input(&fifo,64,true).is_err());
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let parent = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let fixture = Fixture(parent.join(format!("goatr-public-seed-input-{}", Uuid::random().0)));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&fixture.0)
+            .unwrap();
+        let path = fixture.0.join("existing-public.pack");
+        fs::write(&path, b"public immutable bytes").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        assert_eq!(
+            project_input(&path, 64, true).unwrap(),
+            b"public immutable bytes"
+        );
+        assert!(project_input(&path, 4, true).is_err());
+        let alias = fixture.0.join("alias");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(project_input(&alias, 64, true).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(project_input(&path, 64, true).is_err());
+        let fifo = fixture.0.join("fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o400) }, 0);
+        assert!(project_input(&fifo, 64, true).is_err());
     }
     #[test]
     fn project_read_seed_tree_requires_real_distinct_regular_rows_without_path_escape() {
-        let valid=format!("100644 blob {}\tfile-a\x00100644 blob {}\tdir/file-b\x00100644 blob {}\tfile-c\x00","1".repeat(40),"2".repeat(40),"3".repeat(40));
-        let rows=project_seed_files(valid.as_bytes()).unwrap();assert_eq!(rows.len(),3);
-        for invalid in [valid.replace("file-a","../outside"),valid.replace("100644","120000"),valid.replace("file-a","bad\nname"),valid.trim_end_matches('\0').to_owned()] {assert!(project_seed_files(invalid.as_bytes()).is_err());}
+        let valid = format!(
+            "100644 blob {}\tfile-a\x00100644 blob {}\tdir/file-b\x00100644 blob {}\tfile-c\x00",
+            "1".repeat(40),
+            "2".repeat(40),
+            "3".repeat(40)
+        );
+        let rows = project_seed_files(valid.as_bytes()).unwrap();
+        assert_eq!(rows.len(), 3);
+        for invalid in [
+            valid.replace("file-a", "../outside"),
+            valid.replace("100644", "120000"),
+            valid.replace("file-a", "bad\nname"),
+            valid.trim_end_matches('\0').to_owned(),
+        ] {
+            assert!(project_seed_files(invalid.as_bytes()).is_err());
+        }
     }
 
-
-    fn terminal_args()->Vec<&'static str> {
-        vec!["smoke","--terminal-only","--goatr","/nix/store/example/bin/goatr",
-            "--config","/private/config.toml","--workspace-root","/workspace",
-            "--evidence-dir","/private/fresh","--consent-owned-providers","--automate-native-inputs"]
+    fn terminal_args() -> Vec<&'static str> {
+        vec![
+            "smoke",
+            "--terminal-only",
+            "--goatr",
+            "/nix/store/example/bin/goatr",
+            "--config",
+            "/private/config.toml",
+            "--workspace-root",
+            "/workspace",
+            "--evidence-dir",
+            "/private/fresh",
+            "--consent-owned-providers",
+            "--automate-native-inputs",
+        ]
     }
     #[test]
     fn terminal_cli_requires_owned_fixture_consents_rejects_backends_and_pairs_frozen_hashes() {
-        let args=terminal_args();
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+        let args = terminal_args();
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(&args)
+            .unwrap();
         assert!(!terminal_frozen_selection(&parsed).unwrap());
-        for required in ["--goatr","--config","--workspace-root","--evidence-dir","--consent-owned-providers","--automate-native-inputs"] {
-            let mut reduced=args.clone();let index=reduced.iter().position(|arg|*arg==required).unwrap();
-            reduced.drain(index..index+if matches!(required,"--consent-owned-providers"|"--automate-native-inputs"){1}else{2});
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");
+        for required in [
+            "--goatr",
+            "--config",
+            "--workspace-root",
+            "--evidence-dir",
+            "--consent-owned-providers",
+            "--automate-native-inputs",
+        ] {
+            let mut reduced = args.clone();
+            let index = reduced.iter().position(|arg| *arg == required).unwrap();
+            reduced.drain(
+                index
+                    ..index
+                        + if matches!(
+                            required,
+                            "--consent-owned-providers" | "--automate-native-inputs"
+                        ) {
+                            1
+                        } else {
+                            2
+                        },
+            );
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(reduced)
+                    .is_err(),
+                "{required}"
+            );
         }
-        for backend in ["omp","codex"]{let mut conflict=args.clone();conflict.extend(["--backend",backend]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(conflict).is_err());}
+        for backend in ["omp", "codex"] {
+            let mut conflict = args.clone();
+            conflict.extend(["--backend", backend]);
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(conflict)
+                    .is_err()
+            );
+        }
         for mode in [
             "--admission-only",
             "--shared-agent-only",
@@ -14996,240 +18550,716 @@ mod tests {
                 "{mode}"
             );
         }
-        let mut api=args.clone();api.extend(["--api","35"]);assert!(feedback_arguments(arguments_base()).try_get_matches_from(api).is_err());
-        for flag in ["--expected-goatr-sha256","--expected-companion-lock-sha256"] {
-            let mut incomplete=args.clone();incomplete.extend([flag,"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(incomplete).is_err());
+        let mut api = args.clone();
+        api.extend(["--api", "35"]);
+        assert!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(api)
+                .is_err()
+        );
+        for flag in [
+            "--expected-goatr-sha256",
+            "--expected-companion-lock-sha256",
+        ] {
+            let mut incomplete = args.clone();
+            incomplete.extend([
+                flag,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]);
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(incomplete)
+                    .is_err()
+            );
         }
-        let mut frozen=args;frozen.extend(["--expected-goatr-sha256","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--expected-companion-lock-sha256","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(frozen).unwrap();
+        let mut frozen = args;
+        frozen.extend([
+            "--expected-goatr-sha256",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--expected-companion-lock-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ]);
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(frozen)
+            .unwrap();
         assert!(terminal_frozen_selection(&parsed).unwrap());
     }
-    fn terminal_test_cells()->Vec<GridCell> {
-        fn cell(text:&str,width:u64,foreground:GridColor)->GridCell {
-            GridCell{text:text.into(),width:Uint(width),foreground,background:GridColor::Default,
-                attributes:GridAttributes{bold:false,faint:false,italic:false,blink:false,strike:false,inverse:false,concealed:false,underline:GridUnderline::None,underline_color:None}}
+    fn terminal_test_cells() -> Vec<GridCell> {
+        fn cell(text: &str, width: u64, foreground: GridColor) -> GridCell {
+            GridCell {
+                text: text.into(),
+                width: Uint(width),
+                foreground,
+                background: GridColor::Default,
+                attributes: GridAttributes {
+                    bold: false,
+                    faint: false,
+                    italic: false,
+                    blink: false,
+                    strike: false,
+                    inverse: false,
+                    concealed: false,
+                    underline: GridUnderline::None,
+                    underline_color: None,
+                },
+            }
         }
-        let mut cells=TERMINAL_MARKER.chars().map(|value|cell(&value.to_string(),1,GridColor::Default)).collect::<Vec<_>>();
-        for text in ["界","ｶﾞ","👩‍💻","❤️","🇺🇸"] {cells.push(cell(text,2,GridColor::Default));cells.push(cell("",0,GridColor::Default));}
-        for (text,color) in [("R",GridColor::Indexed{index:Uint(1)}),("I",GridColor::Indexed{index:Uint(202)}),("T",GridColor::Rgb{value:Uint(0x112233)}),("D",GridColor::Default)]{cells.push(cell(text,1,color));}
+        let mut cells = TERMINAL_MARKER
+            .chars()
+            .map(|value| cell(&value.to_string(), 1, GridColor::Default))
+            .collect::<Vec<_>>();
+        for text in ["界", "ｶﾞ", "👩‍💻", "❤️", "🇺🇸"] {
+            cells.push(cell(text, 2, GridColor::Default));
+            cells.push(cell("", 0, GridColor::Default));
+        }
+        for (text, color) in [
+            ("R", GridColor::Indexed { index: Uint(1) }),
+            ("I", GridColor::Indexed { index: Uint(202) }),
+            (
+                "T",
+                GridColor::Rgb {
+                    value: Uint(0x112233),
+                },
+            ),
+            ("D", GridColor::Default),
+        ] {
+            cells.push(cell(text, 1, color));
+        }
         cells
     }
-    fn terminal_test_witness(columns:usize)->(GridWitness,Uuid) {
-        let opening=Uuid::random();let subscription=Uuid::random();let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
-        let mut witness=GridWitness::pending(opening.clone(),GridSubject::Shell(target.clone()));witness.fixture=Some(TerminalFixtureWitness::new());
-        witness.response(&opening,&Ok(ResultBody::ShellGridSubscribe(ShellGridSubscribeResult{target,subscription:subscription.clone(),seq:ZeroValue(0),
-            frame:GridBegin { scroll: None, mode:GridMode::Replace,revision:Uint(0),columns:Uint(columns as u64),rows:Uint(1),cursor:None,
-                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2) }})),128).unwrap();
-        (witness,subscription)
+    fn terminal_test_witness(columns: usize) -> (GridWitness, Uuid) {
+        let opening = Uuid::random();
+        let subscription = Uuid::random();
+        let target = ShellTarget {
+            shell_id: Uuid::random(),
+            generation: Uuid::random(),
+        };
+        let mut witness = GridWitness::pending(opening.clone(), GridSubject::Shell(target.clone()));
+        witness.fixture = Some(TerminalFixtureWitness::new());
+        witness
+            .response(
+                &opening,
+                &Ok(ResultBody::ShellGridSubscribe(ShellGridSubscribeResult {
+                    target,
+                    subscription: subscription.clone(),
+                    seq: ZeroValue(0),
+                    frame: GridBegin {
+                        scroll: None,
+                        mode: GridMode::Replace,
+                        revision: Uint(0),
+                        columns: Uint(columns as u64),
+                        rows: Uint(1),
+                        cursor: None,
+                        alternate_screen: false,
+                        graphics_omitted: false,
+                        popup_blocked: false,
+                        part_count: Uint(2),
+                    },
+                })),
+                128,
+            )
+            .unwrap();
+        (witness, subscription)
     }
     #[test]
     fn grid_transaction_clock_starts_at_each_accepted_descriptor_and_never_renews_on_progress() {
-        fn route(grid:&mut Option<GridWitness>,events:&mut u64,generation:&mut Option<GenerationView>,event:Event)->io::Result<()> {
-            let envelope=Envelope::Event(event);
-            let bytes=goatr::protocol::encode_payload(&envelope).unwrap().len();
-            let Envelope::Event(event)=envelope else {unreachable!()};
-            Phone::route_event(grid,events,generation,event,bytes)
-        }
-        for duplicate in [true,false] {
-            let opening=Uuid::random();let subscription=Uuid::random();
-            let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
-            let mut witness=GridWitness::pending(opening.clone(),GridSubject::Shell(target.clone()));
-            witness.fixture=Some(TerminalFixtureWitness::new());
-            assert!(witness.deadline.is_none());witness.arm("TransactionA").unwrap();assert!(witness.deadline.is_none());
-            let mut cells=terminal_test_cells();let columns=cells.len();let first=cells[0].clone();
-            let split=TERMINAL_MARKER.len()+1;let tail=cells.split_off(split);
-            let mut frame=GridBegin { scroll: None, mode:GridMode::Replace,revision:Uint(0),columns:Uint(columns as u64),rows:Uint(1),cursor:None,
-                alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2) };
-            let envelope=Envelope::Response(Response{id:opening,outcome:Ok(ResultBody::ShellGridSubscribe(ShellGridSubscribeResult{
-                target,subscription:subscription.clone(),seq:ZeroValue(0),frame:frame.clone()}))});
-            let bytes=goatr::protocol::encode_payload(&envelope).unwrap().len();
-            let Envelope::Response(response)=envelope else {unreachable!()};
-            let before=Instant::now();witness.response(&response.id,&response.outcome,bytes).unwrap();let after=Instant::now();
-            let initial=witness.deadline.unwrap();
-            assert!(initial>=before+Duration::from_secs(15)&&initial<=after+Duration::from_secs(15));
-            let mut grid=Some(witness);let mut events=0;let mut generation=None;
-            let part=|sequence,revision,index,column,cells|Event{subscription:subscription.clone(),seq:Uint(sequence),
-                body:EventBody::GridPart(GridPart{revision:Uint(revision),index:Uint(index),spans:vec![GridSpan{row:Uint(0),column:Uint(column),cells}]})};
-            route(&mut grid,&mut events,&mut generation,part(1,0,0,0,cells)).unwrap();
-            assert_eq!(grid.as_ref().unwrap().deadline,Some(initial));assert!(grid.as_ref().unwrap().committed.is_none());
-            grid.as_mut().unwrap().arm("TransactionB").unwrap();assert_eq!(grid.as_ref().unwrap().deadline,Some(initial));
-            route(&mut grid,&mut events,&mut generation,part(2,0,1,split as u64,tail)).unwrap();
-            assert_eq!(grid.as_ref().unwrap().deadline,Some(initial));
-            assert!(grid.as_ref().unwrap().fixture.as_ref().unwrap().committed.is_none());
-            route(&mut grid,&mut events,&mut generation,Event{subscription:subscription.clone(),seq:Uint(3),
-                body:EventBody::GridCommit(GridCommit{revision:Uint(0)})}).unwrap();
-            assert_eq!(grid.as_ref().unwrap().committed,Some(0));assert!(grid.as_ref().unwrap().deadline.is_none());
-            assert!(grid.as_ref().unwrap().fixture.as_ref().unwrap().committed.is_some());
-            frame.revision=Uint(1);
-            let next=Event{subscription:subscription.clone(),seq:Uint(4),body:EventBody::GridBegin(GridBeginEvent{frame:frame.clone()})};
-            let before=Instant::now();route(&mut grid,&mut events,&mut generation,next).unwrap();let after=Instant::now();
-            let deadline=grid.as_ref().unwrap().deadline.unwrap();
-            assert!(deadline>=before+Duration::from_secs(15)&&deadline<=after+Duration::from_secs(15));
-            let unchanged=if duplicate {
-                let duplicate=Event{subscription:subscription.clone(),seq:Uint(5),body:EventBody::GridBegin(GridBeginEvent{frame})};
-                assert!(route(&mut grid,&mut events,&mut generation,duplicate).is_err());deadline
-            }else{
-                let expired=Instant::now();grid.as_mut().unwrap().deadline=Some(expired);
-                let error=route(&mut grid,&mut events,&mut generation,part(5,1,0,0,vec![first])).unwrap_err();
-                assert!(error.to_string().contains("phase=transaction_deadline"));expired
+        fn route(
+            grid: &mut Option<GridWitness>,
+            events: &mut u64,
+            generation: &mut Option<GenerationView>,
+            event: Event,
+        ) -> io::Result<()> {
+            let envelope = Envelope::Event(event);
+            let bytes = goatr::protocol::encode_payload(&envelope).unwrap().len();
+            let Envelope::Event(event) = envelope else {
+                unreachable!()
             };
-            let witness=grid.as_ref().unwrap();
-            assert!(witness.retired);assert_eq!(witness.deadline,Some(unchanged));assert_eq!(witness.committed,Some(0));
-            assert!(witness.token_commit.is_none());assert_eq!(events,0);assert!(generation.is_none());
+            Phone::route_event(grid, events, generation, event, bytes)
+        }
+        for duplicate in [true, false] {
+            let opening = Uuid::random();
+            let subscription = Uuid::random();
+            let target = ShellTarget {
+                shell_id: Uuid::random(),
+                generation: Uuid::random(),
+            };
+            let mut witness =
+                GridWitness::pending(opening.clone(), GridSubject::Shell(target.clone()));
+            witness.fixture = Some(TerminalFixtureWitness::new());
+            assert!(witness.deadline.is_none());
+            witness.arm("TransactionA").unwrap();
+            assert!(witness.deadline.is_none());
+            let mut cells = terminal_test_cells();
+            let columns = cells.len();
+            let first = cells[0].clone();
+            let split = TERMINAL_MARKER.len() + 1;
+            let tail = cells.split_off(split);
+            let mut frame = GridBegin {
+                scroll: None,
+                mode: GridMode::Replace,
+                revision: Uint(0),
+                columns: Uint(columns as u64),
+                rows: Uint(1),
+                cursor: None,
+                alternate_screen: false,
+                graphics_omitted: false,
+                popup_blocked: false,
+                part_count: Uint(2),
+            };
+            let envelope = Envelope::Response(Response {
+                id: opening,
+                outcome: Ok(ResultBody::ShellGridSubscribe(ShellGridSubscribeResult {
+                    target,
+                    subscription: subscription.clone(),
+                    seq: ZeroValue(0),
+                    frame: frame.clone(),
+                })),
+            });
+            let bytes = goatr::protocol::encode_payload(&envelope).unwrap().len();
+            let Envelope::Response(response) = envelope else {
+                unreachable!()
+            };
+            let before = Instant::now();
+            witness
+                .response(&response.id, &response.outcome, bytes)
+                .unwrap();
+            let after = Instant::now();
+            let initial = witness.deadline.unwrap();
+            assert!(
+                initial >= before + Duration::from_secs(15)
+                    && initial <= after + Duration::from_secs(15)
+            );
+            let mut grid = Some(witness);
+            let mut events = 0;
+            let mut generation = None;
+            let part = |sequence, revision, index, column, cells| Event {
+                subscription: subscription.clone(),
+                seq: Uint(sequence),
+                body: EventBody::GridPart(GridPart {
+                    revision: Uint(revision),
+                    index: Uint(index),
+                    spans: vec![GridSpan {
+                        row: Uint(0),
+                        column: Uint(column),
+                        cells,
+                    }],
+                }),
+            };
+            route(
+                &mut grid,
+                &mut events,
+                &mut generation,
+                part(1, 0, 0, 0, cells),
+            )
+            .unwrap();
+            assert_eq!(grid.as_ref().unwrap().deadline, Some(initial));
+            assert!(grid.as_ref().unwrap().committed.is_none());
+            grid.as_mut().unwrap().arm("TransactionB").unwrap();
+            assert_eq!(grid.as_ref().unwrap().deadline, Some(initial));
+            route(
+                &mut grid,
+                &mut events,
+                &mut generation,
+                part(2, 0, 1, split as u64, tail),
+            )
+            .unwrap();
+            assert_eq!(grid.as_ref().unwrap().deadline, Some(initial));
+            assert!(
+                grid.as_ref()
+                    .unwrap()
+                    .fixture
+                    .as_ref()
+                    .unwrap()
+                    .committed
+                    .is_none()
+            );
+            route(
+                &mut grid,
+                &mut events,
+                &mut generation,
+                Event {
+                    subscription: subscription.clone(),
+                    seq: Uint(3),
+                    body: EventBody::GridCommit(GridCommit { revision: Uint(0) }),
+                },
+            )
+            .unwrap();
+            assert_eq!(grid.as_ref().unwrap().committed, Some(0));
+            assert!(grid.as_ref().unwrap().deadline.is_none());
+            assert!(
+                grid.as_ref()
+                    .unwrap()
+                    .fixture
+                    .as_ref()
+                    .unwrap()
+                    .committed
+                    .is_some()
+            );
+            frame.revision = Uint(1);
+            let next = Event {
+                subscription: subscription.clone(),
+                seq: Uint(4),
+                body: EventBody::GridBegin(GridBeginEvent {
+                    frame: frame.clone(),
+                }),
+            };
+            let before = Instant::now();
+            route(&mut grid, &mut events, &mut generation, next).unwrap();
+            let after = Instant::now();
+            let deadline = grid.as_ref().unwrap().deadline.unwrap();
+            assert!(
+                deadline >= before + Duration::from_secs(15)
+                    && deadline <= after + Duration::from_secs(15)
+            );
+            let unchanged = if duplicate {
+                let duplicate = Event {
+                    subscription: subscription.clone(),
+                    seq: Uint(5),
+                    body: EventBody::GridBegin(GridBeginEvent { frame }),
+                };
+                assert!(route(&mut grid, &mut events, &mut generation, duplicate).is_err());
+                deadline
+            } else {
+                let expired = Instant::now();
+                grid.as_mut().unwrap().deadline = Some(expired);
+                let error = route(
+                    &mut grid,
+                    &mut events,
+                    &mut generation,
+                    part(5, 1, 0, 0, vec![first]),
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("phase=transaction_deadline"));
+                expired
+            };
+            let witness = grid.as_ref().unwrap();
+            assert!(witness.retired);
+            assert_eq!(witness.deadline, Some(unchanged));
+            assert_eq!(witness.committed, Some(0));
+            assert!(witness.token_commit.is_none());
+            assert_eq!(events, 0);
+            assert!(generation.is_none());
         }
     }
     #[test]
     fn terminal_fixture_facts_require_complete_selected_coverage_and_cross_part_wide_tails() {
-        let cells=terminal_test_cells();let (mut witness,subscription)=terminal_test_witness(cells.len());let split=TERMINAL_MARKER.len()+1;
-        let part=|sequence,index,column,cells|Event{subscription:subscription.clone(),seq:Uint(sequence),body:EventBody::GridPart(GridPart{revision:Uint(0),index:Uint(index),spans:vec![GridSpan{row:Uint(0),column:Uint(column),cells}]})};
-        witness.event(part(1,0,0,cells[..split].to_vec()),256).unwrap();
+        let cells = terminal_test_cells();
+        let (mut witness, subscription) = terminal_test_witness(cells.len());
+        let split = TERMINAL_MARKER.len() + 1;
+        let part = |sequence, index, column, cells| Event {
+            subscription: subscription.clone(),
+            seq: Uint(sequence),
+            body: EventBody::GridPart(GridPart {
+                revision: Uint(0),
+                index: Uint(index),
+                spans: vec![GridSpan {
+                    row: Uint(0),
+                    column: Uint(column),
+                    cells,
+                }],
+            }),
+        };
+        witness
+            .event(part(1, 0, 0, cells[..split].to_vec()), 256)
+            .unwrap();
         assert!(witness.fixture.as_ref().unwrap().committed.is_none());
-        witness.event(part(2,1,split as u64,cells[split..].to_vec()),256).unwrap();
-        witness.event(Event{subscription:subscription.clone(),seq:Uint(3),body:EventBody::GridCommit(GridCommit{revision:Uint(0)})},32).unwrap();
-        assert!(witness.fixture.as_ref().unwrap().committed.unwrap().complete());
-        assert_eq!(witness.committed_dimensions,Some((cells.len() as u64,1)));
-        let (mut wrong,subscription)=terminal_test_witness(cells.len());
-        assert!(wrong.event(Event{subscription,seq:Uint(1),body:EventBody::GridPart(GridPart{revision:Uint(0),index:Uint(0),spans:vec![GridSpan{row:Uint(0),column:Uint(1),cells:cells.clone()}]})},256).is_err());
-        assert!(wrong.retired&&wrong.committed.is_none());
-        let (mut wrong,subscription)=terminal_test_witness(cells.len());
-        let mut malformed=cells;malformed[TERMINAL_MARKER.len()+1].text="not a tail".into();malformed[TERMINAL_MARKER.len()+1].width=Uint(1);
-        assert!(wrong.event(Event{subscription,seq:Uint(1),body:EventBody::GridPart(GridPart{revision:Uint(0),index:Uint(0),spans:vec![GridSpan{row:Uint(0),column:Uint(0),cells:malformed}]})},256).is_err());
-        assert!(wrong.retired&&wrong.committed.is_none());
+        witness
+            .event(part(2, 1, split as u64, cells[split..].to_vec()), 256)
+            .unwrap();
+        witness
+            .event(
+                Event {
+                    subscription: subscription.clone(),
+                    seq: Uint(3),
+                    body: EventBody::GridCommit(GridCommit { revision: Uint(0) }),
+                },
+                32,
+            )
+            .unwrap();
+        assert!(
+            witness
+                .fixture
+                .as_ref()
+                .unwrap()
+                .committed
+                .unwrap()
+                .complete()
+        );
+        assert_eq!(witness.committed_dimensions, Some((cells.len() as u64, 1)));
+        let (mut wrong, subscription) = terminal_test_witness(cells.len());
+        assert!(
+            wrong
+                .event(
+                    Event {
+                        subscription,
+                        seq: Uint(1),
+                        body: EventBody::GridPart(GridPart {
+                            revision: Uint(0),
+                            index: Uint(0),
+                            spans: vec![GridSpan {
+                                row: Uint(0),
+                                column: Uint(1),
+                                cells: cells.clone()
+                            }]
+                        })
+                    },
+                    256
+                )
+                .is_err()
+        );
+        assert!(wrong.retired && wrong.committed.is_none());
+        let (mut wrong, subscription) = terminal_test_witness(cells.len());
+        let mut malformed = cells;
+        malformed[TERMINAL_MARKER.len() + 1].text = "not a tail".into();
+        malformed[TERMINAL_MARKER.len() + 1].width = Uint(1);
+        assert!(
+            wrong
+                .event(
+                    Event {
+                        subscription,
+                        seq: Uint(1),
+                        body: EventBody::GridPart(GridPart {
+                            revision: Uint(0),
+                            index: Uint(0),
+                            spans: vec![GridSpan {
+                                row: Uint(0),
+                                column: Uint(0),
+                                cells: malformed
+                            }]
+                        })
+                    },
+                    256
+                )
+                .is_err()
+        );
+        assert!(wrong.retired && wrong.committed.is_none());
     }
     #[test]
     fn terminal_idle_snapshot_refuses_changed_foreground_group_or_membership() {
-        let mut info:herdr::PaneProcessInfo=serde_json::from_value(json!({"pane_id":"p1","shell_pid":17,
-            "foreground_process_group_id":17,"foreground_processes":[{"pid":17,"name":"zsh"}]})).unwrap();
-        assert_eq!(terminal_idle_pid(&info),Some(17));
-        info.foreground_process_group_id=Some(18);assert_eq!(terminal_idle_pid(&info),None);
-        info.foreground_process_group_id=Some(17);
-        let mut child=info.foreground_processes[0].clone();child.pid=18;info.foreground_processes.push(child);
-        assert_eq!(terminal_idle_pid(&info),None);
-        info.foreground_processes.clear();assert_eq!(terminal_idle_pid(&info),None);
-        info.shell_pid=None;assert_eq!(terminal_idle_pid(&info),None);
+        let mut info: herdr::PaneProcessInfo =
+            serde_json::from_value(json!({"pane_id":"p1","shell_pid":17,
+            "foreground_process_group_id":17,"foreground_processes":[{"pid":17,"name":"zsh"}]}))
+            .unwrap();
+        assert_eq!(terminal_idle_pid(&info), Some(17));
+        info.foreground_process_group_id = Some(18);
+        assert_eq!(terminal_idle_pid(&info), None);
+        info.foreground_process_group_id = Some(17);
+        let mut child = info.foreground_processes[0].clone();
+        child.pid = 18;
+        info.foreground_processes.push(child);
+        assert_eq!(terminal_idle_pid(&info), None);
+        info.foreground_processes.clear();
+        assert_eq!(terminal_idle_pid(&info), None);
+        info.shell_pid = None;
+        assert_eq!(terminal_idle_pid(&info), None);
     }
     #[test]
     fn terminal_delayed_marker_requires_absent_opening_and_later_complete_commit() {
-        let cells=|present:bool| {
-            let mut cells=terminal_test_cells();
+        let cells = |present: bool| {
+            let mut cells = terminal_test_cells();
             for value in TERMINAL_DELAYED.chars() {
-                let mut cell=cells[0].clone();cell.text=if present{value.to_string()}else{" ".into()};cells.push(cell);
+                let mut cell = cells[0].clone();
+                cell.text = if present {
+                    value.to_string()
+                } else {
+                    " ".into()
+                };
+                cells.push(cell);
             }
             cells
         };
-        for opening_contains_marker in [true,false] {
-            let opening_cells=cells(opening_contains_marker);let later_cells=cells(true);
-            let (mut witness,subscription)=terminal_test_witness(opening_cells.len());witness.arm(TERMINAL_DELAYED).unwrap();
-            let split=TERMINAL_MARKER.len()+1;
-            let part=|sequence,revision,index,column,cells|Event{subscription:subscription.clone(),seq:Uint(sequence),
-                body:EventBody::GridPart(GridPart{revision:Uint(revision),index:Uint(index),spans:vec![GridSpan{row:Uint(0),column:Uint(column),cells}]})};
-            witness.event(part(1,0,0,0,opening_cells[..split].to_vec()),256).unwrap();
-            witness.event(part(2,0,1,split as u64,opening_cells[split..].to_vec()),256).unwrap();
+        for opening_contains_marker in [true, false] {
+            let opening_cells = cells(opening_contains_marker);
+            let later_cells = cells(true);
+            let (mut witness, subscription) = terminal_test_witness(opening_cells.len());
+            witness.arm(TERMINAL_DELAYED).unwrap();
+            let split = TERMINAL_MARKER.len() + 1;
+            let part = |sequence, revision, index, column, cells| Event {
+                subscription: subscription.clone(),
+                seq: Uint(sequence),
+                body: EventBody::GridPart(GridPart {
+                    revision: Uint(revision),
+                    index: Uint(index),
+                    spans: vec![GridSpan {
+                        row: Uint(0),
+                        column: Uint(column),
+                        cells,
+                    }],
+                }),
+            };
+            witness
+                .event(part(1, 0, 0, 0, opening_cells[..split].to_vec()), 256)
+                .unwrap();
+            witness
+                .event(
+                    part(2, 0, 1, split as u64, opening_cells[split..].to_vec()),
+                    256,
+                )
+                .unwrap();
             assert!(witness.fixture.as_ref().unwrap().opening.is_none());
             assert!(witness.fixture.as_ref().unwrap().committed.is_none());
             assert!(witness.terminal_opening_commit().is_err());
-            witness.event(Event{subscription:subscription.clone(),seq:Uint(3),body:EventBody::GridCommit(GridCommit{revision:Uint(0)})},32).unwrap();
-            assert_eq!(witness.fixture.as_ref().unwrap().opening,Some((0,opening_contains_marker)));
+            witness
+                .event(
+                    Event {
+                        subscription: subscription.clone(),
+                        seq: Uint(3),
+                        body: EventBody::GridCommit(GridCommit { revision: Uint(0) }),
+                    },
+                    32,
+                )
+                .unwrap();
+            assert_eq!(
+                witness.fixture.as_ref().unwrap().opening,
+                Some((0, opening_contains_marker))
+            );
             if opening_contains_marker {
                 assert!(witness.terminal_fixture_ready(0).is_err());
-            }else{
-                assert_eq!(witness.terminal_opening_commit().unwrap(),0);
+            } else {
+                assert_eq!(witness.terminal_opening_commit().unwrap(), 0);
                 assert!(!witness.terminal_fixture_ready(0).unwrap());
             }
-            witness.event(Event{subscription:subscription.clone(),seq:Uint(4),body:EventBody::GridBegin(GridBeginEvent{frame:GridBegin { scroll: None, mode:GridMode::Replace,revision:Uint(1),columns:Uint(later_cells.len() as u64),rows:Uint(1),cursor:None,
-            alternate_screen:false,graphics_omitted:false,popup_blocked:false,part_count:Uint(2) }})},128).unwrap();
-            witness.event(part(5,1,0,0,later_cells[..split].to_vec()),256).unwrap();
-            witness.event(part(6,1,1,split as u64,later_cells[split..].to_vec()),256).unwrap();
-            if !opening_contains_marker{assert!(!witness.terminal_fixture_ready(0).unwrap());}
-            witness.event(Event{subscription:subscription.clone(),seq:Uint(7),body:EventBody::GridCommit(GridCommit{revision:Uint(1)})},32).unwrap();
-            assert_eq!(witness.token_commit,Some(1));
-            assert_eq!(witness.fixture.as_ref().unwrap().opening,Some((0,opening_contains_marker)));
+            witness
+                .event(
+                    Event {
+                        subscription: subscription.clone(),
+                        seq: Uint(4),
+                        body: EventBody::GridBegin(GridBeginEvent {
+                            frame: GridBegin {
+                                scroll: None,
+                                mode: GridMode::Replace,
+                                revision: Uint(1),
+                                columns: Uint(later_cells.len() as u64),
+                                rows: Uint(1),
+                                cursor: None,
+                                alternate_screen: false,
+                                graphics_omitted: false,
+                                popup_blocked: false,
+                                part_count: Uint(2),
+                            },
+                        }),
+                    },
+                    128,
+                )
+                .unwrap();
+            witness
+                .event(part(5, 1, 0, 0, later_cells[..split].to_vec()), 256)
+                .unwrap();
+            witness
+                .event(
+                    part(6, 1, 1, split as u64, later_cells[split..].to_vec()),
+                    256,
+                )
+                .unwrap();
+            if !opening_contains_marker {
+                assert!(!witness.terminal_fixture_ready(0).unwrap());
+            }
+            witness
+                .event(
+                    Event {
+                        subscription: subscription.clone(),
+                        seq: Uint(7),
+                        body: EventBody::GridCommit(GridCommit { revision: Uint(1) }),
+                    },
+                    32,
+                )
+                .unwrap();
+            assert_eq!(witness.token_commit, Some(1));
+            assert_eq!(
+                witness.fixture.as_ref().unwrap().opening,
+                Some((0, opening_contains_marker))
+            );
             if opening_contains_marker {
                 assert!(witness.terminal_fixture_ready(0).is_err());
-            }else{
+            } else {
                 assert!(witness.terminal_fixture_ready(0).unwrap());
             }
         }
     }
     #[test]
     fn terminal_resize_result_binds_action_boot_shell_and_native_surface_not_crop() {
-        let action=Uuid::random();let boot=Uuid::random();let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
+        let action = Uuid::random();
+        let boot = Uuid::random();
+        let target = ShellTarget {
+            shell_id: Uuid::random(),
+            generation: Uuid::random(),
+        };
         let receipt:Receipt=serde_json::from_value(json!({"actionId":action,"bootId":boot,"method":"shell.resize","shellTarget":target,
             "createdAt":0,"updatedAt":1,"state":"succeeded","result":{"kind":"shell_resize","columns":96,"rows":32}})).unwrap();
-        terminal_resize_receipt(&receipt,&action,&boot,&target,96,32).unwrap();
-        assert!(terminal_resize_receipt(&receipt,&Uuid::random(),&boot,&target,96,32).is_err());
-        assert!(terminal_resize_receipt(&receipt,&action,&Uuid::random(),&target,96,32).is_err());
-        assert!(terminal_resize_receipt(&receipt,&action,&boot,&target,96,30).is_err());
-        let mut unknown=receipt.clone();unknown.state=ReceiptState::Uncertain;
-        assert!(terminal_resize_receipt(&unknown,&action,&boot,&target,96,32).is_err());
-        let mut foreign=receipt;foreign.shell_target=Some(ShellTarget{shell_id:Uuid::random(),generation:target.generation.clone()});
-        assert!(terminal_resize_receipt(&foreign,&action,&boot,&target,96,32).is_err());
+        terminal_resize_receipt(&receipt, &action, &boot, &target, 96, 32).unwrap();
+        assert!(
+            terminal_resize_receipt(&receipt, &Uuid::random(), &boot, &target, 96, 32).is_err()
+        );
+        assert!(
+            terminal_resize_receipt(&receipt, &action, &Uuid::random(), &target, 96, 32).is_err()
+        );
+        assert!(terminal_resize_receipt(&receipt, &action, &boot, &target, 96, 30).is_err());
+        let mut unknown = receipt.clone();
+        unknown.state = ReceiptState::Uncertain;
+        assert!(terminal_resize_receipt(&unknown, &action, &boot, &target, 96, 32).is_err());
+        let mut foreign = receipt;
+        foreign.shell_target = Some(ShellTarget {
+            shell_id: Uuid::random(),
+            generation: target.generation.clone(),
+        });
+        assert!(terminal_resize_receipt(&foreign, &action, &boot, &target, 96, 32).is_err());
     }
     #[test]
-    fn terminal_input_gate_accepts_only_complete_original_frame_dispatch_not_historical_pty_success() {
-        let action=Uuid::random();let boot=Uuid::random();let target=ShellTarget{shell_id:Uuid::random(),generation:Uuid::random()};
+    fn terminal_input_gate_accepts_only_complete_original_frame_dispatch_not_historical_pty_success()
+     {
+        let action = Uuid::random();
+        let boot = Uuid::random();
+        let target = ShellTarget {
+            shell_id: Uuid::random(),
+            generation: Uuid::random(),
+        };
         let receipt:Receipt=serde_json::from_value(json!({"actionId":action,"bootId":boot,"method":"shell.input","shellTarget":target,
             "createdAt":0,"updatedAt":1,"state":"dispatched","result":{"kind":"shell_dispatch","progress":{"frameBytes":19,"socketBytesWritten":19,"frameComplete":true}}})).unwrap();
-        terminal_input_scope(&receipt,&action,&boot,&target).unwrap();
-        grid_receipt(&receipt,&action,&boot,&GridSubject::Shell(target.clone())).unwrap();
-        assert!(terminal_input_scope(&receipt,&Uuid::random(),&boot,&target).is_err());
-        assert!(terminal_input_scope(&receipt,&action,&Uuid::random(),&target).is_err());
-        assert!(terminal_input_scope(&receipt,&action,&boot,&ShellTarget{shell_id:Uuid::random(),generation:target.generation.clone()}).is_err());
-        let mut partial=receipt.clone();partial.state=ReceiptState::Uncertain;
-        partial.result=Some(ActionResult::ShellDispatch(ActionResultShellDispatch{progress:ShellDispatchProgress{frame_bytes:Some(19),socket_bytes_written:Some(7),frame_complete:Some(false)}}));
-        terminal_input_scope(&partial,&action,&boot,&target).unwrap();
-        assert!(grid_receipt(&partial,&action,&boot,&GridSubject::Shell(target.clone())).is_err());
+        terminal_input_scope(&receipt, &action, &boot, &target).unwrap();
+        grid_receipt(
+            &receipt,
+            &action,
+            &boot,
+            &GridSubject::Shell(target.clone()),
+        )
+        .unwrap();
+        assert!(terminal_input_scope(&receipt, &Uuid::random(), &boot, &target).is_err());
+        assert!(terminal_input_scope(&receipt, &action, &Uuid::random(), &target).is_err());
+        assert!(
+            terminal_input_scope(
+                &receipt,
+                &action,
+                &boot,
+                &ShellTarget {
+                    shell_id: Uuid::random(),
+                    generation: target.generation.clone()
+                }
+            )
+            .is_err()
+        );
+        let mut partial = receipt.clone();
+        partial.state = ReceiptState::Uncertain;
+        partial.result = Some(ActionResult::ShellDispatch(ActionResultShellDispatch {
+            progress: ShellDispatchProgress {
+                frame_bytes: Some(19),
+                socket_bytes_written: Some(7),
+                frame_complete: Some(false),
+            },
+        }));
+        terminal_input_scope(&partial, &action, &boot, &target).unwrap();
+        assert!(
+            grid_receipt(
+                &partial,
+                &action,
+                &boot,
+                &GridSubject::Shell(target.clone())
+            )
+            .is_err()
+        );
         let historical:Receipt=serde_json::from_value(json!({"actionId":action,"bootId":boot,"method":"shell.input","shellTarget":target,
             "createdAt":0,"updatedAt":1,"state":"succeeded","result":{"kind":"shell_input","progress":{"encodedBytes":13,"writtenBytes":13,"flushCompleted":true}}})).unwrap();
         historical.validate().unwrap();
-        assert!(grid_receipt(&historical,&action,&boot,&GridSubject::Shell(target)).is_err());
+        assert!(grid_receipt(&historical, &action, &boot, &GridSubject::Shell(target)).is_err());
     }
     #[test]
     fn configured_terminal_gate_never_adopts_a_provider_target_from_a_historical_factory_receipt() {
-        let action=Uuid::random();let boot=Uuid::random();
-        let receipt:Receipt=serde_json::from_value(json!({"actionId":action,"bootId":boot,"method":"terminal.create",
-            "createdAt":0,"updatedAt":1,"state":"reserved"})).unwrap();
-        terminal_creation_scope(&receipt,&action,&boot).unwrap();
-        assert!(terminal_creation_scope(&receipt,&Uuid::random(),&boot).is_err());
-        assert!(terminal_creation_scope(&receipt,&action,&Uuid::random()).is_err());
-        let mut historical=receipt;historical.target=Some(Target{session_id:Uuid::random(),generation:Uuid::random()});
+        let action = Uuid::random();
+        let boot = Uuid::random();
+        let receipt: Receipt = serde_json::from_value(
+            json!({"actionId":action,"bootId":boot,"method":"terminal.create",
+            "createdAt":0,"updatedAt":1,"state":"reserved"}),
+        )
+        .unwrap();
+        terminal_creation_scope(&receipt, &action, &boot).unwrap();
+        assert!(terminal_creation_scope(&receipt, &Uuid::random(), &boot).is_err());
+        assert!(terminal_creation_scope(&receipt, &action, &Uuid::random()).is_err());
+        let mut historical = receipt;
+        historical.target = Some(Target {
+            session_id: Uuid::random(),
+            generation: Uuid::random(),
+        });
         historical.validate().unwrap();
-        assert!(terminal_creation_scope(&historical,&action,&boot).is_err());
+        assert!(terminal_creation_scope(&historical, &action, &boot).is_err());
     }
 
     fn admission_args() -> Vec<&'static str> {
-        vec!["smoke","--admission-only","--backend","omp","--backend","codex",
-            "--goatr","/nix/store/example/bin/goatr","--config","/private/config.toml",
-            "--workspace-root","/workspace","--consent-owned-providers","--evidence-dir","/private/evidence"]
+        vec![
+            "smoke",
+            "--admission-only",
+            "--backend",
+            "omp",
+            "--backend",
+            "codex",
+            "--goatr",
+            "/nix/store/example/bin/goatr",
+            "--config",
+            "/private/config.toml",
+            "--workspace-root",
+            "/workspace",
+            "--consent-owned-providers",
+            "--evidence-dir",
+            "/private/evidence",
+        ]
     }
     fn shared_args() -> Vec<&'static str> {
-        let mut args=admission_args();
-        args[1]="--shared-agent-only";
+        let mut args = admission_args();
+        args[1] = "--shared-agent-only";
         args.push("--automate-native-inputs");
         args
     }
     #[test]
     fn shared_agent_cli_requires_both_unique_backends_and_explicit_owned_inputs() {
-        let args=shared_args();
-        let parsed=feedback_arguments(arguments_base()).try_get_matches_from(&args).unwrap();
+        let args = shared_args();
+        let parsed = feedback_arguments(arguments_base())
+            .try_get_matches_from(&args)
+            .unwrap();
         require_shared_backends(&parsed).unwrap();
-        for backends in [vec!["omp"],vec!["codex"],vec!["omp","omp"],vec!["codex","codex"],vec!["omp","codex","omp"]] {
-            let mut reduced=args.clone();
-            let first=reduced.iter().position(|arg|*arg=="--backend").unwrap();
-            reduced.drain(first..first+4);
-            for backend in backends {reduced.extend(["--backend",backend]);}
-            let parsed=feedback_arguments(arguments_base()).try_get_matches_from(reduced).unwrap();
+        for backends in [
+            vec!["omp"],
+            vec!["codex"],
+            vec!["omp", "omp"],
+            vec!["codex", "codex"],
+            vec!["omp", "codex", "omp"],
+        ] {
+            let mut reduced = args.clone();
+            let first = reduced.iter().position(|arg| *arg == "--backend").unwrap();
+            reduced.drain(first..first + 4);
+            for backend in backends {
+                reduced.extend(["--backend", backend]);
+            }
+            let parsed = feedback_arguments(arguments_base())
+                .try_get_matches_from(reduced)
+                .unwrap();
             assert!(require_shared_backends(&parsed).is_err());
         }
-        for required in ["--backend","--goatr","--config","--workspace-root","--consent-owned-providers","--automate-native-inputs","--evidence-dir"] {
-            let mut reduced=args.clone();
-            let at=reduced.iter().position(|arg|*arg==required).unwrap();
-            let count=if required=="--backend" {4}
-                else if matches!(required,"--consent-owned-providers"|"--automate-native-inputs") {1} else {2};
-            reduced.drain(at..at+count);
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(reduced).is_err(),"{required}");
+        for required in [
+            "--backend",
+            "--goatr",
+            "--config",
+            "--workspace-root",
+            "--consent-owned-providers",
+            "--automate-native-inputs",
+            "--evidence-dir",
+        ] {
+            let mut reduced = args.clone();
+            let at = reduced.iter().position(|arg| *arg == required).unwrap();
+            let count = if required == "--backend" {
+                4
+            } else if matches!(
+                required,
+                "--consent-owned-providers" | "--automate-native-inputs"
+            ) {
+                1
+            } else {
+                2
+            };
+            reduced.drain(at..at + count);
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(reduced)
+                    .is_err(),
+                "{required}"
+            );
         }
         for conflict in [
             "--admission-only",
@@ -15262,35 +19292,69 @@ mod tests {
     }
     #[test]
     fn shared_agent_evidence_is_exclusive_and_never_adopts_an_existing_scope() {
-        let root=fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("goatr-shared-evidence-{}",Uuid::random().0));
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("goatr-shared-evidence-{}", Uuid::random().0));
         struct Root(PathBuf);
-        impl Drop for Root {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
-        let _root=Root(root.clone());
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _root = Root(root.clone());
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-        let path=root.join("fresh");
+        let path = root.join("fresh");
         fresh_shared_evidence(&path).unwrap();
-        private_dir(&path,false).unwrap();
-        assert_eq!(fresh_shared_evidence(&path).unwrap_err().kind(),io::ErrorKind::AlreadyExists);
+        private_dir(&path, false).unwrap();
+        assert_eq!(
+            fresh_shared_evidence(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
     }
     #[test]
     fn shared_effective_config_uses_real_owned_scope_without_adopting_template_owner() {
         use std::os::unix::fs::PermissionsExt;
-        fn published(path: &Path,config: &Config) -> io::Result<Config> {
-            let lock=goatr::setup::SetupLock::acquire(path.parent().unwrap())?;
-            lock.publish(path,&goatr::setup::ExpectedFile::Absent,config.serialized()?.as_bytes())?;
+        fn published(path: &Path, config: &Config) -> io::Result<Config> {
+            let lock = goatr::setup::SetupLock::acquire(path.parent().unwrap())?;
+            lock.publish(
+                path,
+                &goatr::setup::ExpectedFile::Absent,
+                config.serialized()?.as_bytes(),
+            )?;
             drop(lock);
             Config::load(path)
         }
         struct Root(PathBuf);
-        impl Drop for Root {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
-        let home=fs::canonicalize(PathBuf::from(std::env::var_os("HOME").unwrap())).unwrap();
-        let root=Root(home.join(format!(".scfg-{}",&Uuid::random().0[..12])));
-        fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
-        for directory in ["template-runtime","registry","sessions","blobs","owned","owned/runtime","owned/runtime/b","owned/project"] {
-            fs::DirBuilder::new().mode(0o700).create(root.0.join(directory)).unwrap();
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
         }
-        let wrapper=root.0.join("wrapper");
-        let mut file=OpenOptions::new().write(true).create_new(true).mode(0o700).open(&wrapper).unwrap();
+        let home = fs::canonicalize(PathBuf::from(std::env::var_os("HOME").unwrap())).unwrap();
+        let root = Root(home.join(format!(".scfg-{}", &Uuid::random().0[..12])));
+        fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
+        for directory in [
+            "template-runtime",
+            "registry",
+            "sessions",
+            "blobs",
+            "owned",
+            "owned/runtime",
+            "owned/runtime/b",
+            "owned/project",
+        ] {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(root.0.join(directory))
+                .unwrap();
+        }
+        let wrapper = root.0.join("wrapper");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&wrapper)
+            .unwrap();
         file.write_all(b"#!/bin/sh\nexit 99\n").unwrap();
         drop(file);
         let template=Config::parse(&format!(
@@ -15298,118 +19362,215 @@ mod tests {
             root.0.join("template-runtime"),root.0.join("template-runtime"),
             root.0.join("registry"),root.0.join("blobs"),root.0.join("sessions"),
         )).unwrap();
-        let template=published(&root.0.join("deployment.toml"),&template).unwrap();
+        let template = published(&root.0.join("deployment.toml"), &template).unwrap();
         assert!(template.codex_owners.is_empty());
         assert!(template.backend_reason(Provider::Codex).unwrap().is_some());
-        let mut effective=template.clone();
-        effective.runtime_dir=root.0.join("owned/runtime");
-        effective.runtime_dir_agent=effective.runtime_dir.clone();
-        effective.herdr_sockets=vec![root.0.join("owned/h.sock")];
-        effective.projects=vec![ConfiguredProject{id:Uuid::random(),
-            allow_read_tools:false,
-            label:Label::new("Owned fixture project").unwrap(),path:root.0.join("owned/project")}];
-        let owner=CodexOwner{id:Uuid::random(),socket_host:effective.runtime_dir.join("c.sock"),
-            socket_agent:effective.runtime_dir.join("c.sock"),bindings_dir:effective.runtime_dir.join("b"),
-            unit:"goatr-config-fixture.service".into()};
-        effective.default_codex_owner_id=Some(owner.id.clone());
-        effective.codex_owners=vec![owner];
-        let effective=published(&root.0.join("owned/config.toml"),&effective).unwrap();
-        for provider in [Provider::Omp,Provider::Codex] {
+        let mut effective = template.clone();
+        effective.runtime_dir = root.0.join("owned/runtime");
+        effective.runtime_dir_agent = effective.runtime_dir.clone();
+        effective.herdr_sockets = vec![root.0.join("owned/h.sock")];
+        effective.projects = vec![ConfiguredProject {
+            id: Uuid::random(),
+            allow_read_tools: false,
+            label: Label::new("Owned fixture project").unwrap(),
+            path: root.0.join("owned/project"),
+        }];
+        let owner = CodexOwner {
+            id: Uuid::random(),
+            socket_host: effective.runtime_dir.join("c.sock"),
+            socket_agent: effective.runtime_dir.join("c.sock"),
+            bindings_dir: effective.runtime_dir.join("b"),
+            unit: "goatr-config-fixture.service".into(),
+        };
+        effective.default_codex_owner_id = Some(owner.id.clone());
+        effective.codex_owners = vec![owner];
+        let effective = published(&root.0.join("owned/config.toml"), &effective).unwrap();
+        for provider in [Provider::Omp, Provider::Codex] {
             assert!(effective.backend_reason(provider).unwrap().is_none());
         }
         // Configuration trust/attempt eligibility is not a fabricated native owner.
         assert!(!effective.codex_owners[0].socket_host.try_exists().unwrap());
-        assert!(fs::read_dir(&effective.codex_owners[0].bindings_dir).unwrap().next().is_none());
-        let mut missing=effective.clone();
-        missing.codex_owners[0].bindings_dir=effective.runtime_dir.join("missing-bindings");
-        let missing=published(&root.0.join("owned/missing-bindings.toml"),&missing).unwrap();
+        assert!(
+            fs::read_dir(&effective.codex_owners[0].bindings_dir)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        let mut missing = effective.clone();
+        missing.codex_owners[0].bindings_dir = effective.runtime_dir.join("missing-bindings");
+        let missing = published(&root.0.join("owned/missing-bindings.toml"), &missing).unwrap();
         assert!(missing.backend_reason(Provider::Codex).unwrap().is_some());
-        let mut missing=effective.clone();
-        missing.executables.omp=Some(root.0.join("missing-outer-wrapper"));
-        let missing=published(&root.0.join("owned/missing-wrapper.toml"),&missing).unwrap();
+        let mut missing = effective.clone();
+        missing.executables.omp = Some(root.0.join("missing-outer-wrapper"));
+        let missing = published(&root.0.join("owned/missing-wrapper.toml"), &missing).unwrap();
         assert!(missing.backend_reason(Provider::Omp).unwrap().is_some());
-        let mut missing=effective.clone();
-        missing.omp_registry_dir=Some(root.0.join("missing-registry"));
-        let missing=published(&root.0.join("owned/missing-registry.toml"),&missing).unwrap();
+        let mut missing = effective.clone();
+        missing.omp_registry_dir = Some(root.0.join("missing-registry"));
+        let missing = published(&root.0.join("owned/missing-registry.toml"), &missing).unwrap();
         assert!(missing.backend_reason(Provider::Omp).unwrap().is_some());
-        let mut missing=effective.clone();
-        missing.runtime_dir=root.0.join("missing-runtime");
-        assert!(published(&root.0.join("owned/missing-runtime.toml"),&missing).is_err());
-        let unsafe_bindings=root.0.join("unsafe-bindings");
-        fs::DirBuilder::new().mode(0o700).create(&unsafe_bindings).unwrap();
-        fs::set_permissions(&unsafe_bindings,fs::Permissions::from_mode(0o755)).unwrap();
-        let mut unsafe_scope=effective.clone();
-        unsafe_scope.codex_owners[0].bindings_dir=unsafe_bindings;
-        assert!(published(&root.0.join("owned/unsafe-bindings.toml"),&unsafe_scope).is_err());
-        let unsafe_wrapper=root.0.join("unsafe-wrapper");
-        fs::write(&unsafe_wrapper,b"#!/bin/sh\nexit 99\n").unwrap();
-        fs::set_permissions(&unsafe_wrapper,fs::Permissions::from_mode(0o777)).unwrap();
-        let mut unsafe_scope=effective.clone();
-        unsafe_scope.executables.codex=Some(unsafe_wrapper);
-        assert!(published(&root.0.join("owned/unsafe-wrapper.toml"),&unsafe_scope).is_err());
+        let mut missing = effective.clone();
+        missing.runtime_dir = root.0.join("missing-runtime");
+        assert!(published(&root.0.join("owned/missing-runtime.toml"), &missing).is_err());
+        let unsafe_bindings = root.0.join("unsafe-bindings");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&unsafe_bindings)
+            .unwrap();
+        fs::set_permissions(&unsafe_bindings, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut unsafe_scope = effective.clone();
+        unsafe_scope.codex_owners[0].bindings_dir = unsafe_bindings;
+        assert!(published(&root.0.join("owned/unsafe-bindings.toml"), &unsafe_scope).is_err());
+        let unsafe_wrapper = root.0.join("unsafe-wrapper");
+        fs::write(&unsafe_wrapper, b"#!/bin/sh\nexit 99\n").unwrap();
+        fs::set_permissions(&unsafe_wrapper, fs::Permissions::from_mode(0o777)).unwrap();
+        let mut unsafe_scope = effective.clone();
+        unsafe_scope.executables.codex = Some(unsafe_wrapper);
+        assert!(published(&root.0.join("owned/unsafe-wrapper.toml"), &unsafe_scope).is_err());
     }
     #[test]
     fn shared_agent_native_page_admission_rejects_changed_views_duplicates_and_live_cache_rows() {
-        let view=Uuid::random();
-        let mut first=generation_record(5);first.source=RecordSource::NativePage;
-        let page=SessionHistoryResult{view_id:view.clone(),records:vec![first],next_cursor:None};
-        let mut seen=HashSet::new();
-        assert_eq!(shared_history_page(&page,&view,RecordSource::NativePage,Some(6),&mut seen).unwrap(),Some(5));
-        assert!(shared_history_page(&page,&view,RecordSource::NativePage,Some(6),&mut seen).is_err());
-        assert!(shared_history_page(&page,&Uuid::random(),RecordSource::NativePage,None,&mut HashSet::new()).is_err());
-        let mut cached=page.clone();cached.records[0].source=RecordSource::Live;
-        assert!(shared_history_page(&cached,&view,RecordSource::NativePage,None,&mut HashSet::new()).is_err());
-        assert!(shared_history_page(&page,&view,RecordSource::NativePage,Some(5),&mut HashSet::new()).is_err());
+        let view = Uuid::random();
+        let mut first = generation_record(5);
+        first.source = RecordSource::NativePage;
+        let page = SessionHistoryResult {
+            view_id: view.clone(),
+            records: vec![first],
+            next_cursor: None,
+        };
+        let mut seen = HashSet::new();
+        assert_eq!(
+            shared_history_page(&page, &view, RecordSource::NativePage, Some(6), &mut seen)
+                .unwrap(),
+            Some(5)
+        );
+        assert!(
+            shared_history_page(&page, &view, RecordSource::NativePage, Some(6), &mut seen)
+                .is_err()
+        );
+        assert!(
+            shared_history_page(
+                &page,
+                &Uuid::random(),
+                RecordSource::NativePage,
+                None,
+                &mut HashSet::new()
+            )
+            .is_err()
+        );
+        let mut cached = page.clone();
+        cached.records[0].source = RecordSource::Live;
+        assert!(
+            shared_history_page(
+                &cached,
+                &view,
+                RecordSource::NativePage,
+                None,
+                &mut HashSet::new()
+            )
+            .is_err()
+        );
+        assert!(
+            shared_history_page(
+                &page,
+                &view,
+                RecordSource::NativePage,
+                Some(5),
+                &mut HashSet::new()
+            )
+            .is_err()
+        );
     }
     #[test]
     fn shared_agent_stream_admission_requires_new_events_not_the_open_snapshot() {
-        let mut snapshot=generation_snapshot();
+        let mut snapshot = generation_snapshot();
         snapshot.history.push(generation_record(1));
-        let expected=target(&snapshot.state.summary);
-        let mut view=GenerationView::new(snapshot,&expected).unwrap();
-        assert!(!view.streamed_text&&!view.streamed_tool);
-        view.routed_event(generation_event(&view,1,EventBody::HistoryUpsert(HistoryUpsertEvent{
-            records:vec![generation_record(1)],
-        }))).unwrap();
+        let expected = target(&snapshot.state.summary);
+        let mut view = GenerationView::new(snapshot, &expected).unwrap();
+        assert!(!view.streamed_text && !view.streamed_tool);
+        view.routed_event(generation_event(
+            &view,
+            1,
+            EventBody::HistoryUpsert(HistoryUpsertEvent {
+                records: vec![generation_record(1)],
+            }),
+        ))
+        .unwrap();
         assert!(!view.streamed_tool);
-        let assistant:HistoryRecord=serde_json::from_value(json!({"id":"assistant","order":2,
+        let assistant: HistoryRecord = serde_json::from_value(json!({"id":"assistant","order":2,
             "role":"assistant","kind":"message","text":{"kind":"text","text":"fixture"},
-            "source":"live","complete":true,"sourceTruncated":false})).unwrap();
-        view.routed_event(generation_event(&view,2,EventBody::HistoryUpsert(HistoryUpsertEvent{
-            records:vec![assistant],
-        }))).unwrap();
-        assert!(view.streamed_text&&!view.streamed_tool);
-        view.routed_event(generation_event(&view,3,EventBody::HistoryUpsert(HistoryUpsertEvent{
-            records:vec![generation_record(3)],
-        }))).unwrap();
-        assert!(view.streamed_text&&view.streamed_tool);
+            "source":"live","complete":true,"sourceTruncated":false}))
+        .unwrap();
+        view.routed_event(generation_event(
+            &view,
+            2,
+            EventBody::HistoryUpsert(HistoryUpsertEvent {
+                records: vec![assistant],
+            }),
+        ))
+        .unwrap();
+        assert!(view.streamed_text && !view.streamed_tool);
+        view.routed_event(generation_event(
+            &view,
+            3,
+            EventBody::HistoryUpsert(HistoryUpsertEvent {
+                records: vec![generation_record(3)],
+            }),
+        ))
+        .unwrap();
+        assert!(view.streamed_text && view.streamed_tool);
     }
     #[test]
     fn shared_agent_prompt_admission_distinguishes_assistant_echo_from_duplicate_native_input() {
-        let user:HistoryRecord=serde_json::from_value(json!({"id":"user","order":1,
+        let user: HistoryRecord = serde_json::from_value(json!({"id":"user","order":1,
             "role":"user","kind":"message","text":{"kind":"text","text":"owned-marker"},
-            "source":"live","complete":true,"sourceTruncated":false})).unwrap();
-        let mut assistant=user.clone();
-        assistant.id=Id("assistant".into());
-        assistant.role=Role::Assistant;
-        assert!(shared_user_record(&[user.clone(),assistant],"owned-marker").unwrap().is_some());
-        let mut duplicate=user.clone();duplicate.id=Id("duplicate".into());
-        assert!(shared_user_record(&[user,duplicate],"owned-marker").is_err());
+            "source":"live","complete":true,"sourceTruncated":false}))
+        .unwrap();
+        let mut assistant = user.clone();
+        assistant.id = Id("assistant".into());
+        assistant.role = Role::Assistant;
+        assert!(
+            shared_user_record(&[user.clone(), assistant], "owned-marker")
+                .unwrap()
+                .is_some()
+        );
+        let mut duplicate = user.clone();
+        duplicate.id = Id("duplicate".into());
+        assert!(shared_user_record(&[user, duplicate], "owned-marker").is_err());
     }
     #[test]
     fn finite_admission_cli_requires_explicit_inputs_and_rejects_effectful_modes() {
         let args = admission_args();
-        assert!(feedback_arguments(arguments_base()).try_get_matches_from(&args).is_ok());
-        for required in ["--backend","--goatr","--config","--workspace-root","--consent-owned-providers"] {
+        assert!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(&args)
+                .is_ok()
+        );
+        for required in [
+            "--backend",
+            "--goatr",
+            "--config",
+            "--workspace-root",
+            "--consent-owned-providers",
+        ] {
             let mut missing = Vec::new();
             let mut skip = false;
             for arg in &args {
-                if skip { skip = false; continue; }
+                if skip {
+                    skip = false;
+                    continue;
+                }
                 if *arg == required {
                     skip = required != "--consent-owned-providers";
-                } else { missing.push(*arg); }
+                } else {
+                    missing.push(*arg);
+                }
             }
-            assert!(feedback_arguments(arguments_base()).try_get_matches_from(missing).is_err(),"{required}");
+            assert!(
+                feedback_arguments(arguments_base())
+                    .try_get_matches_from(missing)
+                    .is_err(),
+                "{required}"
+            );
         }
         for conflict in [
             "--grid",
@@ -15442,52 +19603,107 @@ mod tests {
     }
     #[test]
     fn finite_admission_needs_current_source_and_each_selected_provider_eligibility() {
-        let server = Server { server_id:Uuid::random(), name:Label::new("owned").unwrap(),
-            connectivity:ServerConnectivity::Online, can_create:CanCreate{omp:true,codex:false}, reason:None };
-        let mut source = NativeHierarchy {server_id:server.server_id.clone(),server_incarnation:Uuid::random(),
-            freshness:NativeFreshness::Current,reason:None,workspaces:vec![],tabs:vec![],panes:vec![]};
-        let backends = [Provider::Omp,Provider::Codex].map(|provider|Backend{
-            provider,version:"source fixture".into(),availability:Availability::SetupRequired,reason:None});
-        assert_eq!(admission_reason(Provider::Omp,&backends,Some(&server),&[source.clone()]),"eligible");
-        assert_eq!(admission_reason(Provider::Codex,&backends,Some(&server),&[source.clone()]),"creation_unavailable");
-        let mut unavailable=backends.clone();
-        unavailable[0].availability=Availability::Unavailable;
-        assert_eq!(admission_reason(Provider::Omp,&unavailable,Some(&server),&[source.clone()]),"backend_unavailable");
-        source.freshness=NativeFreshness::Stale;
-        assert_eq!(admission_reason(Provider::Omp,&backends,Some(&server),&[source]),"source_not_current");
-        assert_eq!(admission_reason(Provider::Omp,&[],Some(&server),&[]),"backend_missing_or_ambiguous");
-        assert_eq!(admission_reason(Provider::Omp,&backends,None,&[]),"source_missing_or_ambiguous");
+        let server = Server {
+            server_id: Uuid::random(),
+            name: Label::new("owned").unwrap(),
+            connectivity: ServerConnectivity::Online,
+            can_create: CanCreate {
+                omp: true,
+                codex: false,
+            },
+            reason: None,
+        };
+        let mut source = NativeHierarchy {
+            server_id: server.server_id.clone(),
+            server_incarnation: Uuid::random(),
+            freshness: NativeFreshness::Current,
+            reason: None,
+            workspaces: vec![],
+            tabs: vec![],
+            panes: vec![],
+        };
+        let backends = [Provider::Omp, Provider::Codex].map(|provider| Backend {
+            provider,
+            version: "source fixture".into(),
+            availability: Availability::SetupRequired,
+            reason: None,
+        });
+        assert_eq!(
+            admission_reason(Provider::Omp, &backends, Some(&server), &[source.clone()]),
+            "eligible"
+        );
+        assert_eq!(
+            admission_reason(Provider::Codex, &backends, Some(&server), &[source.clone()]),
+            "creation_unavailable"
+        );
+        let mut unavailable = backends.clone();
+        unavailable[0].availability = Availability::Unavailable;
+        assert_eq!(
+            admission_reason(
+                Provider::Omp,
+                &unavailable,
+                Some(&server),
+                &[source.clone()]
+            ),
+            "backend_unavailable"
+        );
+        source.freshness = NativeFreshness::Stale;
+        assert_eq!(
+            admission_reason(Provider::Omp, &backends, Some(&server), &[source]),
+            "source_not_current"
+        );
+        assert_eq!(
+            admission_reason(Provider::Omp, &[], Some(&server), &[]),
+            "backend_missing_or_ambiguous"
+        );
+        assert_eq!(
+            admission_reason(Provider::Omp, &backends, None, &[]),
+            "source_missing_or_ambiguous"
+        );
     }
     #[test]
     fn shared_creation_admission_keeps_original_source_before_first_and_second_provider() {
-        let identity=(Uuid::random(),Uuid::random());
-        let original=ServerEvidence{linux_boot_id:Uuid::random(),pid:17,pid_start_ticks:3,
-            socket_device:1,socket_inode:10};
-        let mut initial=None;
+        let identity = (Uuid::random(), Uuid::random());
+        let original = ServerEvidence {
+            linux_boot_id: Uuid::random(),
+            pid: 17,
+            pid_start_ticks: 3,
+            socket_device: 1,
+            socket_inode: 10,
+        };
+        let mut initial = None;
         for created in 0..=1 {
-            let mut workspaces=Vec::new();
-            let mut tabs=Vec::new();
-            let mut panes=Vec::new();
-            let mut shown_workspaces=Vec::new();
-            let mut shown_tabs=Vec::new();
-            let mut shown_panes=Vec::new();
+            let mut workspaces = Vec::new();
+            let mut tabs = Vec::new();
+            let mut panes = Vec::new();
+            let mut shown_workspaces = Vec::new();
+            let mut shown_tabs = Vec::new();
+            let mut shown_panes = Vec::new();
             for index in 0..=created {
-                let workspace=format!("workspace-{index}");
-                let tab=format!("tab-{index}");
-                let pane=format!("pane-{index}");
-                let terminal=format!("terminal-{index}");
-                workspaces.push(json!({"workspace_id":workspace,"number":index+1,"label":"fixture",
-                    "focused":index==0,"active_tab_id":tab,"agent_status":"idle"}));
+                let workspace = format!("workspace-{index}");
+                let tab = format!("tab-{index}");
+                let pane = format!("pane-{index}");
+                let terminal = format!("terminal-{index}");
+                workspaces.push(
+                    json!({"workspace_id":workspace,"number":index+1,"label":"fixture",
+                    "focused":index==0,"active_tab_id":tab,"agent_status":"idle"}),
+                );
                 tabs.push(json!({"tab_id":tab,"workspace_id":workspace,"number":1,
                     "label":"fixture","focused":index==0,"agent_status":"idle"}));
-                panes.push(json!({"pane_id":pane,"terminal_id":terminal,"workspace_id":workspace,
-                    "tab_id":tab,"focused":index==0,"agent_status":"idle"}));
-                shown_workspaces.push(json!({"workspaceId":workspace,"number":index+1,"label":"fixture",
-                    "focused":index==0,"activeTabId":tab,"agentStatus":"idle"}));
+                panes.push(
+                    json!({"pane_id":pane,"terminal_id":terminal,"workspace_id":workspace,
+                    "tab_id":tab,"focused":index==0,"agent_status":"idle"}),
+                );
+                shown_workspaces.push(
+                    json!({"workspaceId":workspace,"number":index+1,"label":"fixture",
+                    "focused":index==0,"activeTabId":tab,"agentStatus":"idle"}),
+                );
                 shown_tabs.push(json!({"tabId":tab,"workspaceId":workspace,"number":1,
                     "label":"fixture","focused":index==0,"agentStatus":"idle"}));
-                shown_panes.push(json!({"paneId":pane,"terminalId":terminal,"workspaceId":workspace,
-                    "tabId":tab,"focused":index==0,"agentStatus":"idle"}));
+                shown_panes.push(
+                    json!({"paneId":pane,"terminalId":terminal,"workspaceId":workspace,
+                    "tabId":tab,"focused":index==0,"agentStatus":"idle"}),
+                );
             }
             let native:Snapshot=serde_json::from_value(json!({"version":"0.9.1","protocol":22,
                 "focused_workspace_id":"workspace-0","focused_tab_id":"tab-0","focused_pane_id":"pane-0",
@@ -15499,33 +19715,67 @@ mod tests {
                     "workspaces":shown_workspaces,"tabs":shown_tabs,"panes":shown_panes}]})).unwrap();
             native.validate().unwrap();
             inventory.validate().unwrap();
-            let initial=initial.get_or_insert_with(||native.clone());
-            assert_eq!(creation_source_observation(&identity,&original,initial,&original,&native,&inventory),Ok(true));
-            let mut replaced=original.clone();replaced.socket_inode+=1;
-            assert!(creation_source_observation(&identity,&original,initial,&replaced,&native,&inventory).is_err());
-            replaced=original.clone();replaced.pid+=1;replaced.pid_start_ticks+=1;
-            assert!(creation_source_observation(&identity,&original,initial,&replaced,&native,&inventory).is_err());
-            let mut successor=inventory.clone();
-            successor.hierarchy[0].server_incarnation=Uuid::random();
-            assert!(creation_source_observation(&identity,&original,initial,&original,&native,&successor).is_err());
-            let mut rebound=native.clone();
-            rebound.panes[0].pane_id=Id("replacement".into());
-            rebound.panes[0].terminal_id=Id("replacement-terminal".into());
-            rebound.focused_pane_id=Some(Id("replacement".into()));
-            let mut rebound_inventory=inventory.clone();
-            rebound_inventory.hierarchy[0].panes[0].pane_id=Id("replacement".into());
-            rebound_inventory.hierarchy[0].panes[0].terminal_id=Id("replacement-terminal".into());
+            let initial = initial.get_or_insert_with(|| native.clone());
+            assert_eq!(
+                creation_source_observation(
+                    &identity, &original, initial, &original, &native, &inventory
+                ),
+                Ok(true)
+            );
+            let mut replaced = original.clone();
+            replaced.socket_inode += 1;
+            assert!(
+                creation_source_observation(
+                    &identity, &original, initial, &replaced, &native, &inventory
+                )
+                .is_err()
+            );
+            replaced = original.clone();
+            replaced.pid += 1;
+            replaced.pid_start_ticks += 1;
+            assert!(
+                creation_source_observation(
+                    &identity, &original, initial, &replaced, &native, &inventory
+                )
+                .is_err()
+            );
+            let mut successor = inventory.clone();
+            successor.hierarchy[0].server_incarnation = Uuid::random();
+            assert!(
+                creation_source_observation(
+                    &identity, &original, initial, &original, &native, &successor
+                )
+                .is_err()
+            );
+            let mut rebound = native.clone();
+            rebound.panes[0].pane_id = Id("replacement".into());
+            rebound.panes[0].terminal_id = Id("replacement-terminal".into());
+            rebound.focused_pane_id = Some(Id("replacement".into()));
+            let mut rebound_inventory = inventory.clone();
+            rebound_inventory.hierarchy[0].panes[0].pane_id = Id("replacement".into());
+            rebound_inventory.hierarchy[0].panes[0].terminal_id = Id("replacement-terminal".into());
             rebound.validate().unwrap();
             rebound_inventory.validate().unwrap();
-            assert!(creation_source_observation(&identity,&original,initial,&original,&rebound,&rebound_inventory).is_err());
+            assert!(
+                creation_source_observation(
+                    &identity,
+                    &original,
+                    initial,
+                    &original,
+                    &rebound,
+                    &rebound_inventory
+                )
+                .is_err()
+            );
         }
     }
     #[test]
     fn admission_refuses_a_current_same_name_successor_instead_of_retargeting() {
-        let server=Uuid::random();
-        let incarnation=Uuid::random();
-        let native:Snapshot=serde_json::from_value(json!({"version":"0.9.1","protocol":22,
-            "workspaces":[],"tabs":[],"panes":[],"agents":[]})).unwrap();
+        let server = Uuid::random();
+        let incarnation = Uuid::random();
+        let native: Snapshot = serde_json::from_value(json!({"version":"0.9.1","protocol":22,
+            "workspaces":[],"tabs":[],"panes":[],"agents":[]}))
+        .unwrap();
         let mut inventory:HostSnapshotResult=serde_json::from_value(json!({
             "subscription":Uuid::random(),"seq":0,
             "servers":[{"serverId":server,"name":"owned","connectivity":"online","canCreate":{"omp":true,"codex":true}}],
@@ -15534,19 +19784,25 @@ mod tests {
                 "workspaces":[],"tabs":[],"panes":[]}]})).unwrap();
         native.validate().unwrap();
         inventory.validate().unwrap();
-        let pinned=(server,incarnation);
-        assert!(admission_source(&inventory,"owned",&native,Some(&pinned)).is_ok());
-        inventory.hierarchy[0].server_incarnation=Uuid::random();
-        assert_eq!(admission_source(&inventory,"owned",&native,Some(&pinned)).unwrap_err(),"source_replaced");
-        inventory.servers[0].server_id=Uuid::random();
-        inventory.hierarchy[0].server_id=inventory.servers[0].server_id.clone();
-        assert_eq!(admission_source(&inventory,"owned",&native,Some(&pinned)).unwrap_err(),"source_replaced");
+        let pinned = (server, incarnation);
+        assert!(admission_source(&inventory, "owned", &native, Some(&pinned)).is_ok());
+        inventory.hierarchy[0].server_incarnation = Uuid::random();
+        assert_eq!(
+            admission_source(&inventory, "owned", &native, Some(&pinned)).unwrap_err(),
+            "source_replaced"
+        );
+        inventory.servers[0].server_id = Uuid::random();
+        inventory.hierarchy[0].server_id = inventory.servers[0].server_id.clone();
+        assert_eq!(
+            admission_source(&inventory, "owned", &native, Some(&pinned)).unwrap_err(),
+            "source_replaced"
+        );
     }
     #[test]
     fn hello_manager_capture_accepts_only_closed_first_guard_fields() {
         let line = b"goatr_hello_capture phase=codex_manager_hello guard=runtime_path code=NotReady io=none";
         let value = parse_hello_guard_line(line).unwrap();
-        assert_eq!(value["guard"],"runtime_path");
+        assert_eq!(value["guard"], "runtime_path");
         for line in [
             b"goatr_hello_capture phase=codex_manager_hello guard=/private/path code=NotReady io=none".as_slice(),
             b"goatr_hello_capture phase=codex_manager_hello guard=runtime_path code=NotReady io=private_error",
@@ -15626,7 +19882,7 @@ mod tests {
     #[test]
     fn omp_launch_capture_non_succeeded_creation_error_is_closed() {
         let receipt = Receipt {
-                    shell_target: None,
+            shell_target: None,
             action_id: Uuid::random(),
             method: ActionMethod::SessionCreate,
             boot_id: Uuid::random(),
@@ -15649,24 +19905,65 @@ mod tests {
 
     #[test]
     fn physical_ephemeral_relay_requires_explicit_backend_only_context() {
-        assert_eq!(physical_relay_bind_port(false, true, OwnedOmpCaptureMode::Backend, false).unwrap(), 7466);
-        assert_eq!(physical_relay_bind_port(false, true, OwnedOmpCaptureMode::None, true).unwrap(), 7466);
-        assert_eq!(physical_relay_bind_port(true, true, OwnedOmpCaptureMode::Backend, false).unwrap(), 0);
-        assert!(physical_relay_bind_port(true, false, OwnedOmpCaptureMode::Backend, false).is_err());
+        assert_eq!(
+            physical_relay_bind_port(false, true, OwnedOmpCaptureMode::Backend, false).unwrap(),
+            7466
+        );
+        assert_eq!(
+            physical_relay_bind_port(false, true, OwnedOmpCaptureMode::None, true).unwrap(),
+            7466
+        );
+        assert_eq!(
+            physical_relay_bind_port(true, true, OwnedOmpCaptureMode::Backend, false).unwrap(),
+            0
+        );
+        assert!(
+            physical_relay_bind_port(true, false, OwnedOmpCaptureMode::Backend, false).is_err()
+        );
         assert!(physical_relay_bind_port(true, true, OwnedOmpCaptureMode::Backend, true).is_err());
-        for mode in [OwnedOmpCaptureMode::None, OwnedOmpCaptureMode::Creation, OwnedOmpCaptureMode::Offline, OwnedOmpCaptureMode::Conflict] {
+        for mode in [
+            OwnedOmpCaptureMode::None,
+            OwnedOmpCaptureMode::Creation,
+            OwnedOmpCaptureMode::Offline,
+            OwnedOmpCaptureMode::Conflict,
+        ] {
             assert!(physical_relay_bind_port(true, true, mode, false).is_err());
         }
     }
 
     #[test]
     fn physical_ephemeral_relay_argument_requires_physical_capture() {
-        let accepted = ["smoke", "--physical-hello-capture", "--physical-relay-ephemeral",
-            "--config", "/owned/config.toml", "--goatr", "/nix/store/owned-goatr/bin/goatr",
-            "--admin-socket", "/owned/runtime/admin.sock", "--expected-goatr-sha256", "00",
-            "--expected-companion-lock-sha256", "00", "--evidence-dir", "/owned/evidence"];
-        assert!(feedback_arguments(arguments_base()).try_get_matches_from(accepted).is_ok());
-        assert!(feedback_arguments(arguments_base()).try_get_matches_from(accepted.into_iter().filter(|arg| *arg != "--physical-hello-capture")).is_err());
+        let accepted = [
+            "smoke",
+            "--physical-hello-capture",
+            "--physical-relay-ephemeral",
+            "--config",
+            "/owned/config.toml",
+            "--goatr",
+            "/nix/store/owned-goatr/bin/goatr",
+            "--admin-socket",
+            "/owned/runtime/admin.sock",
+            "--expected-goatr-sha256",
+            "00",
+            "--expected-companion-lock-sha256",
+            "00",
+            "--evidence-dir",
+            "/owned/evidence",
+        ];
+        assert!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(accepted)
+                .is_ok()
+        );
+        assert!(
+            feedback_arguments(arguments_base())
+                .try_get_matches_from(
+                    accepted
+                        .into_iter()
+                        .filter(|arg| *arg != "--physical-hello-capture")
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -15711,8 +20008,8 @@ mod tests {
 
     #[test]
     fn omp_result_deadline_detail_is_closed_and_keeps_one_backend_budget_slot() {
-        let prefix="goatr_omp_first_guard phase=shell_probe guard=result_deadline code=Timeout io=none frame=none";
-        let budget=herdr_report_capture::Budget::new_backend();
+        let prefix = "goatr_omp_first_guard phase=shell_probe guard=result_deadline code=Timeout io=none frame=none";
+        let budget = herdr_report_capture::Budget::new_backend();
         for detail in [
             "deadlineSite=loop_check observation=not_read entryBudget=expired",
             "deadlineSite=loop_check observation=empty_only entryBudget=le_1s",
@@ -15720,11 +20017,15 @@ mod tests {
             "deadlineSite=complete_before_parse observation=complete_seen entryBudget=gt_5s",
             "deadlineSite=parsed_success observation=complete_seen entryBudget=gt_5s",
         ] {
-            let parsed=parse_omp_guard_line(format!("{prefix} {detail}").as_bytes()).unwrap();
-            assert!(parsed["deadlineSite"].is_string()&&parsed["observation"].is_string()&&parsed["entryBudget"].is_string());
+            let parsed = parse_omp_guard_line(format!("{prefix} {detail}").as_bytes()).unwrap();
+            assert!(
+                parsed["deadlineSite"].is_string()
+                    && parsed["observation"].is_string()
+                    && parsed["entryBudget"].is_string()
+            );
             budget.omp(parsed);
         }
-        assert_eq!(budget.creation_counts().0,1);
+        assert_eq!(budget.creation_counts().0, 1);
         assert!(budget.shell_probe_captured());
         for detail in [
             "deadlineSite=unknown observation=not_read entryBudget=expired",
@@ -15735,19 +20036,53 @@ mod tests {
             "deadlineSite=after_authorization observation=not_read entryBudget=expired",
             "deadlineSite=loop_check observation=not_read entryBudget=expired extra=x",
             "deadlineSite=loop_check observation=not_read entryBudget=expired name=1 kind=1 pane=1 terminal=1 workspace=1 argv=1",
-        ] {assert!(parse_omp_guard_line(format!("{prefix} {detail}").as_bytes()).is_none());}
-        assert!(parse_omp_guard_line(format!("{} deadlineSite=loop_check observation=partial_seen entryBudget=le_1s",
-            prefix.replace("result_deadline","result_read_failed")).as_bytes()).is_none());
-        let plain=parse_omp_guard_line(prefix.as_bytes()).unwrap();
-        let legacy=herdr_report_capture::Budget::new(false);legacy.omp(plain.clone());
-        assert_eq!(legacy.creation_counts().0,1,"ordinary Creation reporting stays unchanged");
-        let backend=herdr_report_capture::Budget::new_backend();backend.omp(plain);
-        assert_eq!(backend.creation_counts().0,0,"Backend deadline requires the complete closed detail");
-        let mut extra=parse_omp_guard_line(format!("{prefix} deadlineSite=loop_check observation=partial_seen entryBudget=le_1s").as_bytes()).unwrap();
-        let creation=herdr_report_capture::Budget::new(false);creation.omp(extra.clone());
-        assert_eq!(creation.creation_counts().0,0,"Backend-only details do not enter ordinary Creation capture");
-        extra["unknown"]=json!("not admitted");backend.omp(extra);
-        assert_eq!(backend.creation_counts().0,0,"unknown fields cannot bypass the parser through the shared budget");
+        ] {
+            assert!(parse_omp_guard_line(format!("{prefix} {detail}").as_bytes()).is_none());
+        }
+        assert!(
+            parse_omp_guard_line(
+                format!(
+                    "{} deadlineSite=loop_check observation=partial_seen entryBudget=le_1s",
+                    prefix.replace("result_deadline", "result_read_failed")
+                )
+                .as_bytes()
+            )
+            .is_none()
+        );
+        let plain = parse_omp_guard_line(prefix.as_bytes()).unwrap();
+        let legacy = herdr_report_capture::Budget::new(false);
+        legacy.omp(plain.clone());
+        assert_eq!(
+            legacy.creation_counts().0,
+            1,
+            "ordinary Creation reporting stays unchanged"
+        );
+        let backend = herdr_report_capture::Budget::new_backend();
+        backend.omp(plain);
+        assert_eq!(
+            backend.creation_counts().0,
+            0,
+            "Backend deadline requires the complete closed detail"
+        );
+        let mut extra = parse_omp_guard_line(
+            format!("{prefix} deadlineSite=loop_check observation=partial_seen entryBudget=le_1s")
+                .as_bytes(),
+        )
+        .unwrap();
+        let creation = herdr_report_capture::Budget::new(false);
+        creation.omp(extra.clone());
+        assert_eq!(
+            creation.creation_counts().0,
+            0,
+            "Backend-only details do not enter ordinary Creation capture"
+        );
+        extra["unknown"] = json!("not admitted");
+        backend.omp(extra);
+        assert_eq!(
+            backend.creation_counts().0,
+            0,
+            "unknown fields cannot bypass the parser through the shared budget"
+        );
     }
 
     #[test]
@@ -16034,53 +20369,97 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn recorded_adb_home_is_consumed_only_by_the_child_and_unsafe_credential_metadata_refuses() {
-        const CHILD:&str="GOATR_ADB_HOME_METADATA_CHILD";
+    async fn recorded_adb_home_is_consumed_only_by_the_child_and_unsafe_credential_metadata_refuses()
+     {
+        const CHILD: &str = "GOATR_ADB_HOME_METADATA_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            assert_eq!(std::env::var_os("HOME"),std::env::var_os("GOATR_ADB_HOME_EXPECTED"));
-            let runtime=std::env::var_os("XDG_RUNTIME_DIR");
-            if std::env::var_os("GOATR_ADB_RUNTIME_ABSENT").is_some(){assert!(runtime.is_none());}else{assert_eq!(runtime,std::env::var_os("GOATR_ADB_RUNTIME_EXPECTED"));}
+            assert_eq!(
+                std::env::var_os("HOME"),
+                std::env::var_os("GOATR_ADB_HOME_EXPECTED")
+            );
+            let runtime = std::env::var_os("XDG_RUNTIME_DIR");
+            if std::env::var_os("GOATR_ADB_RUNTIME_ABSENT").is_some() {
+                assert!(runtime.is_none());
+            } else {
+                assert_eq!(runtime, std::env::var_os("GOATR_ADB_RUNTIME_EXPECTED"));
+            }
             println!("owned_adb_child_home_confirmed");
             return;
         }
-        struct Root(PathBuf);impl Drop for Root{fn drop(&mut self){fs::remove_dir_all(&self.0).unwrap();}}
-        let before_home=std::env::var_os("HOME");let before_runtime=std::env::var_os("XDG_RUNTIME_DIR");
-        let root=Root(fs::canonicalize(PathBuf::from(before_home.clone().unwrap())).unwrap().join(format!(".goatr-adb-home-{}",Uuid::random().0)));
+        struct Root(PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let before_home = std::env::var_os("HOME");
+        let before_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let root = Root(
+            fs::canonicalize(PathBuf::from(before_home.clone().unwrap()))
+                .unwrap()
+                .join(format!(".goatr-adb-home-{}", Uuid::random().0)),
+        );
         fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
-        let home=root.0.join("home");fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
-        let credential=home.join(".emulator_console_auth_token");
+        let home = root.0.join("home");
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let credential = home.join(".emulator_console_auth_token");
         // A nonsecret test fixture: the production validator must use metadata, not contents.
-        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&credential).unwrap().write_all(b"public metadata-only fixture").unwrap();
-        let lease_path=root.0.join("run.json");
-        let mut recorded=json!({"schema":1,"runId":"8bd5376a-b170-4fa3-80c0-d449834fed4d","ownerUid":uid(),"root":root.0,
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&credential)
+            .unwrap()
+            .write_all(b"public metadata-only fixture")
+            .unwrap();
+        let lease_path = root.0.join("run.json");
+        let mut recorded = json!({"schema":1,"runId":"8bd5376a-b170-4fa3-80c0-d449834fed4d","ownerUid":uid(),"root":root.0,
             "serial":"emulator-5594","avdName":"owned-avd","avdHome":home,"androidUserHome":home,"avdPath":home,
             "processIdentity":{"linuxBootId":Uuid::random(),"pid":1,"startTicks":"1","executable":"/nix/store/owned/qemu"}});
-        OpenOptions::new().write(true).create_new(true).mode(0o600).open(&lease_path).unwrap().write_all(&serde_json::to_vec(&recorded).unwrap()).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&lease_path)
+            .unwrap()
+            .write_all(&serde_json::to_vec(&recorded).unwrap())
+            .unwrap();
         assert!(lease(&lease_path).is_err());
-        recorded["adbClientHome"]=json!(home);
-        fs::write(&lease_path,serde_json::to_vec(&recorded).unwrap()).unwrap();
-        let selected=lease(&lease_path).unwrap();
-        let mut child=tokio::process::Command::new(std::env::current_exe().unwrap());
+        recorded["adbClientHome"] = json!(home);
+        fs::write(&lease_path, serde_json::to_vec(&recorded).unwrap()).unwrap();
+        let selected = lease(&lease_path).unwrap();
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
         child.args(["--exact","live::tests::recorded_adb_home_is_consumed_only_by_the_child_and_unsafe_credential_metadata_refuses","--nocapture"])
             .env(CHILD,"1").env("GOATR_ADB_HOME_EXPECTED",&home);
-        if let Some(runtime)=&before_runtime{child.env("GOATR_ADB_RUNTIME_EXPECTED",runtime);}else{child.env("GOATR_ADB_RUNTIME_ABSENT","1");}
-        configure_adb_client_home(&mut child,&selected.root,&selected.adb_client_home).unwrap();
-        let consumed=output(child,15,65536).await.unwrap();
-        assert!(consumed.windows(b"owned_adb_child_home_confirmed".len()).any(|part|part==b"owned_adb_child_home_confirmed"));
-        assert_eq!(std::env::var_os("HOME"),before_home);assert_eq!(std::env::var_os("XDG_RUNTIME_DIR"),before_runtime);
-        let alias=root.0.join("alias");std::os::unix::fs::symlink(&home,&alias).unwrap();
-        assert!(validate_adb_client_home(&root.0,&alias).is_err());
-        fs::set_permissions(&credential,fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(validate_adb_client_home(&root.0,&home).is_err());
-        fs::set_permissions(&credential,fs::Permissions::from_mode(0o600)).unwrap();
-        let hardlink=home.join("duplicate");fs::hard_link(&credential,&hardlink).unwrap();
-        assert!(validate_adb_client_home(&root.0,&home).is_err());fs::remove_file(hardlink).unwrap();
+        if let Some(runtime) = &before_runtime {
+            child.env("GOATR_ADB_RUNTIME_EXPECTED", runtime);
+        } else {
+            child.env("GOATR_ADB_RUNTIME_ABSENT", "1");
+        }
+        configure_adb_client_home(&mut child, &selected.root, &selected.adb_client_home).unwrap();
+        let consumed = output(child, 15, 65536).await.unwrap();
+        assert!(
+            consumed
+                .windows(b"owned_adb_child_home_confirmed".len())
+                .any(|part| part == b"owned_adb_child_home_confirmed")
+        );
+        assert_eq!(std::env::var_os("HOME"), before_home);
+        assert_eq!(std::env::var_os("XDG_RUNTIME_DIR"), before_runtime);
+        let alias = root.0.join("alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        assert!(validate_adb_client_home(&root.0, &alias).is_err());
+        fs::set_permissions(&credential, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(validate_adb_client_home(&root.0, &home).is_err());
+        fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+        let hardlink = home.join("duplicate");
+        fs::hard_link(&credential, &hardlink).unwrap();
+        assert!(validate_adb_client_home(&root.0, &home).is_err());
+        fs::remove_file(hardlink).unwrap();
         fs::remove_file(&credential).unwrap();
-        let name=std::ffi::CString::new(credential.as_os_str().as_encoded_bytes()).unwrap();
-        assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o600)},0);
-        assert!(validate_adb_client_home(&root.0,&home).is_err());
+        let name = std::ffi::CString::new(credential.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(validate_adb_client_home(&root.0, &home).is_err());
     }
-
 
     #[test]
     fn selected_emulator_selector_is_lease_local_and_closed() {
@@ -16165,8 +20544,10 @@ mod tests {
                 let _ = fs::remove_dir_all(&self.0);
             }
         }
-        let root = Root(PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(format!(".grid-config-{}", Uuid::random().0)));
+        let root = Root(
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(format!(".grid-config-{}", Uuid::random().0)),
+        );
         fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
         let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
         let text = format!(
@@ -16174,8 +20555,12 @@ mod tests {
             root.0, root.0
         );
         let path = root.0.join("config.toml");
-        let mut file = OpenOptions::new().write(true).create_new(true)
-            .mode(0o600).open(&path).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
         file.write_all(text.as_bytes()).unwrap();
         file.sync_all().unwrap();
         drop(file);
@@ -16183,7 +20568,10 @@ mod tests {
         let sha = binary_sha256(&path).unwrap();
         assert!(GridQualification::configuration(&path, &sha).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
-        assert!(Config::load(&path).is_err(), "ordinary loader still requires0600");
+        assert!(
+            Config::load(&path).is_err(),
+            "ordinary loader still requires0600"
+        );
         let mut wrong = sha.clone();
         wrong.replace_range(..1, if sha.starts_with('0') { "1" } else { "0" });
         assert!(GridQualification::configuration(&path, &wrong).is_err());
@@ -16216,16 +20604,21 @@ mod tests {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 fs::set_permissions(&fifo, fs::Permissions::from_mode(0o600)).unwrap();
-                let writer = OpenOptions::new().read(true).write(true)
+                let writer = OpenOptions::new()
+                    .read(true)
+                    .write(true)
                     .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                    .open(&fifo).expect("owned nonblocking FIFO cleanup writer");
+                    .open(&fifo)
+                    .expect("owned nonblocking FIFO cleanup writer");
                 let released = result.recv_timeout(Duration::from_secs(5));
                 drop(writer);
                 if released.is_ok() {
                     reader.join().unwrap();
                 }
-                panic!("writer-free FIFO admission blocked; cleanup released reader: {}",
-                    released.is_ok());
+                panic!(
+                    "writer-free FIFO admission blocked; cleanup released reader: {}",
+                    released.is_ok()
+                );
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 reader.join().unwrap();
@@ -16312,15 +20705,18 @@ mod tests {
             target: expected.clone(),
             subscription: Uuid::random(),
             seq: ZeroValue(0),
-            frame: GridBegin { scroll: None, mode: GridMode::Replace,
-            revision: Uint(0),
-            columns: Uint(1),
-            rows: Uint(1),
-            cursor: None,
-            alternate_screen: false,
-            graphics_omitted: true,
-            popup_blocked: false,
-            part_count: Uint(1), },
+            frame: GridBegin {
+                scroll: None,
+                mode: GridMode::Replace,
+                revision: Uint(0),
+                columns: Uint(1),
+                rows: Uint(1),
+                cursor: None,
+                alternate_screen: false,
+                graphics_omitted: true,
+                popup_blocked: false,
+                part_count: Uint(1),
+            },
         });
         let encoded = encode_payload(&Envelope::Response(Response {
             id: opening,
@@ -16355,10 +20751,15 @@ mod tests {
             codex_close_capture: false,
             grid: Some(witness),
         };
-        let body = RequestBody::PromptSubmit(PromptSubmitParams { skill: None, boot_id: phone.hello.boot_id.clone(),
-        delivery: None, native_turn_id: None, images: None,
-        target: expected,
-        text: PromptText("owned boundary fixture".into()), });
+        let body = RequestBody::PromptSubmit(PromptSubmitParams {
+            skill: None,
+            boot_id: phone.hello.boot_id.clone(),
+            delivery: None,
+            native_turn_id: None,
+            images: None,
+            target: expected,
+            text: PromptText("owned boundary fixture".into()),
+        });
         let server_side = async {
             let first = transport::read_frame(&mut host_recv, FRAME_MAX)
                 .await
@@ -16450,10 +20851,13 @@ mod tests {
         })).unwrap();
         inventory.validate().unwrap();
         for _ in 0..2 {
-            let (associated, actual_incarnation) = grid_source(
-                &inventory, &native, &root, Some((&server_id, &incarnation)),
-            ).expect("original proved source beside an unavailable logical row");
-            assert_eq!((&associated.server_id, actual_incarnation), (&server_id, &incarnation));
+            let (associated, actual_incarnation) =
+                grid_source(&inventory, &native, &root, Some((&server_id, &incarnation)))
+                    .expect("original proved source beside an unavailable logical row");
+            assert_eq!(
+                (&associated.server_id, actual_incarnation),
+                (&server_id, &incarnation)
+            );
             assert!(!associated.can_create.omp);
             assert!(associated.can_create.codex);
             inventory.servers.reverse();
@@ -16469,7 +20873,15 @@ mod tests {
         let mut missing = inventory.clone();
         missing.servers.remove(0);
         assert!(grid_source(&missing, &native, &root, None).is_err());
-        assert!(grid_source(&inventory, &native, &root, Some((&logical_id, &incarnation))).is_err());
+        assert!(
+            grid_source(
+                &inventory,
+                &native,
+                &root,
+                Some((&logical_id, &incarnation))
+            )
+            .is_err()
+        );
         let mut other_graph = inventory.clone();
         let mut graph = other_graph.hierarchy[0].clone();
         graph.server_id = logical_id;
@@ -16487,7 +20899,11 @@ mod tests {
             assert!(grid_source(&changed, &native, &root, None).is_err());
         }
         let mut changed_native = native.clone();
-        changed_native.panes[0].read_identity.as_mut().unwrap().binding_epoch += 1;
+        changed_native.panes[0]
+            .read_identity
+            .as_mut()
+            .unwrap()
+            .binding_epoch += 1;
         assert!(grid_source(&inventory, &changed_native, &root, None).is_err());
         changed_native.panes.clear();
         assert!(grid_source(&inventory, &changed_native, &root, None).is_err());
@@ -16497,7 +20913,15 @@ mod tests {
         stale.hierarchy[0].freshness = NativeFreshness::Current;
         stale.hierarchy[0].reason = Some(NativeUnavailableReason::SourceUnavailable);
         assert!(grid_source(&stale, &native, &root, None).is_err());
-        assert!(grid_source(&inventory, &native, &root, Some((&server_id, &Uuid::random()))).is_err());
+        assert!(
+            grid_source(
+                &inventory,
+                &native,
+                &root,
+                Some((&server_id, &Uuid::random()))
+            )
+            .is_err()
+        );
     }
     #[tokio::test]
     async fn grid_source_loss_requires_joined_intent_and_independent_native_eof() {
@@ -16836,15 +21260,18 @@ mod tests {
                         target,
                         subscription: subscription.clone(),
                         seq: ZeroValue(0),
-                        frame: GridBegin { scroll: None, mode: GridMode::Replace,
-                        revision: Uint(0),
-                        columns: Uint(1),
-                        rows: Uint(1),
-                        cursor: None,
-                        alternate_screen: false,
-                        graphics_omitted: true,
-                        popup_blocked: false,
-                        part_count: Uint(1), },
+                        frame: GridBegin {
+                            scroll: None,
+                            mode: GridMode::Replace,
+                            revision: Uint(0),
+                            columns: Uint(1),
+                            rows: Uint(1),
+                            cursor: None,
+                            alternate_screen: false,
+                            graphics_omitted: true,
+                            popup_blocked: false,
+                            part_count: Uint(1),
+                        },
                     },
                 )),
             });
@@ -16997,15 +21424,18 @@ mod tests {
         let original_history_seq = history.as_ref().unwrap().snapshot.seq.0;
         let opening = Uuid::random();
         let subscription = Uuid::random();
-        let frame = GridBegin { scroll: None, mode: GridMode::Replace,
-        revision: Uint(0),
-        columns: Uint(TOKEN.len() as u64),
-        rows: Uint(1),
-        cursor: None,
-        alternate_screen: false,
-        graphics_omitted: true,
-        popup_blocked: false,
-        part_count: Uint(1), };
+        let frame = GridBegin {
+            scroll: None,
+            mode: GridMode::Replace,
+            revision: Uint(0),
+            columns: Uint(TOKEN.len() as u64),
+            rows: Uint(1),
+            cursor: None,
+            alternate_screen: false,
+            graphics_omitted: true,
+            popup_blocked: false,
+            part_count: Uint(1),
+        };
         let response = Envelope::Response(Response {
             id: opening.clone(),
             outcome: Ok(ResultBody::TerminalGridSubscribe(

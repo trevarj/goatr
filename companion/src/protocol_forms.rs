@@ -4,23 +4,23 @@ use std::collections::HashMap;
 
 pub(super) fn decode_request_body(method: Method, params: &Value) -> ValidationResult<RequestBody> {
     match method {
-        Method::SessionControlsRead=>Ok(RequestBody::SessionControlsRead(typed(params,true)?)),
-        Method::SessionControlsApply=>Ok(RequestBody::SessionControlsApply(typed(params,true)?)),
-        Method::SessionQueueList=>Ok(RequestBody::SessionQueueList(typed(params,true)?)),
-        Method::SessionQueueUpdate=>Ok(RequestBody::SessionQueueUpdate(typed(params,true)?)),
-        Method::SessionQueueDelete=>Ok(RequestBody::SessionQueueDelete(typed(params,true)?)),
-        Method::SessionQueueReorder=>Ok(RequestBody::SessionQueueReorder(typed(params,true)?)),
-        Method::SessionQueueStart=>Ok(RequestBody::SessionQueueStart(typed(params,true)?)),
-        Method::ArtifactsList=>Ok(RequestBody::ArtifactsList(typed(params,true)?)),
-        Method::ArtifactsOpen=>Ok(RequestBody::ArtifactsOpen(typed(params,true)?)),
-        Method::ArtifactsRead=>Ok(RequestBody::ArtifactsRead(typed(params,true)?)),
-        Method::ArtifactsClose=>Ok(RequestBody::ArtifactsClose(typed(params,true)?)),
-        Method::TerminalCreate=>Ok(RequestBody::TerminalCreate(typed(params,true)?)),
-        Method::AttachmentsBegin=>Ok(RequestBody::AttachmentsBegin(typed(params,true)?)),
-        Method::AttachmentsChunk=>Ok(RequestBody::AttachmentsChunk(typed(params,true)?)),
-        Method::AttachmentsComplete=>Ok(RequestBody::AttachmentsComplete(typed(params,true)?)),
-        Method::AttachmentsDiscard=>Ok(RequestBody::AttachmentsDiscard(typed(params,true)?)),
-        Method::AttachmentsStatus=>Ok(RequestBody::AttachmentsStatus(typed(params,true)?)),
+        Method::SessionControlsRead => Ok(RequestBody::SessionControlsRead(typed(params, true)?)),
+        Method::SessionControlsApply => Ok(RequestBody::SessionControlsApply(typed(params, true)?)),
+        Method::SessionQueueList => Ok(RequestBody::SessionQueueList(typed(params, true)?)),
+        Method::SessionQueueUpdate => Ok(RequestBody::SessionQueueUpdate(typed(params, true)?)),
+        Method::SessionQueueDelete => Ok(RequestBody::SessionQueueDelete(typed(params, true)?)),
+        Method::SessionQueueReorder => Ok(RequestBody::SessionQueueReorder(typed(params, true)?)),
+        Method::SessionQueueStart => Ok(RequestBody::SessionQueueStart(typed(params, true)?)),
+        Method::ArtifactsList => Ok(RequestBody::ArtifactsList(typed(params, true)?)),
+        Method::ArtifactsOpen => Ok(RequestBody::ArtifactsOpen(typed(params, true)?)),
+        Method::ArtifactsRead => Ok(RequestBody::ArtifactsRead(typed(params, true)?)),
+        Method::ArtifactsClose => Ok(RequestBody::ArtifactsClose(typed(params, true)?)),
+        Method::TerminalCreate => Ok(RequestBody::TerminalCreate(typed(params, true)?)),
+        Method::AttachmentsBegin => Ok(RequestBody::AttachmentsBegin(typed(params, true)?)),
+        Method::AttachmentsChunk => Ok(RequestBody::AttachmentsChunk(typed(params, true)?)),
+        Method::AttachmentsComplete => Ok(RequestBody::AttachmentsComplete(typed(params, true)?)),
+        Method::AttachmentsDiscard => Ok(RequestBody::AttachmentsDiscard(typed(params, true)?)),
+        Method::AttachmentsStatus => Ok(RequestBody::AttachmentsStatus(typed(params, true)?)),
         Method::PairConfirm => Ok(RequestBody::PairConfirm(typed(params, true)?)),
         Method::Hello => Ok(RequestBody::Hello(typed(params, true)?)),
         Method::HostSnapshot => Ok(RequestBody::HostSnapshot(typed(params, true)?)),
@@ -41,12 +41,12 @@ pub(super) fn decode_request_body(method: Method, params: &Value) -> ValidationR
         }
         Method::ShellGridSubscribe => Ok(RequestBody::ShellGridSubscribe(typed(params, true)?)),
         Method::ShellInput => Ok(RequestBody::ShellInput(typed(params, true)?)),
-        Method::ShellResize=>Ok(RequestBody::ShellResize(typed(params,true)?)),
-        Method::ShellScroll=>Ok(RequestBody::ShellScroll(typed(params,true)?)),
+        Method::ShellResize => Ok(RequestBody::ShellResize(typed(params, true)?)),
+        Method::ShellScroll => Ok(RequestBody::ShellScroll(typed(params, true)?)),
         Method::SkillsList => Ok(RequestBody::SkillsList(typed(params, true)?)),
-        Method::SkillsPreviewOpen=>Ok(RequestBody::SkillsPreviewOpen(typed(params,true)?)),
-        Method::SkillsPreviewRead=>Ok(RequestBody::SkillsPreviewRead(typed(params,true)?)),
-        Method::SkillsPreviewClose=>Ok(RequestBody::SkillsPreviewClose(typed(params,true)?)),
+        Method::SkillsPreviewOpen => Ok(RequestBody::SkillsPreviewOpen(typed(params, true)?)),
+        Method::SkillsPreviewRead => Ok(RequestBody::SkillsPreviewRead(typed(params, true)?)),
+        Method::SkillsPreviewClose => Ok(RequestBody::SkillsPreviewClose(typed(params, true)?)),
 
         Method::WorktreesList => Ok(RequestBody::WorktreesList(typed(params, true)?)),
         Method::ChangesRead => Ok(RequestBody::ChangesRead(typed(params, true)?)),
@@ -60,23 +60,23 @@ pub(super) fn decode_request_body(method: Method, params: &Value) -> ValidationR
 }
 pub(super) fn decode_result_body(method: Method, result: &Value) -> ValidationResult<ResultBody> {
     match method {
-        Method::SessionControlsRead=>Ok(ResultBody::SessionControlsRead(typed(result,false)?)),
-        Method::SessionControlsApply=>Ok(ResultBody::SessionControlsApply(typed(result,false)?)),
-        Method::SessionQueueList=>Ok(ResultBody::SessionQueueList(typed(result,false)?)),
-        Method::SessionQueueUpdate=>Ok(ResultBody::SessionQueueUpdate(typed(result,false)?)),
-        Method::SessionQueueDelete=>Ok(ResultBody::SessionQueueDelete(typed(result,false)?)),
-        Method::SessionQueueReorder=>Ok(ResultBody::SessionQueueReorder(typed(result,false)?)),
-        Method::SessionQueueStart=>Ok(ResultBody::SessionQueueStart(typed(result,false)?)),
-        Method::ArtifactsList=>Ok(ResultBody::ArtifactsList(typed(result,false)?)),
-        Method::ArtifactsOpen=>Ok(ResultBody::ArtifactsOpen(typed(result,false)?)),
-        Method::ArtifactsRead=>Ok(ResultBody::ArtifactsRead(typed(result,false)?)),
-        Method::ArtifactsClose=>Ok(ResultBody::ArtifactsClose(typed(result,false)?)),
-        Method::TerminalCreate=>Ok(ResultBody::TerminalCreate(typed(result,false)?)),
-        Method::AttachmentsBegin=>Ok(ResultBody::AttachmentsBegin(typed(result,false)?)),
-        Method::AttachmentsChunk=>Ok(ResultBody::AttachmentsChunk(typed(result,false)?)),
-        Method::AttachmentsComplete=>Ok(ResultBody::AttachmentsComplete(typed(result,false)?)),
-        Method::AttachmentsDiscard=>Ok(ResultBody::AttachmentsDiscard(typed(result,false)?)),
-        Method::AttachmentsStatus=>Ok(ResultBody::AttachmentsStatus(typed(result,false)?)),
+        Method::SessionControlsRead => Ok(ResultBody::SessionControlsRead(typed(result, false)?)),
+        Method::SessionControlsApply => Ok(ResultBody::SessionControlsApply(typed(result, false)?)),
+        Method::SessionQueueList => Ok(ResultBody::SessionQueueList(typed(result, false)?)),
+        Method::SessionQueueUpdate => Ok(ResultBody::SessionQueueUpdate(typed(result, false)?)),
+        Method::SessionQueueDelete => Ok(ResultBody::SessionQueueDelete(typed(result, false)?)),
+        Method::SessionQueueReorder => Ok(ResultBody::SessionQueueReorder(typed(result, false)?)),
+        Method::SessionQueueStart => Ok(ResultBody::SessionQueueStart(typed(result, false)?)),
+        Method::ArtifactsList => Ok(ResultBody::ArtifactsList(typed(result, false)?)),
+        Method::ArtifactsOpen => Ok(ResultBody::ArtifactsOpen(typed(result, false)?)),
+        Method::ArtifactsRead => Ok(ResultBody::ArtifactsRead(typed(result, false)?)),
+        Method::ArtifactsClose => Ok(ResultBody::ArtifactsClose(typed(result, false)?)),
+        Method::TerminalCreate => Ok(ResultBody::TerminalCreate(typed(result, false)?)),
+        Method::AttachmentsBegin => Ok(ResultBody::AttachmentsBegin(typed(result, false)?)),
+        Method::AttachmentsChunk => Ok(ResultBody::AttachmentsChunk(typed(result, false)?)),
+        Method::AttachmentsComplete => Ok(ResultBody::AttachmentsComplete(typed(result, false)?)),
+        Method::AttachmentsDiscard => Ok(ResultBody::AttachmentsDiscard(typed(result, false)?)),
+        Method::AttachmentsStatus => Ok(ResultBody::AttachmentsStatus(typed(result, false)?)),
         Method::PairConfirm => Ok(ResultBody::PairConfirm(typed(result, false)?)),
         Method::Hello => Ok(ResultBody::Hello(typed(result, false)?)),
         Method::HostSnapshot => Ok(ResultBody::HostSnapshot(typed(result, false)?)),
@@ -94,7 +94,7 @@ pub(super) fn decode_result_body(method: Method, result: &Value) -> ValidationRe
             let o = result.as_object().ok_or_else(invalid)?;
             ensure(o.contains_key("receipt") != o.contains_key("state"))?;
             let status = if o.contains_key("receipt") {
-                ActionStatusResult::Known(typed(result, false)?)
+                ActionStatusResult::Known(Box::new(typed(result, false)?))
             } else {
                 ActionStatusResult::Unknown(typed(result, false)?)
             };
@@ -106,12 +106,12 @@ pub(super) fn decode_result_body(method: Method, result: &Value) -> ValidationRe
         }
         Method::ShellGridSubscribe => Ok(ResultBody::ShellGridSubscribe(typed(result, false)?)),
         Method::ShellInput => Ok(ResultBody::ShellInput(typed(result, false)?)),
-        Method::ShellResize=>Ok(ResultBody::ShellResize(typed(result,false)?)),
-        Method::ShellScroll=>Ok(ResultBody::ShellScroll(typed(result,false)?)),
+        Method::ShellResize => Ok(ResultBody::ShellResize(typed(result, false)?)),
+        Method::ShellScroll => Ok(ResultBody::ShellScroll(typed(result, false)?)),
         Method::SkillsList => Ok(ResultBody::SkillsList(typed(result, false)?)),
-        Method::SkillsPreviewOpen=>Ok(ResultBody::SkillsPreviewOpen(typed(result,false)?)),
-        Method::SkillsPreviewRead=>Ok(ResultBody::SkillsPreviewRead(typed(result,false)?)),
-        Method::SkillsPreviewClose=>Ok(ResultBody::SkillsPreviewClose(typed(result,false)?)),
+        Method::SkillsPreviewOpen => Ok(ResultBody::SkillsPreviewOpen(typed(result, false)?)),
+        Method::SkillsPreviewRead => Ok(ResultBody::SkillsPreviewRead(typed(result, false)?)),
+        Method::SkillsPreviewClose => Ok(ResultBody::SkillsPreviewClose(typed(result, false)?)),
 
         Method::WorktreesList => Ok(ResultBody::WorktreesList(typed(result, false)?)),
         Method::ChangesRead => {
@@ -131,18 +131,52 @@ pub(super) fn decode_result_body(method: Method, result: &Value) -> ValidationRe
 /// retain their forward-compatible decoding rules.
 fn validate_changes_read_result(result: &Value) -> Validation {
     let outer = result.as_object().ok_or_else(invalid)?;
-    let changes = outer.get("changes").and_then(Value::as_object).ok_or_else(invalid)?;
-    let entries = changes.get("entries").and_then(Value::as_array).ok_or_else(invalid)?;
+    let changes = outer
+        .get("changes")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    let entries = changes
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
     for entry in entries {
         let entry = entry.as_object().ok_or_else(invalid)?;
-        let kind = entry.get("kind").and_then(Value::as_str).ok_or_else(invalid)?;
+        let kind = entry
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?;
         match kind {
             "tracked" => {
-                exact_keys(entry, &["kind", "path", "index", "worktree", "stagedBinary", "unstagedBinary"], &["kind", "path", "originalPath", "index", "worktree", "submodule", "stagedBinary", "unstagedBinary"])?;
-                let renamed = ["index", "worktree"].into_iter().any(|key| matches!(entry.get(key).and_then(Value::as_str), Some("renamed" | "copied")));
+                exact_keys(
+                    entry,
+                    &[
+                        "kind",
+                        "path",
+                        "index",
+                        "worktree",
+                        "stagedBinary",
+                        "unstagedBinary",
+                    ],
+                    &[
+                        "kind",
+                        "path",
+                        "originalPath",
+                        "index",
+                        "worktree",
+                        "submodule",
+                        "stagedBinary",
+                        "unstagedBinary",
+                    ],
+                )?;
+                let renamed = ["index", "worktree"].into_iter().any(|key| {
+                    matches!(
+                        entry.get(key).and_then(Value::as_str),
+                        Some("renamed" | "copied")
+                    )
+                });
                 ensure(renamed == entry.contains_key("originalPath"))?;
             }
-            "untracked" => exact_keys(entry, &["kind", "path"], &["kind", "path"] )?,
+            "untracked" => exact_keys(entry, &["kind", "path"], &["kind", "path"])?,
             _ => return Err(invalid()),
         }
     }
@@ -150,9 +184,14 @@ fn validate_changes_read_result(result: &Value) -> Validation {
 }
 
 fn exact_keys(
-    object: &serde_json::Map<String, Value>, required: &[&str], allowed: &[&str],
+    object: &serde_json::Map<String, Value>,
+    required: &[&str],
+    allowed: &[&str],
 ) -> Validation {
-    ensure(required.iter().all(|key| object.contains_key(*key)) && object.keys().all(|key| allowed.contains(&key.as_str())))
+    ensure(
+        required.iter().all(|key| object.contains_key(*key))
+            && object.keys().all(|key| allowed.contains(&key.as_str())),
+    )
 }
 
 fn unique<T: Eq + std::hash::Hash>(ids: impl Iterator<Item = T>) -> Validation {
@@ -297,9 +336,9 @@ pub(super) fn validate_native_hierarchy(x: &NativeHierarchy) -> Validation {
     )?;
     ensure(
         x.freshness == NativeFreshness::Current
-            || x.panes
-                .iter()
-                .all(|p| p.target.is_none() && p.unbound_row_id.is_none() && p.shell_target.is_none()),
+            || x.panes.iter().all(|p| {
+                p.target.is_none() && p.unbound_row_id.is_none() && p.shell_target.is_none()
+            }),
     )
 }
 pub(super) fn validate_host_snapshot_result(x: &HostSnapshotResult) -> Validation {
@@ -319,14 +358,30 @@ pub(super) fn validate_host_snapshot_result(x: &HostSnapshotResult) -> Validatio
     unique(x.shells.iter().map(|s| s.target.shell_id.0.as_str()))?;
     unique(x.unbound.iter().map(|r| r.row_id.0.as_str()))?;
     unique(x.hierarchy.iter().map(|h| h.server_id.0.as_str()))?;
-    ensure(x.shells.iter().all(|shell|x.servers.iter().any(|server|server.server_id==shell.server_id) && (shell.connectivity!=SessionConnectivity::Ready || x.hierarchy.iter().any(|graph|graph.server_id==shell.server_id && graph.freshness==NativeFreshness::Current && graph.panes.iter().any(|pane|pane.shell_target.as_ref()==Some(&shell.target) && pane.workspace_id==shell.workspace_id && pane.tab_id==shell.tab_id && pane.pane_id==shell.pane_id && pane.terminal_id==shell.terminal_id)))))?;
+    ensure(x.shells.iter().all(|shell| {
+        x.servers
+            .iter()
+            .any(|server| server.server_id == shell.server_id)
+            && (shell.connectivity != SessionConnectivity::Ready
+                || x.hierarchy.iter().any(|graph| {
+                    graph.server_id == shell.server_id
+                        && graph.freshness == NativeFreshness::Current
+                        && graph.panes.iter().any(|pane| {
+                            pane.shell_target.as_ref() == Some(&shell.target)
+                                && pane.workspace_id == shell.workspace_id
+                                && pane.tab_id == shell.tab_id
+                                && pane.pane_id == shell.pane_id
+                                && pane.terminal_id == shell.terminal_id
+                        })
+                }))
+    }))?;
     if x.hierarchy.is_empty() {
         return Ok(());
     }
     let servers: HashSet<_> = x.servers.iter().map(|s| &s.server_id).collect();
     let sessions: HashMap<_, _> = x.sessions.iter().map(|s| (&s.session_id, s)).collect();
-    let shells: HashMap<_, _> = x.shells.iter().map(|s| (&s.target.shell_id,s)).collect();
-    let mut shell_targets=HashSet::new();
+    let shells: HashMap<_, _> = x.shells.iter().map(|s| (&s.target.shell_id, s)).collect();
+    let mut shell_targets = HashSet::new();
     let unbound: HashMap<_, _> = x.unbound.iter().map(|r| (&r.row_id, r)).collect();
     let mut targets = HashSet::new();
     let mut rows = HashSet::new();
@@ -354,9 +409,19 @@ pub(super) fn validate_host_snapshot_result(x: &HostSnapshotResult) -> Validatio
                         ),
                 )?;
             }
-            if let Some(t)=&p.shell_target {
-                let shell=shells.get(&t.shell_id).ok_or_else(invalid)?;
-                ensure(shell_targets.insert(&t.shell_id) && shell.target==*t && shell.server_id==h.server_id && shell.workspace_id==p.workspace_id && shell.tab_id==p.tab_id && shell.pane_id==p.pane_id && shell.terminal_id==p.terminal_id && shell.connectivity==SessionConnectivity::Ready && p.agent.is_none())?;
+            if let Some(t) = &p.shell_target {
+                let shell = shells.get(&t.shell_id).ok_or_else(invalid)?;
+                ensure(
+                    shell_targets.insert(&t.shell_id)
+                        && shell.target == *t
+                        && shell.server_id == h.server_id
+                        && shell.workspace_id == p.workspace_id
+                        && shell.tab_id == p.tab_id
+                        && shell.pane_id == p.pane_id
+                        && shell.terminal_id == p.terminal_id
+                        && shell.connectivity == SessionConnectivity::Ready
+                        && p.agent.is_none(),
+                )?;
             }
             if let Some(id) = &p.unbound_row_id {
                 let r = unbound.get(id).ok_or_else(invalid)?;
@@ -400,78 +465,175 @@ pub(super) fn validate_history_upsert_event(x: &HistoryUpsertEvent) -> Validatio
 }
 pub(super) fn validate_receipt(x: &Receipt) -> Validation {
     ensure(x.created_at <= x.updated_at)?;
-    ensure(matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput|ActionMethod::ShellResize|ActionMethod::ShellScroll)==x.shell_target.is_some())?;
-    if matches!(x.method,ActionMethod::ShellCreate|ActionMethod::ShellInput|ActionMethod::ShellResize|ActionMethod::ShellScroll) {
+    ensure(
+        matches!(
+            x.method,
+            ActionMethod::ShellCreate
+                | ActionMethod::ShellInput
+                | ActionMethod::ShellResize
+                | ActionMethod::ShellScroll
+        ) == x.shell_target.is_some(),
+    )?;
+    if matches!(
+        x.method,
+        ActionMethod::ShellCreate
+            | ActionMethod::ShellInput
+            | ActionMethod::ShellResize
+            | ActionMethod::ShellScroll
+    ) {
         ensure(x.target.is_none() && x.creation.is_none())?;
-        if x.state==ReceiptState::Succeeded {ensure(match &x.result {Some(ActionResult::ShellCreation(result)) if x.method==ActionMethod::ShellCreate=>result.resources.complete(),Some(ActionResult::ShellInput(result)) if x.method==ActionMethod::ShellInput=>result.progress.accepted(),Some(ActionResult::ShellResize(_)) if x.method==ActionMethod::ShellResize=>true,Some(ActionResult::ShellScroll(_)) if x.method==ActionMethod::ShellScroll=>true,_=>false})?;}
+        if x.state == ReceiptState::Succeeded {
+            ensure(match &x.result {
+                Some(ActionResult::ShellCreation(result))
+                    if x.method == ActionMethod::ShellCreate =>
+                {
+                    result.resources.complete()
+                }
+                Some(ActionResult::ShellInput(result)) if x.method == ActionMethod::ShellInput => {
+                    result.progress.accepted()
+                }
+                Some(ActionResult::ShellResize(_)) if x.method == ActionMethod::ShellResize => true,
+                Some(ActionResult::ShellScroll(_)) if x.method == ActionMethod::ShellScroll => true,
+                _ => false,
+            })?;
+        }
     }
-    if matches!(x.method,ActionMethod::AttachmentsBegin|ActionMethod::AttachmentsChunk|ActionMethod::AttachmentsComplete|ActionMethod::AttachmentsDiscard) {ensure(x.target.is_some() && x.creation.is_none())?;if let Some(ActionResult::Attachment(result))=&x.result{ensure(x.target.as_ref()==Some(&result.target))?;}
-    if x.state==ReceiptState::Succeeded {ensure(matches!(&x.result,Some(ActionResult::Attachment(_))))?;}}
-    // Old provider-target terminal.create receipts remain readable; new configured creation has no provider target.
-    if x.method==ActionMethod::TerminalCreate {ensure(x.shell_target.is_none()&&x.creation.is_none())?;if x.state==ReceiptState::Succeeded{ensure(matches!(&x.result,Some(ActionResult::ShellCreation(result)) if result.resources.complete()))?;}}
-    if x.method==ActionMethod::WorktreesRemove {
+    if matches!(
+        x.method,
+        ActionMethod::AttachmentsBegin
+            | ActionMethod::AttachmentsChunk
+            | ActionMethod::AttachmentsComplete
+            | ActionMethod::AttachmentsDiscard
+    ) {
         ensure(x.target.is_some() && x.creation.is_none())?;
-        if let Some(ActionResult::WorktreeRemoval(result))=&x.result{ensure(Some(&result.target)==x.target.as_ref())?;}
-        if x.state==ReceiptState::Succeeded{ensure(matches!(&x.result,Some(ActionResult::WorktreeRemoval(result)) if result.progress.complete()))?;}
+        if let Some(ActionResult::Attachment(result)) = &x.result {
+            ensure(x.target.as_ref() == Some(&result.target))?;
+        }
+        if x.state == ReceiptState::Succeeded {
+            ensure(matches!(&x.result, Some(ActionResult::Attachment(_))))?;
+        }
+    }
+    // Old provider-target terminal.create receipts remain readable; new configured creation has no provider target.
+    if x.method == ActionMethod::TerminalCreate {
+        ensure(x.shell_target.is_none() && x.creation.is_none())?;
+        if x.state == ReceiptState::Succeeded {
+            ensure(
+                matches!(&x.result,Some(ActionResult::ShellCreation(result)) if result.resources.complete()),
+            )?;
+        }
+    }
+    if x.method == ActionMethod::WorktreesRemove {
+        ensure(x.target.is_some() && x.creation.is_none())?;
+        if let Some(ActionResult::WorktreeRemoval(result)) = &x.result {
+            ensure(Some(&result.target) == x.target.as_ref())?;
+        }
+        if x.state == ReceiptState::Succeeded {
+            ensure(
+                matches!(&x.result,Some(ActionResult::WorktreeRemoval(result)) if result.progress.complete()),
+            )?;
+        }
     }
     if x.method == ActionMethod::AgentRename {
         ensure(x.target.is_some() && x.creation.is_none())?;
-        if let Some(ActionResult::AgentRenamed(result))=&x.result {ensure(Some(&result.target)==x.target.as_ref())?;}
-        if x.state == ReceiptState::Succeeded { ensure(matches!(&x.result, Some(ActionResult::AgentRenamed(result)) if Some(&result.target) == x.target.as_ref()))?; }
+        if let Some(ActionResult::AgentRenamed(result)) = &x.result {
+            ensure(Some(&result.target) == x.target.as_ref())?;
+        }
+        if x.state == ReceiptState::Succeeded {
+            ensure(
+                matches!(&x.result, Some(ActionResult::AgentRenamed(result)) if Some(&result.target) == x.target.as_ref()),
+            )?;
+        }
     }
-    if x.method==ActionMethod::SessionControlsApply {
-        ensure(x.target.is_some()&&x.creation.is_none()&&x.result.is_none())?;
+    if x.method == ActionMethod::SessionControlsApply {
+        ensure(x.target.is_some() && x.creation.is_none() && x.result.is_none())?;
     }
-    if matches!(x.method,ActionMethod::SessionQueueUpdate|ActionMethod::SessionQueueDelete|ActionMethod::SessionQueueReorder|ActionMethod::SessionQueueStart) {
-        ensure(x.target.is_some()&&x.creation.is_none())?;
-        if x.state==ReceiptState::Succeeded {ensure(matches!(&x.result,Some(ActionResult::Queue(_))))?;}
+    if matches!(
+        x.method,
+        ActionMethod::SessionQueueUpdate
+            | ActionMethod::SessionQueueDelete
+            | ActionMethod::SessionQueueReorder
+            | ActionMethod::SessionQueueStart
+    ) {
+        ensure(x.target.is_some() && x.creation.is_none())?;
+        if x.state == ReceiptState::Succeeded {
+            ensure(matches!(&x.result, Some(ActionResult::Queue(_))))?;
+        }
     }
     if let Some(result) = &x.result {
         ensure(matches!(
             (x.method, result),
-            (ActionMethod::TerminalCreate,ActionResult::ShellCreation(_)) | (ActionMethod::SessionCreate, ActionResult::Created(_))
+            (ActionMethod::TerminalCreate, ActionResult::ShellCreation(_))
+                | (ActionMethod::SessionCreate, ActionResult::Created(_))
                 | (ActionMethod::ShellCreate, ActionResult::ShellCreation(_))
                 | (ActionMethod::ShellInput, ActionResult::ShellInput(_))
-                | (ActionMethod::ShellInput,ActionResult::ShellDispatch(_))
-                | (ActionMethod::ShellResize,ActionResult::ShellResize(_))
-                | (ActionMethod::ShellScroll,ActionResult::ShellScroll(_))
-                | (ActionMethod::WorktreesRemove,ActionResult::WorktreeRemoval(_))
-                | (ActionMethod::AttachmentsBegin,ActionResult::Attachment(_))
-                | (ActionMethod::AttachmentsChunk,ActionResult::Attachment(_))
-                | (ActionMethod::AttachmentsComplete,ActionResult::Attachment(_))
-                | (ActionMethod::AttachmentsDiscard,ActionResult::Attachment(_))
+                | (ActionMethod::ShellInput, ActionResult::ShellDispatch(_))
+                | (ActionMethod::ShellResize, ActionResult::ShellResize(_))
+                | (ActionMethod::ShellScroll, ActionResult::ShellScroll(_))
+                | (
+                    ActionMethod::WorktreesRemove,
+                    ActionResult::WorktreeRemoval(_)
+                )
+                | (ActionMethod::AttachmentsBegin, ActionResult::Attachment(_))
+                | (ActionMethod::AttachmentsChunk, ActionResult::Attachment(_))
+                | (
+                    ActionMethod::AttachmentsComplete,
+                    ActionResult::Attachment(_)
+                )
+                | (
+                    ActionMethod::AttachmentsDiscard,
+                    ActionResult::Attachment(_)
+                )
                 | (ActionMethod::AgentRename, ActionResult::AgentRenamed(_))
-                | (ActionMethod::WorkspaceRename, ActionResult::WorkspaceRenamed(_))
+                | (
+                    ActionMethod::WorkspaceRename,
+                    ActionResult::WorkspaceRenamed(_)
+                )
                 | (ActionMethod::PromptSubmit, ActionResult::Prompt(_))
-                | (ActionMethod::PromptSubmit,ActionResult::Queue(_))
-                | (ActionMethod::SessionQueueUpdate,ActionResult::Queue(_))
-                | (ActionMethod::SessionQueueDelete,ActionResult::Queue(_))
-                | (ActionMethod::SessionQueueReorder,ActionResult::Queue(_))
-                | (ActionMethod::SessionQueueStart,ActionResult::Queue(_))
+                | (ActionMethod::PromptSubmit, ActionResult::Queue(_))
+                | (ActionMethod::SessionQueueUpdate, ActionResult::Queue(_))
+                | (ActionMethod::SessionQueueDelete, ActionResult::Queue(_))
+                | (ActionMethod::SessionQueueReorder, ActionResult::Queue(_))
+                | (ActionMethod::SessionQueueStart, ActionResult::Queue(_))
                 | (ActionMethod::TurnCancel, ActionResult::Cancel(_))
                 | (ActionMethod::RequestRespond, ActionResult::Response(_))
         ))?;
-        if matches!(result,ActionResult::ShellScroll(_)){ensure(x.state==ReceiptState::Succeeded)?;}
-        if let ActionResult::ShellDispatch(result)=result {
-            ensure(x.state!=ReceiptState::Succeeded)?;
-            if x.state==ReceiptState::Dispatched {ensure(result.progress.complete())?;}
+        if matches!(result, ActionResult::ShellScroll(_)) {
+            ensure(x.state == ReceiptState::Succeeded)?;
         }
-        if let ActionResult::Queue(result)=result {
-            ensure(x.target.is_some()&&x.shell_target.is_none()&&x.creation.is_none())?;
+        if let ActionResult::ShellDispatch(result) = result {
+            ensure(x.state != ReceiptState::Succeeded)?;
+            if x.state == ReceiptState::Dispatched {
+                ensure(result.progress.complete())?;
+            }
+        }
+        if let ActionResult::Queue(result) = result {
+            ensure(x.target.is_some() && x.shell_target.is_none() && x.creation.is_none())?;
             match x.method {
-                ActionMethod::PromptSubmit|ActionMethod::SessionQueueUpdate=>{
-                    ensure(result.entry_id.is_some()&&result.deleted.is_none()&&result.native_turn_id.is_none())?;
+                ActionMethod::PromptSubmit | ActionMethod::SessionQueueUpdate => {
+                    ensure(
+                        result.entry_id.is_some()
+                            && result.deleted.is_none()
+                            && result.native_turn_id.is_none(),
+                    )?;
                 }
-                ActionMethod::SessionQueueDelete=>{
-                    ensure(result.entry_id.is_some()&&result.native_turn_id.is_none())?;
-                    if x.state==ReceiptState::Succeeded {ensure(result.deleted.is_some())?;}
+                ActionMethod::SessionQueueDelete => {
+                    ensure(result.entry_id.is_some() && result.native_turn_id.is_none())?;
+                    if x.state == ReceiptState::Succeeded {
+                        ensure(result.deleted.is_some())?;
+                    }
                 }
-                ActionMethod::SessionQueueStart=>{
-                    ensure(result.entry_id.is_some()&&result.deleted.is_none())?;
-                    if x.state==ReceiptState::Succeeded {ensure(result.native_turn_id.is_some())?;}
+                ActionMethod::SessionQueueStart => {
+                    ensure(result.entry_id.is_some() && result.deleted.is_none())?;
+                    if x.state == ReceiptState::Succeeded {
+                        ensure(result.native_turn_id.is_some())?;
+                    }
                 }
-                ActionMethod::SessionQueueReorder=>ensure(result.entry_id.is_none()&&result.deleted.is_none()&&result.native_turn_id.is_none())?,
-                _=>return Err(invalid()),
+                ActionMethod::SessionQueueReorder => ensure(
+                    result.entry_id.is_none()
+                        && result.deleted.is_none()
+                        && result.native_turn_id.is_none(),
+                )?,
+                _ => return Err(invalid()),
             }
         }
     }

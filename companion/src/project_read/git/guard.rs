@@ -230,14 +230,13 @@ impl Tracee {
             self.pidfd = Some(unsafe { File::from_raw_fd(fd as i32) });
         }
         let proof = crate::herdr::process_evidence(self.pid as u32).map_err(filesystem)?;
-        if let Some(parent) = parent {
-            if proof.linux_boot_id != parent.linux_boot_id
+        if let Some(parent) = parent
+            && (proof.linux_boot_id != parent.linux_boot_id
                 || proof.namespaces.pid != parent.namespaces.pid
                 || proof.namespaces.mount != parent.namespaces.mount
-                || proof.namespaces.user != parent.namespaces.user
-            {
-                return denied();
-            }
+                || proof.namespaces.user != parent.namespaces.user)
+        {
+            return denied();
         }
         let directory =
             super::super::context::process_directory(&proof, deadline).map_err(filesystem)?;
@@ -703,10 +702,10 @@ impl TraceOwner {
                 break;
             }
             if result < 0 {
-                if io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
-                    if let Some(tracee) = self.tasks.get_mut(&self.leader) {
-                        tracee.lost = true;
-                    }
+                if io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+                    && let Some(tracee) = self.tasks.get_mut(&self.leader)
+                {
+                    tracee.lost = true;
                 }
                 return denied();
             }
@@ -1042,7 +1041,7 @@ impl TraceOwner {
         if number == libc::SYS_readlinkat {
             let value = path(tracee, integer(args[0])?, pathname(pid, args[1])?)?;
             if value != Path::new("/proc/self/exe")
-                && value != PathBuf::from(format!("/proc/{pid}/exe"))
+                && value != Path::new(&format!("/proc/{pid}/exe"))
             {
                 return denied();
             }
@@ -1052,7 +1051,7 @@ impl TraceOwner {
         if number == libc::SYS_readlink {
             let value = path(tracee, libc::AT_FDCWD, pathname(pid, args[0])?)?;
             if value != Path::new("/proc/self/exe")
-                && value != PathBuf::from(format!("/proc/{pid}/exe"))
+                && value != Path::new(&format!("/proc/{pid}/exe"))
             {
                 return denied();
             }
@@ -1126,8 +1125,8 @@ impl TraceOwner {
             Some(Pending::Pipe(address)) => {
                 let mut bytes = [0u8; 8];
                 memory(pid, address, &mut bytes)?;
-                for chunk in bytes.chunks_exact(4) {
-                    let fd = i32::from_ne_bytes(chunk.try_into().map_err(|_| ErrorCode::NotReady)?);
+                for chunk in bytes.as_chunks::<4>().0 {
+                    let fd = i32::from_ne_bytes(*chunk);
                     let name = CString::new(format!("fd/{fd}")).map_err(|_| ErrorCode::NotReady)?;
                     if !tracee
                         .object(&name)?
@@ -1319,20 +1318,18 @@ impl TraceOwner {
                             libc::PTRACE_EVENT_FORK
                                 | libc::PTRACE_EVENT_VFORK
                                 | libc::PTRACE_EVENT_CLONE
-                        ) {
-                            if let Ok(child) = event_pid(*pid) {
-                                if !self.tasks.contains_key(&child) {
-                                    let mut tracee = Tracee::unpinned(child, true);
-                                    let fd = unsafe {
-                                        libc::syscall(libc::SYS_pidfd_open, child, libc::O_EXCL)
-                                    };
-                                    if fd >= 0 {
-                                        tracee.pidfd =
-                                            Some(unsafe { File::from_raw_fd(fd as i32) });
-                                    }
-                                    self.tasks.insert(child, tracee);
+                        ) && let Ok(child) = event_pid(*pid)
+                        {
+                            self.tasks.entry(child).or_insert_with(|| {
+                                let mut tracee = Tracee::unpinned(child, true);
+                                let fd = unsafe {
+                                    libc::syscall(libc::SYS_pidfd_open, child, libc::O_EXCL)
+                                };
+                                if fd >= 0 {
+                                    tracee.pidfd = Some(unsafe { File::from_raw_fd(fd as i32) });
                                 }
-                            }
+                                tracee
+                            });
                         }
                         let _ = trace(
                             *pid,
@@ -1343,13 +1340,12 @@ impl TraceOwner {
                     }
                 } else if result < 0
                     && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+                    && let Some(tracee) = self.tasks.get_mut(pid)
                 {
-                    if let Some(tracee) = self.tasks.get_mut(pid) {
-                        tracee.lost = true;
-                        if tracee.gone() {
-                            self.tasks.remove(pid);
-                            progress = true;
-                        }
+                    tracee.lost = true;
+                    if tracee.gone() {
+                        self.tasks.remove(pid);
+                        progress = true;
                     }
                 }
             }

@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Stock Codex shared-owner adapter. Native contracts are independently implemented.
+use crate::backends::{
+    ControlsPublication, EffectiveControls, NativeControlModel, NativeModelIdentity,
+    OriginalContext, PublicationGuard, PublicationKind, PublicationOrigin, QueueEntryBinding,
+    QueuePublication, QueueRow, SkillsPublication,
+};
 use crate::{
     codex_relay::{self, Manifest, OwnerEpoch, Presence},
     config::{self, CodexOwner},
@@ -13,11 +18,12 @@ use crate::{
         StageMetadata, TransitionProof,
     },
 };
-use crate::backends::{OriginalContext,PublicationGuard,PublicationKind,PublicationOrigin,SkillsPublication,ControlsPublication,NativeControlModel,NativeModelIdentity,EffectiveControls,QueuePublication,QueueEntryBinding,QueueRow};
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use serde::{Serialize,Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -29,14 +35,16 @@ use std::{
     },
     time::Duration,
 };
-#[cfg(target_os = "linux")]
-use std::os::unix::process::CommandExt;
 use tokio::{
     net::UnixStream,
     sync::{oneshot, watch},
     task::JoinSet,
 };
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
+type MutationCallback = (
+    oneshot::Receiver<SecurityResult<Value>>,
+    Arc<Mutex<Option<ErrorCode>>>,
+);
 
 pub const SOURCE_REVISION: &str = "092d3acd6bec3e3a14bdc7e7a2810ab628ab759d";
 fn invalid() -> io::Error {
@@ -59,22 +67,47 @@ fn reservation_reply(create: bool, reservation: Reservation) -> Option<Receipt> 
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManagerFailureGuard {
-    RuntimeMissing, RuntimePath, RuntimeDirectory, SocketBefore, SocketCreate, SocketPath,
-    Connect, PeerCredentials, PeerUid, SocketAfter, SocketChanged, PeerPid,
-    ProcessEvidence, ProcessNamespace, ProcessStat, ProcessPid, ProcessUid, ProcessBoot, ProcessChanged,
+    RuntimeMissing,
+    RuntimePath,
+    RuntimeDirectory,
+    SocketBefore,
+    SocketCreate,
+    SocketPath,
+    Connect,
+    PeerCredentials,
+    PeerUid,
+    SocketAfter,
+    SocketChanged,
+    PeerPid,
+    ProcessEvidence,
+    ProcessNamespace,
+    ProcessStat,
+    ProcessPid,
+    ProcessUid,
+    ProcessBoot,
+    ProcessChanged,
 }
 impl ManagerFailureGuard {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::RuntimeMissing => "runtime_missing", Self::RuntimePath => "runtime_path",
-            Self::RuntimeDirectory => "runtime_directory", Self::SocketBefore => "socket_before",
-            Self::SocketCreate => "socket_create", Self::SocketPath => "socket_path",
-            Self::Connect => "connect", Self::PeerCredentials => "peer_credentials",
-            Self::PeerUid => "peer_uid", Self::SocketAfter => "socket_after",
-            Self::SocketChanged => "socket_changed", Self::PeerPid => "peer_pid",
-            Self::ProcessEvidence => "process_evidence", Self::ProcessNamespace => "process_namespace",
-            Self::ProcessStat => "process_stat", Self::ProcessPid => "process_pid",
-            Self::ProcessUid => "process_uid", Self::ProcessBoot => "process_boot",
+            Self::RuntimeMissing => "runtime_missing",
+            Self::RuntimePath => "runtime_path",
+            Self::RuntimeDirectory => "runtime_directory",
+            Self::SocketBefore => "socket_before",
+            Self::SocketCreate => "socket_create",
+            Self::SocketPath => "socket_path",
+            Self::Connect => "connect",
+            Self::PeerCredentials => "peer_credentials",
+            Self::PeerUid => "peer_uid",
+            Self::SocketAfter => "socket_after",
+            Self::SocketChanged => "socket_changed",
+            Self::PeerPid => "peer_pid",
+            Self::ProcessEvidence => "process_evidence",
+            Self::ProcessNamespace => "process_namespace",
+            Self::ProcessStat => "process_stat",
+            Self::ProcessPid => "process_pid",
+            Self::ProcessUid => "process_uid",
+            Self::ProcessBoot => "process_boot",
             Self::ProcessChanged => "process_changed",
         }
     }
@@ -85,8 +118,14 @@ pub(crate) struct ManagerFailureDetail {
     pub(crate) io: Option<io::ErrorKind>,
 }
 impl ManagerFailureDetail {
-    fn record(slot: Option<&mut Option<Self>>, guard: ManagerFailureGuard, io: Option<io::ErrorKind>) {
-        if let Some(slot) = slot && slot.is_none() {
+    fn record(
+        slot: Option<&mut Option<Self>>,
+        guard: ManagerFailureGuard,
+        io: Option<io::ErrorKind>,
+    ) {
+        if let Some(slot) = slot
+            && slot.is_none()
+        {
             *slot = Some(Self { guard, io });
         }
     }
@@ -1224,32 +1263,70 @@ struct Callback {
     snapshot: bool,
     read_rejection: Option<(Id, oneshot::Sender<CreationReadRejection>)>,
     thread_start: Option<herdr::CodexThreadStartObservation>,
-    optional_missing:Option<(OptionalService,Arc<AtomicBool>)>,
-    mutation_rejection:Option<(NativeMutationKind,Arc<Mutex<Option<ErrorCode>>>)>,
+    optional_missing: Option<(OptionalService, Arc<AtomicBool>)>,
+    mutation_rejection: Option<(NativeMutationKind, Arc<Mutex<Option<ErrorCode>>>)>,
 }
-#[derive(Clone,Copy)]
-enum OptionalService {CollaborationModes,Queue}
-#[derive(Clone,Copy)]
-enum NativeMutationKind {Controls,Queue,QueueStart,Steer,Prompt}
-fn native_mutation_rejection(kind:NativeMutationKind,value:&Value)->Option<ErrorCode> {
-    let code=value["error"]["code"].as_i64();
-    if code==Some(-32601) {return Some(ErrorCode::NotReady)}
-    if code==Some(-32602) {return Some(ErrorCode::InvalidRequest)}
-    if code!=Some(-32600) {return None}
+#[derive(Clone, Copy)]
+enum OptionalService {
+    CollaborationModes,
+    Queue,
+}
+#[derive(Clone, Copy)]
+enum NativeMutationKind {
+    Controls,
+    Queue,
+    QueueStart,
+    Steer,
+    Prompt,
+}
+fn native_mutation_rejection(kind: NativeMutationKind, value: &Value) -> Option<ErrorCode> {
+    let code = value["error"]["code"].as_i64();
+    if code == Some(-32601) {
+        return Some(ErrorCode::NotReady);
+    }
+    if code == Some(-32602) {
+        return Some(ErrorCode::InvalidRequest);
+    }
+    if code != Some(-32600) {
+        return None;
+    }
     // Queue errors can follow a started turn. Only these source-defined guards
     // prove no effect; a storage or other generic BackendError never does.
     match kind {
-        NativeMutationKind::Steer=>Some(ErrorCode::StaleSession),
-        NativeMutationKind::Queue|NativeMutationKind::QueueStart if value["error"]["message"].as_str()==Some("user message queue is unavailable")=>Some(ErrorCode::NotReady),
-        NativeMutationKind::QueueStart if value["error"]["message"].as_str()==Some("thread already has an active or pending turn")=>Some(ErrorCode::Busy),
-        _=>None,
+        NativeMutationKind::Steer => Some(ErrorCode::StaleSession),
+        NativeMutationKind::Queue | NativeMutationKind::QueueStart
+            if value["error"]["message"].as_str() == Some("user message queue is unavailable") =>
+        {
+            Some(ErrorCode::NotReady)
+        }
+        NativeMutationKind::QueueStart
+            if value["error"]["message"].as_str()
+                == Some("thread already has an active or pending turn") =>
+        {
+            Some(ErrorCode::Busy)
+        }
+        _ => None,
     }
 }
-fn entered_uncertain(code:Option<ErrorCode>)->ReceiptTransition {
-    ReceiptTransition {state:ReceiptState::Uncertain,proof:TransitionProof::LostOutcome,result:None,error:code.map(crate::transport::wire_error),at:pairing::now_ms()}
+fn entered_uncertain(code: Option<ErrorCode>) -> ReceiptTransition {
+    ReceiptTransition {
+        state: ReceiptState::Uncertain,
+        proof: TransitionProof::LostOutcome,
+        result: None,
+        error: code.map(crate::transport::wire_error),
+        at: pairing::now_ms(),
+    }
 }
-fn native_refused(code:ErrorCode)->ReceiptTransition {
-    ReceiptTransition {state:ReceiptState::Failed,proof:TransitionProof::DefinitiveNoEffect(Id("Source-defined native preflight refusal".into())),result:None,error:Some(crate::transport::wire_error(code)),at:pairing::now_ms()}
+fn native_refused(code: ErrorCode) -> ReceiptTransition {
+    ReceiptTransition {
+        state: ReceiptState::Failed,
+        proof: TransitionProof::DefinitiveNoEffect(Id(
+            "Source-defined native preflight refusal".into()
+        )),
+        result: None,
+        error: Some(crate::transport::wire_error(code)),
+        at: pairing::now_ms(),
+    }
 }
 fn ordinary_response(value: &Value) -> SecurityResult<Value> {
     if value.get("result").is_some() == value.get("error").is_some() {
@@ -1288,14 +1365,20 @@ fn complete_callback(
     };
     if let Some(callback) = callback {
         let result = ordinary_response(value);
-        if let Some((kind,rejection))=&callback.mutation_rejection
-            &&result==Err(ErrorCode::BackendError) {*rejection.lock()=native_mutation_rejection(*kind,value);}
-        if let Some((service,missing))=&callback.optional_missing
-            &&result==Err(ErrorCode::BackendError)
-            &&(value["error"]["code"].as_i64()==Some(-32601)
-                ||matches!(service,OptionalService::Queue)&&value["error"]["code"].as_i64()==Some(-32600)
-                    &&value["error"]["message"].as_str()==Some("user message queue is unavailable")) {
-            missing.store(true,Ordering::Release);
+        if let Some((kind, rejection)) = &callback.mutation_rejection
+            && result == Err(ErrorCode::BackendError)
+        {
+            *rejection.lock() = native_mutation_rejection(*kind, value);
+        }
+        if let Some((service, missing)) = &callback.optional_missing
+            && result == Err(ErrorCode::BackendError)
+            && (value["error"]["code"].as_i64() == Some(-32601)
+                || matches!(service, OptionalService::Queue)
+                    && value["error"]["code"].as_i64() == Some(-32600)
+                    && value["error"]["message"].as_str()
+                        == Some("user message queue is unavailable"))
+        {
+            missing.store(true, Ordering::Release);
         }
         let thread_start = callback.thread_start.clone();
         if let Some(observation) = &thread_start {
@@ -1532,13 +1615,15 @@ async fn read_native_frames(
                     {
                         observation.unmatched_response();
                     }
-                    callback.is_some_and(|p| payload.len()>p.response_limit) || callback.and_then(|p| p.response_bytes.as_ref())
-                        .is_some_and(|bytes| {
-                            bytes
-                                .fetch_add(payload.len(), Ordering::AcqRel)
-                                .saturating_add(payload.len())
-                                > 16 * 1024 * 1024
-                        })
+                    callback.is_some_and(|p| payload.len() > p.response_limit)
+                        || callback
+                            .and_then(|p| p.response_bytes.as_ref())
+                            .is_some_and(|bytes| {
+                                bytes
+                                    .fetch_add(payload.len(), Ordering::AcqRel)
+                                    .saturating_add(payload.len())
+                                    > 16 * 1024 * 1024
+                            })
                 };
                 if over_budget {
                     let callback = {
@@ -1625,162 +1710,395 @@ impl ReadBudget {
     }
 }
 #[derive(Serialize)]
-struct NativeAdvertisedModel {model:String,label:Label,efforts:Vec<Text>,images:Option<bool>}
-struct ImageModelProof {generation:Uuid,model:NativeModelIdentity}
-fn codex_advertised_model(row:&Value)->SecurityResult<NativeAdvertisedModel> {
-    let model=row["model"].as_str().filter(|model|!model.is_empty()&&model.len()<=512).ok_or(ErrorCode::NotReady)?;
-    let label=Label::new(row["displayName"].as_str().ok_or(ErrorCode::NotReady)?).map_err(policy)?;
-    let advertised=row["supportedReasoningEfforts"].as_array().ok_or(ErrorCode::NotReady)?;
-    if advertised.len()>64 {return Err(ErrorCode::ResourceLimit)}
-    let efforts=advertised.iter().map(|value|value["reasoningEffort"].as_str().map(str::to_owned).ok_or(ErrorCode::NotReady)).collect::<SecurityResult<Vec<_>>>()?;
-    let images=match row.get("inputModalities") {
-        None|Some(Value::Null)=>None,
-        Some(Value::Array(values)) if values.len()<=32&&values.iter().all(Value::is_string)=>Some(values.iter().any(|value|value=="image")),
-        _=>return Err(ErrorCode::NotReady),
-    };
-    let mut unique=HashSet::new();if efforts.iter().any(|effort|effort.len()>FRAME_MAX||!unique.insert(effort)) {return Err(ErrorCode::NotReady)}
-    drop(unique);Ok(NativeAdvertisedModel {model:model.to_owned(),label,efforts,images})
+struct NativeAdvertisedModel {
+    model: String,
+    label: Label,
+    efforts: Vec<Text>,
+    images: Option<bool>,
 }
-fn codex_controls_command(thread:&Id,publication:&ControlsPublication,params:&SessionControlsApplyParams)->SecurityResult<Option<Value>> {
-    let index=publication.validate_apply(params)?;
-    let desired=publication.desired_model(index);
-    let mut native=json!({"threadId":thread});
-    if let Some(mode)=params.mode.filter(|mode|publication.catalogue.current.mode!=Some(*mode)) {
-        let model=desired.ok_or(ErrorCode::NotReady)?;
-        let effort=params.effort.as_ref().or_else(||publication.catalogue.current.effort.as_ref().filter(|effort|
-            params.model_ref.is_none()||index.is_some_and(|index|publication.catalogue.models[index].efforts.contains(effort))));
-        native["collaborationMode"]=json!({"mode":mode,"settings":{"model":model.model,"reasoning_effort":effort,"developer_instructions":null}});
-    } else {
-        if params.model_ref.is_some()&&desired!=publication.current_native.as_ref() {
-            native["model"]=json!(desired.ok_or(ErrorCode::NotReady)?.model);
-        }
-        if let Some(effort)=&params.effort
-            &&publication.catalogue.current.effort.as_ref()!=Some(effort) {native["effort"]=json!(effort);}
+struct ImageModelProof {
+    generation: Uuid,
+    model: NativeModelIdentity,
+}
+fn codex_advertised_model(row: &Value) -> SecurityResult<NativeAdvertisedModel> {
+    let model = row["model"]
+        .as_str()
+        .filter(|model| !model.is_empty() && model.len() <= 512)
+        .ok_or(ErrorCode::NotReady)?;
+    let label =
+        Label::new(row["displayName"].as_str().ok_or(ErrorCode::NotReady)?).map_err(policy)?;
+    let advertised = row["supportedReasoningEfforts"]
+        .as_array()
+        .ok_or(ErrorCode::NotReady)?;
+    if advertised.len() > 64 {
+        return Err(ErrorCode::ResourceLimit);
     }
-    Ok((native.as_object().is_some_and(|object|object.len()>1)).then_some(native))
-}
-fn codex_controls_match(publication:&ControlsPublication,params:&SessionControlsApplyParams,current:&EffectiveControls)->SecurityResult<bool> {
-    let index=publication.validate_apply(params)?;
-    Ok((params.model_ref.is_none()&&params.mode.is_none()||current.model.as_ref()==publication.desired_model(index))
-        &&params.effort.as_ref().is_none_or(|effort|current.effort.as_ref()==Some(effort))
-        &&params.mode.is_none_or(|mode|current.mode==Some(mode)))
-}
-struct ThreadObservation { thread: Option<Id>, cwd: Option<String>, generation: Option<Uuid>, invalid: bool,
-before_pin: Option<String>, observed_before_pin: bool,
-publication: Option<(Arc<State>,Target,Uuid)>,
-controls:crate::backends::ControlsObservation,
-model_provider:Option<String>,
-controls_seen:bool,
-queue_generation:Uuid,
-queue_available:bool,prepared_images:Vec<(Uuid,bool)>, }
-impl Default for ThreadObservation { fn default()->Self {Self {thread:None,cwd:None,generation:None,invalid:false,before_pin:None,observed_before_pin:false,publication:None,
-    controls:crate::backends::ControlsObservation::new(EffectiveControls::default()),model_provider:None,controls_seen:false,queue_generation:Uuid::random(),queue_available:false,prepared_images:Vec::new()}} }
-fn codex_effective_controls(settings:&Value)->EffectiveControls {
-    let provider=settings.get("modelProvider").and_then(Value::as_str).filter(|value|!value.is_empty()&&value.len()<=512);
-    let model=settings.get("model").and_then(Value::as_str).filter(|value|!value.is_empty()&&value.len()<=512);
-    let model=provider.zip(model).map(|(provider,model)|NativeModelIdentity {provider:provider.to_owned(),model:model.to_owned()});
-    let effort=settings.get("effort").or_else(||settings.get("reasoningEffort")).and_then(Value::as_str)
-        .filter(|value|value.len()<=FRAME_MAX).map(str::to_owned);
-    let mode=match settings.get("collaborationMode").or_else(||settings.get("effectiveMode")).and_then(|value|value.get("mode")).and_then(Value::as_str) {
-        Some("default")=>Some(ControlMode::Default),Some("plan")=>Some(ControlMode::Plan),_=>None,
+    let efforts = advertised
+        .iter()
+        .map(|value| {
+            value["reasoningEffort"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(ErrorCode::NotReady)
+        })
+        .collect::<SecurityResult<Vec<_>>>()?;
+    let images = match row.get("inputModalities") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(values)) if values.len() <= 32 && values.iter().all(Value::is_string) => {
+            Some(values.iter().any(|value| value == "image"))
+        }
+        _ => return Err(ErrorCode::NotReady),
     };
-    EffectiveControls {model,effort,mode}
+    let mut unique = HashSet::new();
+    if efforts
+        .iter()
+        .any(|effort| effort.len() > FRAME_MAX || !unique.insert(effort))
+    {
+        return Err(ErrorCode::NotReady);
+    }
+    drop(unique);
+    Ok(NativeAdvertisedModel {
+        model: model.to_owned(),
+        label,
+        efforts,
+        images,
+    })
 }
-impl ThreadObservation { fn arm(&mut self, thread: &Id) { self.thread=Some(thread.clone()); }
-fn observe(&mut self, frame:&Value) {
-    if matches!(frame["method"].as_str(),Some("item/started"|"item/completed"))
-        &&frame["params"]["item"]["type"]=="userMessage"
-        &&frame["params"]["threadId"].as_str().is_some_and(|id|self.thread.as_ref().is_some_and(|thread|thread.0==id))
-        &&let Some(client)=frame["params"]["item"]["clientId"].as_str()
-        &&let Some((_,prepared))=self.prepared_images.iter_mut().find(|(input,_)|input.0==client) {*prepared=true;}
-    if self.thread.is_some()&&matches!(frame["method"].as_str(),Some("thread/settings/updated"|"thread/queue/changed")) {
-        let params=&frame["params"];
-        if !params["threadId"].as_str().is_some_and(|id|self.thread.as_ref().is_some_and(|thread|thread.0!=id)) {
-            if frame["method"]=="thread/settings/updated" {
-                let effective=if params["threadId"].as_str().is_some() {codex_effective_controls(&params["threadSettings"])}else{EffectiveControls::default()};
-                self.model_provider=effective.model.as_ref().map(|model|model.provider.clone());
-                self.controls_seen=true;
-                if self.controls.update(effective)&&let Some((state,target,source))=&self.publication {let _=state.controls_changed(target,source);}
-            } else {
-                self.queue_generation=Uuid::random();
-                if let Some((state,target,source))=&self.publication {let _=state.queue_changed(target,source);}
+fn codex_controls_command(
+    thread: &Id,
+    publication: &ControlsPublication,
+    params: &SessionControlsApplyParams,
+) -> SecurityResult<Option<Value>> {
+    let index = publication.validate_apply(params)?;
+    let desired = publication.desired_model(index);
+    let mut native = json!({"threadId":thread});
+    if let Some(mode) = params
+        .mode
+        .filter(|mode| publication.catalogue.current.mode != Some(*mode))
+    {
+        let model = desired.ok_or(ErrorCode::NotReady)?;
+        let effort = params.effort.as_ref().or_else(|| {
+            publication
+                .catalogue
+                .current
+                .effort
+                .as_ref()
+                .filter(|effort| {
+                    params.model_ref.is_none()
+                        || index.is_some_and(|index| {
+                            publication.catalogue.models[index].efforts.contains(effort)
+                        })
+                })
+        });
+        native["collaborationMode"] = json!({"mode":mode,"settings":{"model":model.model,"reasoning_effort":effort,"developer_instructions":null}});
+    } else {
+        if params.model_ref.is_some() && desired != publication.current_native.as_ref() {
+            native["model"] = json!(desired.ok_or(ErrorCode::NotReady)?.model);
+        }
+        if let Some(effort) = &params.effort
+            && publication.catalogue.current.effort.as_ref() != Some(effort)
+        {
+            native["effort"] = json!(effort);
+        }
+    }
+    Ok((native.as_object().is_some_and(|object| object.len() > 1)).then_some(native))
+}
+fn codex_controls_match(
+    publication: &ControlsPublication,
+    params: &SessionControlsApplyParams,
+    current: &EffectiveControls,
+) -> SecurityResult<bool> {
+    let index = publication.validate_apply(params)?;
+    Ok((params.model_ref.is_none() && params.mode.is_none()
+        || current.model.as_ref() == publication.desired_model(index))
+        && params
+            .effort
+            .as_ref()
+            .is_none_or(|effort| current.effort.as_ref() == Some(effort))
+        && params.mode.is_none_or(|mode| current.mode == Some(mode)))
+}
+struct ThreadObservation {
+    thread: Option<Id>,
+    cwd: Option<String>,
+    generation: Option<Uuid>,
+    invalid: bool,
+    before_pin: Option<String>,
+    observed_before_pin: bool,
+    publication: Option<(Arc<State>, Target, Uuid)>,
+    controls: crate::backends::ControlsObservation,
+    model_provider: Option<String>,
+    controls_seen: bool,
+    queue_generation: Uuid,
+    queue_available: bool,
+    prepared_images: Vec<(Uuid, bool)>,
+}
+impl Default for ThreadObservation {
+    fn default() -> Self {
+        Self {
+            thread: None,
+            cwd: None,
+            generation: None,
+            invalid: false,
+            before_pin: None,
+            observed_before_pin: false,
+            publication: None,
+            controls: crate::backends::ControlsObservation::new(EffectiveControls::default()),
+            model_provider: None,
+            controls_seen: false,
+            queue_generation: Uuid::random(),
+            queue_available: false,
+            prepared_images: Vec::new(),
+        }
+    }
+}
+fn codex_effective_controls(settings: &Value) -> EffectiveControls {
+    let provider = settings
+        .get("modelProvider")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 512);
+    let model = settings
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 512);
+    let model = provider
+        .zip(model)
+        .map(|(provider, model)| NativeModelIdentity {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        });
+    let effort = settings
+        .get("effort")
+        .or_else(|| settings.get("reasoningEffort"))
+        .and_then(Value::as_str)
+        .filter(|value| value.len() <= FRAME_MAX)
+        .map(str::to_owned);
+    let mode = match settings
+        .get("collaborationMode")
+        .or_else(|| settings.get("effectiveMode"))
+        .and_then(|value| value.get("mode"))
+        .and_then(Value::as_str)
+    {
+        Some("default") => Some(ControlMode::Default),
+        Some("plan") => Some(ControlMode::Plan),
+        _ => None,
+    };
+    EffectiveControls {
+        model,
+        effort,
+        mode,
+    }
+}
+impl ThreadObservation {
+    fn arm(&mut self, thread: &Id) {
+        self.thread = Some(thread.clone());
+    }
+    fn observe(&mut self, frame: &Value) {
+        if matches!(
+            frame["method"].as_str(),
+            Some("item/started" | "item/completed")
+        ) && frame["params"]["item"]["type"] == "userMessage"
+            && frame["params"]["threadId"]
+                .as_str()
+                .is_some_and(|id| self.thread.as_ref().is_some_and(|thread| thread.0 == id))
+            && let Some(client) = frame["params"]["item"]["clientId"].as_str()
+            && let Some((_, prepared)) = self
+                .prepared_images
+                .iter_mut()
+                .find(|(input, _)| input.0 == client)
+        {
+            *prepared = true;
+        }
+        if self.thread.is_some()
+            && matches!(
+                frame["method"].as_str(),
+                Some("thread/settings/updated" | "thread/queue/changed")
+            )
+        {
+            let params = &frame["params"];
+            if !params["threadId"]
+                .as_str()
+                .is_some_and(|id| self.thread.as_ref().is_some_and(|thread| thread.0 != id))
+            {
+                if frame["method"] == "thread/settings/updated" {
+                    let effective = if params["threadId"].as_str().is_some() {
+                        codex_effective_controls(&params["threadSettings"])
+                    } else {
+                        EffectiveControls::default()
+                    };
+                    self.model_provider =
+                        effective.model.as_ref().map(|model| model.provider.clone());
+                    self.controls_seen = true;
+                    if self.controls.update(effective)
+                        && let Some((state, target, source)) = &self.publication
+                    {
+                        let _ = state.controls_changed(target, source);
+                    }
+                } else {
+                    self.queue_generation = Uuid::random();
+                    if let Some((state, target, source)) = &self.publication {
+                        let _ = state.queue_changed(target, source);
+                    }
+                }
+            }
+        }
+        if frame["method"] == "skills/changed" && self.thread.is_some() {
+            if !self.invalid {
+                self.generation = Some(Uuid::random());
+            }
+            self.publish();
+            return;
+        }
+        if frame["method"] != "thread/settings/updated" || self.thread.is_none() {
+            return;
+        }
+        let params = &frame["params"];
+        // A missing/malformed routing identity cannot prove that this notification is unrelated.
+        if params["threadId"]
+            .as_str()
+            .is_some_and(|id| self.thread.as_ref().is_some_and(|t| t.0 != id))
+        {
+            return;
+        }
+        let cwd = params["threadSettings"]["cwd"]
+            .as_str()
+            .filter(|s| valid_skills_cwd(s));
+        if params["threadId"].as_str().is_none() || cwd.is_none() {
+            self.invalid = true;
+        }
+        if let Some(pinned) = &self.cwd {
+            if cwd != Some(pinned.as_str()) {
+                self.invalid = true;
+            }
+        } else {
+            if self.observed_before_pin && self.before_pin.as_deref() != cwd {
+                self.invalid = true;
+            }
+            self.before_pin = cwd.map(str::to_owned);
+            self.observed_before_pin = true;
+        }
+        if self.invalid {
+            self.generation = None;
+        }
+        self.publish();
+    }
+    fn pin(&mut self, resumed: &Value) {
+        if !self.controls_seen {
+            let effective = codex_effective_controls(resumed);
+            self.model_provider = effective.model.as_ref().map(|model| model.provider.clone());
+            self.controls.update(effective);
+        }
+        let cwd = resumed
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|s| valid_skills_cwd(s));
+        if cwd.is_none() || (self.observed_before_pin && self.before_pin.as_deref() != cwd) {
+            self.invalid = true;
+        }
+        self.cwd = cwd.map(str::to_owned);
+        self.generation = if self.invalid {
+            None
+        } else {
+            Some(Uuid::random())
+        };
+    }
+    fn publish(&self) {
+        if let Some((state, target, source)) = &self.publication {
+            let _ = state.skills_generation(target, source, self.generation.clone());
+            if self.invalid {
+                let _ = state.project_reads_available(target, source, false, false);
             }
         }
     }
-    if frame["method"]=="skills/changed" && self.thread.is_some() {
-        if !self.invalid { self.generation=Some(Uuid::random()); }
+    fn snapshot(&self) -> SecurityResult<(String, Uuid)> {
+        if self.invalid {
+            return Err(ErrorCode::NotReady);
+        }
+        Ok((
+            self.cwd.clone().ok_or(ErrorCode::NotReady)?,
+            self.generation.clone().ok_or(ErrorCode::NotReady)?,
+        ))
+    }
+    fn watch_image(&mut self, input: &Uuid) -> SecurityResult<()> {
+        if self.thread.is_none() || self.prepared_images.iter().any(|(known, _)| known == input) {
+            return Err(ErrorCode::NotReady);
+        }
+        if self.prepared_images.len() >= crate::attachments::IMAGE_ACTIONS_PER_HOST {
+            return Err(ErrorCode::ResourceLimit);
+        }
+        self.prepared_images.push((input.clone(), false));
+        Ok(())
+    }
+    fn unwatch_image(&mut self, input: &Uuid) {
+        self.prepared_images.retain(|(known, _)| known != input);
+    }
+    fn image_release_result(&mut self, input: &Uuid, result: &crate::storage::StoreResult<bool>) {
+        if matches!(result, Ok(true)) {
+            self.unwatch_image(input);
+        }
+    }
+    fn image_snapshot_seen(&mut self, input: &Uuid) {
+        if let Some((_, prepared)) = self
+            .prepared_images
+            .iter_mut()
+            .find(|(known, _)| known == input)
+        {
+            *prepared = true;
+        }
+    }
+    fn clear(&mut self) {
+        if self.invalid
+            && self.generation.is_none()
+            && self.prepared_images.is_empty()
+            && !self.queue_available
+            && self.controls.current == EffectiveControls::default()
+        {
+            return;
+        }
+        self.prepared_images.clear();
+        self.invalid = true;
+        self.generation = None;
         self.publish();
-        return;
+        self.queue_available = false;
+        self.queue_generation = Uuid::random();
+        self.controls.update(EffectiveControls::default());
+        self.model_provider = None;
+        if let Some((state, target, source)) = &self.publication {
+            let _ = state.controls_changed(target, source);
+            let _ = state.queue_changed(target, source);
+        }
     }
-    if frame["method"]!="thread/settings/updated" || self.thread.is_none() { return; }
-    let params=&frame["params"];
-    // A missing/malformed routing identity cannot prove that this notification is unrelated.
-    if params["threadId"].as_str().is_some_and(|id|self.thread.as_ref().is_some_and(|t|t.0!=id)) { return; }
-    let cwd=params["threadSettings"]["cwd"].as_str().filter(|s|valid_skills_cwd(s));
-    if params["threadId"].as_str().is_none() || cwd.is_none() { self.invalid=true; }
-    if let Some(pinned)=&self.cwd {
-        if cwd!=Some(pinned.as_str()) { self.invalid=true; }
-    } else {
-        if self.observed_before_pin && self.before_pin.as_deref()!=cwd { self.invalid=true; }
-        self.before_pin=cwd.map(str::to_owned); self.observed_before_pin=true;
+}
+fn valid_skills_cwd(cwd: &str) -> bool {
+    cwd.starts_with('/') && cwd.len() <= 4096 && !cwd.chars().any(char::is_control)
+}
+fn publish_project_cwd(
+    observed: &Mutex<ThreadObservation>,
+    thread: &Id,
+    cwd: &str,
+    commit: &mut dyn FnMut() -> SecurityResult<()>,
+) -> SecurityResult<()> {
+    let current = observed.lock();
+    if current.invalid
+        || current.thread.as_ref() != Some(thread)
+        || current.cwd.as_deref() != Some(cwd)
+    {
+        return Err(ErrorCode::StaleSession);
     }
-    if self.invalid {self.generation=None;}
-    self.publish();
-}
-fn pin(&mut self, resumed:&Value) {
-    if !self.controls_seen {
-        let effective=codex_effective_controls(resumed);
-        self.model_provider=effective.model.as_ref().map(|model|model.provider.clone());
-        self.controls.update(effective);
-    }
-    let cwd=resumed.get("cwd").and_then(Value::as_str).filter(|s|valid_skills_cwd(s));
-    if cwd.is_none() || (self.observed_before_pin && self.before_pin.as_deref()!=cwd) { self.invalid=true; }
-    self.cwd=cwd.map(str::to_owned);
-    self.generation=if self.invalid {None}else{Some(Uuid::random())};
-}
-fn publish(&self) { if let Some((state,target,source))=&self.publication {
-    let _=state.skills_generation(target,source,self.generation.clone());
-    if self.invalid {let _=state.project_reads_available(target,source,false,false);}
-} }
-fn snapshot(&self)->SecurityResult<(String,Uuid)> {
-    if self.invalid { return Err(ErrorCode::NotReady); }
-    Ok((self.cwd.clone().ok_or(ErrorCode::NotReady)?,self.generation.clone().ok_or(ErrorCode::NotReady)?))
-}
-fn watch_image(&mut self,input:&Uuid)->SecurityResult<()> {
-    if self.thread.is_none()||self.prepared_images.iter().any(|(known,_)|known==input) {return Err(ErrorCode::NotReady)}
-    if self.prepared_images.len()>=crate::attachments::IMAGE_ACTIONS_PER_HOST {return Err(ErrorCode::ResourceLimit)}
-    self.prepared_images.push((input.clone(),false));Ok(())
-}
-fn unwatch_image(&mut self,input:&Uuid) {self.prepared_images.retain(|(known,_)|known!=input);}
-fn image_release_result(&mut self,input:&Uuid,result:&crate::storage::StoreResult<bool>) {
-    if matches!(result,Ok(true)) {self.unwatch_image(input);}
-}
-fn image_snapshot_seen(&mut self,input:&Uuid) {
-    if let Some((_,prepared))=self.prepared_images.iter_mut().find(|(known,_)|known==input) {*prepared=true;}
-}
-fn clear(&mut self) {
-    if self.invalid&&self.generation.is_none()&&self.prepared_images.is_empty()&&!self.queue_available
-        &&self.controls.current==EffectiveControls::default() {return}
-    self.prepared_images.clear();
-    self.invalid=true;self.generation=None;self.publish();self.queue_available=false;self.queue_generation=Uuid::random();
-    self.controls.update(EffectiveControls::default());self.model_provider=None;
-    if let Some((state,target,source))=&self.publication {let _=state.controls_changed(target,source);let _=state.queue_changed(target,source);}
-} }
-fn valid_skills_cwd(cwd:&str)->bool { cwd.starts_with('/') && cwd.len()<=4096 && !cwd.chars().any(char::is_control) }
-fn publish_project_cwd(observed:&Mutex<ThreadObservation>,thread:&Id,cwd:&str,commit:&mut dyn FnMut()->SecurityResult<()>)->SecurityResult<()> {
-    let current=observed.lock();
-    if current.invalid||current.thread.as_ref()!=Some(thread)||current.cwd.as_deref()!=Some(cwd){return Err(ErrorCode::StaleSession);}
-    let result=commit();drop(current);result
+    let result = commit();
+    drop(current);
+    result
 }
 
-
-struct Link { observed: Arc<Mutex<ThreadObservation>>, writer: tokio::sync::Mutex<NativeWriter>,
-callbacks: Arc<Mutex<Vec<Callback>>>,
-fd: OwnedFd,
-reader: Mutex<Option<tokio::task::JoinHandle<Result<(), ErrorCode>>>>,
-reader_capture: Arc<Mutex<ReaderCaptureState>>,
-thread_start: Arc<OnceLock<herdr::CodexThreadStartObservation>>,
-snapshot_boundary: Arc<AtomicU64>, }
+struct Link {
+    observed: Arc<Mutex<ThreadObservation>>,
+    writer: tokio::sync::Mutex<NativeWriter>,
+    callbacks: Arc<Mutex<Vec<Callback>>>,
+    fd: OwnedFd,
+    reader: Mutex<Option<tokio::task::JoinHandle<Result<(), ErrorCode>>>>,
+    reader_capture: Arc<Mutex<ReaderCaptureState>>,
+    thread_start: Arc<OnceLock<herdr::CodexThreadStartObservation>>,
+    snapshot_boundary: Arc<AtomicU64>,
+}
 impl Link {
     async fn connect(
         owner: &CodexOwner,
@@ -1818,13 +2136,16 @@ impl Link {
             thread_start.clone(),
             observed.clone(),
         ));
-        let link = Arc::new(Self { observed, writer: tokio::sync::Mutex::new(writer),
-        callbacks,
-        fd,
-        reader: Mutex::new(Some(job)),
-        reader_capture,
-        thread_start,
-        snapshot_boundary, });
+        let link = Arc::new(Self {
+            observed,
+            writer: tokio::sync::Mutex::new(writer),
+            callbacks,
+            fd,
+            reader: Mutex::new(Some(job)),
+            reader_capture,
+            thread_start,
+            snapshot_boundary,
+        });
         let ready=link.rpc("initialize",json!({"clientInfo":{"name":"goatr","title":"Goatr","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true,"requestAttestation":false,"optOutNotificationMethods":[]}})).await;
         if !ready.as_ref().is_ok_and(|value| value.is_object()) {
             link.close().await;
@@ -1907,13 +2228,19 @@ impl Link {
         }
     }
     async fn send(&self, bytes: Vec<u8>) -> SecurityResult<()> {
-        self.send_current(bytes,None).await
+        self.send_current(bytes, None).await
     }
-    async fn send_current(&self,bytes:Vec<u8>,context:Option<&OriginalContext>)->SecurityResult<()> {
+    async fn send_current(
+        &self,
+        bytes: Vec<u8>,
+        context: Option<&OriginalContext>,
+    ) -> SecurityResult<()> {
         let mut writer = tokio::time::timeout(Duration::from_secs(5), self.writer.lock())
             .await
             .map_err(|_| ErrorCode::Busy)?;
-        if let Some(context)=context {context.recheck()?;}
+        if let Some(context) = context {
+            context.recheck()?;
+        }
         tokio::time::timeout(
             Duration::from_secs(5),
             writer.send(Message::Text(
@@ -1924,10 +2251,15 @@ impl Link {
         .map_err(|_| ErrorCode::Timeout)?
         .map_err(policy)
     }
-    fn mutation_callback(&self,id:NativeRpcId,kind:NativeMutationKind)->SecurityResult<(oneshot::Receiver<SecurityResult<Value>>,Arc<Mutex<Option<ErrorCode>>>)> {
-        let rejection=Arc::new(Mutex::new(None));
-        let reply=self.callback_with_observation(id,false,None,None,Some((kind,rejection.clone())))?;
-        Ok((reply,rejection))
+    fn mutation_callback(
+        &self,
+        id: NativeRpcId,
+        kind: NativeMutationKind,
+    ) -> SecurityResult<MutationCallback> {
+        let rejection = Arc::new(Mutex::new(None));
+        let reply =
+            self.callback_with_observation(id, false, None, None, Some((kind, rejection.clone())))?;
+        Ok((reply, rejection))
     }
     fn callback(
         &self,
@@ -1958,7 +2290,7 @@ impl Link {
         snapshot: bool,
         read_rejection: Option<(Id, oneshot::Sender<CreationReadRejection>)>,
         thread_start: Option<herdr::CodexThreadStartObservation>,
-        mutation_rejection: Option<(NativeMutationKind,Arc<Mutex<Option<ErrorCode>>>)>,
+        mutation_rejection: Option<(NativeMutationKind, Arc<Mutex<Option<ErrorCode>>>)>,
     ) -> SecurityResult<oneshot::Receiver<SecurityResult<Value>>> {
         let (tx, rx) = oneshot::channel();
         let mut callbacks = self.callbacks.lock();
@@ -1968,7 +2300,7 @@ impl Link {
         callbacks.push(Callback {
             response_limit: 16 * 1024 * 1024,
             response_bytes: None,
-            optional_missing:None,
+            optional_missing: None,
             mutation_rejection,
             id,
             reply: tx,
@@ -1993,29 +2325,61 @@ impl Link {
         params: Value,
         bytes: Option<Arc<AtomicUsize>>,
     ) -> SecurityResult<Value> {
-        self.rpc_captured(method,params,bytes,None,None).await
+        self.rpc_captured(method, params, bytes, None, None).await
     }
-    async fn rpc_optional(&self,context:&OriginalContext,service:OptionalService,params:Value)->SecurityResult<Option<Value>> {
-        let method=match service {OptionalService::CollaborationModes=>"collaborationMode/list",OptionalService::Queue=>"thread/queue/list"};
-        let missing=Arc::new(AtomicBool::new(false));
-        match self.rpc_captured(method,params,None,Some((service,missing.clone())),Some(context)).await {
-            Ok(value)=>Ok(Some(value)),
-            Err(ErrorCode::BackendError) if missing.load(Ordering::Acquire)=>Ok(None),
-            Err(code)=>Err(code),
+    async fn rpc_optional(
+        &self,
+        context: &OriginalContext,
+        service: OptionalService,
+        params: Value,
+    ) -> SecurityResult<Option<Value>> {
+        let method = match service {
+            OptionalService::CollaborationModes => "collaborationMode/list",
+            OptionalService::Queue => "thread/queue/list",
+        };
+        let missing = Arc::new(AtomicBool::new(false));
+        match self
+            .rpc_captured(
+                method,
+                params,
+                None,
+                Some((service, missing.clone())),
+                Some(context),
+            )
+            .await
+        {
+            Ok(value) => Ok(Some(value)),
+            Err(ErrorCode::BackendError) if missing.load(Ordering::Acquire) => Ok(None),
+            Err(code) => Err(code),
         }
     }
-    async fn rpc_current(&self,context:&OriginalContext,method:&str,params:Value)->SecurityResult<Value> {
-        self.rpc_captured(method,params,None,None,Some(context)).await
+    async fn rpc_current(
+        &self,
+        context: &OriginalContext,
+        method: &str,
+        params: Value,
+    ) -> SecurityResult<Value> {
+        self.rpc_captured(method, params, None, None, Some(context))
+            .await
     }
     async fn rpc_captured(
-        &self,method:&str,params:Value,bytes:Option<Arc<AtomicUsize>>,optional_missing:Option<(OptionalService,Arc<AtomicBool>)>,
-        context:Option<&OriginalContext>,
-    )->SecurityResult<Value> {
+        &self,
+        method: &str,
+        params: Value,
+        bytes: Option<Arc<AtomicUsize>>,
+        optional_missing: Option<(OptionalService, Arc<AtomicBool>)>,
+        context: Option<&OriginalContext>,
+    ) -> SecurityResult<Value> {
         let id = Uuid::random().0;
         let rx = self.callback(NativeRpcId::String(id.clone()), method == "thread/resume")?;
-        if let Some(missing)=optional_missing
-            &&let Some(callback)=self.callbacks.lock().iter_mut().find(|callback|callback.id==NativeRpcId::String(id.clone())) {
-            callback.optional_missing=Some(missing);
+        if let Some(missing) = optional_missing
+            && let Some(callback) = self
+                .callbacks
+                .lock()
+                .iter_mut()
+                .find(|callback| callback.id == NativeRpcId::String(id.clone()))
+        {
+            callback.optional_missing = Some(missing);
         }
         if let Some(bytes) = bytes
             && let Some(callback) = self
@@ -2035,14 +2399,22 @@ impl Link {
                 callback.response_limit = 1024 * 1024;
             }
         }
-        if matches!(method,"model/list"|"collaborationMode/list")
-            &&let Some(callback)=self.callbacks.lock().iter_mut().find(|callback|callback.id==NativeRpcId::String(id.clone())) {
-            callback.response_limit=256*1024;
+        if matches!(method, "model/list" | "collaborationMode/list")
+            && let Some(callback) = self
+                .callbacks
+                .lock()
+                .iter_mut()
+                .find(|callback| callback.id == NativeRpcId::String(id.clone()))
+        {
+            callback.response_limit = 256 * 1024;
         }
         let result = async {
             self.send_current(
-                serde_json::to_vec(&json!({"id":id,"method":method,"params":params})).map_err(policy)?,context,
-            ).await?;
+                serde_json::to_vec(&json!({"id":id,"method":method,"params":params}))
+                    .map_err(policy)?,
+                context,
+            )
+            .await?;
             tokio::time::timeout(Duration::from_secs(10), rx)
                 .await
                 .map_err(|_| ErrorCode::Timeout)?
@@ -3179,50 +3551,110 @@ impl BrowseSource {
         crate::state::BrowsePosition::new(self, bytes)
     }
 }
-fn skill_prompt_bytes(publication:&SkillsPublication,row:usize,action:&Uuid,thread:&Id)->SecurityResult<Vec<u8>> {
-    if thread!=&publication.origin.context.native {return Err(ErrorCode::StaleSession)}
-    let row=publication.catalogue.skills.get(row).filter(|row|row.enabled&&row.invocation_ref.is_some()).ok_or(ErrorCode::NotReady)?;
-    let path=row.path.as_ref().ok_or(ErrorCode::NotReady)?;
+fn skill_prompt_bytes(
+    publication: &SkillsPublication,
+    row: usize,
+    action: &Uuid,
+    thread: &Id,
+) -> SecurityResult<Vec<u8>> {
+    if thread != &publication.origin.context.native {
+        return Err(ErrorCode::StaleSession);
+    }
+    let row = publication
+        .catalogue
+        .skills
+        .get(row)
+        .filter(|row| row.enabled && row.invocation_ref.is_some())
+        .ok_or(ErrorCode::NotReady)?;
+    let path = row.path.as_ref().ok_or(ErrorCode::NotReady)?;
     serde_json::to_vec(&json!({"id":action.0,"method":"turn/start","params":{"threadId":thread.0,"clientUserMessageId":action.0,"input":[{"type":"skill","name":row.name,"path":path}]}})).map_err(policy)
 }
 #[derive(Deserialize)]
-#[serde(rename_all="camelCase")]
-struct NativeQueuePage {data:Vec<NativeQueueRow>,next_cursor:Option<String>}
-#[derive(Deserialize)]
-struct NativeQueueRow {id:Id,input:Vec<NativeQueueInput>}
-#[derive(Deserialize)]
-#[serde(tag="type",rename_all="camelCase")]
-enum NativeQueueInput {
-    Text {text:String},Image {},LocalImage {},Audio {},LocalAudio {},Skill {},Mention {},
-    #[serde(other)]Unsupported,
+#[serde(rename_all = "camelCase")]
+struct NativeQueuePage {
+    data: Vec<NativeQueueRow>,
+    next_cursor: Option<String>,
 }
-fn project_queue_row(row:NativeQueueRow)->SecurityResult<QueueRow> {
-    let editable=!row.input.is_empty()&&row.input.iter().all(|input|matches!(input,NativeQueueInput::Text {..}));
-    let mut text:Option<String>=None;
+#[derive(Deserialize)]
+struct NativeQueueRow {
+    id: Id,
+    input: Vec<NativeQueueInput>,
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum NativeQueueInput {
+    Text {
+        text: String,
+    },
+    Image {},
+    LocalImage {},
+    Audio {},
+    LocalAudio {},
+    Skill {},
+    Mention {},
+    #[serde(other)]
+    Unsupported,
+}
+fn project_queue_row(row: NativeQueueRow) -> SecurityResult<QueueRow> {
+    let editable = !row.input.is_empty()
+        && row
+            .input
+            .iter()
+            .all(|input| matches!(input, NativeQueueInput::Text { .. }));
+    let mut text: Option<String> = None;
     for input in row.input {
-        let fragment:std::borrow::Cow<'static,str>=match input {
-            NativeQueueInput::Text {text}=>std::borrow::Cow::Owned(text),
-            NativeQueueInput::Image {}|NativeQueueInput::LocalImage {}=>std::borrow::Cow::Borrowed("[Native image input]"),
-            NativeQueueInput::Audio {}|NativeQueueInput::LocalAudio {}=>std::borrow::Cow::Borrowed("[Native audio input]"),
-            NativeQueueInput::Skill {}=>std::borrow::Cow::Borrowed("[Native Skill input]"),
-            NativeQueueInput::Mention {}=>std::borrow::Cow::Borrowed("[Native mention input]"),
-            NativeQueueInput::Unsupported=>std::borrow::Cow::Borrowed("[Unsupported native input]"),
+        let fragment: std::borrow::Cow<'static, str> = match input {
+            NativeQueueInput::Text { text } => std::borrow::Cow::Owned(text),
+            NativeQueueInput::Image {} | NativeQueueInput::LocalImage {} => {
+                std::borrow::Cow::Borrowed("[Native image input]")
+            }
+            NativeQueueInput::Audio {} | NativeQueueInput::LocalAudio {} => {
+                std::borrow::Cow::Borrowed("[Native audio input]")
+            }
+            NativeQueueInput::Skill {} => std::borrow::Cow::Borrowed("[Native Skill input]"),
+            NativeQueueInput::Mention {} => std::borrow::Cow::Borrowed("[Native mention input]"),
+            NativeQueueInput::Unsupported => {
+                std::borrow::Cow::Borrowed("[Unsupported native input]")
+            }
         };
-        if let Some(text)=&mut text {
-            if text.len().checked_add(1+fragment.len()).is_none_or(|bytes|bytes>256*1024) {return Err(ErrorCode::ResourceLimit)}
-            text.push('\n');text.push_str(&fragment);
+        if let Some(text) = &mut text {
+            if text
+                .len()
+                .checked_add(1 + fragment.len())
+                .is_none_or(|bytes| bytes > 256 * 1024)
+            {
+                return Err(ErrorCode::ResourceLimit);
+            }
+            text.push('\n');
+            text.push_str(&fragment);
         } else {
-            if fragment.len()>256*1024 {return Err(ErrorCode::ResourceLimit)}
-            text=Some(fragment.into_owned());
+            if fragment.len() > 256 * 1024 {
+                return Err(ErrorCode::ResourceLimit);
+            }
+            text = Some(fragment.into_owned());
         }
     }
-    Ok(QueueRow {id:row.id,text:text.unwrap_or_else(||"[No native input]".into()),editable})
+    Ok(QueueRow {
+        id: row.id,
+        text: text.unwrap_or_else(|| "[No native input]".into()),
+        editable,
+    })
 }
-pub(crate) struct QueueRead {publication:QueuePublication,rows:Vec<QueueRow>,previous:Option<Arc<QueuePublication>>}
+pub(crate) struct QueueRead {
+    publication: QueuePublication,
+    rows: Vec<QueueRow>,
+    previous: Option<Arc<QueuePublication>>,
+}
 #[derive(Clone)]
-struct ControlsAction {publication:Arc<ControlsPublication>,original:Arc<Connection>}
+struct ControlsAction {
+    publication: Arc<ControlsPublication>,
+    original: Arc<Connection>,
+}
 #[derive(Clone)]
-struct QueueAction {publication:Arc<QueuePublication>,original:Arc<Connection>}
+struct QueueAction {
+    publication: Arc<QueuePublication>,
+    original: Arc<Connection>,
+}
 #[derive(Clone)]
 struct SkillInvocation {
     publication: Arc<SkillsPublication>,
@@ -3873,7 +4305,10 @@ impl Runtime {
     pub fn backend(&self) -> Backend {
         self.backend_observed(None)
     }
-    pub(crate) fn backend_observed(&self, manager_detail: Option<&mut Option<ManagerFailureDetail>>) -> Backend {
+    pub(crate) fn backend_observed(
+        &self,
+        manager_detail: Option<&mut Option<ManagerFailureDetail>>,
+    ) -> Backend {
         let ready = self
             .connections
             .lock()
@@ -3901,63 +4336,156 @@ impl Runtime {
         c.validate(&self.security.state, &self.topology)?;
         Ok(c)
     }
-    pub(crate) fn project_context(self:&Arc<Self>,target:&Target)->SecurityResult<crate::project_read::ProjectReadContext> {
-        let connection=self.connection(target)?;
-        let original=self.original_context(target)?;
-        if original.epoch!=connection.epoch||!Arc::ptr_eq(&connection,&self.connection(target)?) {return Err(ErrorCode::StaleSession);}
-        let cwd={
-            let observed=connection.link.observed.lock();
-            if observed.invalid||observed.thread.as_ref()!=Some(&connection.key.native_conversation_id) {return Err(ErrorCode::NotReady);}
+    pub(crate) fn project_context(
+        self: &Arc<Self>,
+        target: &Target,
+    ) -> SecurityResult<crate::project_read::ProjectReadContext> {
+        let connection = self.connection(target)?;
+        let original = self.original_context(target)?;
+        if original.epoch != connection.epoch
+            || !Arc::ptr_eq(&connection, &self.connection(target)?)
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        let cwd = {
+            let observed = connection.link.observed.lock();
+            if observed.invalid
+                || observed.thread.as_ref() != Some(&connection.key.native_conversation_id)
+            {
+                return Err(ErrorCode::NotReady);
+            }
             observed.cwd.clone().ok_or(ErrorCode::NotReady)?
         };
-        let retained=Arc::new((original,connection,cwd));
-        let checked=retained.clone();
-        let validate=Arc::new(move||{
+        let retained = Arc::new((original, connection, cwd));
+        let checked = retained.clone();
+        let validate = Arc::new(move || {
             checked.0.recheck()?;
-            let observed=checked.1.link.observed.lock();
-            if observed.invalid||observed.thread.as_ref()!=Some(&checked.1.key.native_conversation_id)||observed.cwd.as_deref()!=Some(checked.2.as_str()) {
+            let observed = checked.1.link.observed.lock();
+            if observed.invalid
+                || observed.thread.as_ref() != Some(&checked.1.key.native_conversation_id)
+                || observed.cwd.as_deref() != Some(checked.2.as_str())
+            {
                 return Err(ErrorCode::StaleSession);
             }
             Ok(())
         });
-        let checked=retained.clone();
-        let publish=Arc::new(move|commit:&mut dyn FnMut()->SecurityResult<()>|checked.0.with_current(||{
-            publish_project_cwd(&checked.1.link.observed,&checked.1.key.native_conversation_id,checked.2.as_str(),commit)
-        }));
-        self.topology.capture_project_context(crate::project_read::ProjectReadOrigin {source:ArtifactSource::Session{target:target.clone()},epoch:retained.0.epoch.clone(),
-            physical:retained.0.source.clone(),validate,publish,captured:std::time::Instant::now()},retained.0.process.clone(),Path::new(&retained.2),false)
-    }
-    pub(crate) fn original_context(self:&Arc<Self>,target:&Target)->SecurityResult<crate::backends::OriginalContext> {
-        let original=self.connection(target)?;let runtime=Arc::downgrade(self);let retained=original.clone();
-        let validate=Arc::new(move||{
-            let runtime=runtime.upgrade().ok_or(ErrorCode::NotReady)?;
-            let current=runtime.connections.lock().get(&retained.target.session_id).cloned().ok_or(ErrorCode::StaleSession)?;
-            if !Arc::ptr_eq(&current,&retained){return Err(ErrorCode::StaleSession)}
-            retained.validate(&runtime.security.state,&runtime.topology)
+        let checked = retained.clone();
+        let publish = Arc::new(move |commit: &mut dyn FnMut() -> SecurityResult<()>| {
+            checked.0.with_current(|| {
+                publish_project_cwd(
+                    &checked.1.link.observed,
+                    &checked.1.key.native_conversation_id,
+                    checked.2.as_str(),
+                    commit,
+                )
+            })
         });
-        let runtime=Arc::downgrade(self);let retained=original.clone();
-        let publish=Arc::new(move|enqueue:&mut dyn FnMut()->SecurityResult<()>|{
-            let runtime=runtime.upgrade().ok_or(ErrorCode::NotReady)?;
-            let connections=runtime.connections.lock();
-            if !connections.get(&retained.target.session_id).is_some_and(|current|Arc::ptr_eq(current,&retained)){return Err(ErrorCode::StaleSession)}
-            retained.validate(&runtime.security.state,&runtime.topology)?;
+        self.topology.capture_project_context(
+            crate::project_read::ProjectReadOrigin {
+                source: ArtifactSource::Session {
+                    target: target.clone(),
+                },
+                epoch: retained.0.epoch.clone(),
+                physical: retained.0.source.clone(),
+                validate,
+                publish,
+                captured: std::time::Instant::now(),
+            },
+            retained.0.process.clone(),
+            Path::new(&retained.2),
+            false,
+        )
+    }
+    pub(crate) fn original_context(
+        self: &Arc<Self>,
+        target: &Target,
+    ) -> SecurityResult<crate::backends::OriginalContext> {
+        let original = self.connection(target)?;
+        let runtime = Arc::downgrade(self);
+        let retained = original.clone();
+        let validate = Arc::new(move || {
+            let runtime = runtime.upgrade().ok_or(ErrorCode::NotReady)?;
+            let current = runtime
+                .connections
+                .lock()
+                .get(&retained.target.session_id)
+                .cloned()
+                .ok_or(ErrorCode::StaleSession)?;
+            if !Arc::ptr_eq(&current, &retained) {
+                return Err(ErrorCode::StaleSession);
+            }
+            retained.validate(&runtime.security.state, &runtime.topology)
+        });
+        let runtime = Arc::downgrade(self);
+        let retained = original.clone();
+        let publish = Arc::new(move |enqueue: &mut dyn FnMut() -> SecurityResult<()>| {
+            let runtime = runtime.upgrade().ok_or(ErrorCode::NotReady)?;
+            let connections = runtime.connections.lock();
+            if !connections
+                .get(&retained.target.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &retained))
+            {
+                return Err(ErrorCode::StaleSession);
+            }
+            retained.validate(&runtime.security.state, &runtime.topology)?;
             enqueue()
         });
-        crate::backends::OriginalContext::capture(Provider::Codex,original.target.clone(),original.epoch.clone(),
-            original.source.clone(),original.owner.clone(),original.key.native_conversation_id.clone(),validate,publish)
+        crate::backends::OriginalContext::capture(
+            crate::backends::OriginalIdentity {
+                provider: Provider::Codex,
+                target: original.target.clone(),
+                epoch: original.epoch.clone(),
+                source: original.source.clone(),
+                process: original.owner.clone(),
+                native: original.key.native_conversation_id.clone(),
+            },
+            validate,
+            publish,
+        )
     }
-    pub(crate) fn attachment_context(self:&Arc<Self>,target:&Target)->SecurityResult<crate::attachments::ProviderContext> {
-        let original=self.connection(target)?;let runtime=Arc::downgrade(self);let retained=original.clone();
-        let validate=Arc::new(move||{let runtime=runtime.upgrade().ok_or(ErrorCode::NotReady)?;let current=runtime.connections.lock().get(&retained.target.session_id).cloned().ok_or(ErrorCode::NotReady)?;if !Arc::ptr_eq(&current,&retained){return Err(ErrorCode::StaleSession)}retained.validate(&runtime.security.state,&runtime.topology)});
-        let runtime=Arc::downgrade(self);let retained=original.clone();
-        let publish=Arc::new(move|enqueue:&mut dyn FnMut()->SecurityResult<()>|{
-            let runtime=runtime.upgrade().ok_or(ErrorCode::NotReady)?;
-            let connections=runtime.connections.lock();
-            if !connections.get(&retained.target.session_id).is_some_and(|current|Arc::ptr_eq(current,&retained)){return Err(ErrorCode::StaleSession)}
-            retained.validate(&runtime.security.state,&runtime.topology)?;
+    pub(crate) fn attachment_context(
+        self: &Arc<Self>,
+        target: &Target,
+    ) -> SecurityResult<crate::attachments::ProviderContext> {
+        let original = self.connection(target)?;
+        let runtime = Arc::downgrade(self);
+        let retained = original.clone();
+        let validate = Arc::new(move || {
+            let runtime = runtime.upgrade().ok_or(ErrorCode::NotReady)?;
+            let current = runtime
+                .connections
+                .lock()
+                .get(&retained.target.session_id)
+                .cloned()
+                .ok_or(ErrorCode::NotReady)?;
+            if !Arc::ptr_eq(&current, &retained) {
+                return Err(ErrorCode::StaleSession);
+            }
+            retained.validate(&runtime.security.state, &runtime.topology)
+        });
+        let runtime = Arc::downgrade(self);
+        let retained = original.clone();
+        let publish = Arc::new(move |enqueue: &mut dyn FnMut() -> SecurityResult<()>| {
+            let runtime = runtime.upgrade().ok_or(ErrorCode::NotReady)?;
+            let connections = runtime.connections.lock();
+            if !connections
+                .get(&retained.target.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &retained))
+            {
+                return Err(ErrorCode::StaleSession);
+            }
+            retained.validate(&runtime.security.state, &runtime.topology)?;
             enqueue()
         });
-        crate::attachments::ProviderContext::capture(&self.topology.config,original.target.clone(),original.epoch.clone(),original.source.clone(),original.owner.clone(),validate,publish)
+        crate::attachments::ProviderContext::capture(
+            &self.topology.config,
+            original.target.clone(),
+            original.epoch.clone(),
+            original.source.clone(),
+            original.owner.clone(),
+            validate,
+            publish,
+        )
     }
     fn read_connection(&self, target: &Target) -> Result<Arc<Connection>, ErrorCode> {
         let c = self
@@ -4033,7 +4561,9 @@ impl Runtime {
         if self.stopping.load(Ordering::Acquire) {
             return Err(ErrorCode::NotReady);
         }
-        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some()) {return Err(ErrorCode::NotReady)}
+        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some()) {
+            return Err(ErrorCode::NotReady);
+        }
         if let RequestBody::SessionCreate(p) = &request.body {
             if p.provider != Provider::Codex {
                 return Err(ErrorCode::NotReady);
@@ -4341,44 +4871,149 @@ fn apply_thread_state(state: &mut SessionState, thread: &Value) {
 }
 
 impl Runtime {
-    async fn attention_commit<T:Send+'static>(self:&Arc<Self>,c:&Arc<Connection>,commit:impl FnOnce(&mut crate::storage::Storage)->crate::storage::StoreResult<T>+Send+'static)->SecurityResult<T>{
-        let runtime=self.clone();let original=c.clone();
-        self.security.storage.call(move|store|{
-            original.readiness(&runtime.security.state,&runtime.topology).map_err(crate::storage::StorageError::Policy)?;
-            let connections=runtime.connections.lock();
-            if !connections.get(&original.target.session_id).is_some_and(|current|Arc::ptr_eq(current,&original)){return Err(crate::storage::StorageError::Policy(ErrorCode::StaleSession))}
-            runtime.security.state.with_attention_source(&original.target,&original.epoch,Provider::Codex,||commit(store)).map_err(crate::storage::StorageError::Policy)?
-        }).await.map_err(pairing::store_error)
+    async fn attention_commit<T: Send + 'static>(
+        self: &Arc<Self>,
+        c: &Arc<Connection>,
+        commit: impl FnOnce(&mut crate::storage::Storage) -> crate::storage::StoreResult<T>
+        + Send
+        + 'static,
+    ) -> SecurityResult<T> {
+        let runtime = self.clone();
+        let original = c.clone();
+        self.security
+            .storage
+            .call(move |store| {
+                original
+                    .readiness(&runtime.security.state, &runtime.topology)
+                    .map_err(crate::storage::StorageError::Policy)?;
+                let connections = runtime.connections.lock();
+                if !connections
+                    .get(&original.target.session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &original))
+                {
+                    return Err(crate::storage::StorageError::Policy(
+                        ErrorCode::StaleSession,
+                    ));
+                }
+                runtime
+                    .security
+                    .state
+                    .with_attention_source(
+                        &original.target,
+                        &original.epoch,
+                        Provider::Codex,
+                        || commit(store),
+                    )
+                    .map_err(crate::storage::StorageError::Policy)?
+            })
+            .await
+            .map_err(pairing::store_error)
     }
-    async fn release_prepared_images(self:&Arc<Self>,c:&Arc<Connection>) {
-        let inputs:Vec<_>=c.link.observed.lock().prepared_images.iter().filter(|(_,prepared)|*prepared).map(|(input,_)|input.clone()).collect();
-        if inputs.is_empty() {return}
-        let original=match self.original_context(&c.target) {Ok(original) if original.epoch==c.epoch=>original,_=>return};
+    async fn release_prepared_images(self: &Arc<Self>, c: &Arc<Connection>) {
+        let inputs: Vec<_> = c
+            .link
+            .observed
+            .lock()
+            .prepared_images
+            .iter()
+            .filter(|(_, prepared)| *prepared)
+            .map(|(input, _)| input.clone())
+            .collect();
+        if inputs.is_empty() {
+            return;
+        }
+        let original = match self.original_context(&c.target) {
+            Ok(original) if original.epoch == c.epoch => original,
+            _ => return,
+        };
         for input in inputs {
-            let proof=original.clone();let selected=input.clone();
-            let released=self.security.storage.call(move|store|store.image_read_prepared(&proof,&selected)).await;
-            c.link.observed.lock().image_release_result(&input,&released);
+            let proof = original.clone();
+            let selected = input.clone();
+            let released = self
+                .security
+                .storage
+                .call(move |store| store.image_read_prepared(&proof, &selected))
+                .await;
+            c.link
+                .observed
+                .lock()
+                .image_release_result(&input, &released);
         }
     }
-    async fn attention_before_event(self:&Arc<Self>,c:&Arc<Connection>,event:&Value)->SecurityResult<()>{
-        if c.readiness(&self.security.state,&self.topology)?.is_none(){return Ok(())}
-        let p=&event["params"];if p.get("threadId").and_then(Value::as_str)!=Some(c.key.native_conversation_id.0.as_str()){return Ok(())}
+    async fn attention_before_event(
+        self: &Arc<Self>,
+        c: &Arc<Connection>,
+        event: &Value,
+    ) -> SecurityResult<()> {
+        if c.readiness(&self.security.state, &self.topology)?.is_none() {
+            return Ok(());
+        }
+        let p = &event["params"];
+        if p.get("threadId").and_then(Value::as_str)
+            != Some(c.key.native_conversation_id.0.as_str())
+        {
+            return Ok(());
+        }
         self.release_prepared_images(c).await;
-        let before=self.security.state.session_state(&c.target,&c.epoch)?;let current;let native;let mut actionable=false;
-        if event.get("id").is_some(){
-            let id=native_json::rpc_id(&event["id"]).map_err(policy)?;
-            if c.resolved.lock().contains(&id)||c.dialogs.lock().iter().any(|d|d.id==id){return Ok(())}
-            native=Some(serde_json::to_string(&id).map_err(policy)?);current=SessionStatus::Attention;actionable=true;
-        }else{match event["method"].as_str(){
-            Some("turn/started")=>{current=SessionStatus::Working;native=Some(native_id(&p["turn"],"id")?.0);},
-            Some("turn/completed")=>{let turn=native_id(&p["turn"],"id")?;if before.native_turn_id.as_ref()!=Some(&turn){return Ok(())}current=SessionStatus::Idle;native=Some(turn.0);},
-            Some("thread/status/changed")=>{let mut display=before.clone();apply_thread_state(&mut display,&p["status"]);current=display.summary.status;native=before.native_turn_id.as_ref().map(|id|id.0.clone());},
-            _=>return Ok(())
-        }}
-        let family=if actionable{"request"}else if current==SessionStatus::Idle{"completed"}else{"state"};
-        let correlation=native.as_deref().map(|native|crate::push::correlation(&c.target,"codex",native,family)).unwrap_or_else(||Id("native-checkpoint".into()));
-        let change=crate::storage::AttentionTransition{target:c.target.clone(),correlation,previous:before.summary.status,current,snapshot:native.is_none(),new_actionable:actionable};
-        let events=self.attention_commit(c,move|store|store.attention_transition(&change,crate::pairing::now_ms())).await?;
+        let before = self.security.state.session_state(&c.target, &c.epoch)?;
+        let current;
+        let native;
+        let mut actionable = false;
+        if event.get("id").is_some() {
+            let id = native_json::rpc_id(&event["id"]).map_err(policy)?;
+            if c.resolved.lock().contains(&id) || c.dialogs.lock().iter().any(|d| d.id == id) {
+                return Ok(());
+            }
+            native = Some(serde_json::to_string(&id).map_err(policy)?);
+            current = SessionStatus::Attention;
+            actionable = true;
+        } else {
+            match event["method"].as_str() {
+                Some("turn/started") => {
+                    current = SessionStatus::Working;
+                    native = Some(native_id(&p["turn"], "id")?.0);
+                }
+                Some("turn/completed") => {
+                    let turn = native_id(&p["turn"], "id")?;
+                    if before.native_turn_id.as_ref() != Some(&turn) {
+                        return Ok(());
+                    }
+                    current = SessionStatus::Idle;
+                    native = Some(turn.0);
+                }
+                Some("thread/status/changed") => {
+                    let mut display = before.clone();
+                    apply_thread_state(&mut display, &p["status"]);
+                    current = display.summary.status;
+                    native = before.native_turn_id.as_ref().map(|id| id.0.clone());
+                }
+                _ => return Ok(()),
+            }
+        }
+        let family = if actionable {
+            "request"
+        } else if current == SessionStatus::Idle {
+            "completed"
+        } else {
+            "state"
+        };
+        let correlation = native
+            .as_deref()
+            .map(|native| crate::push::correlation(&c.target, "codex", native, family))
+            .unwrap_or_else(|| Id("native-checkpoint".into()));
+        let change = crate::storage::AttentionTransition {
+            target: c.target.clone(),
+            correlation,
+            previous: before.summary.status,
+            current,
+            snapshot: native.is_none(),
+            new_actionable: actionable,
+        };
+        let events = self
+            .attention_commit(c, move |store| {
+                store.attention_transition(&change, crate::pairing::now_ms())
+            })
+            .await?;
         self.security.publish_attention(events).await
     }
     fn apply_event(&self, c: &Connection, event: &Value) -> Result<(), ErrorCode> {
@@ -4602,184 +5237,646 @@ impl Runtime {
             .session_open(&auth.connection_id, request, target, pairing::now_ms())
     }
     /// One existing-owner read; the pinned cwd never comes from the phone or a fallback.
-    pub(crate) async fn skills_list(self:&Arc<Self>,auth:&Arc<Authorized>,target:&Target)->SecurityResult<SkillsPublication> {
-        self.security.state.clear_skills_publication(&auth.connection_id);
-        let slot=self.security.state.reserve_publication(auth,PublicationKind::Skills)?;
-        let c=self.connection(target)?;
-        let context=self.original_context(target)?.authorized(auth);
-        let (cwd,generation)=c.link.observed.lock().snapshot()?;
-        let expires=std::time::Instant::now()+Duration::from_secs(300);
-        let context=context.leased(expires);
-        let before=self.security.state.session_state(target,&c.epoch)?;
-        if !before.summary.capabilities.skills_read||before.summary.skills_generation.as_ref()!=Some(&generation) {return Err(ErrorCode::NotReady)}
-        let native=c.link.rpc_current(&context,"skills/list",json!({"cwds":[cwd],"forceReload":false})).await?;
+    pub(crate) async fn skills_list(
+        self: &Arc<Self>,
+        auth: &Arc<Authorized>,
+        target: &Target,
+    ) -> SecurityResult<SkillsPublication> {
+        self.security
+            .state
+            .clear_skills_publication(&auth.connection_id);
+        let slot = self
+            .security
+            .state
+            .reserve_publication(auth, PublicationKind::Skills)?;
+        let c = self.connection(target)?;
+        let context = self.original_context(target)?.authorized(auth);
+        let (cwd, generation) = c.link.observed.lock().snapshot()?;
+        let expires = std::time::Instant::now() + Duration::from_secs(300);
+        let context = context.leased(expires);
+        let before = self.security.state.session_state(target, &c.epoch)?;
+        if !before.summary.capabilities.skills_read
+            || before.summary.skills_generation.as_ref() != Some(&generation)
+        {
+            return Err(ErrorCode::NotReady);
+        }
+        let native = c
+            .link
+            .rpc_current(
+                &context,
+                "skills/list",
+                json!({"cwds":[cwd],"forceReload":false}),
+            )
+            .await?;
         context.recheck()?;
-        if c.link.observed.lock().snapshot()? != (cwd.clone(),generation.clone()) {return Err(ErrorCode::StaleSession)}
-        let data=native["data"].as_array().ok_or(ErrorCode::NotReady)?;
-        if data.len()!=1||data[0]["cwd"].as_str()!=Some(cwd.as_str()) {return Err(ErrorCode::NotReady)}
-        let rows=data[0]["skills"].as_array().ok_or(ErrorCode::NotReady)?;
-        let errors=data[0]["errors"].as_array().ok_or(ErrorCode::NotReady)?;
-        if rows.len()>128||errors.len()>32 {return Err(ErrorCode::ResourceLimit)}
-        fn text(value:&Value,key:&str)->SecurityResult<Text> {value[key].as_str().map(str::to_owned).ok_or(ErrorCode::NotReady)}
-        fn optional(value:&Value,key:&str)->SecurityResult<Option<Text>> {match value.get(key) {None|Some(Value::Null)=>Ok(None),Some(Value::String(s))=>Ok(Some(s.clone())),_=>Err(ErrorCode::NotReady)}}
-        let skills=rows.iter().map(|row| {
-            let interface=row.get("interface").filter(|v|!v.is_null());
-            if interface.is_some_and(|v|!v.is_object()) {return Err(ErrorCode::NotReady)}
-            Ok(SkillEntry {name:text(row,"name")?,description:text(row,"description")?,path:Some(text(row,"path")?),scope:text(row,"scope")?,enabled:row["enabled"].as_bool().ok_or(ErrorCode::NotReady)?,display_name:interface.map(|v|optional(v,"displayName")).transpose()?.flatten(),short_description:optional(row,"shortDescription")?.or(interface.map(|v|optional(v,"shortDescription")).transpose()?.flatten()),command_name:None,document_ref:None,invocation_ref:None})
-        }).collect::<SecurityResult<Vec<_>>>()?;
-        let errors=errors.iter().map(|row|Ok(SkillLoadError {path:text(row,"path")?,message:text(row,"message")?})).collect::<SecurityResult<Vec<_>>>()?;
-        let catalogue=SkillsListResult {target:target.clone(),catalogue_generation:generation.clone(),skills,errors,provider:Provider::Codex};
-        catalogue.validate().map_err(|_|ErrorCode::ResourceLimit)?;
-        let paths=catalogue.skills.iter().enumerate().filter(|(_,row)|row.enabled).filter_map(|(index,row)|row.path.as_ref().map(|path|(index,std::path::PathBuf::from(path),None))).collect();
-        let check_link=c.link.clone();let expected_cwd=cwd.clone();let expected_generation=generation.clone();
-        let check=Arc::new(move||{if check_link.observed.lock().snapshot()? != (expected_cwd.clone(),expected_generation.clone()) {return Err(ErrorCode::StaleSession)}Ok(())});
-        let fence_link=c.link.clone();let expected_cwd=cwd.clone();let expected_generation=generation.clone();
-        let fence:PublicationGuard=Arc::new(move|commit|{let skills=fence_link.observed.lock();if skills.snapshot()? != (expected_cwd.clone(),expected_generation.clone()) {return Err(ErrorCode::StaleSession)}commit()});
-        self.topology.skill_documents.prepare(SkillsPublication {origin:PublicationOrigin {peer:auth.proof.peer_id().clone(),peer_epoch:auth.proof.epoch(),connection:auth.connection_id.clone(),context:context.guarded(check,fence)},catalogue,documents:HashMap::new(),document_expires:expires,native_catalogue:None,native_cwd:Some(cwd),slot},paths).await
+        if c.link.observed.lock().snapshot()? != (cwd.clone(), generation.clone()) {
+            return Err(ErrorCode::StaleSession);
+        }
+        let data = native["data"].as_array().ok_or(ErrorCode::NotReady)?;
+        if data.len() != 1 || data[0]["cwd"].as_str() != Some(cwd.as_str()) {
+            return Err(ErrorCode::NotReady);
+        }
+        let rows = data[0]["skills"].as_array().ok_or(ErrorCode::NotReady)?;
+        let errors = data[0]["errors"].as_array().ok_or(ErrorCode::NotReady)?;
+        if rows.len() > 128 || errors.len() > 32 {
+            return Err(ErrorCode::ResourceLimit);
+        }
+        fn text(value: &Value, key: &str) -> SecurityResult<Text> {
+            value[key]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(ErrorCode::NotReady)
+        }
+        fn optional(value: &Value, key: &str) -> SecurityResult<Option<Text>> {
+            match value.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                _ => Err(ErrorCode::NotReady),
+            }
+        }
+        let skills = rows
+            .iter()
+            .map(|row| {
+                let interface = row.get("interface").filter(|v| !v.is_null());
+                if interface.is_some_and(|v| !v.is_object()) {
+                    return Err(ErrorCode::NotReady);
+                }
+                Ok(SkillEntry {
+                    name: text(row, "name")?,
+                    description: text(row, "description")?,
+                    path: Some(text(row, "path")?),
+                    scope: text(row, "scope")?,
+                    enabled: row["enabled"].as_bool().ok_or(ErrorCode::NotReady)?,
+                    display_name: interface
+                        .map(|v| optional(v, "displayName"))
+                        .transpose()?
+                        .flatten(),
+                    short_description: optional(row, "shortDescription")?.or(interface
+                        .map(|v| optional(v, "shortDescription"))
+                        .transpose()?
+                        .flatten()),
+                    command_name: None,
+                    document_ref: None,
+                    invocation_ref: None,
+                })
+            })
+            .collect::<SecurityResult<Vec<_>>>()?;
+        let errors = errors
+            .iter()
+            .map(|row| {
+                Ok(SkillLoadError {
+                    path: text(row, "path")?,
+                    message: text(row, "message")?,
+                })
+            })
+            .collect::<SecurityResult<Vec<_>>>()?;
+        let catalogue = SkillsListResult {
+            target: target.clone(),
+            catalogue_generation: generation.clone(),
+            skills,
+            errors,
+            provider: Provider::Codex,
+        };
+        catalogue.validate().map_err(|_| ErrorCode::ResourceLimit)?;
+        let paths = catalogue
+            .skills
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.enabled)
+            .filter_map(|(index, row)| {
+                row.path
+                    .as_ref()
+                    .map(|path| (index, std::path::PathBuf::from(path), None))
+            })
+            .collect();
+        let check_link = c.link.clone();
+        let expected_cwd = cwd.clone();
+        let expected_generation = generation.clone();
+        let check = Arc::new(move || {
+            if check_link.observed.lock().snapshot()?
+                != (expected_cwd.clone(), expected_generation.clone())
+            {
+                return Err(ErrorCode::StaleSession);
+            }
+            Ok(())
+        });
+        let fence_link = c.link.clone();
+        let expected_cwd = cwd.clone();
+        let expected_generation = generation.clone();
+        let fence: PublicationGuard = Arc::new(move |commit| {
+            let skills = fence_link.observed.lock();
+            if skills.snapshot()? != (expected_cwd.clone(), expected_generation.clone()) {
+                return Err(ErrorCode::StaleSession);
+            }
+            commit()
+        });
+        self.topology
+            .skill_documents
+            .prepare(
+                SkillsPublication {
+                    origin: PublicationOrigin {
+                        peer: auth.proof.peer_id().clone(),
+                        peer_epoch: auth.proof.epoch(),
+                        connection: auth.connection_id.clone(),
+                        context: context.guarded(check, fence),
+                    },
+                    catalogue,
+                    documents: HashMap::new(),
+                    document_expires: expires,
+                    native_catalogue: None,
+                    native_cwd: Some(cwd),
+                    slot,
+                },
+                paths,
+            )
+            .await
     }
-    pub(crate) fn enqueue_skills_list(&self,connection:&Uuid,response_id:Uuid,publication:SkillsPublication)->SecurityResult<()> {
-        let context=publication.origin.context.clone();let mut publication=Some(publication);
-        context.with_current(||self.security.state.skills_list_response(connection,response_id.clone(),publication.take().ok_or(ErrorCode::StaleSession)?))
+    pub(crate) fn enqueue_skills_list(
+        &self,
+        connection: &Uuid,
+        response_id: Uuid,
+        publication: SkillsPublication,
+    ) -> SecurityResult<()> {
+        let context = publication.origin.context.clone();
+        let mut publication = Some(publication);
+        context.with_current(|| {
+            self.security.state.skills_list_response(
+                connection,
+                response_id.clone(),
+                publication.take().ok_or(ErrorCode::StaleSession)?,
+            )
+        })
     }
-    pub(crate) async fn authorize_skill_document(self:&Arc<Self>,auth:&Authorized,publication:&Arc<SkillsPublication>,document:&Uuid)->SecurityResult<()> {
-        self.security.state.skills_publication_current(auth,publication)?;
+    pub(crate) async fn authorize_skill_document(
+        self: &Arc<Self>,
+        auth: &Authorized,
+        publication: &Arc<SkillsPublication>,
+        document: &Uuid,
+    ) -> SecurityResult<()> {
+        self.security
+            .state
+            .skills_publication_current(auth, publication)?;
         publication.origin.context.recheck()?;
-        let selected=publication.catalogue.skills.iter().find(|row|row.document_ref.as_ref()==Some(document)&&row.enabled).ok_or(ErrorCode::NotReady)?;
-        let cwd=publication.native_cwd.as_ref().ok_or(ErrorCode::NotReady)?;
-        let c=self.connection(&publication.catalogue.target)?;
-        if c.epoch!=publication.origin.context.epoch {return Err(ErrorCode::StaleSession)}
-        let native=c.link.rpc_current(&publication.origin.context,"skills/list",json!({"cwds":[cwd],"forceReload":false})).await?;
-        let data=native["data"].as_array().ok_or(ErrorCode::NotReady)?;
-        if data.len()!=1||data[0]["cwd"].as_str()!=Some(cwd.as_str()) {return Err(ErrorCode::StaleSession)}
-        let rows=data[0]["skills"].as_array().ok_or(ErrorCode::NotReady)?;
-        if rows.len()>128 {return Err(ErrorCode::ResourceLimit)}
-        if !rows.iter().any(|row|row["enabled"].as_bool()==Some(true)&&row["name"].as_str()==Some(selected.name.as_str())&&row["path"].as_str()==selected.path.as_deref()&&row["scope"].as_str()==Some(selected.scope.as_str())) {return Err(ErrorCode::StaleSession)}
+        let selected = publication
+            .catalogue
+            .skills
+            .iter()
+            .find(|row| row.document_ref.as_ref() == Some(document) && row.enabled)
+            .ok_or(ErrorCode::NotReady)?;
+        let cwd = publication.native_cwd.as_ref().ok_or(ErrorCode::NotReady)?;
+        let c = self.connection(&publication.catalogue.target)?;
+        if c.epoch != publication.origin.context.epoch {
+            return Err(ErrorCode::StaleSession);
+        }
+        let native = c
+            .link
+            .rpc_current(
+                &publication.origin.context,
+                "skills/list",
+                json!({"cwds":[cwd],"forceReload":false}),
+            )
+            .await?;
+        let data = native["data"].as_array().ok_or(ErrorCode::NotReady)?;
+        if data.len() != 1 || data[0]["cwd"].as_str() != Some(cwd.as_str()) {
+            return Err(ErrorCode::StaleSession);
+        }
+        let rows = data[0]["skills"].as_array().ok_or(ErrorCode::NotReady)?;
+        if rows.len() > 128 {
+            return Err(ErrorCode::ResourceLimit);
+        }
+        if !rows.iter().any(|row| {
+            row["enabled"].as_bool() == Some(true)
+                && row["name"].as_str() == Some(selected.name.as_str())
+                && row["path"].as_str() == selected.path.as_deref()
+                && row["scope"].as_str() == Some(selected.scope.as_str())
+        }) {
+            return Err(ErrorCode::StaleSession);
+        }
         publication.origin.context.recheck()
     }
-    async fn model_catalogue(&self,c:&Arc<Connection>,context:&OriginalContext)->SecurityResult<Vec<NativeAdvertisedModel>> {
-        let mut models=Vec::new();let mut cursor:Option<String>=None;let mut seen=HashSet::new();let mut bytes=0usize;
+    async fn model_catalogue(
+        &self,
+        c: &Arc<Connection>,
+        context: &OriginalContext,
+    ) -> SecurityResult<Vec<NativeAdvertisedModel>> {
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = HashSet::new();
+        let mut bytes = 0usize;
         loop {
-            if seen.len()>=256 {return Err(ErrorCode::ResourceLimit)}
-            context.recheck()?;
-            let mut params=json!({"limit":100,"includeHidden":false});if let Some(cursor)=&cursor {params["cursor"]=json!(cursor);}
-            let page=c.link.rpc_current(context,"model/list",params).await?;context.recheck()?;
-            let rows=page["data"].as_array().ok_or(ErrorCode::NotReady)?;
-            if rows.len()>100||models.len()+rows.len()>256 {return Err(ErrorCode::ResourceLimit)}
-            for row in rows {
-                let model=codex_advertised_model(row)?;
-                bytes=bytes.checked_add(crate::protocol::encoded_size(&model,256*1024).map_err(|_|ErrorCode::ResourceLimit)?).ok_or(ErrorCode::ResourceLimit)?;
-                if bytes>256*1024 {return Err(ErrorCode::ResourceLimit)}models.push(model);
+            if seen.len() >= 256 {
+                return Err(ErrorCode::ResourceLimit);
             }
-            let Some(next)=next_cursor(&page)? else {break};
-            if models.len()>=256 {return Err(ErrorCode::ResourceLimit)}
-            if !seen.insert(next.clone()) {return Err(ErrorCode::NotReady)}cursor=Some(next);
+            context.recheck()?;
+            let mut params = json!({"limit":100,"includeHidden":false});
+            if let Some(cursor) = &cursor {
+                params["cursor"] = json!(cursor);
+            }
+            let page = c.link.rpc_current(context, "model/list", params).await?;
+            context.recheck()?;
+            let rows = page["data"].as_array().ok_or(ErrorCode::NotReady)?;
+            if rows.len() > 100 || models.len() + rows.len() > 256 {
+                return Err(ErrorCode::ResourceLimit);
+            }
+            for row in rows {
+                let model = codex_advertised_model(row)?;
+                bytes = bytes
+                    .checked_add(
+                        crate::protocol::encoded_size(&model, 256 * 1024)
+                            .map_err(|_| ErrorCode::ResourceLimit)?,
+                    )
+                    .ok_or(ErrorCode::ResourceLimit)?;
+                if bytes > 256 * 1024 {
+                    return Err(ErrorCode::ResourceLimit);
+                }
+                models.push(model);
+            }
+            let Some(next) = next_cursor(&page)? else {
+                break;
+            };
+            if models.len() >= 256 {
+                return Err(ErrorCode::ResourceLimit);
+            }
+            if !seen.insert(next.clone()) {
+                return Err(ErrorCode::NotReady);
+            }
+            cursor = Some(next);
         }
-        let mut unique=HashSet::new();if models.iter().any(|model|!unique.insert(&model.model)) {return Err(ErrorCode::NotReady)}
-        drop(unique);Ok(models)
+        let mut unique = HashSet::new();
+        if models.iter().any(|model| !unique.insert(&model.model)) {
+            return Err(ErrorCode::NotReady);
+        }
+        drop(unique);
+        Ok(models)
     }
-    async fn capture_image_model(self:&Arc<Self>,auth:&Authorized,c:&Arc<Connection>,context:&OriginalContext)->SecurityResult<ImageModelProof> {
-        let _slot=self.security.state.reserve_publication(auth,PublicationKind::Controls)?;
-        let (generation,model)={let observed=c.link.observed.lock();
-            (observed.controls.generation.clone(),observed.controls.current.model.clone().ok_or(ErrorCode::NotReady)?)};
-        let context=context.clone().leased(std::time::Instant::now()+Duration::from_secs(300));
-        let models=self.model_catalogue(c,&context).await?;
-        if c.link.observed.lock().controls.generation!=generation {return Err(ErrorCode::StaleSession)}
-        let advertised=models.iter().find(|advertised|advertised.model==model.model).ok_or(ErrorCode::NotReady)?;
-        if advertised.images!=Some(true) {return Err(ErrorCode::NotReady)}
-        Ok(ImageModelProof {generation,model})
+    async fn capture_image_model(
+        self: &Arc<Self>,
+        auth: &Authorized,
+        c: &Arc<Connection>,
+        context: &OriginalContext,
+    ) -> SecurityResult<ImageModelProof> {
+        let _slot = self
+            .security
+            .state
+            .reserve_publication(auth, PublicationKind::Controls)?;
+        let (generation, model) = {
+            let observed = c.link.observed.lock();
+            (
+                observed.controls.generation.clone(),
+                observed
+                    .controls
+                    .current
+                    .model
+                    .clone()
+                    .ok_or(ErrorCode::NotReady)?,
+            )
+        };
+        let context = context
+            .clone()
+            .leased(std::time::Instant::now() + Duration::from_secs(300));
+        let models = self.model_catalogue(c, &context).await?;
+        if c.link.observed.lock().controls.generation != generation {
+            return Err(ErrorCode::StaleSession);
+        }
+        let advertised = models
+            .iter()
+            .find(|advertised| advertised.model == model.model)
+            .ok_or(ErrorCode::NotReady)?;
+        if advertised.images != Some(true) {
+            return Err(ErrorCode::NotReady);
+        }
+        Ok(ImageModelProof { generation, model })
     }
-    fn validate_image_model(&self,c:&Arc<Connection>,proof:&ImageModelProof)->SecurityResult<()> {
-        let observed=c.link.observed.lock();
-        if observed.controls.generation!=proof.generation||observed.controls.current.model.as_ref()!=Some(&proof.model) {return Err(ErrorCode::StaleSession)}
+    fn validate_image_model(
+        &self,
+        c: &Arc<Connection>,
+        proof: &ImageModelProof,
+    ) -> SecurityResult<()> {
+        let observed = c.link.observed.lock();
+        if observed.controls.generation != proof.generation
+            || observed.controls.current.model.as_ref() != Some(&proof.model)
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         Ok(())
     }
-    pub(crate) async fn controls_read(self:&Arc<Self>,auth:&Arc<Authorized>,target:&Target)->SecurityResult<ControlsPublication> {
-        self.security.state.clear_controls_publication(&auth.connection_id);
-        let slot=self.security.state.reserve_publication(auth,PublicationKind::Controls)?;
-        let c=self.connection(target)?;let context=self.original_context(target)?.authorized(auth);
-        let (observation,current,provider)={let observed=c.link.observed.lock();
-            (observed.controls.generation.clone(),observed.controls.current.clone(),observed.model_provider.clone().ok_or(ErrorCode::NotReady)?)};
-        let expires=std::time::Instant::now()+Duration::from_secs(300);
-        let context=context.leased(expires);
-        let native=self.model_catalogue(&c,&context).await?;
-        let mut models=Vec::with_capacity(native.len());let mut bindings=Vec::with_capacity(native.len());
+    pub(crate) async fn controls_read(
+        self: &Arc<Self>,
+        auth: &Arc<Authorized>,
+        target: &Target,
+    ) -> SecurityResult<ControlsPublication> {
+        self.security
+            .state
+            .clear_controls_publication(&auth.connection_id);
+        let slot = self
+            .security
+            .state
+            .reserve_publication(auth, PublicationKind::Controls)?;
+        let c = self.connection(target)?;
+        let context = self.original_context(target)?.authorized(auth);
+        let (observation, current, provider) = {
+            let observed = c.link.observed.lock();
+            (
+                observed.controls.generation.clone(),
+                observed.controls.current.clone(),
+                observed.model_provider.clone().ok_or(ErrorCode::NotReady)?,
+            )
+        };
+        let expires = std::time::Instant::now() + Duration::from_secs(300);
+        let context = context.leased(expires);
+        let native = self.model_catalogue(&c, &context).await?;
+        let mut models = Vec::with_capacity(native.len());
+        let mut bindings = Vec::with_capacity(native.len());
         for row in native {
-            models.push(SessionControlModel {reference:Uuid::random(),label:row.label,efforts:row.efforts});
-            bindings.push(NativeControlModel {identity:NativeModelIdentity {provider:provider.clone(),model:row.model},native_reference:None});
+            models.push(SessionControlModel {
+                reference: Uuid::random(),
+                label: row.label,
+                efforts: row.efforts,
+            });
+            bindings.push(NativeControlModel {
+                identity: NativeModelIdentity {
+                    provider: provider.clone(),
+                    model: row.model,
+                },
+                native_reference: None,
+            });
         }
-        let mut modes=Vec::new();
-        if let Some(native)=c.link.rpc_optional(&context,OptionalService::CollaborationModes,json!({})).await? {
-            let advertised=native["data"].as_array().ok_or(ErrorCode::NotReady)?;
-            if advertised.len()>32 {return Err(ErrorCode::ResourceLimit)}
+        let mut modes = Vec::new();
+        if let Some(native) = c
+            .link
+            .rpc_optional(&context, OptionalService::CollaborationModes, json!({}))
+            .await?
+        {
+            let advertised = native["data"].as_array().ok_or(ErrorCode::NotReady)?;
+            if advertised.len() > 32 {
+                return Err(ErrorCode::ResourceLimit);
+            }
             for row in advertised {
-                let mode=match row["mode"].as_str() {Some("default")=>ControlMode::Default,Some("plan")=>ControlMode::Plan,_=>continue};
-                if !modes.contains(&mode) {modes.push(mode);}
+                let mode = match row["mode"].as_str() {
+                    Some("default") => ControlMode::Default,
+                    Some("plan") => ControlMode::Plan,
+                    _ => continue,
+                };
+                if !modes.contains(&mode) {
+                    modes.push(mode);
+                }
             }
         }
         context.recheck()?;
-        let queue_available=if let Some(native)=c.link.rpc_optional(&context,OptionalService::Queue,json!({"threadId":c.key.native_conversation_id,"limit":1})).await? {
-            let data=native["data"].as_array().ok_or(ErrorCode::NotReady)?;
-            if data.len()>1 {return Err(ErrorCode::ResourceLimit)}next_cursor(&native)?;true
-        } else {false};
-        context.recheck()?;
-        {let mut observed=c.link.observed.lock();if observed.controls.generation!=observation {return Err(ErrorCode::StaleSession)}observed.queue_available=queue_available;}
-        let model_ref=current.model.as_ref().and_then(|current|bindings.iter().position(|model|&model.identity==current)).map(|index|models[index].reference.clone());
-        let mut deliveries=vec![PromptDelivery::Native,PromptDelivery::Steer];if queue_available {deliveries.push(PromptDelivery::Queue);}
-        let catalogue=SessionControlsReadResult {target:target.clone(),catalogue_generation:Uuid::random(),models,current:SessionControlsCurrent {model_ref,effort:current.effort,mode:current.mode},modes,deliveries,queue_available};
-        catalogue.validate().map_err(|_|ErrorCode::ResourceLimit)?;
-        Ok(ControlsPublication {origin:PublicationOrigin {peer:auth.proof.peer_id().clone(),peer_epoch:auth.proof.epoch(),connection:auth.connection_id.clone(),context},catalogue,models:bindings,current_native:current.model,native_catalogue:None,observation,expires,slot})
-    }
-    pub(crate) fn enqueue_controls(&self,connection:&Uuid,response_id:Uuid,publication:ControlsPublication)->SecurityResult<()> {
-        let c=self.connection(&publication.catalogue.target)?;
-        if c.epoch!=publication.origin.context.epoch {return Err(ErrorCode::StaleSession)}
-        let context=publication.origin.context.clone();let observation=publication.observation.clone();let mut publication=Some(publication);
-        context.with_current(||{let observed=c.link.observed.lock();if observed.controls.generation!=observation {return Err(ErrorCode::StaleSession)}self.security.state.controls_response(connection,response_id.clone(),publication.take().ok_or(ErrorCode::StaleSession)?)})
-    }
-    fn validate_controls_selection(&self,c:&Arc<Connection>,publication:&ControlsPublication,params:&SessionControlsApplyParams)->SecurityResult<()> {
-        if c.epoch!=publication.origin.context.epoch||c.target!=params.target||c.link.observed.lock().controls.generation!=publication.observation {return Err(ErrorCode::StaleSession)}
-        publication.origin.context.recheck()?;publication.validate_apply(params)?;Ok(())
-    }
-    pub(crate) async fn queue_list(self:&Arc<Self>,auth:&Arc<Authorized>,params:&SessionQueueListParams)->SecurityResult<QueueRead> {
-        let previous=if let Some(cursor)=&params.cursor {Some(self.security.state.queue_publication(auth,&params.target,Some(cursor))?)} else {self.security.state.clear_queue_publication(&auth.connection_id);None};
-        let slot=match &previous {Some(previous)=>previous.slot.clone(),None=>self.security.state.reserve_publication(auth,PublicationKind::Queue)?};
-        let expires=previous.as_ref().map_or_else(||std::time::Instant::now()+Duration::from_secs(300),|previous|previous.expires);
-        let c=self.connection(&params.target)?;let context=self.original_context(&params.target)?.authorized(auth).leased(expires);
-        let observation=c.link.observed.lock().queue_generation.clone();
-        if previous.as_ref().is_some_and(|previous|previous.observation!=observation||previous.origin.context.epoch!=c.epoch) {return Err(ErrorCode::StaleSession)}
-        let limit=params.limit.unwrap_or(Uint(100)).0 as usize;
-        // Native rows may contain inline media. Preserve the native continuation;
-        // a single oversized row still refuses at the unchanged native frame bound.
-        let mut native=json!({"threadId":c.key.native_conversation_id,"limit":1});
-        if let Some(previous)=&previous {native["cursor"]=json!(previous.native_cursor.as_ref().ok_or(ErrorCode::StaleSession)?);}
-        let Some(native)=c.link.rpc_optional(&context,OptionalService::Queue,native).await? else {
-            c.link.observed.lock().queue_available=false;return Err(ErrorCode::NotReady)
+        let queue_available = if let Some(native) = c
+            .link
+            .rpc_optional(
+                &context,
+                OptionalService::Queue,
+                json!({"threadId":c.key.native_conversation_id,"limit":1}),
+            )
+            .await?
+        {
+            let data = native["data"].as_array().ok_or(ErrorCode::NotReady)?;
+            if data.len() > 1 {
+                return Err(ErrorCode::ResourceLimit);
+            }
+            next_cursor(&native)?;
+            true
+        } else {
+            false
         };
         context.recheck()?;
-        let page:NativeQueuePage=serde_json::from_value(native).map_err(policy)?;
-        if page.data.len()>limit||page.data.len()>1 {return Err(ErrorCode::ResourceLimit)}
-        if page.next_cursor.as_ref().is_some_and(|cursor|cursor.is_empty()||cursor.len()>512) {return Err(ErrorCode::NotReady)}
-        let mut entries=previous.as_ref().map(|previous|previous.entries.clone()).unwrap_or_default();
-        if entries.len()+page.data.len()>128 {return Err(ErrorCode::ResourceLimit)}
-        let mut rows=Vec::with_capacity(page.data.len());
-        for row in page.data {
-            let row=project_queue_row(row)?;
-            entries.push(QueueEntryBinding {id:row.id.clone(),editable:row.editable});rows.push(row);
+        {
+            let mut observed = c.link.observed.lock();
+            if observed.controls.generation != observation {
+                return Err(ErrorCode::StaleSession);
+            }
+            observed.queue_available = queue_available;
         }
-        {let mut observed=c.link.observed.lock();if observed.queue_generation!=observation {return Err(ErrorCode::StaleSession)}observed.queue_available=true;}
-        let next_cursor=page.next_cursor.as_ref().map(|_|Id(Uuid::random().0));
-        let complete=page.next_cursor.is_none();
-        let publication=QueuePublication {origin:PublicationOrigin {peer:auth.proof.peer_id().clone(),peer_epoch:auth.proof.epoch(),connection:auth.connection_id.clone(),context},entries,next_cursor,native_cursor:page.next_cursor,complete,
-            bytes:previous.as_ref().map_or(0,|previous|previous.bytes),payloads:previous.as_ref().map(|previous|previous.payloads.clone()).unwrap_or_default(),observation,
-            expires,slot};
-        Ok(QueueRead {publication,rows,previous})
+        let model_ref = current
+            .model
+            .as_ref()
+            .and_then(|current| bindings.iter().position(|model| &model.identity == current))
+            .map(|index| models[index].reference.clone());
+        let mut deliveries = vec![PromptDelivery::Native, PromptDelivery::Steer];
+        if queue_available {
+            deliveries.push(PromptDelivery::Queue);
+        }
+        let catalogue = SessionControlsReadResult {
+            target: target.clone(),
+            catalogue_generation: Uuid::random(),
+            models,
+            current: SessionControlsCurrent {
+                model_ref,
+                effort: current.effort,
+                mode: current.mode,
+            },
+            modes,
+            deliveries,
+            queue_available,
+        };
+        catalogue.validate().map_err(|_| ErrorCode::ResourceLimit)?;
+        Ok(ControlsPublication {
+            origin: PublicationOrigin {
+                peer: auth.proof.peer_id().clone(),
+                peer_epoch: auth.proof.epoch(),
+                connection: auth.connection_id.clone(),
+                context,
+            },
+            catalogue,
+            models: bindings,
+            current_native: current.model,
+            native_catalogue: None,
+            observation,
+            expires,
+            slot,
+        })
     }
-    pub(crate) fn enqueue_queue(&self,connection:&Uuid,response_id:Uuid,read:QueueRead)->SecurityResult<()> {
-        let c=self.connection(&read.publication.origin.context.target)?;
-        if c.epoch!=read.publication.origin.context.epoch {return Err(ErrorCode::StaleSession)}
-        let context=read.publication.origin.context.clone();let observation=read.publication.observation.clone();let mut read=Some(read);
-        context.with_current(||{let observed=c.link.observed.lock();if observed.queue_generation!=observation {return Err(ErrorCode::StaleSession)}
-            let read=read.take().ok_or(ErrorCode::StaleSession)?;
-            self.security.state.queue_response(connection,response_id.clone(),read.publication,read.rows,read.previous.as_ref())
+    pub(crate) fn enqueue_controls(
+        &self,
+        connection: &Uuid,
+        response_id: Uuid,
+        publication: ControlsPublication,
+    ) -> SecurityResult<()> {
+        let c = self.connection(&publication.catalogue.target)?;
+        if c.epoch != publication.origin.context.epoch {
+            return Err(ErrorCode::StaleSession);
+        }
+        let context = publication.origin.context.clone();
+        let observation = publication.observation.clone();
+        let mut publication = Some(publication);
+        context.with_current(|| {
+            let observed = c.link.observed.lock();
+            if observed.controls.generation != observation {
+                return Err(ErrorCode::StaleSession);
+            }
+            self.security.state.controls_response(
+                connection,
+                response_id.clone(),
+                publication.take().ok_or(ErrorCode::StaleSession)?,
+            )
+        })
+    }
+    fn validate_controls_selection(
+        &self,
+        c: &Arc<Connection>,
+        publication: &ControlsPublication,
+        params: &SessionControlsApplyParams,
+    ) -> SecurityResult<()> {
+        if c.epoch != publication.origin.context.epoch
+            || c.target != params.target
+            || c.link.observed.lock().controls.generation != publication.observation
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        publication.origin.context.recheck()?;
+        publication.validate_apply(params)?;
+        Ok(())
+    }
+    pub(crate) async fn queue_list(
+        self: &Arc<Self>,
+        auth: &Arc<Authorized>,
+        params: &SessionQueueListParams,
+    ) -> SecurityResult<QueueRead> {
+        let previous = if let Some(cursor) = &params.cursor {
+            Some(
+                self.security
+                    .state
+                    .queue_publication(auth, &params.target, Some(cursor))?,
+            )
+        } else {
+            self.security
+                .state
+                .clear_queue_publication(&auth.connection_id);
+            None
+        };
+        let slot = match &previous {
+            Some(previous) => previous.slot.clone(),
+            None => self
+                .security
+                .state
+                .reserve_publication(auth, PublicationKind::Queue)?,
+        };
+        let expires = previous.as_ref().map_or_else(
+            || std::time::Instant::now() + Duration::from_secs(300),
+            |previous| previous.expires,
+        );
+        let c = self.connection(&params.target)?;
+        let context = self
+            .original_context(&params.target)?
+            .authorized(auth)
+            .leased(expires);
+        let observation = c.link.observed.lock().queue_generation.clone();
+        if previous.as_ref().is_some_and(|previous| {
+            previous.observation != observation || previous.origin.context.epoch != c.epoch
+        }) {
+            return Err(ErrorCode::StaleSession);
+        }
+        let limit = params.limit.unwrap_or(Uint(100)).0 as usize;
+        // Native rows may contain inline media. Preserve the native continuation;
+        // a single oversized row still refuses at the unchanged native frame bound.
+        let mut native = json!({"threadId":c.key.native_conversation_id,"limit":1});
+        if let Some(previous) = &previous {
+            native["cursor"] = json!(
+                previous
+                    .native_cursor
+                    .as_ref()
+                    .ok_or(ErrorCode::StaleSession)?
+            );
+        }
+        let Some(native) = c
+            .link
+            .rpc_optional(&context, OptionalService::Queue, native)
+            .await?
+        else {
+            c.link.observed.lock().queue_available = false;
+            return Err(ErrorCode::NotReady);
+        };
+        context.recheck()?;
+        let page: NativeQueuePage = serde_json::from_value(native).map_err(policy)?;
+        if page.data.len() > limit || page.data.len() > 1 {
+            return Err(ErrorCode::ResourceLimit);
+        }
+        if page
+            .next_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 512)
+        {
+            return Err(ErrorCode::NotReady);
+        }
+        let mut entries = previous
+            .as_ref()
+            .map(|previous| previous.entries.clone())
+            .unwrap_or_default();
+        if entries.len() + page.data.len() > 128 {
+            return Err(ErrorCode::ResourceLimit);
+        }
+        let mut rows = Vec::with_capacity(page.data.len());
+        for row in page.data {
+            let row = project_queue_row(row)?;
+            entries.push(QueueEntryBinding {
+                id: row.id.clone(),
+                editable: row.editable,
+            });
+            rows.push(row);
+        }
+        {
+            let mut observed = c.link.observed.lock();
+            if observed.queue_generation != observation {
+                return Err(ErrorCode::StaleSession);
+            }
+            observed.queue_available = true;
+        }
+        let next_cursor = page.next_cursor.as_ref().map(|_| Id(Uuid::random().0));
+        let complete = page.next_cursor.is_none();
+        let publication = QueuePublication {
+            origin: PublicationOrigin {
+                peer: auth.proof.peer_id().clone(),
+                peer_epoch: auth.proof.epoch(),
+                connection: auth.connection_id.clone(),
+                context,
+            },
+            entries,
+            next_cursor,
+            native_cursor: page.next_cursor,
+            complete,
+            bytes: previous.as_ref().map_or(0, |previous| previous.bytes),
+            payloads: previous
+                .as_ref()
+                .map(|previous| previous.payloads.clone())
+                .unwrap_or_default(),
+            observation,
+            expires,
+            slot,
+        };
+        Ok(QueueRead {
+            publication,
+            rows,
+            previous,
+        })
+    }
+    pub(crate) fn enqueue_queue(
+        &self,
+        connection: &Uuid,
+        response_id: Uuid,
+        read: QueueRead,
+    ) -> SecurityResult<()> {
+        let c = self.connection(&read.publication.origin.context.target)?;
+        if c.epoch != read.publication.origin.context.epoch {
+            return Err(ErrorCode::StaleSession);
+        }
+        let context = read.publication.origin.context.clone();
+        let observation = read.publication.observation.clone();
+        let mut read = Some(read);
+        context.with_current(|| {
+            let observed = c.link.observed.lock();
+            if observed.queue_generation != observation {
+                return Err(ErrorCode::StaleSession);
+            }
+            let read = read.take().ok_or(ErrorCode::StaleSession)?;
+            self.security.state.queue_response(
+                connection,
+                response_id.clone(),
+                read.publication,
+                read.rows,
+                read.previous.as_ref(),
+            )
         })
     }
     pub async fn history(
@@ -4904,71 +6001,175 @@ impl Runtime {
             pairing::now_ms(),
         )
     }
-    fn capture_skill_invocation(&self,auth:&Authorized,request:&Request)->SecurityResult<Option<SkillInvocation>> {
-        let RequestBody::PromptSubmit(params)=&request.body else {return Ok(None)};
-        let Some(selector)=&params.skill else {return Ok(None)};
-        let publication=self.security.state.skills_publication(auth,&params.target,&selector.catalogue_generation)?;
-        let original=self.connection(&params.target)?;
-        if original.epoch!=publication.origin.context.epoch {return Err(ErrorCode::StaleSession)}
-        let row=publication.catalogue.skills.iter().position(|entry|entry.invocation_ref.as_ref()==Some(&selector.reference)&&entry.enabled&&entry.path.is_some()).ok_or(ErrorCode::NotReady)?;
-        Ok(Some(SkillInvocation{publication,original,row}))
+    fn capture_skill_invocation(
+        &self,
+        auth: &Authorized,
+        request: &Request,
+    ) -> SecurityResult<Option<SkillInvocation>> {
+        let RequestBody::PromptSubmit(params) = &request.body else {
+            return Ok(None);
+        };
+        let Some(selector) = &params.skill else {
+            return Ok(None);
+        };
+        let publication = self.security.state.skills_publication(
+            auth,
+            &params.target,
+            &selector.catalogue_generation,
+        )?;
+        let original = self.connection(&params.target)?;
+        if original.epoch != publication.origin.context.epoch {
+            return Err(ErrorCode::StaleSession);
+        }
+        let row = publication
+            .catalogue
+            .skills
+            .iter()
+            .position(|entry| {
+                entry.invocation_ref.as_ref() == Some(&selector.reference)
+                    && entry.enabled
+                    && entry.path.is_some()
+            })
+            .ok_or(ErrorCode::NotReady)?;
+        Ok(Some(SkillInvocation {
+            publication,
+            original,
+            row,
+        }))
     }
-    fn validate_skill_invocation(&self,invocation:&SkillInvocation,request:&Request)->SecurityResult<()> {
-        if self.stopping.load(Ordering::Acquire) {return Err(ErrorCode::NotReady)}
-        let c=&invocation.original;
-        self.security.state.validate_session_mutation_checked(request,Some(&c.epoch)).map_err(|(_,code)|code)?;
-        c.validate(&self.security.state,&self.topology)?;
-        let connections=self.connections.lock();
-        if !connections.get(&c.target.session_id).is_some_and(|current|Arc::ptr_eq(current,c)) {return Err(ErrorCode::StaleSession)}
-        let skills=c.link.observed.lock();
-        let publication=&invocation.publication;
-        if skills.invalid||skills.cwd.as_deref()!=publication.native_cwd.as_deref()||skills.generation.as_ref()!=Some(&publication.catalogue.catalogue_generation)||std::time::Instant::now()>=publication.document_expires {return Err(ErrorCode::StaleSession)}
-        let display=self.security.state.session_state(&c.target,&c.epoch)?;
-        if display.summary.connectivity!=SessionConnectivity::Ready || !display.summary.capabilities.prompt || !display.summary.capabilities.skills_read || display.summary.skills_generation.as_ref()!=Some(&publication.catalogue.catalogue_generation) {return Err(ErrorCode::NotReady)}
+    fn validate_skill_invocation(
+        &self,
+        invocation: &SkillInvocation,
+        request: &Request,
+    ) -> SecurityResult<()> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(ErrorCode::NotReady);
+        }
+        let c = &invocation.original;
+        self.security
+            .state
+            .validate_session_mutation_checked(request, Some(&c.epoch))
+            .map_err(|(_, code)| code)?;
+        c.validate(&self.security.state, &self.topology)?;
+        let connections = self.connections.lock();
+        if !connections
+            .get(&c.target.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, c))
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        let skills = c.link.observed.lock();
+        let publication = &invocation.publication;
+        if skills.invalid
+            || skills.cwd.as_deref() != publication.native_cwd.as_deref()
+            || skills.generation.as_ref() != Some(&publication.catalogue.catalogue_generation)
+            || std::time::Instant::now() >= publication.document_expires
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        let display = self.security.state.session_state(&c.target, &c.epoch)?;
+        if display.summary.connectivity != SessionConnectivity::Ready
+            || !display.summary.capabilities.prompt
+            || !display.summary.capabilities.skills_read
+            || display.summary.skills_generation.as_ref()
+                != Some(&publication.catalogue.catalogue_generation)
+        {
+            return Err(ErrorCode::NotReady);
+        }
         Ok(())
     }
-    fn capture_controls_action(&self,auth:&Authorized,request:&Request)->SecurityResult<Option<ControlsAction>> {
-        let RequestBody::SessionControlsApply(params)=&request.body else {return Ok(None)};
-        let publication=self.security.state.controls_publication(auth,&params.target,&params.catalogue_generation)?;
-        let original=self.connection(&params.target)?;
-        self.validate_controls_selection(&original,&publication,params)?;
-        Ok(Some(ControlsAction {publication,original}))
-    }
-    fn capture_queue_action(&self,auth:&Authorized,request:&Request)->SecurityResult<Option<QueueAction>> {
-        let target=match &request.body {
-            RequestBody::SessionQueueUpdate(params)=>&params.target,RequestBody::SessionQueueDelete(params)=>&params.target,
-            RequestBody::SessionQueueStart(params)=>&params.target,RequestBody::SessionQueueReorder(params)=>&params.target,
-            _=>return Ok(None),
+    fn capture_controls_action(
+        &self,
+        auth: &Authorized,
+        request: &Request,
+    ) -> SecurityResult<Option<ControlsAction>> {
+        let RequestBody::SessionControlsApply(params) = &request.body else {
+            return Ok(None);
         };
-        let publication=self.security.state.queue_publication(auth,target,None)?;
-        let original=self.connection(target)?;let action=QueueAction {publication,original};
-        self.validate_queue_action(&action,request)?;Ok(Some(action))
+        let publication = self.security.state.controls_publication(
+            auth,
+            &params.target,
+            &params.catalogue_generation,
+        )?;
+        let original = self.connection(&params.target)?;
+        self.validate_controls_selection(&original, &publication, params)?;
+        Ok(Some(ControlsAction {
+            publication,
+            original,
+        }))
     }
-    fn validate_queue_action(&self,action:&QueueAction,request:&Request)->SecurityResult<()> {
-        let c=&action.original;let publication=&action.publication;
-        self.security.state.validate_session_mutation_checked(request,Some(&c.epoch)).map_err(|(_,code)|code)?;
-        if c.epoch!=publication.origin.context.epoch||c.target!=publication.origin.context.target
-            ||c.link.observed.lock().queue_generation!=publication.observation||std::time::Instant::now()>=publication.expires {return Err(ErrorCode::StaleSession)}
+    fn capture_queue_action(
+        &self,
+        auth: &Authorized,
+        request: &Request,
+    ) -> SecurityResult<Option<QueueAction>> {
+        let target = match &request.body {
+            RequestBody::SessionQueueUpdate(params) => &params.target,
+            RequestBody::SessionQueueDelete(params) => &params.target,
+            RequestBody::SessionQueueStart(params) => &params.target,
+            RequestBody::SessionQueueReorder(params) => &params.target,
+            _ => return Ok(None),
+        };
+        let publication = self.security.state.queue_publication(auth, target, None)?;
+        let original = self.connection(target)?;
+        let action = QueueAction {
+            publication,
+            original,
+        };
+        self.validate_queue_action(&action, request)?;
+        Ok(Some(action))
+    }
+    fn validate_queue_action(&self, action: &QueueAction, request: &Request) -> SecurityResult<()> {
+        let c = &action.original;
+        let publication = &action.publication;
+        self.security
+            .state
+            .validate_session_mutation_checked(request, Some(&c.epoch))
+            .map_err(|(_, code)| code)?;
+        if c.epoch != publication.origin.context.epoch
+            || c.target != publication.origin.context.target
+            || c.link.observed.lock().queue_generation != publication.observation
+            || std::time::Instant::now() >= publication.expires
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         publication.origin.context.recheck()?;
-        let selected=match &request.body {
-            RequestBody::SessionQueueUpdate(params)=>{
-                let entry=publication.entries.iter().find(|entry|entry.id==params.entry_id).ok_or(ErrorCode::StaleSession)?;
-                if !entry.editable {return Err(ErrorCode::InvalidRequest)}None
+        let selected = match &request.body {
+            RequestBody::SessionQueueUpdate(params) => {
+                let entry = publication
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == params.entry_id)
+                    .ok_or(ErrorCode::StaleSession)?;
+                if !entry.editable {
+                    return Err(ErrorCode::InvalidRequest);
+                }
+                None
             }
-            RequestBody::SessionQueueDelete(params)=>Some(&params.entry_id),
-            RequestBody::SessionQueueStart(params)=>{
-                let state=self.security.state.session_state(&c.target,&c.epoch)?;
-                if state.native_turn_id.is_some()||state.summary.status!=SessionStatus::Idle {return Err(ErrorCode::Busy)}
+            RequestBody::SessionQueueDelete(params) => Some(&params.entry_id),
+            RequestBody::SessionQueueStart(params) => {
+                let state = self.security.state.session_state(&c.target, &c.epoch)?;
+                if state.native_turn_id.is_some() || state.summary.status != SessionStatus::Idle {
+                    return Err(ErrorCode::Busy);
+                }
                 Some(&params.entry_id)
             }
-            RequestBody::SessionQueueReorder(params)=>{
-                if !publication.complete||params.entry_ids.len()!=publication.entries.len() {return Err(ErrorCode::StaleSession)}
-                let expected:HashSet<_>=publication.entries.iter().map(|entry|&entry.id).collect();
-                if params.entry_ids.iter().any(|id|!expected.contains(id)) {return Err(ErrorCode::StaleSession)}None
+            RequestBody::SessionQueueReorder(params) => {
+                if !publication.complete || params.entry_ids.len() != publication.entries.len() {
+                    return Err(ErrorCode::StaleSession);
+                }
+                let expected: HashSet<_> =
+                    publication.entries.iter().map(|entry| &entry.id).collect();
+                if params.entry_ids.iter().any(|id| !expected.contains(id)) {
+                    return Err(ErrorCode::StaleSession);
+                }
+                None
             }
-            _=>return Err(ErrorCode::InvalidRequest),
+            _ => return Err(ErrorCode::InvalidRequest),
         };
-        if selected.is_some_and(|id|!publication.entries.iter().any(|entry|&entry.id==id)) {return Err(ErrorCode::StaleSession)}
+        if selected.is_some_and(|id| !publication.entries.iter().any(|entry| &entry.id == id)) {
+            return Err(ErrorCode::StaleSession);
+        }
         Ok(())
     }
     pub async fn mutate(
@@ -4976,24 +6177,41 @@ impl Runtime {
         auth: Arc<Authorized>,
         request: Request,
     ) -> SecurityResult<Receipt> {
-        let create=matches!(&request.body,RequestBody::SessionCreate(_));
+        let create = matches!(&request.body, RequestBody::SessionCreate(_));
         // The original absolute creation budget includes preflight and held-root capture.
-        let deadline=tokio::time::Instant::now()+Duration::from_secs(if create {300}else{120});
-        let request=if create||matches!(&request.body,RequestBody::SessionControlsApply(_)|RequestBody::SessionQueueUpdate(_)|RequestBody::SessionQueueDelete(_)|RequestBody::SessionQueueReorder(_)|RequestBody::SessionQueueStart(_)) {
-            let (request,existing)=self.security.preflight_request(&auth,request).await?;
-            if let Some(receipt)=existing{return Ok(receipt)}
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(if create { 300 } else { 120 });
+        let request = if create
+            || matches!(
+                &request.body,
+                RequestBody::SessionControlsApply(_)
+                    | RequestBody::SessionQueueUpdate(_)
+                    | RequestBody::SessionQueueDelete(_)
+                    | RequestBody::SessionQueueReorder(_)
+                    | RequestBody::SessionQueueStart(_)
+            ) {
+            let (request, existing) = self.security.preflight_request(&auth, request).await?;
+            if let Some(receipt) = existing {
+                return Ok(receipt);
+            }
             request
-        } else {request};
-        let selection=if let RequestBody::SessionCreate(params)=&request.body {
-            Some(self.topology.capture_creation(&auth,params).await)
-        } else {None};
-        let admitted_selection=selection.clone();
+        } else {
+            request
+        };
+        let selection = if let RequestBody::SessionCreate(params) = &request.body {
+            Some(self.topology.capture_creation(&auth, params).await)
+        } else {
+            None
+        };
+        let admitted_selection = selection.clone();
         // Capture even failure before reserve's first await; SQLite's matching receipt wins.
-        let invocation=self.capture_skill_invocation(&auth,&request);
-        let admitted_invocation=invocation.clone();
-        let controls=self.capture_controls_action(&auth,&request);let admitted_controls=controls.clone();
-        let queue=self.capture_queue_action(&auth,&request);let admitted_queue=queue.clone();
-        let admission_authorization=auth.clone();
+        let invocation = self.capture_skill_invocation(&auth, &request);
+        let admitted_invocation = invocation.clone();
+        let controls = self.capture_controls_action(&auth, &request);
+        let admitted_controls = controls.clone();
+        let queue = self.capture_queue_action(&auth, &request);
+        let admitted_queue = queue.clone();
+        let admission_authorization = auth.clone();
         let action = request.id.clone();
         let (tx, rx) = oneshot::channel();
         let owner = self.clone();
@@ -5007,22 +6225,48 @@ impl Runtime {
                 &auth,
                 request,
                 move |r| {
-                    if let Some(controls)=admitted_controls.as_ref().map_err(|code|*code)? {
-                        validator.security.state.controls_publication_current(&admission_authorization,&controls.publication)?;
-                        validator.security.state.validate_session_mutation_checked(r,Some(&controls.original.epoch)).map_err(|(_,code)|code)?;
-                        let RequestBody::SessionControlsApply(params)=&r.body else {return Err(ErrorCode::InvalidRequest)};
-                        validator.validate_controls_selection(&controls.original,&controls.publication,params)?;
-                    } else if let Some(queue)=admitted_queue.as_ref().map_err(|code|*code)? {
-                        validator.security.state.queue_publication_current(&admission_authorization,&queue.publication)?;
-                        validator.validate_queue_action(queue,r)?;
-                    } else
-                    if let Some(invocation)=admitted_invocation.as_ref().map_err(|code|*code)? {
-                        validator.security.state.skills_publication_current(&admission_authorization,&invocation.publication)?;
-                        validator.validate_skill_invocation(invocation,r)?;
-                    } else {validator.validate(r)?;}
-                    if let RequestBody::SessionCreate(params)=&r.body {
-                        admitted_selection.as_ref().ok_or(ErrorCode::NotReady)?.as_ref().map_err(|code|*code)?
-                            .validate(&validator.topology,params)?;
+                    if let Some(controls) = admitted_controls.as_ref().map_err(|code| *code)? {
+                        validator.security.state.controls_publication_current(
+                            &admission_authorization,
+                            &controls.publication,
+                        )?;
+                        validator
+                            .security
+                            .state
+                            .validate_session_mutation_checked(r, Some(&controls.original.epoch))
+                            .map_err(|(_, code)| code)?;
+                        let RequestBody::SessionControlsApply(params) = &r.body else {
+                            return Err(ErrorCode::InvalidRequest);
+                        };
+                        validator.validate_controls_selection(
+                            &controls.original,
+                            &controls.publication,
+                            params,
+                        )?;
+                    } else if let Some(queue) = admitted_queue.as_ref().map_err(|code| *code)? {
+                        validator.security.state.queue_publication_current(
+                            &admission_authorization,
+                            &queue.publication,
+                        )?;
+                        validator.validate_queue_action(queue, r)?;
+                    } else if let Some(invocation) =
+                        admitted_invocation.as_ref().map_err(|code| *code)?
+                    {
+                        validator.security.state.skills_publication_current(
+                            &admission_authorization,
+                            &invocation.publication,
+                        )?;
+                        validator.validate_skill_invocation(invocation, r)?;
+                    } else {
+                        validator.validate(r)?;
+                    }
+                    if let RequestBody::SessionCreate(params) = &r.body {
+                        admitted_selection
+                            .as_ref()
+                            .ok_or(ErrorCode::NotReady)?
+                            .as_ref()
+                            .map_err(|code| *code)?
+                            .validate(&validator.topology, params)?;
                     }
                     if validator.jobs.lock().len() >= 64 {
                         return Err(ErrorCode::Busy);
@@ -5030,7 +6274,7 @@ impl Runtime {
                     Ok(())
                 },
                 move |committed| {
-                    let selection=selection.and_then(Result::ok);
+                    let selection = selection.and_then(Result::ok);
                     let worker = owner.clone();
                     owner.jobs.lock().spawn_on(
                         async move {
@@ -5038,20 +6282,45 @@ impl Runtime {
                             let outcome = if let RequestBody::SessionCreate(params) = &original.body
                             {
                                 match selection.as_deref() {
-                                    Some(selection)=>worker.creation_job(&authorization,&action,params,selection,deadline).await,
-                                    None=>Err(ErrorCode::NotReady),
+                                    Some(selection) => {
+                                        worker
+                                            .creation_job(
+                                                &authorization,
+                                                &action,
+                                                params,
+                                                selection,
+                                                deadline,
+                                            )
+                                            .await
+                                    }
+                                    None => Err(ErrorCode::NotReady),
                                 }
                             } else {
-                                match (controls,queue) {
-                                    (Err(code),_)|(_,Err(code))=>Err(code),
-                                    (Ok(Some(controls)),_)=>worker.write_controls_once(&authorization,original,controls).await.map(|_|()),
-                                    (_,Ok(Some(queue)))=>worker.write_queue_once(&authorization,original,queue).await.map(|_|()),
-                                    _=>worker.write_once(&authorization, original, invocation).await.map(|_|()),
+                                match (controls, queue) {
+                                    (Err(code), _) | (_, Err(code)) => Err(code),
+                                    (Ok(Some(controls)), _) => worker
+                                        .write_controls_once(&authorization, original, controls)
+                                        .await
+                                        .map(|_| ()),
+                                    (_, Ok(Some(queue))) => worker
+                                        .write_queue_once(&authorization, original, queue)
+                                        .await
+                                        .map(|_| ()),
+                                    _ => worker
+                                        .write_once(&authorization, original, invocation)
+                                        .await
+                                        .map(|_| ()),
                                 }
                             };
                             if let Err(code) = outcome {
-                                if selection.as_ref().is_some_and(|selection|selection.unproved()) {
-                                    let _=worker.topology.uncertain_creation(&authorization,&action,code).await;
+                                if selection
+                                    .as_ref()
+                                    .is_some_and(|selection| selection.unproved())
+                                {
+                                    let _ = worker
+                                        .topology
+                                        .uncertain_creation(&authorization, &action, code)
+                                        .await;
                                 }
                                 let _ = worker.fail_unentered(&authorization, &action, code).await;
                             }
@@ -5141,116 +6410,308 @@ impl Runtime {
             .await
             .map_err(pairing::store_error)
     }
-    async fn write_controls_once(&self,auth:&Authorized,request:Request,action:ControlsAction)->SecurityResult<Receipt> {
-        let RequestBody::SessionControlsApply(params)=&request.body else {return Err(ErrorCode::InvalidRequest)};
-        let c=&action.original;let publication=&action.publication;
-        let command=codex_controls_command(&c.key.native_conversation_id,publication,params)?;
-        let mut changes=c.link.observed.lock().controls.subscribe();
-        let mut writer=if command.is_some() {Some(tokio::time::timeout(Duration::from_secs(5),c.link.writer.lock()).await.map_err(|_|ErrorCode::Busy)?)}else{None};
-        let bytes=command.map(|params|serde_json::to_string(&json!({"id":request.id,"method":"thread/settings/update","params":params}))).transpose().map_err(policy)?;
-        let fd=c.link.fd.as_fd().try_clone_to_owned().map_err(policy)?;
-        let callback_registered=bytes.is_some();
-        let callback=if callback_registered {Some(c.link.mutation_callback(NativeRpcId::String(request.id.0.clone()),NativeMutationKind::Controls)?)}else{None};
-        let result=self.security.boundary(
-            auth,request.id.clone(),
-            ||{
-                self.security.state.controls_publication_current(auth,publication)?;
-                self.security.state.validate_session_mutation_checked(&request,Some(&c.epoch)).map_err(|(_,code)|code)?;
-                self.validate_controls_selection(c,publication,params)
-            },
-            fd,
-            async {
-                if let Some(bytes)=bytes {
-                    let Some(mut writer)=writer.take() else {return entered_uncertain(Some(ErrorCode::NotReady))};
-                    let written=writer.send(Message::Text(bytes.into())).await.is_ok();drop(writer);
-                    if !written {return entered_uncertain(None)}
-                    let Some((reply,rejection))=callback else {return entered_uncertain(Some(ErrorCode::NotReady))};
-                    match reply.await {
-                        Ok(Ok(ack)) if ack.as_object().is_some_and(|object|object.is_empty())=>{},
-                        Ok(Err(code))=>return rejection.lock().map_or_else(||entered_uncertain(Some(code)),native_refused),
-                        _=>return entered_uncertain(None),
-                    }
-                }
-                // The update ACK means queued only. This watch is the original
-                // ingress observer, subscribed before dispatch, not a polling read.
-                loop {
-                    if let Err(code)=publication.origin.context.recheck() {return entered_uncertain(Some(code))}
-                    let effective={let observed=c.link.observed.lock();codex_controls_match(publication,params,&observed.controls.current)};
-                    match effective {
-                        Ok(true)=>return ReceiptTransition {state:ReceiptState::Succeeded,proof:TransitionProof::NativeEffectiveState(c.key.native_conversation_id.clone()),result:None,error:None,at:pairing::now_ms()},
-                        Err(code)=>return entered_uncertain(Some(code)),
-                        Ok(false)=>{},
-                    }
-                    if changes.changed().await.is_err() {return entered_uncertain(Some(ErrorCode::NotReady))}
-                }
-            },
-        ).await;
-        if callback_registered {c.link.callbacks.lock().retain(|callback|!matches!(&callback.id,NativeRpcId::String(id) if id==&request.id.0));}
-        result?;self.receipt(auth,&request.id).await
-    }
-    async fn write_queue_once(&self,auth:&Authorized,request:Request,action:QueueAction)->SecurityResult<Receipt> {
-        let c=&action.original;
-        let (method,params,kind)=match &request.body {
-            RequestBody::SessionQueueUpdate(params)=>("thread/queue/update",json!({"threadId":c.key.native_conversation_id,"queuedSubmissionId":params.entry_id,"input":[{"type":"text","text":params.text.0,"text_elements":[]}]}),NativeMutationKind::Queue),
-            RequestBody::SessionQueueDelete(params)=>("thread/queue/delete",json!({"threadId":c.key.native_conversation_id,"queuedSubmissionId":params.entry_id}),NativeMutationKind::Queue),
-            RequestBody::SessionQueueReorder(params)=>("thread/queue/reorder",json!({"threadId":c.key.native_conversation_id,"queuedSubmissionIds":params.entry_ids}),NativeMutationKind::Queue),
-            RequestBody::SessionQueueStart(params)=>("thread/queue/start",json!({"threadId":c.key.native_conversation_id,"queuedSubmissionId":params.entry_id}),NativeMutationKind::QueueStart),
-            _=>return Err(ErrorCode::InvalidRequest),
+    async fn write_controls_once(
+        &self,
+        auth: &Authorized,
+        request: Request,
+        action: ControlsAction,
+    ) -> SecurityResult<Receipt> {
+        let RequestBody::SessionControlsApply(params) = &request.body else {
+            return Err(ErrorCode::InvalidRequest);
         };
-        let mut writer=tokio::time::timeout(Duration::from_secs(5),c.link.writer.lock()).await.map_err(|_|ErrorCode::Busy)?;
-        let bytes=serde_json::to_string(&json!({"id":request.id,"method":method,"params":params})).map_err(policy)?;
-        let fd=c.link.fd.as_fd().try_clone_to_owned().map_err(policy)?;
-        let (reply,rejection)=c.link.mutation_callback(NativeRpcId::String(request.id.0.clone()),kind)?;
-        let result=self.security.boundary(
-            auth,request.id.clone(),
-            ||{self.security.state.queue_publication_current(auth,&action.publication)?;self.validate_queue_action(&action,&request)},
-            fd,
-            async {
-                let written=writer.send(Message::Text(bytes.into())).await.is_ok();drop(writer);
-                if !written {return entered_uncertain(None)}
-                let native=match reply.await {
-                    Ok(Ok(native))=>native,
-                    Ok(Err(code))=>return rejection.lock().map_or_else(||entered_uncertain(Some(code)),native_refused),
-                    _=>return entered_uncertain(None),
-                };
-                let facts=(||->SecurityResult<ActionResultQueue> {
-                    match &request.body {
-                        RequestBody::SessionQueueUpdate(params)=>{
-                            let id=native_id(&native["queuedSubmission"],"id")?;
-                            if id!=params.entry_id {return Err(ErrorCode::StaleSession)}
-                            Ok(ActionResultQueue {entry_id:Some(id),deleted:None,native_turn_id:None})
+        let c = &action.original;
+        let publication = &action.publication;
+        let command = codex_controls_command(&c.key.native_conversation_id, publication, params)?;
+        let mut changes = c.link.observed.lock().controls.subscribe();
+        let mut writer = if command.is_some() {
+            Some(
+                tokio::time::timeout(Duration::from_secs(5), c.link.writer.lock())
+                    .await
+                    .map_err(|_| ErrorCode::Busy)?,
+            )
+        } else {
+            None
+        };
+        let bytes = command
+            .map(|params| {
+                serde_json::to_string(
+                    &json!({"id":request.id,"method":"thread/settings/update","params":params}),
+                )
+            })
+            .transpose()
+            .map_err(policy)?;
+        let fd = c.link.fd.as_fd().try_clone_to_owned().map_err(policy)?;
+        let callback_registered = bytes.is_some();
+        let callback = if callback_registered {
+            Some(c.link.mutation_callback(
+                NativeRpcId::String(request.id.0.clone()),
+                NativeMutationKind::Controls,
+            )?)
+        } else {
+            None
+        };
+        let result = self
+            .security
+            .boundary(
+                auth,
+                request.id.clone(),
+                || {
+                    self.security
+                        .state
+                        .controls_publication_current(auth, publication)?;
+                    self.security
+                        .state
+                        .validate_session_mutation_checked(&request, Some(&c.epoch))
+                        .map_err(|(_, code)| code)?;
+                    self.validate_controls_selection(c, publication, params)
+                },
+                fd,
+                async {
+                    if let Some(bytes) = bytes {
+                        let Some(mut writer) = writer.take() else {
+                            return entered_uncertain(Some(ErrorCode::NotReady));
+                        };
+                        let written = writer.send(Message::Text(bytes.into())).await.is_ok();
+                        drop(writer);
+                        if !written {
+                            return entered_uncertain(None);
                         }
-                        RequestBody::SessionQueueDelete(params)=>Ok(ActionResultQueue {entry_id:Some(params.entry_id.clone()),deleted:Some(native["deleted"].as_bool().ok_or(ErrorCode::NotReady)?),native_turn_id:None}),
-                        RequestBody::SessionQueueStart(params)=>{
-                            let turn=native_id(&native["turn"],"id")?;
-                            if native["turn"]["status"]!="inProgress" {return Err(ErrorCode::NotReady)}
-                            Ok(ActionResultQueue {entry_id:Some(params.entry_id.clone()),deleted:None,native_turn_id:Some(turn)})
+                        let Some((reply, rejection)) = callback else {
+                            return entered_uncertain(Some(ErrorCode::NotReady));
+                        };
+                        match reply.await {
+                            Ok(Ok(ack))
+                                if ack.as_object().is_some_and(|object| object.is_empty()) => {}
+                            Ok(Err(code)) => {
+                                return rejection
+                                    .lock()
+                                    .map_or_else(|| entered_uncertain(Some(code)), native_refused);
+                            }
+                            _ => return entered_uncertain(None),
                         }
-                        RequestBody::SessionQueueReorder(_) if native.as_object().is_some_and(|object|object.is_empty())=>Ok(ActionResultQueue {entry_id:None,deleted:None,native_turn_id:None}),
-                        _=>Err(ErrorCode::NotReady),
                     }
-                })();
-                match facts {
-                    Ok(facts)=>match action.publication.origin.context.recheck() {
-                        Ok(())=>ReceiptTransition {state:ReceiptState::Succeeded,proof:TransitionProof::CorrelatedAcknowledgement(Id(request.id.0.clone())),result:Some(ActionResult::Queue(facts)),error:None,at:pairing::now_ms()},
-                        Err(code)=>ReceiptTransition {result:Some(ActionResult::Queue(facts)),..entered_uncertain(Some(code))},
-                    },
-                    Err(code)=>entered_uncertain(Some(code)),
-                }
-            },
-        ).await;
-        c.link.callbacks.lock().retain(|callback|!matches!(&callback.id,NativeRpcId::String(id) if id==&request.id.0));
-        result?;self.receipt(auth,&request.id).await
+                    // The update ACK means queued only. This watch is the original
+                    // ingress observer, subscribed before dispatch, not a polling read.
+                    loop {
+                        if let Err(code) = publication.origin.context.recheck() {
+                            return entered_uncertain(Some(code));
+                        }
+                        let effective = {
+                            let observed = c.link.observed.lock();
+                            codex_controls_match(publication, params, &observed.controls.current)
+                        };
+                        match effective {
+                            Ok(true) => {
+                                return ReceiptTransition {
+                                    state: ReceiptState::Succeeded,
+                                    proof: TransitionProof::NativeEffectiveState(
+                                        c.key.native_conversation_id.clone(),
+                                    ),
+                                    result: None,
+                                    error: None,
+                                    at: pairing::now_ms(),
+                                };
+                            }
+                            Err(code) => return entered_uncertain(Some(code)),
+                            Ok(false) => {}
+                        }
+                        if changes.changed().await.is_err() {
+                            return entered_uncertain(Some(ErrorCode::NotReady));
+                        }
+                    }
+                },
+            )
+            .await;
+        if callback_registered {
+            c.link.callbacks.lock().retain(
+                |callback| !matches!(&callback.id,NativeRpcId::String(id) if id==&request.id.0),
+            );
+        }
+        result?;
+        self.receipt(auth, &request.id).await
     }
-    async fn write_prompt_options(self:&Arc<Self>,auth:&Arc<Authorized>,request:Request)->SecurityResult<Receipt> {
-        let RequestBody::PromptSubmit(params)=&request.body else {return Err(ErrorCode::InvalidRequest)};
-        if params.skill.is_some()||matches!(params.delivery,Some(PromptDelivery::FollowUp|PromptDelivery::Aside)) {return Err(ErrorCode::InvalidRequest)}
-        let original=self.connection(&params.target)?;let c=&original;let context=self.original_context(&params.target)?;
-        if context.epoch!=c.epoch {return Err(ErrorCode::StaleSession)}
-        let model=if params.images.is_some() {Some(self.capture_image_model(auth,c,&context.clone().authorized(auth)).await?)}else{None};
-        let images=if params.images.is_some() {
-            self.security.prepare_prompt_images(auth,&request,crate::attachments::ImageSource {original:context.clone(),attachment:self.attachment_context(&params.target)?}).await?
-        }else{None};
+    async fn write_queue_once(
+        &self,
+        auth: &Authorized,
+        request: Request,
+        action: QueueAction,
+    ) -> SecurityResult<Receipt> {
+        let c = &action.original;
+        let (method, params, kind) = match &request.body {
+            RequestBody::SessionQueueUpdate(params) => (
+                "thread/queue/update",
+                json!({"threadId":c.key.native_conversation_id,"queuedSubmissionId":params.entry_id,"input":[{"type":"text","text":params.text.0,"text_elements":[]}]}),
+                NativeMutationKind::Queue,
+            ),
+            RequestBody::SessionQueueDelete(params) => (
+                "thread/queue/delete",
+                json!({"threadId":c.key.native_conversation_id,"queuedSubmissionId":params.entry_id}),
+                NativeMutationKind::Queue,
+            ),
+            RequestBody::SessionQueueReorder(params) => (
+                "thread/queue/reorder",
+                json!({"threadId":c.key.native_conversation_id,"queuedSubmissionIds":params.entry_ids}),
+                NativeMutationKind::Queue,
+            ),
+            RequestBody::SessionQueueStart(params) => (
+                "thread/queue/start",
+                json!({"threadId":c.key.native_conversation_id,"queuedSubmissionId":params.entry_id}),
+                NativeMutationKind::QueueStart,
+            ),
+            _ => return Err(ErrorCode::InvalidRequest),
+        };
+        let mut writer = tokio::time::timeout(Duration::from_secs(5), c.link.writer.lock())
+            .await
+            .map_err(|_| ErrorCode::Busy)?;
+        let bytes =
+            serde_json::to_string(&json!({"id":request.id,"method":method,"params":params}))
+                .map_err(policy)?;
+        let fd = c.link.fd.as_fd().try_clone_to_owned().map_err(policy)?;
+        let (reply, rejection) = c
+            .link
+            .mutation_callback(NativeRpcId::String(request.id.0.clone()), kind)?;
+        let result = self
+            .security
+            .boundary(
+                auth,
+                request.id.clone(),
+                || {
+                    self.security
+                        .state
+                        .queue_publication_current(auth, &action.publication)?;
+                    self.validate_queue_action(&action, &request)
+                },
+                fd,
+                async {
+                    let written = writer.send(Message::Text(bytes.into())).await.is_ok();
+                    drop(writer);
+                    if !written {
+                        return entered_uncertain(None);
+                    }
+                    let native = match reply.await {
+                        Ok(Ok(native)) => native,
+                        Ok(Err(code)) => {
+                            return rejection
+                                .lock()
+                                .map_or_else(|| entered_uncertain(Some(code)), native_refused);
+                        }
+                        _ => return entered_uncertain(None),
+                    };
+                    let facts = (|| -> SecurityResult<ActionResultQueue> {
+                        match &request.body {
+                            RequestBody::SessionQueueUpdate(params) => {
+                                let id = native_id(&native["queuedSubmission"], "id")?;
+                                if id != params.entry_id {
+                                    return Err(ErrorCode::StaleSession);
+                                }
+                                Ok(ActionResultQueue {
+                                    entry_id: Some(id),
+                                    deleted: None,
+                                    native_turn_id: None,
+                                })
+                            }
+                            RequestBody::SessionQueueDelete(params) => Ok(ActionResultQueue {
+                                entry_id: Some(params.entry_id.clone()),
+                                deleted: Some(
+                                    native["deleted"].as_bool().ok_or(ErrorCode::NotReady)?,
+                                ),
+                                native_turn_id: None,
+                            }),
+                            RequestBody::SessionQueueStart(params) => {
+                                let turn = native_id(&native["turn"], "id")?;
+                                if native["turn"]["status"] != "inProgress" {
+                                    return Err(ErrorCode::NotReady);
+                                }
+                                Ok(ActionResultQueue {
+                                    entry_id: Some(params.entry_id.clone()),
+                                    deleted: None,
+                                    native_turn_id: Some(turn),
+                                })
+                            }
+                            RequestBody::SessionQueueReorder(_)
+                                if native.as_object().is_some_and(|object| object.is_empty()) =>
+                            {
+                                Ok(ActionResultQueue {
+                                    entry_id: None,
+                                    deleted: None,
+                                    native_turn_id: None,
+                                })
+                            }
+                            _ => Err(ErrorCode::NotReady),
+                        }
+                    })();
+                    match facts {
+                        Ok(facts) => match action.publication.origin.context.recheck() {
+                            Ok(()) => ReceiptTransition {
+                                state: ReceiptState::Succeeded,
+                                proof: TransitionProof::CorrelatedAcknowledgement(Id(request
+                                    .id
+                                    .0
+                                    .clone())),
+                                result: Some(ActionResult::Queue(facts)),
+                                error: None,
+                                at: pairing::now_ms(),
+                            },
+                            Err(code) => ReceiptTransition {
+                                result: Some(ActionResult::Queue(facts)),
+                                ..entered_uncertain(Some(code))
+                            },
+                        },
+                        Err(code) => entered_uncertain(Some(code)),
+                    }
+                },
+            )
+            .await;
+        c.link.callbacks.lock().retain(
+            |callback| !matches!(&callback.id,NativeRpcId::String(id) if id==&request.id.0),
+        );
+        result?;
+        self.receipt(auth, &request.id).await
+    }
+    async fn write_prompt_options(
+        self: &Arc<Self>,
+        auth: &Arc<Authorized>,
+        request: Request,
+    ) -> SecurityResult<Receipt> {
+        let RequestBody::PromptSubmit(params) = &request.body else {
+            return Err(ErrorCode::InvalidRequest);
+        };
+        if params.skill.is_some()
+            || matches!(
+                params.delivery,
+                Some(PromptDelivery::FollowUp | PromptDelivery::Aside)
+            )
+        {
+            return Err(ErrorCode::InvalidRequest);
+        }
+        let original = self.connection(&params.target)?;
+        let c = &original;
+        let context = self.original_context(&params.target)?;
+        if context.epoch != c.epoch {
+            return Err(ErrorCode::StaleSession);
+        }
+        let model = if params.images.is_some() {
+            Some(
+                self.capture_image_model(auth, c, &context.clone().authorized(auth))
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let images = if params.images.is_some() {
+            self.security
+                .prepare_prompt_images(
+                    auth,
+                    &request,
+                    crate::attachments::ImageSource {
+                        original: context.clone(),
+                        attachment: self.attachment_context(&params.target)?,
+                    },
+                )
+                .await?
+        } else {
+            None
+        };
         let outcome=async {
             let mut input=Vec::with_capacity(usize::from(!params.text.0.is_empty())+params.images.as_ref().map_or(0,Vec::len));
             if !params.text.0.is_empty() {input.push(json!({"type":"text","text":params.text.0,"text_elements":[]}));}
@@ -5326,15 +6787,30 @@ impl Runtime {
             c.link.callbacks.lock().retain(|callback|!matches!(&callback.id,NativeRpcId::String(id) if id==&request.id.0));
             result?;self.receipt(auth,&request.id).await
         }.await;
-        if outcome.is_err()&&let Some(images)=images
-            &&!images.entered.load(Ordering::Acquire) {c.link.observed.lock().unwatch_image(images.native_input());let _=self.security.image_preparation_failed(images).await;}
+        if outcome.is_err()
+            && let Some(images) = images
+            && !images.entered.load(Ordering::Acquire)
+        {
+            c.link.observed.lock().unwatch_image(images.native_input());
+            let _ = self.security.image_preparation_failed(images).await;
+        }
         outcome
     }
-    async fn write_once(self:&Arc<Self>,auth:&Arc<Authorized>,request:Request,invocation:SecurityResult<Option<SkillInvocation>>)->SecurityResult<Receipt> {
-        let invocation=invocation?;
-        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some())!=invocation.is_some() {return Err(ErrorCode::NotReady)}
-        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.images.is_some()||matches!(params.delivery,Some(PromptDelivery::Steer|PromptDelivery::Queue))) {
-            return self.write_prompt_options(auth,request).await;
+    async fn write_once(
+        self: &Arc<Self>,
+        auth: &Arc<Authorized>,
+        request: Request,
+        invocation: SecurityResult<Option<SkillInvocation>>,
+    ) -> SecurityResult<Receipt> {
+        let invocation = invocation?;
+        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some())
+            != invocation.is_some()
+        {
+            return Err(ErrorCode::NotReady);
+        }
+        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.images.is_some()||matches!(params.delivery,Some(PromptDelivery::Steer|PromptDelivery::Queue)))
+        {
+            return self.write_prompt_options(auth, request).await;
         }
         let target = match &request.body {
             RequestBody::PromptSubmit(p) => &p.target,
@@ -5342,7 +6818,10 @@ impl Runtime {
             RequestBody::RequestRespond(p) => &p.target,
             _ => return Err(ErrorCode::InvalidRequest),
         };
-        let c=match &invocation {Some(invocation)=>invocation.original.clone(),None=>self.connection(target)?};
+        let c = match &invocation {
+            Some(invocation) => invocation.original.clone(),
+            None => self.connection(target)?,
+        };
         if !c.link.loaded(&c.key.native_conversation_id).await? {
             return Err(ErrorCode::NotReady);
         }
@@ -5355,10 +6834,22 @@ impl Runtime {
             RequestBody::PromptSubmit(p) => {
                 let id = NativeRpcId::String(request.id.0.clone());
                 callback = Some(c.link.callback(id, false)?);
-                let bytes=if let Some(invocation)=&invocation {
-                    skill_prompt_bytes(&invocation.publication,invocation.row,&request.id,&c.key.native_conversation_id)?
-                } else {serde_json::to_vec(&json!({"id":request.id.0,"method":"turn/start","params":{"threadId":c.key.native_conversation_id.0,"clientUserMessageId":request.id.0,"input":[{"type":"text","text":p.text.0,"text_elements":[]}]}})).map_err(policy)?};
-                (bytes,ActionResult::Prompt(ActionResultPrompt{native_turn_id:None}))
+                let bytes = if let Some(invocation) = &invocation {
+                    skill_prompt_bytes(
+                        &invocation.publication,
+                        invocation.row,
+                        &request.id,
+                        &c.key.native_conversation_id,
+                    )?
+                } else {
+                    serde_json::to_vec(&json!({"id":request.id.0,"method":"turn/start","params":{"threadId":c.key.native_conversation_id.0,"clientUserMessageId":request.id.0,"input":[{"type":"text","text":p.text.0,"text_elements":[]}]}})).map_err(policy)?
+                };
+                (
+                    bytes,
+                    ActionResult::Prompt(ActionResultPrompt {
+                        native_turn_id: None,
+                    }),
+                )
             }
             RequestBody::TurnCancel(p) => {
                 let turn = p
@@ -5394,7 +6885,10 @@ impl Runtime {
             .boundary(
                 auth,
                 action.clone(),
-                || match &invocation {Some(invocation)=>self.validate_skill_invocation(invocation,&request),None=>self.validate(&request)},
+                || match &invocation {
+                    Some(invocation) => self.validate_skill_invocation(invocation, &request),
+                    None => self.validate(&request),
+                },
                 fd,
                 async {
                     if let RequestBody::RequestRespond(p) = &request.body {
@@ -5849,13 +7343,21 @@ fn service_environment(property: &Value) -> SecurityResult<Vec<(String, String)>
     values.sort();
     Ok(values)
 }
-fn first_owner_service_evidence(pending:&mut Option<crate::codex_relay::ProcessStart>,pid:u32)->std::io::Result<Option<ProcessEvidence>> {
-    if pending.is_none(){*pending=Some(crate::codex_relay::ProcessStart::capture(pid)?);}
-    let original=pending.as_ref().ok_or_else(invalid)?;
+fn first_owner_service_evidence(
+    pending: &mut Option<crate::codex_relay::ProcessStart>,
+    pid: u32,
+) -> std::io::Result<Option<ProcessEvidence>> {
+    if pending.is_none() {
+        *pending = Some(crate::codex_relay::ProcessStart::capture(pid)?);
+    }
+    let original = pending.as_ref().ok_or_else(invalid)?;
     match original.evidence(pid) {
-        Ok(process)=>Ok(Some(process)),
-        Err(error) if error.kind()==std::io::ErrorKind::PermissionDenied=>{original.check(pid)?;Ok(None)}
-        Err(error)=>Err(error),
+        Ok(process) => Ok(Some(process)),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            original.check(pid)?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 fn service_pid(properties: &HashMap<String, String>) -> SecurityResult<u32> {
@@ -5968,7 +7470,9 @@ fn manager_socket_object(path: &Path) -> io::Result<(u64, u64)> {
 fn manager_process() -> SecurityResult<ProcessEvidence> {
     manager_process_observed(None)
 }
-fn manager_process_observed(mut capture: Option<&mut Option<ManagerFailureDetail>>) -> SecurityResult<ProcessEvidence> {
+fn manager_process_observed(
+    mut capture: Option<&mut Option<ManagerFailureDetail>>,
+) -> SecurityResult<ProcessEvidence> {
     let (pid, _) = manager_peer_observed(capture.as_deref_mut())?;
     herdr::process_evidence(pid).map_err(|error| {
         if let Some(slot) = capture {
@@ -5990,29 +7494,51 @@ fn manager_process_observed(mut capture: Option<&mut Option<ManagerFailureDetail
 fn manager_peer() -> SecurityResult<(u32, u32)> {
     manager_peer_observed(None)
 }
-fn manager_peer_observed(mut capture: Option<&mut Option<ManagerFailureDetail>>) -> SecurityResult<(u32, u32)> {
+fn manager_peer_observed(
+    mut capture: Option<&mut Option<ManagerFailureDetail>>,
+) -> SecurityResult<(u32, u32)> {
     use std::os::fd::AsFd;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {
-            ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::RuntimeMissing, None);
+            ManagerFailureDetail::record(
+                capture.as_deref_mut(),
+                ManagerFailureGuard::RuntimeMissing,
+                None,
+            );
             ErrorCode::NotReady
         })?;
     config::absolute(&runtime).map_err(|error| {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::RuntimePath, Some(error.kind()));
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::RuntimePath,
+            Some(error.kind()),
+        );
         policy(error)
     })?;
     if runtime.as_path() != std::path::Path::new(&format!("/run/user/{}", pairing::uid())) {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::RuntimePath, None);
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::RuntimePath,
+            None,
+        );
         return Err(ErrorCode::NotReady);
     }
     pairing::private_dir(&runtime, false).map_err(|error| {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::RuntimeDirectory, Some(error.kind()));
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::RuntimeDirectory,
+            Some(error.kind()),
+        );
         policy(error)
     })?;
     let path = runtime.join("systemd/private");
     let before = manager_socket_object(&path).map_err(|error| {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::SocketBefore, Some(error.kind()));
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::SocketBefore,
+            Some(error.kind()),
+        );
         policy(error)
     })?;
     // SAFETY: the owned nonblocking Unix descriptor never waits under a start fence.
@@ -6024,14 +7550,22 @@ fn manager_peer_observed(mut capture: Option<&mut Option<ManagerFailureDetail>>)
         )
     };
     if raw < 0 {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::SocketCreate, Some(io::Error::last_os_error().kind()));
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::SocketCreate,
+            Some(io::Error::last_os_error().kind()),
+        );
         return Err(ErrorCode::NotReady);
     }
     use std::os::fd::{AsRawFd, FromRawFd};
     let stream = unsafe { OwnedFd::from_raw_fd(raw) };
     let bytes = path.as_os_str().as_encoded_bytes();
     if bytes.len() > 107 {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::SocketPath, None);
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::SocketPath,
+            None,
+        );
         return Err(ErrorCode::NotReady);
     }
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -6049,7 +7583,11 @@ fn manager_peer_observed(mut capture: Option<&mut Option<ManagerFailureDetail>>)
         )
     } != 0
     {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::Connect, Some(io::Error::last_os_error().kind()));
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::Connect,
+            Some(io::Error::last_os_error().kind()),
+        );
         return Err(ErrorCode::NotReady);
     }
     let fd = stream.as_fd();
@@ -6064,8 +7602,13 @@ fn manager_peer_observed(mut capture: Option<&mut Option<ManagerFailureDetail>>)
             (&mut credentials as *mut libc::ucred).cast(),
             &mut len,
         )
-    } != 0 {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::PeerCredentials, Some(io::Error::last_os_error().kind()));
+    } != 0
+    {
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::PeerCredentials,
+            Some(io::Error::last_os_error().kind()),
+        );
         return Err(ErrorCode::NotReady);
     }
     if credentials.uid != pairing::uid() {
@@ -6073,11 +7616,19 @@ fn manager_peer_observed(mut capture: Option<&mut Option<ManagerFailureDetail>>)
         return Err(ErrorCode::NotReady);
     }
     let after = manager_socket_object(&path).map_err(|error| {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::SocketAfter, Some(error.kind()));
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::SocketAfter,
+            Some(error.kind()),
+        );
         policy(error)
     })?;
     if after != before {
-        ManagerFailureDetail::record(capture.as_deref_mut(), ManagerFailureGuard::SocketChanged, None);
+        ManagerFailureDetail::record(
+            capture.as_deref_mut(),
+            ManagerFailureGuard::SocketChanged,
+            None,
+        );
         return Err(ErrorCode::NotReady);
     }
     Ok((
@@ -6236,7 +7787,10 @@ impl Runtime {
     fn creation_unavailable(&self) -> Option<&'static str> {
         self.creation_unavailable_observed(None)
     }
-    fn creation_unavailable_observed(&self, manager_detail: Option<&mut Option<ManagerFailureDetail>>) -> Option<&'static str> {
+    fn creation_unavailable_observed(
+        &self,
+        manager_detail: Option<&mut Option<ManagerFailureDetail>>,
+    ) -> Option<&'static str> {
         match self.topology.config.backend_reason(Provider::Codex) {
             Ok(Some(reason)) => return Some(reason),
             Err(_) => {
@@ -6452,7 +8006,7 @@ impl Runtime {
         auth: &Authorized,
         action: &Uuid,
         params: &SessionCreateParams,
-        selection:&herdr::CreationSelection,
+        selection: &herdr::CreationSelection,
         resources: &CreationResources,
         job_deadline: tokio::time::Instant,
     ) -> SecurityResult<(
@@ -6521,24 +8075,41 @@ impl Runtime {
             admitted.owner_started = Some(false);
             let metadata = owner_metadata(&owner, &epoch);
             let admitted = self
-                .security.start_boundary(auth, action.clone(), (CreationStage::Owner, metadata.clone()), || { selection.validate(&self.topology, params).map_err(|code| crate::pairing::CreationAdmissionFailure::guarded(code, crate::pairing::CreationAdmissionGuard::Directory))?; let checked: crate::pairing::SecurityResult<()> = (|| {
-                self.topology
-                    .validate_provider_stage(action, params, &known)?;
-                epoch
-                    .validate(&owner.socket_host, &owner.socket_agent)
-                    .map_err(policy)?;
-                Ok(())
-            })(); checked.map_err(Into::into) }, || {
-                Ok((
-                    (),
-                    stage(
-                        admitted,
-                        metadata,
-                        StageState::Confirmed,
-                        Some("Reused exact independently owned live app-server"),
-                    ),
-                ))
-            })
+                .security
+                .start_boundary(
+                    auth,
+                    action.clone(),
+                    (CreationStage::Owner, metadata.clone()),
+                    || {
+                        selection.validate(&self.topology, params).map_err(|code| {
+                            crate::pairing::CreationAdmissionFailure::guarded(
+                                code,
+                                crate::pairing::CreationAdmissionGuard::Directory,
+                            )
+                        })?;
+                        let checked: crate::pairing::SecurityResult<()> = (|| {
+                            self.topology
+                                .validate_provider_stage(action, params, &known)?;
+                            epoch
+                                .validate(&owner.socket_host, &owner.socket_agent)
+                                .map_err(policy)?;
+                            Ok(())
+                        })(
+                        );
+                        checked.map_err(Into::into)
+                    },
+                    || {
+                        Ok((
+                            (),
+                            stage(
+                                admitted,
+                                metadata,
+                                StageState::Confirmed,
+                                Some("Reused exact independently owned live app-server"),
+                            ),
+                        ))
+                    },
+                )
                 .await;
             if let Err(code) = admitted {
                 link.close().await;
@@ -6645,67 +8216,82 @@ impl Runtime {
             reporter.arm_owner_progress(action);
         }
         let child = match self
-            .security.start_boundary(auth, action.clone(), (CreationStage::Owner, intent.clone()), || { selection.validate(&self.topology, params).map_err(|code| crate::pairing::CreationAdmissionFailure::guarded(code, crate::pairing::CreationAdmissionGuard::Directory))?; let checked: crate::pairing::SecurityResult<()> = (|| {
-            if tokio::time::Instant::now() >= job_deadline {
-                return Err(ErrorCode::Timeout);
-            }
-            self.topology
-                .validate_provider_stage(action, params, &known)?;
-            if manager_process()? != manager
-                || std::fs::symlink_metadata(&owner.socket_host).is_ok()
-                || std::fs::symlink_metadata(&path).is_ok()
-            {
-                return Err(ErrorCode::NotReady);
-            }
-            config::executable(&wrapper).map_err(policy)
-        })(); checked.map_err(Into::into) }, || {
-            if let Err(error) = codex_relay::private_write(&path, &record, false) {
-                if let Some(reporter) = &spawn_reporter {
-                    reporter.prebinding_error(
-                        "creation",
-                        "owner_persist",
-                        policy(&error),
-                        &error,
-                    );
-                }
-                return Err(policy(error));
-            }
-            let mut command = std::process::Command::new(&systemd);
-            command
-                .args(&args)
-                .current_dir(&cwd)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            #[cfg(target_os = "linux")]
-            // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
-            unsafe {
-                command.pre_exec(codex_relay::drop_inherited_capabilities);
-            }
-            match command.spawn()
-            {
-                Ok(child) => Ok((
-                    Some(child),
-                    stage(
-                        admitted,
-                        intent,
-                        StageState::Dispatching,
-                        Some("Independent owner service admission process started"),
-                    ),
-                )),
-                Err(error) => {
-                    if let Some(reporter) = &spawn_reporter {
-                        reporter.prebinding_error(
-                            "creation",
-                            "owner_spawn",
-                            policy(&error),
-                            &error,
-                        );
+            .security
+            .start_boundary(
+                auth,
+                action.clone(),
+                (CreationStage::Owner, intent.clone()),
+                || {
+                    selection.validate(&self.topology, params).map_err(|code| {
+                        crate::pairing::CreationAdmissionFailure::guarded(
+                            code,
+                            crate::pairing::CreationAdmissionGuard::Directory,
+                        )
+                    })?;
+                    let checked: crate::pairing::SecurityResult<()> = (|| {
+                        if tokio::time::Instant::now() >= job_deadline {
+                            return Err(ErrorCode::Timeout);
+                        }
+                        self.topology
+                            .validate_provider_stage(action, params, &known)?;
+                        if manager_process()? != manager
+                            || std::fs::symlink_metadata(&owner.socket_host).is_ok()
+                            || std::fs::symlink_metadata(&path).is_ok()
+                        {
+                            return Err(ErrorCode::NotReady);
+                        }
+                        config::executable(&wrapper).map_err(policy)
+                    })();
+                    checked.map_err(Into::into)
+                },
+                || {
+                    if let Err(error) = codex_relay::private_write(&path, &record, false) {
+                        if let Some(reporter) = &spawn_reporter {
+                            reporter.prebinding_error(
+                                "creation",
+                                "owner_persist",
+                                policy(&error),
+                                &error,
+                            );
+                        }
+                        return Err(policy(error));
                     }
-                    Ok((None, stage(admitted, intent, StageState::Uncertain, None)))
-                }
-            }
-        })
+                    let mut command = std::process::Command::new(&systemd);
+                    command
+                        .args(&args)
+                        .current_dir(&cwd)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+                    #[cfg(target_os = "linux")]
+                    // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
+                    unsafe {
+                        command.pre_exec(codex_relay::drop_inherited_capabilities);
+                    }
+                    match command.spawn() {
+                        Ok(child) => Ok((
+                            Some(child),
+                            stage(
+                                admitted,
+                                intent,
+                                StageState::Dispatching,
+                                Some("Independent owner service admission process started"),
+                            ),
+                        )),
+                        Err(error) => {
+                            if let Some(reporter) = &spawn_reporter {
+                                reporter.prebinding_error(
+                                    "creation",
+                                    "owner_spawn",
+                                    policy(&error),
+                                    &error,
+                                );
+                            }
+                            Ok((None, stage(admitted, intent, StageState::Uncertain, None)))
+                        }
+                    }
+                },
+            )
             .await
         {
             Ok(child) => {
@@ -6813,12 +8399,15 @@ impl Runtime {
                         return Err(code);
                     }
                 };
-                record.service = match first_owner_service_evidence(&mut pending_service,pid) {
+                record.service = match first_owner_service_evidence(&mut pending_service, pid) {
                     Ok(Some(service)) => Some(service),
                     Ok(None) => {
                         // Type=exec may expose the ORIGINAL launcher before its post-exec dumpability boundary.
                         // No new unit/action or deadline: retry only this first read-only proof.
-                        tokio::time::sleep_until((tokio::time::Instant::now()+Duration::from_millis(20)).min(deadline)).await;
+                        tokio::time::sleep_until(
+                            (tokio::time::Instant::now() + Duration::from_millis(20)).min(deadline),
+                        )
+                        .await;
                         continue;
                     }
                     Err(error) => {
@@ -6867,7 +8456,12 @@ impl Runtime {
                     Ok(proof) => proof,
                     Err(_) => {
                         if let Some(reporter) = &reporter {
-                            reporter.prebinding("creation", "owner_wait", ErrorCode::Timeout, "none");
+                            reporter.prebinding(
+                                "creation",
+                                "owner_wait",
+                                ErrorCode::Timeout,
+                                "none",
+                            );
                         }
                         return Err(ErrorCode::Timeout);
                     }
@@ -6882,7 +8476,12 @@ impl Runtime {
                     Ok(proof) => proof,
                     Err(_) => {
                         if let Some(reporter) = &reporter {
-                            reporter.prebinding("creation", "owner_native_process", ErrorCode::NotReady, "none");
+                            reporter.prebinding(
+                                "creation",
+                                "owner_native_process",
+                                ErrorCode::NotReady,
+                                "none",
+                            );
                         }
                         return Err(ErrorCode::NotReady);
                     }
@@ -7126,14 +8725,15 @@ impl Runtime {
         auth: &Authorized,
         action: &Uuid,
         params: &SessionCreateParams,
-        selection:&herdr::CreationSelection,
+        selection: &herdr::CreationSelection,
         deadline: tokio::time::Instant,
     ) -> SecurityResult<()> {
         if tokio::time::Instant::now() >= deadline || self.stopping.load(Ordering::Acquire) {
             return Err(ErrorCode::Timeout);
         }
         let workspace = self
-            .topology.workspace_once(&self.security, auth, action, params, selection)
+            .topology
+            .workspace_once(&self.security, auth, action, params, selection)
             .await?;
         if workspace.state != ReceiptState::Dispatching
             || workspace
@@ -7143,15 +8743,28 @@ impl Runtime {
         {
             return Ok(());
         }
-        let prepared=match self.topology.prepare_created_shell(&self.security,auth,(action,params,selection),deadline,None).await {
-            Ok(Some(prepared))=>prepared,
-            Ok(None)=>return Ok(()),
-            Err(code)=>{
-                self.topology.uncertain_creation(auth,action,code).await?;
+        let prepared = match self
+            .topology
+            .prepare_created_shell(
+                &self.security,
+                auth,
+                (action, params, selection),
+                deadline,
+                None,
+            )
+            .await
+        {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return Ok(()),
+            Err(code) => {
+                self.topology.uncertain_creation(auth, action, code).await?;
                 return Ok(());
             }
         };
-        let probe=self.topology.shell_probe_once(&self.security,auth,prepared).await?;
+        let probe = self
+            .topology
+            .shell_probe_once(&self.security, auth, prepared)
+            .await?;
         if probe.state != ReceiptState::Dispatching
             || probe
                 .creation
@@ -7214,7 +8827,7 @@ impl Runtime {
             let validator_resources = known.clone();
             let (native_owner, native_epoch, native_link, native_source) = (&owner, &epoch, &link, &thread_source);
             let reporter = self.invalidation_reporter.clone();
-            self.security.thread_creation_boundary(auth, action.clone(), metadata.clone(), deadline, self.thread_stop.subscribe(), || { selection.validate(&self.topology, params).map_err(|code| crate::pairing::CreationAdmissionFailure::guarded(code, crate::pairing::CreationAdmissionGuard::Directory))?; let checked: crate::pairing::SecurityResult<()> = (|| {
+            self.security.thread_creation_boundary(crate::pairing::NativeBoundary { auth, action: action.clone(), connection: fd }, metadata.clone(), deadline, self.thread_stop.subscribe(), || { selection.validate(&self.topology, params).map_err(|code| crate::pairing::CreationAdmissionFailure::guarded(code, crate::pairing::CreationAdmissionGuard::Directory))?; let checked: crate::pairing::SecurityResult<()> = (|| {
                 self.topology.validate_provider_stage(action, params, &validator_resources)?;
                 let current = self.topology.source(&params.server_id)?;
                 if current.incarnation != thread_source.incarnation || current.evidence != thread_source.evidence {
@@ -7233,7 +8846,7 @@ impl Runtime {
                     return Err(ErrorCode::Timeout);
                 }
                 Ok(())
-            })(); checked.map_err(Into::into) }, fd, |checkpoint| async move {
+            })(); checked.map_err(Into::into) }, |checkpoint| async move {
                 let effect_entered = thread_start.as_ref().map(|_| std::time::Instant::now());
                 let mut effect = ThreadEffectDrop::new(
                     reporter.clone(),
@@ -7766,27 +9379,60 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::{Read,Write},os::{fd::{AsRawFd,FromRawFd},unix::{net::UnixStream as FileWakeChannel,process::CommandExt}}};
+    use std::{
+        io::{Read, Write},
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::{net::UnixStream as FileWakeChannel, process::CommandExt},
+        },
+    };
     struct FileWakeFixtureChild(std::process::Child);
     impl FileWakeFixtureChild {
-        fn exit(&mut self)->std::process::ExitStatus {
-            let deadline=std::time::Instant::now()+Duration::from_secs(5);
-            loop{if let Some(status)=self.0.try_wait().unwrap(){return status;}assert!(std::time::Instant::now()<deadline,"owned fixture exit timed out");std::thread::sleep(Duration::from_millis(10));}
+        fn exit(&mut self) -> std::process::ExitStatus {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    return status;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "owned fixture exit timed out"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
-    impl Drop for FileWakeFixtureChild {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-    fn file_wake_endpoint(key:&str)->Option<FileWakeChannel> {
-        let fd=std::env::var(key).ok()?.parse::<i32>().unwrap();assert!(fd>2);let channel=unsafe{FileWakeChannel::from_raw_fd(fd)};
-        channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();Some(channel)
+    impl Drop for FileWakeFixtureChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
-    fn file_wake_state(channel:&mut FileWakeChannel,expected:u8){let mut state=[0];channel.read_exact(&mut state).unwrap();assert_eq!(state,[expected]);}
+    fn file_wake_endpoint(key: &str) -> Option<FileWakeChannel> {
+        let fd = std::env::var(key).ok()?.parse::<i32>().unwrap();
+        assert!(fd > 2);
+        let channel = unsafe { FileWakeChannel::from_raw_fd(fd) };
+        channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        channel
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        Some(channel)
+    }
+    fn file_wake_state(channel: &mut FileWakeChannel, expected: u8) {
+        let mut state = [0];
+        channel.read_exact(&mut state).unwrap();
+        assert_eq!(state, [expected]);
+    }
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "current_thread")]
     async fn helper_command_drops_child_capabilities_without_changing_parent() {
         let parent_state = || {
             codex_relay::capability_state(
                 &std::fs::read_to_string("/proc/thread-self/status").unwrap(),
-            ).unwrap()
+            )
+            .unwrap()
         };
         let before = parent_state();
         // The coordinator's explicit opt-in refuses a vacuous zero-capability proof.
@@ -7794,170 +9440,449 @@ mod tests {
             assert_eq!(value, std::ffi::OsStr::new("1"));
             let wake = 1u64 << 35;
             assert_eq!(
-                (before.inheritable, before.permitted, before.effective, before.ambient),
+                (
+                    before.inheritable,
+                    before.permitted,
+                    before.effective,
+                    before.ambient
+                ),
                 (wake, wake, wake, wake),
             );
         }
         // Exercise the real bounded helper boundary; cat reports its own kernel credentials.
         let cat = installed_command("cat").unwrap();
         let (success, status) = command_output(&cat, &["/proc/thread-self/status".into()])
-            .await.unwrap();
+            .await
+            .unwrap();
         assert!(success);
         assert!(codex_relay::capability_state(&status).unwrap().zero());
         assert_eq!(parent_state(), before);
     }
     #[test]
     fn owner_first_service_permission_wait_keeps_original_public_epoch_and_never_adopts_pid() {
-        use std::process::{Command,Stdio};
-        if let Some(mut channel)=file_wake_endpoint("GOATR_OWNER_DUMP_TEST_FD") {
-            crate::codex_relay::drop_inherited_capabilities().unwrap();assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)},0);
-            channel.write_all(b"0").unwrap();file_wake_state(&mut channel,b'1');
-            assert_eq!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,1,0,0,0)},0);channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'2');return;
+        use std::process::{Command, Stdio};
+        if let Some(mut channel) = file_wake_endpoint("GOATR_OWNER_DUMP_TEST_FD") {
+            crate::codex_relay::drop_inherited_capabilities().unwrap();
+            assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) }, 0);
+            channel.write_all(b"0").unwrap();
+            file_wake_state(&mut channel, b'1');
+            assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) }, 0);
+            channel.write_all(b"1").unwrap();
+            file_wake_state(&mut channel, b'2');
+            return;
         }
-        let test=concat!(module_path!(),"::owner_first_service_permission_wait_keeps_original_public_epoch_and_never_adopts_pid");
-        let test=test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"),"::")).unwrap();
-        let (mut channel,endpoint)=FileWakeChannel::pair().unwrap();channel.set_read_timeout(Some(Duration::from_secs(5))).unwrap();channel.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-        let fd=endpoint.as_raw_fd();assert!(fd>2);let mut command=Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact",test,"--test-threads=1"]).env("GOATR_OWNER_DUMP_TEST_FD",fd.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        unsafe{command.pre_exec(move||{crate::codex_relay::drop_inherited_capabilities()?;let flags=libc::fcntl(fd,libc::F_GETFD);if flags<0||libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)<0{return Err(std::io::Error::last_os_error());}Ok(())});}
-        let mut child=FileWakeFixtureChild(command.spawn().unwrap());drop(endpoint);file_wake_state(&mut channel,b'0');
-        let mut pending=None;assert!(first_owner_service_evidence(&mut pending,child.0.id()).unwrap().is_none());assert!(pending.is_some());
-        assert!(first_owner_service_evidence(&mut pending,std::process::id()).is_err());
-        assert!(first_owner_service_evidence(&mut pending,child.0.id()).unwrap().is_none());
-        channel.write_all(b"1").unwrap();file_wake_state(&mut channel,b'1');
-        let proof=first_owner_service_evidence(&mut pending,child.0.id()).unwrap().unwrap();assert_eq!(proof.pid,child.0.id());
-        channel.write_all(b"2").unwrap();assert!(child.exit().success());assert!(first_owner_service_evidence(&mut pending,proof.pid).is_err());
+        let test = concat!(
+            module_path!(),
+            "::owner_first_service_permission_wait_keeps_original_public_epoch_and_never_adopts_pid"
+        );
+        let test = test
+            .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .unwrap();
+        let (mut channel, endpoint) = FileWakeChannel::pair().unwrap();
+        channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        channel
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let fd = endpoint.as_raw_fd();
+        assert!(fd > 2);
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--test-threads=1"])
+            .env("GOATR_OWNER_DUMP_TEST_FD", fd.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                crate::codex_relay::drop_inherited_capabilities()?;
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = FileWakeFixtureChild(command.spawn().unwrap());
+        drop(endpoint);
+        file_wake_state(&mut channel, b'0');
+        let mut pending = None;
+        assert!(
+            first_owner_service_evidence(&mut pending, child.0.id())
+                .unwrap()
+                .is_none()
+        );
+        assert!(pending.is_some());
+        assert!(first_owner_service_evidence(&mut pending, std::process::id()).is_err());
+        assert!(
+            first_owner_service_evidence(&mut pending, child.0.id())
+                .unwrap()
+                .is_none()
+        );
+        channel.write_all(b"1").unwrap();
+        file_wake_state(&mut channel, b'1');
+        let proof = first_owner_service_evidence(&mut pending, child.0.id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.pid, child.0.id());
+        channel.write_all(b"2").unwrap();
+        assert!(child.exit().success());
+        assert!(first_owner_service_evidence(&mut pending, proof.pid).is_err());
     }
     use std::path::PathBuf;
-    async fn publication_context(state:Arc<State>,target:&Target,epoch:&Uuid)->(crate::herdr::grid::GridQueueFixture,OriginalContext) {
-        let server=state.session_state(target,epoch).unwrap().summary.server_id;
-        let fixture=crate::herdr::grid::queue_fixture(Arc::new(State::default()),server).await;
-        let source=fixture.source.clone();let checked_source=source.clone();
-        let checked_target=target.clone();let checked_epoch=epoch.clone();let weak=Arc::downgrade(&state);
-        let check:Arc<dyn Fn()->SecurityResult<()>+Send+Sync>=Arc::new(move||{
+    async fn publication_context(
+        state: Arc<State>,
+        target: &Target,
+        epoch: &Uuid,
+    ) -> (crate::herdr::grid::GridQueueFixture, OriginalContext) {
+        let server = state
+            .session_state(target, epoch)
+            .unwrap()
+            .summary
+            .server_id;
+        let fixture = crate::herdr::grid::queue_fixture(Arc::new(State::default()), server).await;
+        let source = fixture.source.clone();
+        let checked_source = source.clone();
+        let checked_target = target.clone();
+        let checked_epoch = epoch.clone();
+        let weak = Arc::downgrade(&state);
+        let check: Arc<dyn Fn() -> SecurityResult<()> + Send + Sync> = Arc::new(move || {
             checked_source.recheck().map_err(policy)?;
-            weak.upgrade().ok_or(ErrorCode::StaleSession)?.validate_source(&checked_target,&checked_epoch)
+            weak.upgrade()
+                .ok_or(ErrorCode::StaleSession)?
+                .validate_source(&checked_target, &checked_epoch)
         });
-        let checked=check.clone();
-        let publish:PublicationGuard=Arc::new(move|commit|{checked()?;commit()});
-        let process=herdr::process_evidence(std::process::id()).unwrap();
-        let context=OriginalContext::capture(Provider::Codex,target.clone(),epoch.clone(),source,process,Id("thread".into()),check,publish).unwrap();
-        (fixture,context)
+        let checked = check.clone();
+        let publish: PublicationGuard = Arc::new(move |commit| {
+            checked()?;
+            commit()
+        });
+        let process = herdr::process_evidence(std::process::id()).unwrap();
+        let context = OriginalContext::capture(
+            crate::backends::OriginalIdentity {
+                provider: Provider::Codex,
+                target: target.clone(),
+                epoch: epoch.clone(),
+                source,
+                process,
+                native: Id("thread".into()),
+            },
+            check,
+            publish,
+        )
+        .unwrap();
+        (fixture, context)
     }
-    fn skill_publication(peer:&crate::storage::AuthenticatedPeer,connection:&Uuid,context:&OriginalContext,catalogue:SkillsListResult,count:Arc<AtomicUsize>)->SecurityResult<SkillsPublication> {
+    fn skill_publication(
+        peer: &crate::storage::AuthenticatedPeer,
+        connection: &Uuid,
+        context: &OriginalContext,
+        catalogue: SkillsListResult,
+        count: Arc<AtomicUsize>,
+    ) -> SecurityResult<SkillsPublication> {
         Ok(SkillsPublication {
-            origin:crate::backends::PublicationOrigin {peer:peer.peer_id().clone(),peer_epoch:peer.epoch(),connection:connection.clone(),context:context.clone()},
-            catalogue,documents:HashMap::new(),document_expires:std::time::Instant::now()+Duration::from_secs(300),
-            native_catalogue:None,native_cwd:Some("/original".into()),slot:crate::backends::PublicationSlot::reserve(count,32)?,
+            origin: crate::backends::PublicationOrigin {
+                peer: peer.peer_id().clone(),
+                peer_epoch: peer.epoch(),
+                connection: connection.clone(),
+                context: context.clone(),
+            },
+            catalogue,
+            documents: HashMap::new(),
+            document_expires: std::time::Instant::now() + Duration::from_secs(300),
+            native_catalogue: None,
+            native_cwd: Some("/original".into()),
+            slot: crate::backends::PublicationSlot::reserve(count, 32)?,
         })
     }
     #[test]
     fn native_model_catalogue_uses_slug_and_never_infers_missing_image_modality() {
-        let row=json!({"id":"catalogue-only-id","model":"native-model-slug","displayName":"Native model","supportedReasoningEfforts":[{"reasoningEffort":"high"}],"inputModalities":["text","image"]});
-        let model=codex_advertised_model(&row).unwrap();assert_eq!(model.model,"native-model-slug");assert_eq!(model.efforts,vec!["high"]);assert_eq!(model.images,Some(true));
-        let mut unknown=row.clone();unknown.as_object_mut().unwrap().remove("inputModalities");
-        assert_eq!(codex_advertised_model(&unknown).unwrap().images,None);
-        let mut duplicate=row;duplicate["supportedReasoningEfforts"]=json!([{"reasoningEffort":"high"},{"reasoningEffort":"high"}]);
-        assert!(matches!(codex_advertised_model(&duplicate),Err(ErrorCode::NotReady)));
+        let row = json!({"id":"catalogue-only-id","model":"native-model-slug","displayName":"Native model","supportedReasoningEfforts":[{"reasoningEffort":"high"}],"inputModalities":["text","image"]});
+        let model = codex_advertised_model(&row).unwrap();
+        assert_eq!(model.model, "native-model-slug");
+        assert_eq!(model.efforts, vec!["high"]);
+        assert_eq!(model.images, Some(true));
+        let mut unknown = row.clone();
+        unknown.as_object_mut().unwrap().remove("inputModalities");
+        assert_eq!(codex_advertised_model(&unknown).unwrap().images, None);
+        let mut duplicate = row;
+        duplicate["supportedReasoningEfforts"] =
+            json!([{"reasoningEffort":"high"},{"reasoningEffort":"high"}]);
+        assert!(matches!(
+            codex_advertised_model(&duplicate),
+            Err(ErrorCode::NotReady)
+        ));
     }
     #[test]
     fn native_queue_mixed_inputs_stay_noneditable_and_never_forward_media_urls() {
         let row:NativeQueueRow=serde_json::from_value(json!({"id":"entry","input":[{"type":"text","text":"visible text"},{"type":"image","url":"https://private.invalid/image"},{"type":"futureNativeInput","secret":"not forwarded"}]})).unwrap();
-        let projected=project_queue_row(row).unwrap();assert!(!projected.editable);assert!(projected.text.contains("visible text"));
-        assert!(!projected.text.contains("https://"));assert!(!projected.text.contains("not forwarded"));
+        let projected = project_queue_row(row).unwrap();
+        assert!(!projected.editable);
+        assert!(projected.text.contains("visible text"));
+        assert!(!projected.text.contains("https://"));
+        assert!(!projected.text.contains("not forwarded"));
         let plain:NativeQueueRow=serde_json::from_value(json!({"id":"text-entry","input":[{"type":"text","text":"first"},{"type":"text","text":"second"}]})).unwrap();
-        let plain=project_queue_row(plain).unwrap();assert!(plain.editable);assert_eq!(plain.text,"first\nsecond");
-        let large=NativeQueueRow{id:Id("large".into()),input:vec![NativeQueueInput::Text{text:"x".repeat(256*1024+1)}]};
-        assert!(matches!(project_queue_row(large),Err(ErrorCode::ResourceLimit)));
+        let plain = project_queue_row(plain).unwrap();
+        assert!(plain.editable);
+        assert_eq!(plain.text, "first\nsecond");
+        let large = NativeQueueRow {
+            id: Id("large".into()),
+            input: vec![NativeQueueInput::Text {
+                text: "x".repeat(256 * 1024 + 1),
+            }],
+        };
+        assert!(matches!(
+            project_queue_row(large),
+            Err(ErrorCode::ResourceLimit)
+        ));
     }
     #[test]
     fn native_queue_storage_failure_is_not_a_definitive_no_effect_rejection() {
-        let error=json!({"error":{"code":-32600,"message":"queue operation failed: storage error"}});
-        assert_eq!(native_mutation_rejection(NativeMutationKind::QueueStart,&error),None);
-        let busy=json!({"error":{"code":-32600,"message":"thread already has an active or pending turn"}});
-        assert_eq!(native_mutation_rejection(NativeMutationKind::QueueStart,&busy),Some(ErrorCode::Busy));
-        assert_eq!(native_mutation_rejection(NativeMutationKind::Queue,&busy),None);
-        let absent=json!({"error":{"code":-32600,"message":"user message queue is unavailable"}});
-        assert_eq!(native_mutation_rejection(NativeMutationKind::Queue,&absent),Some(ErrorCode::NotReady));
+        let error =
+            json!({"error":{"code":-32600,"message":"queue operation failed: storage error"}});
+        assert_eq!(
+            native_mutation_rejection(NativeMutationKind::QueueStart, &error),
+            None
+        );
+        let busy = json!({"error":{"code":-32600,"message":"thread already has an active or pending turn"}});
+        assert_eq!(
+            native_mutation_rejection(NativeMutationKind::QueueStart, &busy),
+            Some(ErrorCode::Busy)
+        );
+        assert_eq!(
+            native_mutation_rejection(NativeMutationKind::Queue, &busy),
+            None
+        );
+        let absent = json!({"error":{"code":-32600,"message":"user message queue is unavailable"}});
+        assert_eq!(
+            native_mutation_rejection(NativeMutationKind::Queue, &absent),
+            Some(ErrorCode::NotReady)
+        );
     }
     #[tokio::test]
-    async fn project_cwd_invalidation_cannot_enter_between_observation_check_and_state_publication() {
-        use crate::storage::{PairedDevice,Storage};use std::sync::mpsc;
-        let (state,target,epoch)=publication_observation_state();let state=Arc::new(state);
-        let (_fixture,context)=publication_context(state.clone(),&target,&epoch).await;
-        state.project_reads_available(&target,&epoch,true,true).unwrap();
-        let thread=Id("thread".into());let mut native=ThreadObservation::default();native.arm(&thread);
-        native.pin(&json!({"cwd":"/original project"}));native.publication=Some((state.clone(),target.clone(),epoch.clone()));native.publish();
-        let observed=Arc::new(Mutex::new(native));
-        let mut storage=Storage::memory([27;32],0).unwrap();
-        let device=PairedDevice {device_id:Uuid::random(),endpoint_id:EndpointId(iroh::SecretKey::from_bytes(&[28;32]).public().to_string()),device_name:Label("project reader".into()),paired_at:Uint(0),last_seen_at:None};
-        let peer_epoch=storage.pair_device(&device).unwrap();let peer=storage.authenticated_hello(&device.device_id,peer_epoch).unwrap();let connection=state.connect(&peer);
-        let (checked,enter)=mpsc::channel();let (attempted,contention)=mpsc::channel();let changed=observed.clone();
-        let invalidator=std::thread::spawn(move||{
+    async fn project_cwd_invalidation_cannot_enter_between_observation_check_and_state_publication()
+    {
+        use crate::storage::{PairedDevice, Storage};
+        use std::sync::mpsc;
+        let (state, target, epoch) = publication_observation_state();
+        let state = Arc::new(state);
+        let (_fixture, context) = publication_context(state.clone(), &target, &epoch).await;
+        state
+            .project_reads_available(&target, &epoch, true, true)
+            .unwrap();
+        let thread = Id("thread".into());
+        let mut native = ThreadObservation::default();
+        native.arm(&thread);
+        native.pin(&json!({"cwd":"/original project"}));
+        native.publication = Some((state.clone(), target.clone(), epoch.clone()));
+        native.publish();
+        let observed = Arc::new(Mutex::new(native));
+        let mut storage = Storage::memory([27; 32], 0).unwrap();
+        let device = PairedDevice {
+            device_id: Uuid::random(),
+            endpoint_id: EndpointId(iroh::SecretKey::from_bytes(&[28; 32]).public().to_string()),
+            device_name: Label("project reader".into()),
+            paired_at: Uint(0),
+            last_seen_at: None,
+        };
+        let peer_epoch = storage.pair_device(&device).unwrap();
+        let peer = storage
+            .authenticated_hello(&device.device_id, peer_epoch)
+            .unwrap();
+        let connection = state.connect(&peer);
+        let (checked, enter) = mpsc::channel();
+        let (attempted, contention) = mpsc::channel();
+        let changed = observed.clone();
+        let invalidator = std::thread::spawn(move || {
             enter.recv_timeout(Duration::from_secs(5)).unwrap();
-            let frame=json!({"method":"thread/settings/updated","params":{"threadId":"thread","threadSettings":{"cwd":"/replacement project"}}});
+            let frame = json!({"method":"thread/settings/updated","params":{"threadId":"thread","threadSettings":{"cwd":"/replacement project"}}});
             match changed.try_lock() {
-                Some(mut current)=>{current.observe(&frame);attempted.send(false).unwrap();},
-                None=>{attempted.send(true).unwrap();changed.lock().observe(&frame);},
+                Some(mut current) => {
+                    current.observe(&frame);
+                    attempted.send(false).unwrap();
+                }
+                None => {
+                    attempted.send(true).unwrap();
+                    changed.lock().observe(&frame);
+                }
             };
         });
-        let response=Uuid::random();let mut held=false;
-        let published=context.with_current(||publish_project_cwd(&observed,&thread,"/original project",&mut ||{
-            checked.send(()).unwrap();held=contention.recv_timeout(Duration::from_secs(5)).unwrap();
-            state.worktrees_list_response(&connection,&target,&epoch,response.clone(),WorktreesListResult {target:target.clone(),worktrees:Vec::new()})
-        }));
-        invalidator.join().unwrap();assert_eq!(published,Ok(()));assert!(held);
+        let response = Uuid::random();
+        let mut held = false;
+        let published = context.with_current(|| {
+            publish_project_cwd(&observed, &thread, "/original project", &mut || {
+                checked.send(()).unwrap();
+                held = contention.recv_timeout(Duration::from_secs(5)).unwrap();
+                state.worktrees_list_response(
+                    &connection,
+                    &target,
+                    &epoch,
+                    response.clone(),
+                    WorktreesListResult {
+                        target: target.clone(),
+                        worktrees: Vec::new(),
+                    },
+                )
+            })
+        });
+        invalidator.join().unwrap();
+        assert_eq!(published, Ok(()));
+        assert!(held);
         assert!(observed.lock().invalid);
-        let summary=state.session_state(&target,&epoch).unwrap().summary;
-        assert!(!summary.capabilities.artifacts&&!summary.capabilities.worktrees_read&&!summary.capabilities.changes_read);
-        let mut delivered=false;
+        let summary = state.session_state(&target, &epoch).unwrap().summary;
+        assert!(
+            !summary.capabilities.artifacts
+                && !summary.capabilities.worktrees_read
+                && !summary.capabilities.changes_read
+        );
+        let mut delivered = false;
         for _ in 0..16 {
-            let (bytes,closed)=state.pop_output(&connection).unwrap();assert!(!closed);let Some(bytes)=bytes else{break;};
-            if let Envelope::Response(reply)=decode_payload(&bytes,Some(Method::WorktreesList)).unwrap()&&reply.id==response {
-                let Ok(ResultBody::WorktreesList(result))=reply.outcome else{panic!("actual project publication missing")};assert_eq!(result.target,target);delivered=true;
+            let (bytes, closed) = state.pop_output(&connection).unwrap();
+            assert!(!closed);
+            let Some(bytes) = bytes else {
+                break;
+            };
+            if let Envelope::Response(reply) =
+                decode_payload(&bytes, Some(Method::WorktreesList)).unwrap()
+                && reply.id == response
+            {
+                let Ok(ResultBody::WorktreesList(result)) = reply.outcome else {
+                    panic!("actual project publication missing")
+                };
+                assert_eq!(result.target, target);
+                delivered = true;
             }
         }
-        assert!(delivered,"the original response must publish before the competing cwd invalidation");
-        let mut entered=false;
-        assert_eq!(context.with_current(||publish_project_cwd(&observed,&thread,"/original project",&mut ||{entered=true;Ok(())})),Err(ErrorCode::StaleSession));assert!(!entered);
+        assert!(
+            delivered,
+            "the original response must publish before the competing cwd invalidation"
+        );
+        let mut entered = false;
+        assert_eq!(
+            context.with_current(|| publish_project_cwd(
+                &observed,
+                &thread,
+                "/original project",
+                &mut || {
+                    entered = true;
+                    Ok(())
+                }
+            )),
+            Err(ErrorCode::StaleSession)
+        );
+        assert!(!entered);
     }
 
     #[tokio::test]
-    async fn controls_apply_is_sparse_mode_precedence_requires_effective_observation_and_original_lease() {
-        let (state,target,epoch)=publication_observation_state();let state=Arc::new(state);
-        let (_fixture,context)=publication_context(state.clone(),&target,&epoch).await;
-        let reference=Uuid::random();let generation=Uuid::random();let native=NativeModelIdentity{provider:"native-provider".into(),model:"actual-slug".into()};
-        let mut publication=ControlsPublication {
-            origin:PublicationOrigin{peer:Uuid::random(),peer_epoch:1,connection:Uuid::random(),context},
-            catalogue:SessionControlsReadResult{target:target.clone(),catalogue_generation:generation.clone(),
-                models:vec![SessionControlModel{reference:reference.clone(),label:Label("Native model".into()),efforts:vec!["low".into(),"high".into()]}],
-                current:SessionControlsCurrent{model_ref:Some(reference.clone()),effort:Some("low".into()),mode:Some(ControlMode::Default)},
-                modes:vec![ControlMode::Default,ControlMode::Plan],deliveries:vec![PromptDelivery::Native],queue_available:false},
-            models:vec![NativeControlModel{identity:native.clone(),native_reference:None}],
-            current_native:Some(native.clone()),native_catalogue:None,observation:Uuid::random(),
-            expires:std::time::Instant::now()+Duration::from_secs(300),slot:crate::backends::PublicationSlot::reserve(Arc::new(AtomicUsize::new(0)),32).unwrap(),
+    async fn controls_apply_is_sparse_mode_precedence_requires_effective_observation_and_original_lease()
+     {
+        let (state, target, epoch) = publication_observation_state();
+        let state = Arc::new(state);
+        let (_fixture, context) = publication_context(state.clone(), &target, &epoch).await;
+        let reference = Uuid::random();
+        let generation = Uuid::random();
+        let native = NativeModelIdentity {
+            provider: "native-provider".into(),
+            model: "actual-slug".into(),
         };
-        let mut params=SessionControlsApplyParams{boot_id:Uuid::random(),target:target.clone(),catalogue_generation:generation,
-            model_ref:None,effort:Some("high".into()),mode:None};
-        let command=codex_controls_command(&Id("thread".into()),&publication,&params).unwrap().unwrap();
-        assert_eq!(command,json!({"threadId":"thread","effort":"high"}));
-        assert!(!codex_controls_match(&publication,&params,&EffectiveControls::default()).unwrap(),"a queued acknowledgement is not effective native settings");
-        let observed=EffectiveControls{model:Some(native.clone()),effort:Some("high".into()),mode:Some(ControlMode::Default)};
-        assert!(codex_controls_match(&publication,&params,&observed).unwrap());
-        params.mode=Some(ControlMode::Plan);
-        let command=codex_controls_command(&Id("thread".into()),&publication,&params).unwrap().unwrap();
-        assert_eq!(command,json!({"threadId":"thread","collaborationMode":{"mode":"plan","settings":{"model":"actual-slug","reasoning_effort":"high","developer_instructions":null}}}));
-        assert!(command.get("model").is_none()&&command.get("effort").is_none());
-        params.model_ref=Some(Uuid::random());assert_eq!(publication.validate_apply(&params),Err(ErrorCode::InvalidRequest));
-        params.model_ref=None;publication.current_native=None;assert_eq!(publication.validate_apply(&params),Err(ErrorCode::NotReady));
-        publication.current_native=Some(native);publication.expires=std::time::Instant::now();
-        assert_eq!(publication.validate_apply(&params),Err(ErrorCode::StaleSession));
+        let mut publication = ControlsPublication {
+            origin: PublicationOrigin {
+                peer: Uuid::random(),
+                peer_epoch: 1,
+                connection: Uuid::random(),
+                context,
+            },
+            catalogue: SessionControlsReadResult {
+                target: target.clone(),
+                catalogue_generation: generation.clone(),
+                models: vec![SessionControlModel {
+                    reference: reference.clone(),
+                    label: Label("Native model".into()),
+                    efforts: vec!["low".into(), "high".into()],
+                }],
+                current: SessionControlsCurrent {
+                    model_ref: Some(reference.clone()),
+                    effort: Some("low".into()),
+                    mode: Some(ControlMode::Default),
+                },
+                modes: vec![ControlMode::Default, ControlMode::Plan],
+                deliveries: vec![PromptDelivery::Native],
+                queue_available: false,
+            },
+            models: vec![NativeControlModel {
+                identity: native.clone(),
+                native_reference: None,
+            }],
+            current_native: Some(native.clone()),
+            native_catalogue: None,
+            observation: Uuid::random(),
+            expires: std::time::Instant::now() + Duration::from_secs(300),
+            slot: crate::backends::PublicationSlot::reserve(Arc::new(AtomicUsize::new(0)), 32)
+                .unwrap(),
+        };
+        let mut params = SessionControlsApplyParams {
+            boot_id: Uuid::random(),
+            target: target.clone(),
+            catalogue_generation: generation,
+            model_ref: None,
+            effort: Some("high".into()),
+            mode: None,
+        };
+        let command = codex_controls_command(&Id("thread".into()), &publication, &params)
+            .unwrap()
+            .unwrap();
+        assert_eq!(command, json!({"threadId":"thread","effort":"high"}));
+        assert!(
+            !codex_controls_match(&publication, &params, &EffectiveControls::default()).unwrap(),
+            "a queued acknowledgement is not effective native settings"
+        );
+        let observed = EffectiveControls {
+            model: Some(native.clone()),
+            effort: Some("high".into()),
+            mode: Some(ControlMode::Default),
+        };
+        assert!(codex_controls_match(&publication, &params, &observed).unwrap());
+        params.mode = Some(ControlMode::Plan);
+        let command = codex_controls_command(&Id("thread".into()), &publication, &params)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            command,
+            json!({"threadId":"thread","collaborationMode":{"mode":"plan","settings":{"model":"actual-slug","reasoning_effort":"high","developer_instructions":null}}})
+        );
+        assert!(command.get("model").is_none() && command.get("effort").is_none());
+        params.model_ref = Some(Uuid::random());
+        assert_eq!(
+            publication.validate_apply(&params),
+            Err(ErrorCode::InvalidRequest)
+        );
+        params.model_ref = None;
+        publication.current_native = None;
+        assert_eq!(
+            publication.validate_apply(&params),
+            Err(ErrorCode::NotReady)
+        );
+        publication.current_native = Some(native);
+        publication.expires = std::time::Instant::now();
+        assert_eq!(
+            publication.validate_apply(&params),
+            Err(ErrorCode::StaleSession)
+        );
     }
     #[test]
     fn manager_failure_capture_keeps_only_the_first_actual_closed_rejection() {
         let mut detail = None;
-        ManagerFailureDetail::record(Some(&mut detail), ManagerFailureGuard::Connect, Some(io::ErrorKind::WouldBlock));
-        ManagerFailureDetail::record(Some(&mut detail), ManagerFailureGuard::ProcessEvidence, Some(io::ErrorKind::PermissionDenied));
+        ManagerFailureDetail::record(
+            Some(&mut detail),
+            ManagerFailureGuard::Connect,
+            Some(io::ErrorKind::WouldBlock),
+        );
+        ManagerFailureDetail::record(
+            Some(&mut detail),
+            ManagerFailureGuard::ProcessEvidence,
+            Some(io::ErrorKind::PermissionDenied),
+        );
         let detail = detail.unwrap();
         assert_eq!(detail.guard, ManagerFailureGuard::Connect);
         assert_eq!(detail.io, Some(io::ErrorKind::WouldBlock));
@@ -7965,105 +9890,271 @@ mod tests {
     }
     #[tokio::test]
     async fn skill_publications_are_bounded_and_failed_enqueue_never_keeps_an_admission() {
-        use crate::storage::{PairedDevice,Storage};
-        let (state,target,source)=publication_observation_state();let state=Arc::new(state);
-        let (_fixture,context)=publication_context(state.clone(),&target,&source).await;
-        let generation=Uuid::random();state.skills_generation(&target,&source,Some(generation.clone())).unwrap();
+        use crate::storage::{PairedDevice, Storage};
+        let (state, target, source) = publication_observation_state();
+        let state = Arc::new(state);
+        let (_fixture, context) = publication_context(state.clone(), &target, &source).await;
+        let generation = Uuid::random();
+        state
+            .skills_generation(&target, &source, Some(generation.clone()))
+            .unwrap();
         let catalogue:SkillsListResult=serde_json::from_value(json!({"target":target,"catalogueGeneration":generation,"skills":[{"name":"native","description":"bounded","path":"/original/SKILL.md","scope":"repo","enabled":true}],"errors":[]})).unwrap();
-        let count=Arc::new(AtomicUsize::new(0));let mut owners=Vec::new();
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut owners = Vec::new();
         for seed in 1..=33 {
-            let mut storage=Storage::memory([seed;32],0).unwrap();
-            let device=PairedDevice{device_id:Uuid::random(),endpoint_id:EndpointId(iroh::SecretKey::from_bytes(&[seed;32]).public().to_string()),device_name:Label::new("bounded skills phone").unwrap(),paired_at:Uint(0),last_seen_at:None};
-            let epoch=storage.pair_device(&device).unwrap();let peer=storage.authenticated_hello(&device.device_id,epoch).unwrap();let connection=state.connect(&peer);
-            let result=skill_publication(&peer,&connection,&context,catalogue.clone(),count.clone())
-                .and_then(|publication|state.skills_list_response(&connection,Uuid::random(),publication));
-            if seed<=32 {assert_eq!(result,Ok(()));}else{assert_eq!(result,Err(ErrorCode::ResourceLimit));}
-            owners.push((peer,connection));
+            let mut storage = Storage::memory([seed; 32], 0).unwrap();
+            let device = PairedDevice {
+                device_id: Uuid::random(),
+                endpoint_id: EndpointId(
+                    iroh::SecretKey::from_bytes(&[seed; 32])
+                        .public()
+                        .to_string(),
+                ),
+                device_name: Label::new("bounded skills phone").unwrap(),
+                paired_at: Uint(0),
+                last_seen_at: None,
+            };
+            let epoch = storage.pair_device(&device).unwrap();
+            let peer = storage
+                .authenticated_hello(&device.device_id, epoch)
+                .unwrap();
+            let connection = state.connect(&peer);
+            let result = skill_publication(
+                &peer,
+                &connection,
+                &context,
+                catalogue.clone(),
+                count.clone(),
+            )
+            .and_then(|publication| {
+                state.skills_list_response(&connection, Uuid::random(), publication)
+            });
+            if seed <= 32 {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(result, Err(ErrorCode::ResourceLimit));
+            }
+            owners.push((peer, connection));
         }
-        let (peer,connection)=&owners[0];let mut large=catalogue.clone();large.skills[0].description="x".repeat(16000);let mut full=false;
+        let (peer, connection) = &owners[0];
+        let mut large = catalogue.clone();
+        large.skills[0].description = "x".repeat(16000);
+        let mut full = false;
         for _ in 0..512 {
             state.clear_skills_publication(connection);
-            let publication=skill_publication(peer,connection,&context,large.clone(),count.clone()).unwrap();
-            match state.skills_list_response(connection,Uuid::random(),publication) {
-                Ok(())=>{},Err(ErrorCode::ResourceLimit)=>{full=true;break},Err(code)=>panic!("unexpected publication failure: {code:?}"),
+            let publication =
+                skill_publication(peer, connection, &context, large.clone(), count.clone())
+                    .unwrap();
+            match state.skills_list_response(connection, Uuid::random(), publication) {
+                Ok(()) => {}
+                Err(ErrorCode::ResourceLimit) => {
+                    full = true;
+                    break;
+                }
+                Err(code) => panic!("unexpected publication failure: {code:?}"),
             }
         }
-        assert!(full,"the real connection byte queue must reach its bounded failure");
-        let (peer,connection)=&owners[32];
-        let publication=skill_publication(peer,connection,&context,catalogue,count.clone()).unwrap();
-        assert_eq!(state.skills_list_response(connection,Uuid::random(),publication),Ok(()),"failed enqueue must release its real publication slot");
-        assert_eq!(count.load(Ordering::Acquire),32);
+        assert!(
+            full,
+            "the real connection byte queue must reach its bounded failure"
+        );
+        let (peer, connection) = &owners[32];
+        let publication =
+            skill_publication(peer, connection, &context, catalogue, count.clone()).unwrap();
+        assert_eq!(
+            state.skills_list_response(connection, Uuid::random(), publication),
+            Ok(()),
+            "failed enqueue must release its real publication slot"
+        );
+        assert_eq!(count.load(Ordering::Acquire), 32);
     }
 
     #[test]
     fn skills_notifications_advance_original_catalogue_without_poisoning_valid_cwd() {
-        let (state,target,source)=publication_observation_state();
-        let state=Arc::new(state);
-        let mut observation=ThreadObservation::default();
+        let (state, target, source) = publication_observation_state();
+        let state = Arc::new(state);
+        let mut observation = ThreadObservation::default();
         observation.arm(&Id("thread".into()));
         observation.pin(&json!({"cwd":"/original project"}));
-        observation.publication=Some((state.clone(),target.clone(),source.clone()));
+        observation.publication = Some((state.clone(), target.clone(), source.clone()));
         observation.publish();
-        let first=observation.snapshot().unwrap();
-        observation.observe(&native_json::parse(br#"{"method":"skills/changed","params":{}}"#,NATIVE).unwrap());
-        let second=observation.snapshot().unwrap();
-        assert_eq!(first.0,second.0);
-        assert_ne!(first.1,second.1);
-        assert_eq!(state.session_state(&target,&source).unwrap().summary.skills_generation,Some(second.1.clone()));
+        let first = observation.snapshot().unwrap();
+        observation.observe(
+            &native_json::parse(br#"{"method":"skills/changed","params":{}}"#, NATIVE).unwrap(),
+        );
+        let second = observation.snapshot().unwrap();
+        assert_eq!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+        assert_eq!(
+            state
+                .session_state(&target, &source)
+                .unwrap()
+                .summary
+                .skills_generation,
+            Some(second.1.clone())
+        );
         observation.observe(&json!({"method":"thread/settings/updated","params":{"threadId":"thread","threadSettings":{"cwd":"/original project","model":"changed-native-model","modelProvider":"native-provider","effort":"high"}}}));
-        assert_eq!(observation.snapshot().unwrap().1,second.1);
-        assert_eq!(observation.controls.current.model.as_ref().unwrap().model,"changed-native-model");
+        assert_eq!(observation.snapshot().unwrap().1, second.1);
+        assert_eq!(
+            observation.controls.current.model.as_ref().unwrap().model,
+            "changed-native-model"
+        );
         observation.observe(&json!({"method":"thread/settings/updated","params":{"threadId":"thread","threadSettings":{"cwd":"/replacement"}}}));
-        assert_eq!(observation.snapshot(),Err(ErrorCode::NotReady));
+        assert_eq!(observation.snapshot(), Err(ErrorCode::NotReady));
         observation.observe(&json!({"method":"skills/changed","params":{}}));
-        assert_eq!(observation.snapshot(),Err(ErrorCode::NotReady));
-        let summary=state.session_state(&target,&source).unwrap().summary;
+        assert_eq!(observation.snapshot(), Err(ErrorCode::NotReady));
+        let summary = state.session_state(&target, &source).unwrap().summary;
         assert!(summary.skills_generation.is_none());
         assert!(!summary.capabilities.skills_read);
     }
 
     #[tokio::test]
     async fn published_skill_reference_preserves_native_bytes_and_peer_epoch_hello_scope() {
-        use crate::storage::{PairedDevice,Storage};
-        let (state,target,source)=publication_observation_state();let state=Arc::new(state);
-        let (_fixture,context)=publication_context(state.clone(),&target,&source).await;
-        let generation=Uuid::random();state.skills_generation(&target,&source,Some(generation.clone())).unwrap();
-        let mut storage=Storage::memory([91;32],0).unwrap();
-        let device=PairedDevice{device_id:Uuid::random(),endpoint_id:EndpointId(iroh::SecretKey::from_bytes(&[92;32]).public().to_string()),device_name:Label::new("skills phone").unwrap(),paired_at:Uint(0),last_seen_at:None};
-        let epoch=storage.pair_device(&device).unwrap();let peer=storage.authenticated_hello(&device.device_id,epoch).unwrap();let connection=state.connect(&peer);
+        use crate::storage::{PairedDevice, Storage};
+        let (state, target, source) = publication_observation_state();
+        let state = Arc::new(state);
+        let (_fixture, context) = publication_context(state.clone(), &target, &source).await;
+        let generation = Uuid::random();
+        state
+            .skills_generation(&target, &source, Some(generation.clone()))
+            .unwrap();
+        let mut storage = Storage::memory([91; 32], 0).unwrap();
+        let device = PairedDevice {
+            device_id: Uuid::random(),
+            endpoint_id: EndpointId(iroh::SecretKey::from_bytes(&[92; 32]).public().to_string()),
+            device_name: Label::new("skills phone").unwrap(),
+            paired_at: Uint(0),
+            last_seen_at: None,
+        };
+        let epoch = storage.pair_device(&device).unwrap();
+        let peer = storage
+            .authenticated_hello(&device.device_id, epoch)
+            .unwrap();
+        let connection = state.connect(&peer);
         let catalogue:SkillsListResult=serde_json::from_value(json!({"target":target,"catalogueGeneration":generation,"provider":"codex","skills":[
             {"name":"name with spaces","description":"native catalogue row","path":"/original/skill path)/SKILL.md","scope":"repo","enabled":true},
             {"name":"disabled","description":"","path":"/original/disabled/SKILL.md","scope":"repo","enabled":false}
         ],"errors":[]})).unwrap();
-        let count=Arc::new(AtomicUsize::new(0));let response=Uuid::random();
-        state.skills_list_response(&connection,response.clone(),skill_publication(&peer,&connection,&context,catalogue.clone(),count.clone()).unwrap()).unwrap();
-        let (bytes,closed)=state.pop_output(&connection).unwrap();assert!(!closed);
-        let Envelope::Response(frame)=decode_payload(&bytes.unwrap(),Some(Method::SkillsList)).unwrap()else{panic!("one actual catalogue response")};
-        assert_eq!(frame.id,response);
-        let Ok(ResultBody::SkillsList(published))=frame.outcome else{panic!("wrong catalogue response")};
-        assert!(published.skills[0].invocation_ref.is_some());assert!(published.skills[1].invocation_ref.is_none());assert!(skill_insert_text(&published.skills[0]).is_none());
-        let publication_count=Arc::new(AtomicUsize::new(0));
-        let publication=Arc::new(skill_publication(&peer,&connection,&context,published,publication_count.clone()).unwrap());
-        let action=Uuid::random();
-        let native=native_json::parse(&skill_prompt_bytes(&publication,0,&action,&context.native).unwrap(),NATIVE).unwrap();
-        assert_eq!(native,json!({"id":action.0,"method":"turn/start","params":{"threadId":"thread","clientUserMessageId":action.0,"input":[{"type":"skill","name":"name with spaces","path":"/original/skill path)/SKILL.md"}]}}));
-        assert_eq!(skill_prompt_bytes(&publication,1,&action,&context.native),Err(ErrorCode::NotReady));
-        assert_eq!(skill_prompt_bytes(&publication,0,&action,&Id("other-thread".into())),Err(ErrorCode::StaleSession));
-        let mut wrong=skill_publication(&peer,&connection,&context,catalogue.clone(),count.clone()).unwrap();wrong.origin.peer_epoch+=1;
-        assert_eq!(state.skills_list_response(&connection,Uuid::random(),wrong),Err(ErrorCode::Unauthorized));
-        let mut wrong=skill_publication(&peer,&connection,&context,catalogue.clone(),count.clone()).unwrap();wrong.origin.peer=Uuid::random();
-        assert_eq!(state.skills_list_response(&connection,Uuid::random(),wrong),Err(ErrorCode::Unauthorized));
-        let replacement=state.connect(&peer);
-        assert_eq!(state.skills_list_response(&connection,Uuid::random(),skill_publication(&peer,&connection,&context,catalogue.clone(),count.clone()).unwrap()),Err(ErrorCode::Unauthorized));
-        assert_eq!(state.skills_list_response(&replacement,Uuid::random(),skill_publication(&peer,&connection,&context,catalogue,count.clone()).unwrap()),Err(ErrorCode::Unauthorized));
-        let retained=publication.clone();drop(publication);assert_eq!(publication_count.load(Ordering::Acquire),1);
-        drop(retained);assert_eq!(publication_count.load(Ordering::Acquire),0);
+        let count = Arc::new(AtomicUsize::new(0));
+        let response = Uuid::random();
+        state
+            .skills_list_response(
+                &connection,
+                response.clone(),
+                skill_publication(
+                    &peer,
+                    &connection,
+                    &context,
+                    catalogue.clone(),
+                    count.clone(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (bytes, closed) = state.pop_output(&connection).unwrap();
+        assert!(!closed);
+        let Envelope::Response(frame) =
+            decode_payload(&bytes.unwrap(), Some(Method::SkillsList)).unwrap()
+        else {
+            panic!("one actual catalogue response")
+        };
+        assert_eq!(frame.id, response);
+        let Ok(ResultBody::SkillsList(published)) = frame.outcome else {
+            panic!("wrong catalogue response")
+        };
+        assert!(published.skills[0].invocation_ref.is_some());
+        assert!(published.skills[1].invocation_ref.is_none());
+        assert!(skill_insert_text(&published.skills[0]).is_none());
+        let publication_count = Arc::new(AtomicUsize::new(0));
+        let publication = Arc::new(
+            skill_publication(
+                &peer,
+                &connection,
+                &context,
+                published,
+                publication_count.clone(),
+            )
+            .unwrap(),
+        );
+        let action = Uuid::random();
+        let native = native_json::parse(
+            &skill_prompt_bytes(&publication, 0, &action, &context.native).unwrap(),
+            NATIVE,
+        )
+        .unwrap();
+        assert_eq!(
+            native,
+            json!({"id":action.0,"method":"turn/start","params":{"threadId":"thread","clientUserMessageId":action.0,"input":[{"type":"skill","name":"name with spaces","path":"/original/skill path)/SKILL.md"}]}})
+        );
+        assert_eq!(
+            skill_prompt_bytes(&publication, 1, &action, &context.native),
+            Err(ErrorCode::NotReady)
+        );
+        assert_eq!(
+            skill_prompt_bytes(&publication, 0, &action, &Id("other-thread".into())),
+            Err(ErrorCode::StaleSession)
+        );
+        let mut wrong = skill_publication(
+            &peer,
+            &connection,
+            &context,
+            catalogue.clone(),
+            count.clone(),
+        )
+        .unwrap();
+        wrong.origin.peer_epoch += 1;
+        assert_eq!(
+            state.skills_list_response(&connection, Uuid::random(), wrong),
+            Err(ErrorCode::Unauthorized)
+        );
+        let mut wrong = skill_publication(
+            &peer,
+            &connection,
+            &context,
+            catalogue.clone(),
+            count.clone(),
+        )
+        .unwrap();
+        wrong.origin.peer = Uuid::random();
+        assert_eq!(
+            state.skills_list_response(&connection, Uuid::random(), wrong),
+            Err(ErrorCode::Unauthorized)
+        );
+        let replacement = state.connect(&peer);
+        assert_eq!(
+            state.skills_list_response(
+                &connection,
+                Uuid::random(),
+                skill_publication(
+                    &peer,
+                    &connection,
+                    &context,
+                    catalogue.clone(),
+                    count.clone()
+                )
+                .unwrap()
+            ),
+            Err(ErrorCode::Unauthorized)
+        );
+        assert_eq!(
+            state.skills_list_response(
+                &replacement,
+                Uuid::random(),
+                skill_publication(&peer, &connection, &context, catalogue, count.clone()).unwrap()
+            ),
+            Err(ErrorCode::Unauthorized)
+        );
+        let retained = publication.clone();
+        drop(publication);
+        assert_eq!(publication_count.load(Ordering::Acquire), 1);
+        drop(retained);
+        assert_eq!(publication_count.load(Ordering::Acquire), 0);
     }
 
     #[test]
     fn create_receipt_reserved_and_existing_return_the_same_committed_receipt() {
         let receipt = Receipt {
-                    shell_target: None,
+            shell_target: None,
             action_id: Uuid::random(),
             method: ActionMethod::SessionCreate,
             boot_id: Uuid::random(),
@@ -8549,9 +10640,12 @@ mod tests {
         );
 
         let changes = &[
-            (OriginalPresenceScopeFailure::Binding, (|presence: &mut Presence| {
-                presence.binding_id = Uuid::random();
-            }) as fn(&mut Presence)),
+            (
+                OriginalPresenceScopeFailure::Binding,
+                (|presence: &mut Presence| {
+                    presence.binding_id = Uuid::random();
+                }) as fn(&mut Presence),
+            ),
             (OriginalPresenceScopeFailure::OwnerEpoch, |presence| {
                 presence.owner_epoch.start_ticks = "replacement".into();
             }),
@@ -8590,9 +10684,15 @@ mod tests {
         let serial = Mutex::new(());
         let request = Request {
             id: Uuid::random(),
-            body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: Uuid::random(),
-            target: target.clone(),
-            text: PromptText::new("test").unwrap(), }),
+            body: RequestBody::PromptSubmit(PromptSubmitParams {
+                delivery: None,
+                native_turn_id: None,
+                images: None,
+                skill: None,
+                boot_id: Uuid::random(),
+                target: target.clone(),
+                text: PromptText::new("test").unwrap(),
+            }),
         };
         assert_eq!(
             revalidate_observation(
@@ -8971,9 +11071,15 @@ mod tests {
         );
         let request = Request {
             id: Uuid::random(),
-            body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: Uuid::random(),
-            target: target.clone(),
-            text: PromptText::new("test").unwrap(), }),
+            body: RequestBody::PromptSubmit(PromptSubmitParams {
+                delivery: None,
+                native_turn_id: None,
+                images: None,
+                skill: None,
+                boot_id: Uuid::random(),
+                target: target.clone(),
+                text: PromptText::new("test").unwrap(),
+            }),
         };
         assert_eq!(
             state.validate_session_mutation_checked(&request, Some(&epoch)),
@@ -9743,8 +11849,8 @@ mod tests {
         let callbacks = Mutex::new(vec![Callback {
             response_limit: 16 * 1024 * 1024,
             response_bytes: None,
-            optional_missing:None,
-            mutation_rejection:None,
+            optional_missing: None,
+            mutation_rejection: None,
             id: NativeRpcId::from_raw("-123456789012345678901234567890").unwrap(),
             reply: tx,
             snapshot: true,
@@ -9784,8 +11890,8 @@ mod tests {
             let callbacks = Mutex::new(vec![Callback {
                 response_limit: 16 * 1024 * 1024,
                 response_bytes: None,
-                optional_missing:None,
-                mutation_rejection:None,
+                optional_missing: None,
+                mutation_rejection: None,
                 id: NativeRpcId::from_raw("-71").unwrap(),
                 reply,
                 snapshot: false,
@@ -9815,8 +11921,8 @@ mod tests {
         let callbacks = Mutex::new(vec![Callback {
             response_limit: 16 * 1024 * 1024,
             response_bytes: None,
-            optional_missing:None,
-            mutation_rejection:None,
+            optional_missing: None,
+            mutation_rejection: None,
             id: NativeRpcId::String("original-title".into()),
             reply,
             snapshot: false,
@@ -9886,8 +11992,8 @@ mod tests {
             let callbacks = Mutex::new(vec![Callback {
                 response_limit: 16 * 1024 * 1024,
                 response_bytes: None,
-                optional_missing:None,
-                mutation_rejection:None,
+                optional_missing: None,
+                mutation_rejection: None,
                 id: NativeRpcId::from_raw("-42").unwrap(),
                 reply,
                 snapshot: false,
@@ -9960,8 +12066,8 @@ mod tests {
             let callbacks = Mutex::new(vec![Callback {
                 response_limit: 16 * 1024 * 1024,
                 response_bytes: None,
-                optional_missing:None,
-                mutation_rejection:None,
+                optional_missing: None,
+                mutation_rejection: None,
                 id: NativeRpcId::String("original-read".into()),
                 reply,
                 snapshot: false,
@@ -9993,8 +12099,8 @@ mod tests {
             let callbacks = Mutex::new(vec![Callback {
                 response_limit: 16 * 1024 * 1024,
                 response_bytes: None,
-                optional_missing:None,
-                mutation_rejection:None,
+                optional_missing: None,
+                mutation_rejection: None,
                 id: NativeRpcId::String("original".into()),
                 reply: tx,
                 snapshot: false,
@@ -10447,18 +12553,32 @@ mod tests {
     }
     #[test]
     fn prepared_image_observation_survives_unconfirmed_storage_release() {
-        let mut observed=ThreadObservation::default();
+        let mut observed = ThreadObservation::default();
         observed.arm(&Id("original-thread".into()));
-        let input=Uuid::random();let other=Uuid::random();
-        observed.watch_image(&input).unwrap();observed.watch_image(&other).unwrap();
+        let input = Uuid::random();
+        let other = Uuid::random();
+        observed.watch_image(&input).unwrap();
+        observed.watch_image(&other).unwrap();
         observed.observe(&json!({"method":"item/started","params":{"threadId":"original-thread","item":{"type":"userMessage","clientId":input}}}));
-        assert_eq!(observed.prepared_images,vec![(input.clone(),true),(other.clone(),false)]);
-        observed.image_release_result(&input,&Ok(false));
-        assert_eq!(observed.prepared_images,vec![(input.clone(),true),(other.clone(),false)]);
-        observed.image_release_result(&input,&Err(crate::storage::StorageError::Policy(ErrorCode::NotReady)));
-        assert_eq!(observed.prepared_images,vec![(input.clone(),true),(other.clone(),false)]);
-        observed.image_release_result(&input,&Ok(true));
-        assert_eq!(observed.prepared_images,vec![(other,false)]);
+        assert_eq!(
+            observed.prepared_images,
+            vec![(input.clone(), true), (other.clone(), false)]
+        );
+        observed.image_release_result(&input, &Ok(false));
+        assert_eq!(
+            observed.prepared_images,
+            vec![(input.clone(), true), (other.clone(), false)]
+        );
+        observed.image_release_result(
+            &input,
+            &Err(crate::storage::StorageError::Policy(ErrorCode::NotReady)),
+        );
+        assert_eq!(
+            observed.prepared_images,
+            vec![(input.clone(), true), (other.clone(), false)]
+        );
+        observed.image_release_result(&input, &Ok(true));
+        assert_eq!(observed.prepared_images, vec![(other, false)]);
     }
     #[test]
     fn provided_native_millisecond_times_do_not_round_or_invent_missing_dates() {

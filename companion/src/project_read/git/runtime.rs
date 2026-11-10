@@ -107,10 +107,10 @@ fn bytes(
     {
         return fail();
     }
-    if let Some(expected) = expected {
-        if !digest_text(expected) || crate::pairing::hex(&Sha256::digest(&data)) != expected {
-            return fail();
-        }
+    if let Some(expected) = expected
+        && (!digest_text(expected) || crate::pairing::hex(&Sha256::digest(&data)) != expected)
+    {
+        return fail();
     }
     check(deadline).map_err(filesystem)?;
     Ok(data)

@@ -1,16 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use goatr::{
-    config::Config,
-    herdr::*,
-    protocol::*,
-    storage::*,
-};
+use goatr::{config::Config, herdr::*, protocol::*, storage::*};
 use serde_json::{Value, json};
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 use tokio::{
     io::{AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -188,7 +179,12 @@ fn strict_snapshot_routing_empty_focus_and_duplicate_terminal_are_not_proof() {
             && !snapshot.shell_read_bound
             && !snapshot.artifact_read_bound
     );
-    assert!(snapshot.panes.iter().all(|pane| pane.read_identity.is_none()));
+    assert!(
+        snapshot
+            .panes
+            .iter()
+            .all(|pane| pane.read_identity.is_none())
+    );
     let mut empty = snapshot.clone();
     empty.focused_workspace_id = None;
     assert!(empty.no_focus().is_err());
@@ -201,7 +197,6 @@ fn strict_snapshot_routing_empty_focus_and_duplicate_terminal_are_not_proof() {
     wrong.agents[0].terminal_id = Id::new("other").unwrap();
     assert!(wrong.validate().is_err());
 }
-
 
 #[test]
 fn grouping_is_not_proof_mapping_display_restores_offline_and_retirement_preserves_receipts() {
@@ -238,9 +233,15 @@ fn grouping_is_not_proof_mapping_display_restores_offline_and_retirement_preserv
     let p = peer(&mut store);
     let request = Request {
         id: Uuid::random(),
-        body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: store.boot_id.clone(),
-        target: target.clone(),
-        text: PromptText::new("not retained").unwrap(), }),
+        body: RequestBody::PromptSubmit(PromptSubmitParams {
+            delivery: None,
+            native_turn_id: None,
+            images: None,
+            skill: None,
+            boot_id: store.boot_id.clone(),
+            target: target.clone(),
+            text: PromptText::new("not retained").unwrap(),
+        }),
     };
     store.reserve(&p, &request, 0, |_| Ok(())).unwrap();
     assert!(
@@ -449,7 +450,11 @@ async fn stock_creation_and_rename_acknowledgments_admit_without_private_fields(
                 }
                 _ => unreachable!(),
             };
-            write(reader.get_mut(), json!({"id":request["id"],"result":result})).await;
+            write(
+                reader.get_mut(),
+                json!({"id":request["id"],"result":result}),
+            )
+            .await;
         }
     });
     let created = Client::connect(&root.socket())

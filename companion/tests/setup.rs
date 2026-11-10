@@ -173,7 +173,10 @@ fn actual_cli_decline_cancel_and_nonterminal_have_zero_publication_effects() {
 
 #[test]
 fn actual_setup_project_consent_preserves_explicit_deny_all_and_exact_selfhost_origins() {
-    for policy in [Vec::<String>::new(), vec!["https://push.example:8443".into()]] {
+    for policy in [
+        Vec::<String>::new(),
+        vec!["https://push.example:8443".into()],
+    ] {
         let root = Root::new();
         let path = root.0.join("config.toml");
         let mut configured = root.config();
@@ -188,7 +191,9 @@ fn actual_setup_project_consent_preserves_explicit_deny_all_and_exact_selfhost_o
         assert_eq!(saved.projects.len(), 1);
         assert_eq!(saved.projects[0].path, root.0);
         assert!(!saved.projects[0].allow_read_tools);
-        assert!(!saved.allow_attachments && !saved.allow_terminal_control && !saved.allow_omp_controls);
+        assert!(
+            !saved.allow_attachments && !saved.allow_terminal_control && !saved.allow_omp_controls
+        );
         assert!(!root.0.join(".serve-unit.json").exists());
     }
 }

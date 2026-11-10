@@ -704,7 +704,10 @@ pub(super) enum ToolOutputMarkerState {
     Ready,
 }
 
-pub(super) fn completed_tool_output_state(records: &[HistoryRecord], marker: &str) -> ToolOutputMarkerState {
+pub(super) fn completed_tool_output_state(
+    records: &[HistoryRecord],
+    marker: &str,
+) -> ToolOutputMarkerState {
     let mut matching = records.iter().filter(|record| {
         record.complete
             && record
@@ -1315,7 +1318,7 @@ pub async fn run(args: &clap::ArgMatches, evidence: &Path) -> io::Result<bool> {
                 io::Error::other("phone endpoint bind failed"),
             )
         })?;
-    let mut phone = pair(&binary, &root, &socket, &endpoint,None).await?;
+    let mut phone = pair(&binary, &root, &socket, &endpoint, None).await?;
     if let Some(budget) = serve.omp_capture_budget.clone() {
         phone.set_omp_capture(budget);
     }

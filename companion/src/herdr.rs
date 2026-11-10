@@ -34,13 +34,13 @@ use tokio::{
     net::UnixStream,
     sync::watch,
 };
-mod worktree_creation;
-pub(crate) mod shells;
-pub(crate) mod grid;
-pub(crate) mod endpoint;
 mod ansi;
 pub mod artifacts;
 pub(crate) mod creation_directories;
+pub(crate) mod endpoint;
+pub(crate) mod grid;
+pub(crate) mod shells;
+mod worktree_creation;
 pub(crate) use creation_directories::CreationSelection;
 pub(crate) mod skills;
 #[cfg(test)]
@@ -51,18 +51,18 @@ pub use worktree_creation::ExecutionCheckout;
 /// One-shot observation prepared before any fixed shell-query input. The original
 /// process-info/idle proof moves here rather than being repeated by the consumer.
 pub(crate) struct PreparedShell<'a> {
-    action:&'a Uuid,
-    params:&'a SessionCreateParams,
-    selection:&'a CreationSelection,
-    deadline:tokio::time::Instant,
-    resources:CreationResources,
-    focus:Id,
-    source:Source,
-    info:PaneProcessInfo,
-    shell:ProcessEvidence,
-    original_reporter:ProcessEvidence,
-    executable:PathBuf,
-    dialect:ShellDialect,
+    action: &'a Uuid,
+    params: &'a SessionCreateParams,
+    selection: &'a CreationSelection,
+    deadline: tokio::time::Instant,
+    resources: CreationResources,
+    focus: Id,
+    source: Source,
+    info: PaneProcessInfo,
+    shell: ProcessEvidence,
+    original_reporter: ProcessEvidence,
+    executable: PathBuf,
+    dialect: ShellDialect,
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -90,22 +90,50 @@ struct ClosedReport {
     code: Option<ErrorCode>,
     io: &'static str,
     frame: &'static str,
-    probe_deadline:Option<(&'static str,ProbeObservation,&'static str)>,
+    probe_deadline: Option<(&'static str, ProbeObservation, &'static str)>,
 }
-#[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
-enum ProbeObservation {NotRead,EmptyOnly,PartialSeen,CompleteSeen}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ProbeObservation {
+    NotRead,
+    EmptyOnly,
+    PartialSeen,
+    CompleteSeen,
+}
 impl ProbeObservation {
-    fn observe(&mut self,bytes:&[u8]) {
-        let observed=if bytes.ends_with(b"\n"){Self::CompleteSeen}else if bytes.is_empty(){Self::EmptyOnly}else{Self::PartialSeen};
-        if observed>*self {*self=observed;}
+    fn observe(&mut self, bytes: &[u8]) {
+        let observed = if bytes.ends_with(b"\n") {
+            Self::CompleteSeen
+        } else if bytes.is_empty() {
+            Self::EmptyOnly
+        } else {
+            Self::PartialSeen
+        };
+        if observed > *self {
+            *self = observed;
+        }
     }
-    fn as_str(self)->&'static str {
-        match self {Self::NotRead=>"not_read",Self::EmptyOnly=>"empty_only",Self::PartialSeen=>"partial_seen",Self::CompleteSeen=>"complete_seen"}
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRead => "not_read",
+            Self::EmptyOnly => "empty_only",
+            Self::PartialSeen => "partial_seen",
+            Self::CompleteSeen => "complete_seen",
+        }
     }
 }
-fn probe_entry_budget(now:tokio::time::Instant,deadline:tokio::time::Instant)->&'static str {
-    if now>=deadline {"expired"}
-    else {let remaining=deadline-now;if remaining<=Duration::from_secs(1){"le_1s"}else if remaining<=Duration::from_secs(5){"le_5s"}else{"gt_5s"}}
+fn probe_entry_budget(now: tokio::time::Instant, deadline: tokio::time::Instant) -> &'static str {
+    if now >= deadline {
+        "expired"
+    } else {
+        let remaining = deadline - now;
+        if remaining <= Duration::from_secs(1) {
+            "le_1s"
+        } else if remaining <= Duration::from_secs(5) {
+            "le_5s"
+        } else {
+            "gt_5s"
+        }
+    }
 }
 /// Closed observations from the existing coarse traversal; never retain native values.
 #[derive(Clone, Copy)]
@@ -151,7 +179,11 @@ struct CoarseShellFailure {
 }
 impl CoarseShellFailure {
     fn new(guard: CoarseShellGuard) -> Self {
-        Self { guard, code: ErrorCode::NotReady, io: "none" }
+        Self {
+            guard,
+            code: ErrorCode::NotReady,
+            io: "none",
+        }
     }
     fn io(guard: CoarseShellGuard, error: &io::Error) -> Self {
         let kind = match error.kind() {
@@ -169,7 +201,11 @@ impl CoarseShellFailure {
         };
         Self {
             guard,
-            code: if error.kind() == io::ErrorKind::OutOfMemory { ErrorCode::ResourceLimit } else { ErrorCode::NotReady },
+            code: if error.kind() == io::ErrorKind::OutOfMemory {
+                ErrorCode::ResourceLimit
+            } else {
+                ErrorCode::NotReady
+            },
             io: kind,
         }
     }
@@ -237,13 +273,13 @@ fn creation_terminal_readiness(phase: &'static str, guard: &'static str) -> bool
     matches!(
         (phase, guard),
         ("launch_preflight", _)
-            |
-        (
-            "omp_ready",
-            "report_absent_after_interactive_ready"
-                | "report_absent_without_interactive_ready"
-                | "original_agent_absent"
-        ) | ("shell_probe", _)
+            | (
+                "omp_ready",
+                "report_absent_after_interactive_ready"
+                    | "report_absent_without_interactive_ready"
+                    | "original_agent_absent"
+            )
+            | ("shell_probe", _)
     )
 }
 #[derive(Clone, Copy)]
@@ -346,7 +382,7 @@ impl OmpCreationReporter {
                 code,
                 io,
                 frame: "none",
-                probe_deadline:None,
+                probe_deadline: None,
             },
             ack,
         );
@@ -397,9 +433,12 @@ impl OmpCreationReporter {
         }
         // Keep room for the first native admission or connection failure even if normal
         // launch/output observations arrive before it.
-        let reserved = u8::from(!state.backend_launch_emitted) + u8::from(!state.backend_readiness_emitted);
+        let reserved =
+            u8::from(!state.backend_launch_emitted) + u8::from(!state.backend_readiness_emitted);
         if state.lines >= 8
-            || (coarse_shell && state.mode == OmpReporterMode::Backend && state.lines.saturating_add(reserved) >= 8)
+            || (coarse_shell
+                && state.mode == OmpReporterMode::Backend
+                && state.lines.saturating_add(reserved) >= 8)
             || (progress && state.progress_lines >= 3)
             || !state.seen.insert((phase, guard))
         {
@@ -441,24 +480,33 @@ impl OmpCreationReporter {
                 u8::from(workspace),
                 u8::from(argv),
             );
-        } else if let Some((site,observation,budget))=metadata.probe_deadline {
-            let _=writeln!(std::io::stderr().lock(),
+        } else if let Some((site, observation, budget)) = metadata.probe_deadline {
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "goatr_omp_first_guard phase={phase} guard={guard} code={code} io={} frame={} deadlineSite={site} observation={} entryBudget={budget}",
-                metadata.io,metadata.frame,observation.as_str());
+                metadata.io,
+                metadata.frame,
+                observation.as_str()
+            );
         } else {
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "goatr_omp_first_guard phase={phase} guard={guard} code={code} io={} frame={}",
-                metadata.io, metadata.frame
+                metadata.io,
+                metadata.frame
             );
         }
     }
     /// One Backend-only settlement from the unchanged startup traversal. Creation,
     /// Offline and ordinary runs retain their existing capture budgets and stay silent.
-    fn report_coarse_shell(&self, guard: CoarseShellGuard, code: Option<ErrorCode>, io: &'static str) {
+    fn report_coarse_shell(
+        &self,
+        guard: CoarseShellGuard,
+        code: Option<ErrorCode>,
+        io: &'static str,
+    ) {
         let mut state = self.0.lock().expect("OMP first-guard reporter mutex");
-        if state.mode != OmpReporterMode::Backend || state.coarse_shell_settled
-        {
+        if state.mode != OmpReporterMode::Backend || state.coarse_shell_settled {
             return;
         }
         state.coarse_shell_settled = true;
@@ -547,10 +595,17 @@ impl OmpCreationReporter {
         }
     }
     /// Reports the first existing pre-intent launch failure without another observation.
-    pub(crate) fn report_launch_preflight(&self, guard: &'static str, code: ErrorCode, io: &'static str) {
+    pub(crate) fn report_launch_preflight(
+        &self,
+        guard: &'static str,
+        code: ErrorCode,
+        io: &'static str,
+    ) {
         let mut state = self.0.lock().expect("OMP first-guard reporter mutex");
-        if !matches!(state.mode, OmpReporterMode::Creation | OmpReporterMode::Backend)
-            || state.launch_preflight_seen
+        if !matches!(
+            state.mode,
+            OmpReporterMode::Creation | OmpReporterMode::Backend
+        ) || state.launch_preflight_seen
         {
             return;
         }
@@ -573,17 +628,32 @@ impl OmpCreationReporter {
             Self::emit(&mut state, "shell_probe", guard, Some(code), io, None);
         }
     }
-    fn backend_capture(&self)->bool {
-        self.0.lock().expect("OMP first-guard reporter mutex").mode==OmpReporterMode::Backend
+    fn backend_capture(&self) -> bool {
+        self.0.lock().expect("OMP first-guard reporter mutex").mode == OmpReporterMode::Backend
     }
-    fn report_probe_deadline(&self,site:&'static str,detail:Option<(ProbeObservation,&'static str)>) {
-        let Some((observation,budget))=detail else {
-            self.report_shell_probe("result_deadline",ErrorCode::Timeout,"none");return;
+    fn report_probe_deadline(
+        &self,
+        site: &'static str,
+        detail: Option<(ProbeObservation, &'static str)>,
+    ) {
+        let Some((observation, budget)) = detail else {
+            self.report_shell_probe("result_deadline", ErrorCode::Timeout, "none");
+            return;
         };
-        let mut state=self.0.lock().expect("OMP first-guard reporter mutex");
-        if state.mode==OmpReporterMode::Backend {
-            Self::emit_with_frame(&mut state,"shell_probe","result_deadline",
-                ClosedReport{code:Some(ErrorCode::Timeout),io:"none",frame:"none",probe_deadline:Some((site,observation,budget))},None);
+        let mut state = self.0.lock().expect("OMP first-guard reporter mutex");
+        if state.mode == OmpReporterMode::Backend {
+            Self::emit_with_frame(
+                &mut state,
+                "shell_probe",
+                "result_deadline",
+                ClosedReport {
+                    code: Some(ErrorCode::Timeout),
+                    io: "none",
+                    frame: "none",
+                    probe_deadline: Some((site, observation, budget)),
+                },
+                None,
+            );
         }
     }
     pub(crate) fn report_agent(&self, guard: &'static str, code: Option<ErrorCode>) {
@@ -685,7 +755,12 @@ impl OmpCreationReporter {
                     &mut state,
                     "transport",
                     guard,
-                    ClosedReport { code, io, frame, probe_deadline:None },
+                    ClosedReport {
+                        code,
+                        io,
+                        frame,
+                        probe_deadline: None,
+                    },
                     None,
                 );
             }
@@ -751,7 +826,7 @@ impl OmpCreationReporter {
                         code: failure.code,
                         io: failure.io,
                         frame: failure.frame,
-                        probe_deadline:None,
+                        probe_deadline: None,
                     },
                     None,
                 );
@@ -769,7 +844,7 @@ impl OmpCreationReporter {
                     code: failure.code,
                     io: failure.io,
                     frame: failure.frame,
-                    probe_deadline:None,
+                    probe_deadline: None,
                 },
                 None,
             );
@@ -1020,7 +1095,11 @@ impl CodexThreadStartObservation {
     }
     /// Called once, under the existing callback lock after original registration.
     pub(crate) fn activate(&self) {
-        let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if !state.closed {
             self.0.active.store(true, Ordering::Release);
         }
@@ -1029,7 +1108,11 @@ impl CodexThreadStartObservation {
         if !self.0.active.load(Ordering::Acquire) {
             return;
         }
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if !state.closed && self.0.active.load(Ordering::Acquire) {
             // Decoding proves a complete data frame is available in this window,
             // even if registration raced with the reader's earlier socket yield.
@@ -1041,16 +1124,29 @@ impl CodexThreadStartObservation {
         if !self.0.active.load(Ordering::Acquire) {
             return;
         }
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if !state.closed && self.0.active.load(Ordering::Acquire) {
             state.snapshot.complete_data_frame = true;
         }
     }
     pub(crate) fn start_send_elapsed(&self, elapsed: Duration) {
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // A fast callback can close frame observation before the send returns.
         // The elapsed bucket may still be recorded, until the snapshot is frozen.
-        if !state.closed && matches!(state.snapshot.start_send_elapsed, CodexStartSendElapsed::Unobserved) {
+        if !state.closed
+            && matches!(
+                state.snapshot.start_send_elapsed,
+                CodexStartSendElapsed::Unobserved
+            )
+        {
             let budget = pairing::BOUNDARY_TIMEOUT;
             state.snapshot.start_send_elapsed = if elapsed < budget / 4 {
                 CodexStartSendElapsed::LtQuarter
@@ -1069,7 +1165,11 @@ impl CodexThreadStartObservation {
     /// the original callback remains active. The before/after division is the
     /// observation order of the original send future's completion marker.
     pub(crate) fn method(&self, method: &str, has_id: bool) {
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if !state.closed && self.0.active.load(Ordering::Acquire) {
             let family = match (has_id, method) {
                 (false, "configWarning") => 1 << 0,
@@ -1083,7 +1183,10 @@ impl CodexThreadStartObservation {
             };
             state.snapshot.complete_data_frame = true;
             state.snapshot.decoded_frame = true;
-            if matches!(state.snapshot.start_send_elapsed, CodexStartSendElapsed::Unobserved) {
+            if matches!(
+                state.snapshot.start_send_elapsed,
+                CodexStartSendElapsed::Unobserved
+            ) {
                 state.snapshot.methods_before |= family;
             } else {
                 state.snapshot.methods_after |= family;
@@ -1094,7 +1197,11 @@ impl CodexThreadStartObservation {
         if !self.0.active.load(Ordering::Acquire) {
             return;
         }
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if !state.closed && self.0.active.load(Ordering::Acquire) {
             state.snapshot.complete_data_frame = true;
             state.snapshot.decoded_frame = true;
@@ -1102,7 +1209,11 @@ impl CodexThreadStartObservation {
         }
     }
     pub(crate) fn matched(&self, error: Option<ErrorCode>) {
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // Removing the original callback ends its frame-observation window.
         self.0.active.store(false, Ordering::Release);
         if !state.closed {
@@ -1113,7 +1224,11 @@ impl CodexThreadStartObservation {
         }
     }
     pub(crate) fn delivered(&self, delivered: bool) {
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if !state.closed {
             state.snapshot.milestone = if delivered {
                 CodexThreadStartMilestone::Delivered
@@ -1124,7 +1239,11 @@ impl CodexThreadStartObservation {
     }
     /// Freezes exactly once. Late callbacks and frames cannot rewrite this view.
     pub(crate) fn freeze(&self) -> CodexThreadStartSnapshot {
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.0.active.store(false, Ordering::Release);
         state.closed = true;
         state.snapshot
@@ -1157,8 +1276,11 @@ impl CodexInvalidationReporter {
     }
     pub(crate) fn arm_owner_progress(&self, action: &Uuid) {
         let Ok(mut state) = self.0.lock() else { return };
-        if state.owner_progress_action.is_none() && state.original.is_none()
-            && !state.prebinding_reported && !state.invalidated && !state.transport_reported
+        if state.owner_progress_action.is_none()
+            && state.original.is_none()
+            && !state.prebinding_reported
+            && !state.invalidated
+            && !state.transport_reported
         {
             state.owner_progress_action = Some(action.clone());
         }
@@ -1172,8 +1294,11 @@ impl CodexInvalidationReporter {
         };
         let Ok(mut state) = self.0.lock() else { return };
         if state.owner_progress_action.as_ref() != Some(action)
-            || state.original.is_some() || state.prebinding_reported || state.invalidated
-            || state.transport_reported || state.owner_progress_seen & bit != 0
+            || state.original.is_some()
+            || state.prebinding_reported
+            || state.invalidated
+            || state.transport_reported
+            || state.owner_progress_seen & bit != 0
             || state.lines >= 3
         {
             return;
@@ -1199,7 +1324,9 @@ impl CodexInvalidationReporter {
         state.prebinding_reported = true;
         state.lines += 1;
         let milestone = snapshot.milestone.name();
-        let result = snapshot.error.map_or("none".to_owned(), |result| format!("{result:?}"));
+        let result = snapshot
+            .error
+            .map_or("none".to_owned(), |result| format!("{result:?}"));
         eprintln!(
             "goatr_codex_first_guard phase=thread guard=thread_effect_drop_start_reply code=NotReady io=none errno=0 start={milestone} decoded={} unmatched={} result={result} elapsed={} data={} before={} after={}",
             u8::from(snapshot.decoded_frame),
@@ -1263,12 +1390,7 @@ impl CodexInvalidationReporter {
             Self::emit(&mut state, phase, guard, code, io, 0, None);
         }
     }
-    fn shell_probe_prebinding(
-        &self,
-        guard: &'static str,
-        code: ErrorCode,
-        io: &'static str,
-    ) {
+    fn shell_probe_prebinding(&self, guard: &'static str, code: ErrorCode, io: &'static str) {
         if !codex_shell_probe_guard(guard) {
             return;
         }
@@ -1530,19 +1652,29 @@ pub struct Pane {
     pub focused: bool,
     pub agent_status: NativeAgentStatus,
     #[serde(default)]
-    pub scroll:Option<NativeScroll>,
+    pub scroll: Option<NativeScroll>,
     #[serde(default)]
     pub read_identity: Option<PaneReadIdentity>,
     #[serde(default)]
     pub shell: Option<NativeShellInfo>,
-    #[serde(default,deserialize_with="optional_artifact_shell_scope")]pub artifact_shell_scope:Option<artifacts::NativeArtifactScope>,
+    #[serde(default, deserialize_with = "optional_artifact_shell_scope")]
+    pub artifact_shell_scope: Option<artifacts::NativeArtifactScope>,
 }
-#[derive(Clone,Debug,Deserialize,PartialEq,Eq)]
-pub struct NativeScroll {pub offset_from_bottom:u64,pub max_offset_from_bottom:u64,pub viewport_rows:u64}
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct NativeScroll {
+    pub offset_from_bottom: u64,
+    pub max_offset_from_bottom: u64,
+    pub viewport_rows: u64,
+}
 impl NativeScroll {
-    fn metrics(&self)->SecurityResult<GridScroll> {
-        let value=GridScroll{offset_from_bottom:Uint(self.offset_from_bottom),max_offset_from_bottom:Uint(self.max_offset_from_bottom),viewport_rows:Uint(self.viewport_rows)};
-        value.validate().map_err(|_|ErrorCode::NotReady)?;Ok(value)
+    fn metrics(&self) -> SecurityResult<GridScroll> {
+        let value = GridScroll {
+            offset_from_bottom: Uint(self.offset_from_bottom),
+            max_offset_from_bottom: Uint(self.max_offset_from_bottom),
+            viewport_rows: Uint(self.viewport_rows),
+        };
+        value.validate().map_err(|_| ErrorCode::NotReady)?;
+        Ok(value)
     }
 }
 /// Host-local opaque native epoch values. They never enter the Goatr wire model.
@@ -1557,7 +1689,10 @@ pub struct PaneReadIdentity {
 impl PaneReadIdentity {
     fn validate(&self) -> io::Result<()> {
         if self.herdr_incarnation.len() != 32
-            || !self.herdr_incarnation.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !self
+                .herdr_incarnation
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
             return Err(invalid("invalid native read incarnation"));
         }
@@ -1604,9 +1739,28 @@ fn launch_ack_matches(
         && (agent.launch_pending || agent.agent.as_deref() == Some(kind))
         && workspace == Some(&agent.workspace_id)
 }
-fn agent_shell_capability<'de,D:serde::Deserializer<'de>>(deserializer:D)->Result<bool,D::Error>{let value=Value::deserialize(deserializer)?;Ok(value.as_bool().unwrap_or(false))}
-fn optional_artifact_shell_scope<'de,D:serde::Deserializer<'de>>(deserializer:D)->Result<Option<artifacts::NativeArtifactScope>,D::Error>{let value=Value::deserialize(deserializer)?;Ok(serde_json::from_value::<artifacts::NativeArtifactScope>(value).ok().filter(|scope|scope.validate().is_ok()))}
-fn agent_shell_epoch<'de,D:serde::Deserializer<'de>>(deserializer:D)->Result<Option<u64>,D::Error>{let value=Value::deserialize(deserializer)?;Ok(value.as_u64().filter(|epoch|*epoch>0))}
+fn agent_shell_capability<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(false))
+}
+fn optional_artifact_shell_scope<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<artifacts::NativeArtifactScope>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(
+        serde_json::from_value::<artifacts::NativeArtifactScope>(value)
+            .ok()
+            .filter(|scope| scope.validate().is_ok()),
+    )
+}
+fn agent_shell_epoch<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(value.as_u64().filter(|epoch| *epoch > 0))
+}
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct NativeLayout {
     pub workspace_id: Id,
@@ -1623,10 +1777,14 @@ pub struct NativeLayoutPane {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Snapshot {
     // Read-only qualification for the explicitly private legacy smoke mode, never stock authority.
-    #[serde(default)] pub pane_grid_subscribe_bound: bool,
-    #[serde(default)] pub shell_grid_subscribe_bound: bool,
-    #[serde(default,deserialize_with="agent_shell_capability")]pub artifact_read_bound:bool,
-    #[serde(default,deserialize_with="agent_shell_epoch")]pub artifact_permission_epoch:Option<u64>,
+    #[serde(default)]
+    pub pane_grid_subscribe_bound: bool,
+    #[serde(default)]
+    pub shell_grid_subscribe_bound: bool,
+    #[serde(default, deserialize_with = "agent_shell_capability")]
+    pub artifact_read_bound: bool,
+    #[serde(default, deserialize_with = "agent_shell_epoch")]
+    pub artifact_permission_epoch: Option<u64>,
     pub version: String,
     pub protocol: u32,
     #[serde(default)]
@@ -1741,34 +1899,65 @@ impl Snapshot {
             .ok_or_else(|| invalid("pane absent"))
     }
     /// Optional terminal geometry never gates structured agents or ordinary inventory.
-    pub(crate) fn layout_seed(&self, selected:&Pane)->io::Result<(u16,u16)> {
-        if self.layouts.len()>512 {return Err(limit());}
-        let tabs:HashMap<_,_>=self.tabs.iter().map(|tab|(&tab.tab_id,&tab.workspace_id)).collect();
-        let panes:HashMap<_,_>=self.panes.iter().map(|pane|(&pane.pane_id,pane)).collect();
-        let mut layout_tabs=HashSet::new();
-        let mut layout_panes=0usize;
-        let mut seed=None;
+    pub(crate) fn layout_seed(&self, selected: &Pane) -> io::Result<(u16, u16)> {
+        if self.layouts.len() > 512 {
+            return Err(limit());
+        }
+        let tabs: HashMap<_, _> = self
+            .tabs
+            .iter()
+            .map(|tab| (&tab.tab_id, &tab.workspace_id))
+            .collect();
+        let panes: HashMap<_, _> = self
+            .panes
+            .iter()
+            .map(|pane| (&pane.pane_id, pane))
+            .collect();
+        let mut layout_tabs = HashSet::new();
+        let mut layout_panes = 0usize;
+        let mut seed = None;
         for layout in &self.layouts {
-            if tabs.get(&layout.tab_id)!=Some(&&layout.workspace_id)||!layout_tabs.insert(&layout.tab_id)
-                ||layout.area.width>4096||layout.area.height>4096
-                ||usize::from(layout.area.width)*usize::from(layout.area.height)>1_000_000
-            {return Err(invalid("invalid native layout"));}
-            layout_panes=layout_panes.checked_add(layout.panes.len()).ok_or_else(limit)?;
-            if layout_panes>512 {return Err(limit());}
-            let mut members=HashSet::new();
-            for member in &layout.panes {
-                let pane=panes.get(&member.pane_id).ok_or_else(||invalid("layout pane absent"))?;
-                if pane.tab_id!=layout.tab_id||pane.workspace_id!=layout.workspace_id
-                    ||!members.insert(&member.pane_id)||!layout.area.contains(member.rect)
-                {return Err(invalid("layout pane routing/geometry changed"));}
+            if tabs.get(&layout.tab_id) != Some(&&layout.workspace_id)
+                || !layout_tabs.insert(&layout.tab_id)
+                || layout.area.width > 4096
+                || layout.area.height > 4096
+                || usize::from(layout.area.width) * usize::from(layout.area.height) > 1_000_000
+            {
+                return Err(invalid("invalid native layout"));
             }
-            if !members.contains(&layout.focused_pane_id) {return Err(invalid("focused layout pane absent"));}
-            if layout.tab_id==selected.tab_id&&layout.workspace_id==selected.workspace_id&&members.contains(&selected.pane_id) {
-                if layout.area.width==0||layout.area.height==0 {return Err(invalid("initial terminal geometry unavailable"));}
-                seed=Some((layout.area.width,layout.area.height));
+            layout_panes = layout_panes
+                .checked_add(layout.panes.len())
+                .ok_or_else(limit)?;
+            if layout_panes > 512 {
+                return Err(limit());
+            }
+            let mut members = HashSet::new();
+            for member in &layout.panes {
+                let pane = panes
+                    .get(&member.pane_id)
+                    .ok_or_else(|| invalid("layout pane absent"))?;
+                if pane.tab_id != layout.tab_id
+                    || pane.workspace_id != layout.workspace_id
+                    || !members.insert(&member.pane_id)
+                    || !layout.area.contains(member.rect)
+                {
+                    return Err(invalid("layout pane routing/geometry changed"));
+                }
+            }
+            if !members.contains(&layout.focused_pane_id) {
+                return Err(invalid("focused layout pane absent"));
+            }
+            if layout.tab_id == selected.tab_id
+                && layout.workspace_id == selected.workspace_id
+                && members.contains(&selected.pane_id)
+            {
+                if layout.area.width == 0 || layout.area.height == 0 {
+                    return Err(invalid("initial terminal geometry unavailable"));
+                }
+                seed = Some((layout.area.width, layout.area.height));
             }
         }
-        seed.ok_or_else(||invalid("initial terminal layout unavailable"))
+        seed.ok_or_else(|| invalid("initial terminal layout unavailable"))
     }
     pub fn no_focus(&self) -> io::Result<()> {
         if self.focused_workspace_id.is_none() {
@@ -2113,7 +2302,8 @@ impl InstalledExecutablePin {
         }
         self.recheck_configured()?;
         let current = fs::metadata(&self.proc_exe)?;
-        if (current.dev(), current.ino()) != self.object || process_evidence(before.pid)? != *before {
+        if (current.dev(), current.ino()) != self.object || process_evidence(before.pid)? != *before
+        {
             return Err(invalid("Herdr process changed during executable proof"));
         }
         Ok(())
@@ -2286,8 +2476,7 @@ impl Client {
                 return Err(invalid("Herdr process/socket epoch changed"));
             }
         }
-        if socket_identity(&self.path)?
-            != (self.evidence.socket_device, self.evidence.socket_inode)
+        if socket_identity(&self.path)? != (self.evidence.socket_device, self.evidence.socket_inode)
         {
             return Err(invalid("Herdr process/socket epoch changed"));
         }
@@ -2385,42 +2574,97 @@ impl Client {
         snapshot.validate()?;
         Ok((evidence, snapshot))
     }
-    pub async fn agent_rename(self,pane:&Id,name:&AgentName)->Result<Agent,ApiError> {
-        let mut result=self.request("agent.rename",json!({"target":pane,"name":name.0}),"agent_info").await?;
-        let agent=result.get_mut("agent").ok_or_else(||ApiError::Unavailable(invalid("native agent result absent")))?.take();
-        serde_json::from_value(agent).map_err(|_|ApiError::Unavailable(invalid("invalid native agent result")))
+    pub async fn agent_rename(self, pane: &Id, name: &AgentName) -> Result<Agent, ApiError> {
+        let mut result = self
+            .request(
+                "agent.rename",
+                json!({"target":pane,"name":name.0}),
+                "agent_info",
+            )
+            .await?;
+        let agent = result
+            .get_mut("agent")
+            .ok_or_else(|| ApiError::Unavailable(invalid("native agent result absent")))?
+            .take();
+        serde_json::from_value(agent)
+            .map_err(|_| ApiError::Unavailable(invalid("invalid native agent result")))
     }
-    pub async fn workspace_rename(self,workspace:&Id,label:&Label)->Result<Workspace,ApiError> {
-        let mut result=self.request("workspace.rename",json!({"workspace_id":workspace,"label":label.0}),"workspace_info").await?;
-        let workspace=result.get_mut("workspace").ok_or_else(||ApiError::Unavailable(invalid("native workspace result absent")))?.take();
-        serde_json::from_value(workspace).map_err(|_|ApiError::Unavailable(invalid("invalid native workspace result")))
+    pub async fn workspace_rename(
+        self,
+        workspace: &Id,
+        label: &Label,
+    ) -> Result<Workspace, ApiError> {
+        let mut result = self
+            .request(
+                "workspace.rename",
+                json!({"workspace_id":workspace,"label":label.0}),
+                "workspace_info",
+            )
+            .await?;
+        let workspace = result
+            .get_mut("workspace")
+            .ok_or_else(|| ApiError::Unavailable(invalid("native workspace result absent")))?
+            .take();
+        serde_json::from_value(workspace)
+            .map_err(|_| ApiError::Unavailable(invalid("invalid native workspace result")))
     }
-    async fn pane_scroll<F>(mut self,pane:&Id,offset:u64,started:&mut bool,admit:F)->Result<Pane,ApiError>
-    where F:Fn()->SecurityResult<()> {
-        let read=async {
+    async fn pane_scroll<F>(
+        mut self,
+        pane: &Id,
+        offset: u64,
+        started: &mut bool,
+        admit: F,
+    ) -> Result<Pane, ApiError>
+    where
+        F: Fn() -> SecurityResult<()>,
+    {
+        let read = async {
             self.recheck()?;
-            let id=Uuid::random().0;
+            let id = Uuid::random().0;
             let mut request=serde_json::to_vec(&json!({"id":id,"method":"pane.scroll","params":{"pane_id":pane,"offset_from_bottom":offset}})).map_err(io::Error::from)?;
-            if request.len()+1>FRAME_MAX{return Err(ApiError::Unavailable(limit()));}request.push(b'\n');
-            let mut written=0;
-            while written<request.len() {
-                let count=std::future::poll_fn(|cx|{
-                    if admit().is_err(){return std::task::Poll::Ready(Err(invalid("original history write admission lost")));}
-                    tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(self.reader.get_mut()),cx,&request[written..])
-                }).await?;
-                if count==0{return Err(ApiError::Unavailable(invalid("history socket write ended")));}
-                *started=true;written+=count;
+            if request.len() + 1 > FRAME_MAX {
+                return Err(ApiError::Unavailable(limit()));
             }
-            let bytes=read_line(&mut self.reader).await?;
-            let response=response(&bytes,&id,"pane_info");
-            let mut result=match (response,self.recheck()) {
-                (Ok(value),Ok(()))=>value,(Ok(value),Err(_))=>return Err(ApiError::Changed(value)),
-                (Err(error),Ok(()))=>return Err(error),(_,Err(error))=>return Err(ApiError::Unavailable(error)),
+            request.push(b'\n');
+            let mut written = 0;
+            while written < request.len() {
+                let count = std::future::poll_fn(|cx| {
+                    if admit().is_err() {
+                        return std::task::Poll::Ready(Err(invalid(
+                            "original history write admission lost",
+                        )));
+                    }
+                    tokio::io::AsyncWrite::poll_write(
+                        std::pin::Pin::new(self.reader.get_mut()),
+                        cx,
+                        &request[written..],
+                    )
+                })
+                .await?;
+                if count == 0 {
+                    return Err(ApiError::Unavailable(invalid("history socket write ended")));
+                }
+                *started = true;
+                written += count;
+            }
+            let bytes = read_line(&mut self.reader).await?;
+            let response = response(&bytes, &id, "pane_info");
+            let mut result = match (response, self.recheck()) {
+                (Ok(value), Ok(())) => value,
+                (Ok(value), Err(_)) => return Err(ApiError::Changed(value)),
+                (Err(error), Ok(())) => return Err(error),
+                (_, Err(error)) => return Err(ApiError::Unavailable(error)),
             };
-            let pane=result.get_mut("pane").ok_or_else(||ApiError::Unavailable(invalid("native pane result absent")))?.take();
-            serde_json::from_value(pane).map_err(|_|ApiError::Unavailable(invalid("invalid native pane result")))
+            let pane = result
+                .get_mut("pane")
+                .ok_or_else(|| ApiError::Unavailable(invalid("native pane result absent")))?
+                .take();
+            serde_json::from_value(pane)
+                .map_err(|_| ApiError::Unavailable(invalid("invalid native pane result")))
         };
-        tokio::time::timeout(READ_TIMEOUT,read).await.map_err(|_|ApiError::Unavailable(invalid("history response timeout")))?
+        tokio::time::timeout(READ_TIMEOUT, read)
+            .await
+            .map_err(|_| ApiError::Unavailable(invalid("history response timeout")))?
     }
     /// Public reported PIDs remain in Herdr's namespace; callers must prove translation
     /// using actual kernel peer/process evidence before treating them as proc pathnames.
@@ -2668,7 +2912,7 @@ pub struct Source {
 }
 impl Source {
     /// Exact source owner, independent of a merely advanced inventory revision.
-    pub(crate) fn same_physical_identity(&self,current:&Source)->bool {
+    pub(crate) fn same_physical_identity(&self, current: &Source) -> bool {
         self.server_id == current.server_id
             && self.incarnation == current.incarnation
             && self.socket_path == current.socket_path
@@ -3177,7 +3421,11 @@ struct Binding {
 /// Original logical rename scope; document/read grants are independent.
 #[derive(Clone)]
 pub(crate) struct RenameContext {
-    source_epoch:Uuid,pane:Id,terminal:Id,workspace:Id,tab:Id,
+    source_epoch: Uuid,
+    pane: Id,
+    terminal: Id,
+    workspace: Id,
+    tab: Id,
 }
 /// Measured in the actual pane shell, including aliases/functions; not a remote/config flag.
 /// The caller supplies the captured absolute result of shell resolution, never executes the
@@ -3267,14 +3515,14 @@ pub struct Topology {
     storage: Arc<StorageOwner>,
     state: Arc<State>,
     host_id: EndpointId,
-    artifact_leases:Mutex<artifacts::ArtifactLeases>,
-    creation_roots:HashMap<Uuid,Option<Arc<crate::project_read::Root>>>,
-    pub(crate) skill_documents:Arc<skills::Documents>,
-    terminal_jobs:Mutex<tokio::task::JoinSet<()>>,
-    terminal_slots:Arc<tokio::sync::Semaphore>,
-    terminal_stopping:AtomicBool,
-    terminal_safety:SecurityResult<()>,
-    terminal_unproved_servers:HashSet<Uuid>,
+    artifact_leases: Mutex<artifacts::ArtifactLeases>,
+    creation_roots: HashMap<Uuid, Option<Arc<crate::project_read::Root>>>,
+    pub(crate) skill_documents: Arc<skills::Documents>,
+    terminal_jobs: Mutex<tokio::task::JoinSet<()>>,
+    terminal_slots: Arc<tokio::sync::Semaphore>,
+    terminal_stopping: AtomicBool,
+    terminal_safety: SecurityResult<()>,
+    terminal_unproved_servers: HashSet<Uuid>,
     inner: Mutex<Inner>,
     // ponytail: serialize the short cross-owner identity commit, never native readiness/I/O.
     updates: tokio::sync::Mutex<()>,
@@ -3292,23 +3540,48 @@ impl Topology {
     ) -> SecurityResult<Arc<Self>> {
         config.preflight().map_err(policy)?;
         let (servers, sessions, shells) = storage
-            .call(|s| Ok((s.persisted_servers()?, s.persisted_sessions()?,s.persisted_shells()?)))
+            .call(|s| {
+                Ok((
+                    s.persisted_servers()?,
+                    s.persisted_sessions()?,
+                    s.persisted_shells()?,
+                ))
+            })
             .await
             .map_err(pairing::store_error)?;
-        let restored_fences=storage.call(|store|store.creation_shell_fences()).await;
-        let (terminal_safety,terminal_unproved_servers)=match restored_fences {
-            Ok((fences,unproved))=>{for(peer,action,fence)in fences{state.creation_shell_fence(peer,action,Some(fence));}(Ok(()),unproved)}
-            Err(error)=>(Err(pairing::store_error(error)),HashSet::new()),
+        let restored_fences = storage.call(|store| store.creation_shell_fences()).await;
+        let (terminal_safety, terminal_unproved_servers) = match restored_fences {
+            Ok((fences, unproved)) => {
+                for (peer, action, fence) in fences {
+                    state.creation_shell_fence(peer, action, Some(fence));
+                }
+                (Ok(()), unproved)
+            }
+            Err(error) => (Err(pairing::store_error(error)), HashSet::new()),
         };
         // Hold project objects once; creation, terminal and read grants stay independent.
         // An unavailable root disables only operations using that project, never chat.
-        let creation_roots=config.projects.iter().map(|project| {
-            let root=if config.allow_scoped_shell_probe||config.allow_terminal_control||project.allow_read_tools {
-                crate::project_read::Root::open(&project.path,std::time::Instant::now()+Duration::from_secs(5)).ok().map(Arc::new)
-            } else { None };
-            (project.id.clone(),root)
-        }).collect();
-        let skill_documents=skills::Documents::new(&config);
+        let creation_roots = config
+            .projects
+            .iter()
+            .map(|project| {
+                let root = if config.allow_scoped_shell_probe
+                    || config.allow_terminal_control
+                    || project.allow_read_tools
+                {
+                    crate::project_read::Root::open(
+                        &project.path,
+                        std::time::Instant::now() + Duration::from_secs(5),
+                    )
+                    .ok()
+                    .map(Arc::new)
+                } else {
+                    None
+                };
+                (project.id.clone(), root)
+            })
+            .collect();
+        let skill_documents = skills::Documents::new(&config);
         let owner = Arc::new(Self {
             config,
             storage,
@@ -3391,8 +3664,22 @@ impl Topology {
         owner.restore_shells(shells)?;
         // One weak maintenance owner bounds idle metadata retention without a
         // Topology -> provider Runtime -> Topology lifetime cycle.
-        let artifact_owner=Arc::downgrade(&owner);
-        tokio::spawn(async move{loop{tokio::time::sleep(Duration::from_secs(1)).await;let Some(owner)=artifact_owner.upgrade()else{break};owner.artifact_leases.lock().expect("artifact leases").maintain();owner.state.prune_creation_directories();drop(owner);}});
+        let artifact_owner = Arc::downgrade(&owner);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let Some(owner) = artifact_owner.upgrade() else {
+                    break;
+                };
+                owner
+                    .artifact_leases
+                    .lock()
+                    .expect("artifact leases")
+                    .maintain();
+                owner.state.prune_creation_directories();
+                drop(owner);
+            }
+        });
         owner.publish()?;
         Ok(owner)
     }
@@ -3554,64 +3841,127 @@ impl Topology {
             .collect()
     }
 
-
-    fn logical_rename_context(&self,target:&Target)->SecurityResult<(Source,RenameContext,SessionSummary)> {
-        let (server,incarnation,terminal,epoch)={
-            let inner=self.inner.lock().expect("topology mutex");
-            let binding=inner.bindings.get(&target.session_id).filter(|binding|binding.target==*target).ok_or(ErrorCode::StaleSession)?;
-            (binding.key.server_id.clone(),binding.key.server_incarnation.clone(),binding.key.terminal_id.clone(),binding.source_epoch.clone())
+    fn logical_rename_context(
+        &self,
+        target: &Target,
+    ) -> SecurityResult<(Source, RenameContext, SessionSummary)> {
+        let (server, incarnation, terminal, epoch) = {
+            let inner = self.inner.lock().expect("topology mutex");
+            let binding = inner
+                .bindings
+                .get(&target.session_id)
+                .filter(|binding| binding.target == *target)
+                .ok_or(ErrorCode::StaleSession)?;
+            (
+                binding.key.server_id.clone(),
+                binding.key.server_incarnation.clone(),
+                binding.key.terminal_id.clone(),
+                binding.source_epoch.clone(),
+            )
         };
-        let source=self.source(&server)?;
-        if source.incarnation!=incarnation{return Err(ErrorCode::StaleSession)}
-        let state=self.state.session_state(target,&epoch)?;
-        if state.summary.connectivity!=SessionConnectivity::Ready{return Err(ErrorCode::NotReady)}
-        let pane=source.snapshot.pane(&state.summary.pane_id).map_err(policy)?;
-        if state.summary.server_id!=server||pane.terminal_id!=terminal
-            ||pane.terminal_id!=state.summary.terminal_id||pane.workspace_id!=state.summary.workspace_id {
+        let source = self.source(&server)?;
+        if source.incarnation != incarnation {
             return Err(ErrorCode::StaleSession);
         }
-        let context=RenameContext{source_epoch:epoch,pane:pane.pane_id.clone(),terminal:pane.terminal_id.clone(),
-            workspace:pane.workspace_id.clone(),tab:pane.tab_id.clone()};
+        let state = self.state.session_state(target, &epoch)?;
+        if state.summary.connectivity != SessionConnectivity::Ready {
+            return Err(ErrorCode::NotReady);
+        }
+        let pane = source
+            .snapshot
+            .pane(&state.summary.pane_id)
+            .map_err(policy)?;
+        if state.summary.server_id != server
+            || pane.terminal_id != terminal
+            || pane.terminal_id != state.summary.terminal_id
+            || pane.workspace_id != state.summary.workspace_id
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        let context = RenameContext {
+            source_epoch: epoch,
+            pane: pane.pane_id.clone(),
+            terminal: pane.terminal_id.clone(),
+            workspace: pane.workspace_id.clone(),
+            tab: pane.tab_id.clone(),
+        };
         source.recheck().map_err(policy)?;
-        Ok((source,context,state.summary))
+        Ok((source, context, state.summary))
     }
-    fn validate_logical_rename_context(&self,target:&Target,original:&Source,context:&RenameContext,ack:bool)->SecurityResult<(Source,SessionSummary)> {
+    fn validate_logical_rename_context(
+        &self,
+        target: &Target,
+        original: &Source,
+        context: &RenameContext,
+        ack: bool,
+    ) -> SecurityResult<(Source, SessionSummary)> {
         original.recheck_identity().map_err(policy)?;
-        let source={
-            let inner=self.inner.lock().expect("topology mutex");
-            let binding=inner.bindings.get(&target.session_id).filter(|binding| {
-                binding.target==*target&&binding.source_epoch==context.source_epoch
-                    &&binding.key.server_id==original.server_id&&binding.key.server_incarnation==original.incarnation
-                    &&binding.key.terminal_id==context.terminal
-            }).ok_or(ErrorCode::StaleSession)?;
-            let current=inner.servers.get(&binding.key.server_id).and_then(|record|record.source.as_ref()).ok_or(ErrorCode::NotReady)?;
-            if !original.same_physical_identity(current){return Err(ErrorCode::StaleSession)}
+        let source = {
+            let inner = self.inner.lock().expect("topology mutex");
+            let binding = inner
+                .bindings
+                .get(&target.session_id)
+                .filter(|binding| {
+                    binding.target == *target
+                        && binding.source_epoch == context.source_epoch
+                        && binding.key.server_id == original.server_id
+                        && binding.key.server_incarnation == original.incarnation
+                        && binding.key.terminal_id == context.terminal
+                })
+                .ok_or(ErrorCode::StaleSession)?;
+            let current = inner
+                .servers
+                .get(&binding.key.server_id)
+                .and_then(|record| record.source.as_ref())
+                .ok_or(ErrorCode::NotReady)?;
+            if !original.same_physical_identity(current) {
+                return Err(ErrorCode::StaleSession);
+            }
             current.clone()
         };
-        let state=self.state.session_state(target,&context.source_epoch)?;
-        let pane=source.snapshot.pane(&context.pane).map_err(policy)?;
-        if state.summary.pane_id!=context.pane||state.summary.terminal_id!=context.terminal
-            ||state.summary.workspace_id!=context.workspace||state.summary.server_id!=source.server_id
-            ||pane.terminal_id!=context.terminal||pane.workspace_id!=context.workspace||pane.tab_id!=context.tab {
+        let state = self.state.session_state(target, &context.source_epoch)?;
+        let pane = source.snapshot.pane(&context.pane).map_err(policy)?;
+        if state.summary.pane_id != context.pane
+            || state.summary.terminal_id != context.terminal
+            || state.summary.workspace_id != context.workspace
+            || state.summary.server_id != source.server_id
+            || pane.terminal_id != context.terminal
+            || pane.workspace_id != context.workspace
+            || pane.tab_id != context.tab
+        {
             return Err(ErrorCode::StaleSession);
         }
         if !ack {
             original.recheck().map_err(policy)?;
             source.recheck().map_err(policy)?;
-            if state.summary.connectivity!=SessionConnectivity::Ready{return Err(ErrorCode::NotReady)}
+            if state.summary.connectivity != SessionConnectivity::Ready {
+                return Err(ErrorCode::NotReady);
+            }
         }
-        Ok((source,state.summary))
+        Ok((source, state.summary))
     }
-    pub(crate) async fn workspace_rename_context(&self,target:&Target)->SecurityResult<(Source,RenameContext)> {
-        let _update=self.updates.lock().await;
-        let (source,context,summary)=self.logical_rename_context(target)?;
-        if !summary.capabilities.workspace_rename{return Err(ErrorCode::NotReady)}
-        Ok((source,context))
+    pub(crate) async fn workspace_rename_context(
+        &self,
+        target: &Target,
+    ) -> SecurityResult<(Source, RenameContext)> {
+        let _update = self.updates.lock().await;
+        let (source, context, summary) = self.logical_rename_context(target)?;
+        if !summary.capabilities.workspace_rename {
+            return Err(ErrorCode::NotReady);
+        }
+        Ok((source, context))
     }
-    pub(crate) fn validate_workspace_rename_context_now(&self,target:&Target,source:&Source,context:&RenameContext)->SecurityResult<()> {
-        let _update=self.updates.try_lock().map_err(|_|ErrorCode::Busy)?;
-        let (_,summary)=self.validate_logical_rename_context(target,source,context,false)?;
-        if !summary.capabilities.workspace_rename{return Err(ErrorCode::NotReady)}
+    pub(crate) fn validate_workspace_rename_context_now(
+        &self,
+        target: &Target,
+        source: &Source,
+        context: &RenameContext,
+    ) -> SecurityResult<()> {
+        let _update = self.updates.try_lock().map_err(|_| ErrorCode::Busy)?;
+        let (_, summary) = self.validate_logical_rename_context(target, source, context, false)?;
+        if !summary.capabilities.workspace_rename {
+            return Err(ErrorCode::NotReady);
+        }
         Ok(())
     }
 
@@ -3651,7 +4001,9 @@ impl Topology {
             .filter(|p| project.is_none_or(|id| &p.id == id))
             .any(|p| {
                 self.creation_roots.get(&p.id).is_some_and(Option::is_some)
-                    && self.validate_coarse(&source, coarse, provider, &p.id).is_ok()
+                    && self
+                        .validate_coarse(&source, coarse, provider, &p.id)
+                        .is_ok()
             });
         if !available {
             return "Creation disabled: configured project/wrapper/runtime object views or shell epoch are unavailable".into();
@@ -3818,7 +4170,7 @@ impl Topology {
             return Err(ErrorCode::NotReady);
         }
         let project = self.config.project(&measurement.project_id)?;
-        let execution_directory=measurement.execution_directory.clone();
+        let execution_directory = measurement.execution_directory.clone();
         let proof = WrapperProof {
             action_id: measurement.action_id,
             server_incarnation: source.incarnation.clone(),
@@ -3868,7 +4220,8 @@ impl Topology {
         params: &SessionCreateParams,
         root: Option<(&CreationResources, &Uuid)>,
     ) -> Result<(), (ErrorCode, &'static str, &'static str)> {
-        self.validate_placement(params).map_err(|code|(code,"creation_placement","none"))?;
+        self.validate_placement(params)
+            .map_err(|code| (code, "creation_placement", "none"))?;
         let current = self
             .source(&params.server_id)
             .map_err(|code| (code, "topology_source", "none"))?;
@@ -3906,7 +4259,11 @@ impl Topology {
             }
             let pane = current
                 .snapshot
-                .pane(resources.pane_id.as_ref().ok_or((ErrorCode::NotReady, "pane_absent", "none"))?)
+                .pane(resources.pane_id.as_ref().ok_or((
+                    ErrorCode::NotReady,
+                    "pane_absent",
+                    "none",
+                ))?)
                 .map_err(|error| {
                     let io = codex_invalidation_io(&error).0;
                     (policy(error), "pane_absent", io)
@@ -4026,9 +4383,22 @@ impl Topology {
         // Only the helper's one explicitly configured socket owns this settlement.
         // Other session-list discoveries must not consume its first-observation latch.
         let selected_capture_source = self.config.herdr_sockets.len() == 1
-            && self.inner.lock().ok().and_then(|inner| inner.servers.get(server).map(|record| record.path == self.config.herdr_sockets[0])).unwrap_or(false);
+            && self
+                .inner
+                .lock()
+                .ok()
+                .and_then(|inner| {
+                    inner
+                        .servers
+                        .get(server)
+                        .map(|record| record.path == self.config.herdr_sockets[0])
+                })
+                .unwrap_or(false);
         let capture = if selected_capture_source {
-            self.omp_offline_reporter.lock().ok().and_then(|current| current.clone())
+            self.omp_offline_reporter
+                .lock()
+                .ok()
+                .and_then(|current| current.clone())
         } else {
             None
         };
@@ -4038,12 +4408,21 @@ impl Topology {
             }
         };
         if !self.config.allow_scoped_shell_probe {
-            report(CoarseShellGuard::ConsentAbsent, Some(ErrorCode::NotReady), "none");
+            report(
+                CoarseShellGuard::ConsentAbsent,
+                Some(ErrorCode::NotReady),
+                "none",
+            );
             return;
         }
         // The existing authoritative recovery cadence may heal a failed coarse probe.
         // A retained proof needs no additional native calls on an unchanged observation.
-        if self.inner.lock().expect("topology mutex").servers.get(server)
+        if self
+            .inner
+            .lock()
+            .expect("topology mutex")
+            .servers
+            .get(server)
             .is_some_and(|record| record.coarse_shell.is_some())
         {
             return;
@@ -4074,7 +4453,8 @@ impl Topology {
             let client = match Client::connect_source(&source).await {
                 Ok(client) => client,
                 Err(error) => {
-                    rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::Connect, &error));
+                    rejected
+                        .get_or_insert(CoarseShellFailure::io(CoarseShellGuard::Connect, &error));
                     continue;
                 }
             };
@@ -4085,7 +4465,10 @@ impl Topology {
             let info = match client.process_info(&pane.pane_id).await {
                 Ok(info) => info,
                 Err(error) => {
-                    rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::ProcessInfo, &error));
+                    rejected.get_or_insert(CoarseShellFailure::io(
+                        CoarseShellGuard::ProcessInfo,
+                        &error,
+                    ));
                     continue;
                 }
             };
@@ -4096,14 +4479,20 @@ impl Topology {
             let shell = match reported_process(&reporter, pid) {
                 Ok(shell) => shell,
                 Err(error) => {
-                    rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::ReportedProcess, &error));
+                    rejected.get_or_insert(CoarseShellFailure::io(
+                        CoarseShellGuard::ReportedProcess,
+                        &error,
+                    ));
                     continue;
                 }
             };
             let (executable, dialect) = match shell_executable(&shell) {
                 Ok(executable) => executable,
                 Err(error) => {
-                    rejected.get_or_insert(CoarseShellFailure::io(CoarseShellGuard::ShellExecutable, &error));
+                    rejected.get_or_insert(CoarseShellFailure::io(
+                        CoarseShellGuard::ShellExecutable,
+                        &error,
+                    ));
                     continue;
                 }
             };
@@ -4128,7 +4517,8 @@ impl Topology {
             let mut inner = self.inner.lock().expect("topology mutex");
             if let Some(record) = inner.servers.get_mut(server) {
                 let current = record.source.as_ref();
-                if !source.revision_current() || record.coarse_shell.is_some()
+                if !source.revision_current()
+                    || record.coarse_shell.is_some()
                     || !current.is_some_and(|current| {
                         source.same_physical_identity(current)
                             && current.revision == source.revision
@@ -4147,10 +4537,15 @@ impl Topology {
         match installed {
             Some(true) => report(CoarseShellGuard::Installed, None, "none"),
             Some(false) => {
-                let failure = rejected.unwrap_or_else(|| CoarseShellFailure::new(CoarseShellGuard::NoCandidate));
+                let failure = rejected
+                    .unwrap_or_else(|| CoarseShellFailure::new(CoarseShellGuard::NoCandidate));
                 report(failure.guard, Some(failure.code), failure.io);
             }
-            None => report(CoarseShellGuard::RecordAbsent, Some(ErrorCode::NotReady), "none"),
+            None => report(
+                CoarseShellGuard::RecordAbsent,
+                Some(ErrorCode::NotReady),
+                "none",
+            ),
         }
         let _ = self.publish();
     }
@@ -4304,22 +4699,23 @@ impl Topology {
     /// Exactly one fixed query in this receipt's new root; ACK is enqueue, not execution.
     pub(crate) async fn shell_probe_once(
         &self,
-        security:&Security,
-        auth:&Authorized,
-        prepared:PreparedShell<'_>,
-    )->SecurityResult<Receipt> {
-        self.shell_probe_once_reported(security,auth,prepared,None).await
+        security: &Security,
+        auth: &Authorized,
+        prepared: PreparedShell<'_>,
+    ) -> SecurityResult<Receipt> {
+        self.shell_probe_once_reported(security, auth, prepared, None)
+            .await
     }
     /// The reported form is used only by the already-authorized OMP creation job.  It observes
     /// existing pre-intent failures and maps them back to the exact public result.
     pub(crate) async fn prepare_created_shell<'a>(
         &self,
-        security:&Security,
-        auth:&Authorized,
-        (action,params,selection):(&'a Uuid,&'a SessionCreateParams,&'a CreationSelection),
-        deadline:tokio::time::Instant,
-        reporter:Option<&OmpCreationReporter>,
-    )->SecurityResult<Option<PreparedShell<'a>>> {
+        security: &Security,
+        auth: &Authorized,
+        (action, params, selection): (&'a Uuid, &'a SessionCreateParams, &'a CreationSelection),
+        deadline: tokio::time::Instant,
+        reporter: Option<&OmpCreationReporter>,
+    ) -> SecurityResult<Option<PreparedShell<'a>>> {
         if tokio::time::Instant::now() >= deadline {
             if let Some(reporter) = reporter {
                 reporter.report_shell_probe("deadline", ErrorCode::Timeout, "none");
@@ -4458,29 +4854,120 @@ impl Topology {
                 return Err(code);
             }
         };
-        let (shell, original_reporter, executable, dialect) =
-            match self.idle_probe_shell_classified(&source, &info) {
-                Ok(shell) => shell,
-                Err((_, _, ProbeShellGuard::ShellNotIdle)) => {
-                    let shell_reporter = match process_evidence(source.evidence.pid) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            let io = codex_invalidation_io(&error).0;
-                            let code = policy(error);
+        let (shell, original_reporter, executable, dialect) = match self
+            .idle_probe_shell_classified(&source, &info)
+        {
+            Ok(shell) => shell,
+            Err((_, _, ProbeShellGuard::ShellNotIdle)) => {
+                let shell_reporter = match process_evidence(source.evidence.pid) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let io = codex_invalidation_io(&error).0;
+                        let code = policy(error);
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe("shell_reporter", code, io);
+                        }
+                        return Err(code);
+                    }
+                };
+                let Some(pid) = info.shell_pid else {
+                    if let Some(reporter) = reporter {
+                        reporter.report_shell_probe("shell_absent", ErrorCode::NotReady, "none");
+                    }
+                    return Err(ErrorCode::NotReady);
+                };
+                let shell = match reported_process(&shell_reporter, pid) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let io = codex_invalidation_io(&error).0;
+                        let code = policy(error);
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe("shell_process", code, io);
+                        }
+                        return Err(code);
+                    }
+                };
+                let (executable, dialect) = match shell_executable(&shell) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let io = codex_invalidation_io(&error).0;
+                        let code = policy(error);
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe("shell_executable", code, io);
+                        }
+                        return Err(code);
+                    }
+                };
+                match process_evidence(shell_reporter.pid) {
+                    Ok(current) if current == shell_reporter => {}
+                    Ok(_) => {
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe(
+                                "shell_reporter_recheck",
+                                ErrorCode::NotReady,
+                                "none",
+                            );
+                        }
+                        return Err(ErrorCode::NotReady);
+                    }
+                    Err(error) => {
+                        let io = codex_invalidation_io(&error).0;
+                        let code = policy(error);
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe("shell_reporter_recheck", code, io);
+                        }
+                        return Err(code);
+                    }
+                }
+                loop {
+                    if tokio::time::Instant::now() >= deadline {
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe(
+                                "shell_not_idle",
+                                ErrorCode::Timeout,
+                                "none",
+                            );
+                        }
+                        return Err(ErrorCode::Timeout);
+                    }
+                    {
+                        let _guard = security.native_guard(auth).await.inspect_err(|code| {
                             if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("shell_reporter", code, io);
+                                reporter.report_shell_probe("authorization", *code, "none");
+                            }
+                        })?;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe(
+                                "shell_not_idle",
+                                ErrorCode::Timeout,
+                                "none",
+                            );
+                        }
+                        return Err(ErrorCode::Timeout);
+                    }
+                    let refreshed = match self.fresh_creation_root(&source, &resources, &focus) {
+                        Ok(value) => value,
+                        Err(code) => {
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe("source_identity", code, "none");
                             }
                             return Err(code);
                         }
                     };
-                    let Some(pid) = info.shell_pid else {
-                        if let Some(reporter) = reporter {
-                            reporter.report_shell_probe("shell_absent", ErrorCode::NotReady, "none");
+                    match process_evidence(shell.pid) {
+                        Ok(current) if current == shell => {}
+                        Ok(_) => {
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe(
+                                    "shell_process",
+                                    ErrorCode::NotReady,
+                                    "none",
+                                );
+                            }
+                            return Err(ErrorCode::NotReady);
                         }
-                        return Err(ErrorCode::NotReady);
-                    };
-                    let shell = match reported_process(&shell_reporter, pid) {
-                        Ok(value) => value,
                         Err(error) => {
                             let io = codex_invalidation_io(&error).0;
                             let code = policy(error);
@@ -4489,9 +4976,20 @@ impl Topology {
                             }
                             return Err(code);
                         }
-                    };
-                    let (executable, dialect) = match shell_executable(&shell) {
-                        Ok(value) => value,
+                    }
+                    match shell_executable(&shell) {
+                        Ok((current, current_dialect))
+                            if current == executable && current_dialect == dialect => {}
+                        Ok(_) => {
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe(
+                                    "shell_executable",
+                                    ErrorCode::NotReady,
+                                    "none",
+                                );
+                            }
+                            return Err(ErrorCode::NotReady);
+                        }
                         Err(error) => {
                             let io = codex_invalidation_io(&error).0;
                             let code = policy(error);
@@ -4500,98 +4998,20 @@ impl Topology {
                             }
                             return Err(code);
                         }
-                    };
-                    match process_evidence(shell_reporter.pid) {
-                        Ok(current) if current == shell_reporter => {}
-                        Ok(_) => {
-                            if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("shell_reporter_recheck", ErrorCode::NotReady, "none");
-                            }
-                            return Err(ErrorCode::NotReady);
-                        }
-                        Err(error) => {
-                            let io = codex_invalidation_io(&error).0;
-                            let code = policy(error);
-                            if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("shell_reporter_recheck", code, io);
-                            }
-                            return Err(code);
-                        }
                     }
-                    loop {
-                        if tokio::time::Instant::now() >= deadline {
-                            if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("shell_not_idle", ErrorCode::Timeout, "none");
-                            }
-                            return Err(ErrorCode::Timeout);
+                    if tokio::time::Instant::now() >= deadline {
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe(
+                                "shell_not_idle",
+                                ErrorCode::Timeout,
+                                "none",
+                            );
                         }
-                        {
-                            let _guard = security.native_guard(auth).await.inspect_err(|code| {
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("authorization", *code, "none");
-                                }
-                            })?;
-                        }
-                        if tokio::time::Instant::now() >= deadline {
-                            if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("shell_not_idle", ErrorCode::Timeout, "none");
-                            }
-                            return Err(ErrorCode::Timeout);
-                        }
-                        let refreshed = match self.fresh_creation_root(&source, &resources, &focus) {
-                            Ok(value) => value,
-                            Err(code) => {
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("source_identity", code, "none");
-                                }
-                                return Err(code);
-                            }
-                        };
-                        match process_evidence(shell.pid) {
-                            Ok(current) if current == shell => {}
-                            Ok(_) => {
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_process", ErrorCode::NotReady, "none");
-                                }
-                                return Err(ErrorCode::NotReady);
-                            }
-                            Err(error) => {
-                                let io = codex_invalidation_io(&error).0;
-                                let code = policy(error);
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_process", code, io);
-                                }
-                                return Err(code);
-                            }
-                        }
-                        match shell_executable(&shell) {
-                            Ok((current, current_dialect)) if current == executable && current_dialect == dialect => {}
-                            Ok(_) => {
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_executable", ErrorCode::NotReady, "none");
-                                }
-                                return Err(ErrorCode::NotReady);
-                            }
-                            Err(error) => {
-                                let io = codex_invalidation_io(&error).0;
-                                let code = policy(error);
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_executable", code, io);
-                                }
-                                return Err(code);
-                            }
-                        }
-                        if tokio::time::Instant::now() >= deadline {
-                            if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("shell_not_idle", ErrorCode::Timeout, "none");
-                            }
-                            return Err(ErrorCode::Timeout);
-                        }
-                        let client = match tokio::time::timeout_at(
-                            deadline,
-                            Client::connect_source(&refreshed),
-                        )
-                        .await
+                        return Err(ErrorCode::Timeout);
+                    }
+                    let client =
+                        match tokio::time::timeout_at(deadline, Client::connect_source(&refreshed))
+                            .await
                         {
                             Ok(Ok(client)) => client,
                             Ok(Err(error)) => {
@@ -4604,28 +5024,38 @@ impl Topology {
                             }
                             Err(_) => {
                                 if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_not_idle", ErrorCode::Timeout, "none");
+                                    reporter.report_shell_probe(
+                                        "shell_not_idle",
+                                        ErrorCode::Timeout,
+                                        "none",
+                                    );
                                 }
                                 return Err(ErrorCode::Timeout);
                             }
                         };
-                        if client.evidence != source.evidence {
-                            if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("source_identity", ErrorCode::StaleSession, "none");
-                            }
-                            return Err(ErrorCode::StaleSession);
+                    if client.evidence != source.evidence {
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe(
+                                "source_identity",
+                                ErrorCode::StaleSession,
+                                "none",
+                            );
                         }
-                        if tokio::time::Instant::now() >= deadline {
-                            if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("shell_not_idle", ErrorCode::Timeout, "none");
-                            }
-                            return Err(ErrorCode::Timeout);
+                        return Err(ErrorCode::StaleSession);
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe(
+                                "shell_not_idle",
+                                ErrorCode::Timeout,
+                                "none",
+                            );
                         }
-                        let observed = match tokio::time::timeout_at(
-                            deadline,
-                            client.process_info(&pane.pane_id),
-                        )
-                        .await
+                        return Err(ErrorCode::Timeout);
+                    }
+                    let observed =
+                        match tokio::time::timeout_at(deadline, client.process_info(&pane.pane_id))
+                            .await
                         {
                             Ok(Ok(value)) => value,
                             Ok(Err(error)) => {
@@ -4638,213 +5068,337 @@ impl Topology {
                             }
                             Err(_) => {
                                 if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_not_idle", ErrorCode::Timeout, "none");
+                                    reporter.report_shell_probe(
+                                        "shell_not_idle",
+                                        ErrorCode::Timeout,
+                                        "none",
+                                    );
                                 }
                                 return Err(ErrorCode::Timeout);
                             }
                         };
-                        if observed.shell_pid != Some(pid) {
+                    if observed.shell_pid != Some(pid) {
+                        if let Some(reporter) = reporter {
+                            reporter.report_shell_probe(
+                                "shell_process",
+                                ErrorCode::NotReady,
+                                "none",
+                            );
+                        }
+                        return Err(ErrorCode::NotReady);
+                    }
+                    match process_evidence(shell_reporter.pid) {
+                        Ok(current) if current == shell_reporter => {}
+                        Ok(_) => {
                             if let Some(reporter) = reporter {
-                                reporter.report_shell_probe("shell_process", ErrorCode::NotReady, "none");
+                                reporter.report_shell_probe(
+                                    "shell_reporter_recheck",
+                                    ErrorCode::NotReady,
+                                    "none",
+                                );
                             }
                             return Err(ErrorCode::NotReady);
                         }
-                        match process_evidence(shell_reporter.pid) {
-                            Ok(current) if current == shell_reporter => {}
-                            Ok(_) => {
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_reporter_recheck", ErrorCode::NotReady, "none");
-                                }
-                                return Err(ErrorCode::NotReady);
+                        Err(error) => {
+                            let io = codex_invalidation_io(&error).0;
+                            let code = policy(error);
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe("shell_reporter_recheck", code, io);
                             }
-                            Err(error) => {
-                                let io = codex_invalidation_io(&error).0;
-                                let code = policy(error);
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_reporter_recheck", code, io);
-                                }
-                                return Err(code);
-                            }
+                            return Err(code);
                         }
-                        match process_evidence(shell.pid) {
-                            Ok(current) if current == shell => {}
-                            Ok(_) => {
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_process", ErrorCode::NotReady, "none");
-                                }
-                                return Err(ErrorCode::NotReady);
+                    }
+                    match process_evidence(shell.pid) {
+                        Ok(current) if current == shell => {}
+                        Ok(_) => {
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe(
+                                    "shell_process",
+                                    ErrorCode::NotReady,
+                                    "none",
+                                );
                             }
-                            Err(error) => {
-                                let io = codex_invalidation_io(&error).0;
-                                let code = policy(error);
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_process", code, io);
-                                }
-                                return Err(code);
-                            }
+                            return Err(ErrorCode::NotReady);
                         }
-                        match shell_executable(&shell) {
-                            Ok((current, current_dialect))
-                                if current == executable && current_dialect == dialect => {}
-                            Ok(_) => {
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_executable", ErrorCode::NotReady, "none");
-                                }
-                                return Err(ErrorCode::NotReady);
+                        Err(error) => {
+                            let io = codex_invalidation_io(&error).0;
+                            let code = policy(error);
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe("shell_process", code, io);
                             }
-                            Err(error) => {
-                                let io = codex_invalidation_io(&error).0;
-                                let code = policy(error);
-                                if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe("shell_executable", code, io);
-                                }
-                                return Err(code);
-                            }
+                            return Err(code);
                         }
-                        match self.idle_probe_shell_classified(&refreshed, &observed) {
-                            Ok((current_shell, current_reporter, current_executable, current_dialect)) => {
-                                {
-                                    let _guard = security.native_guard(auth).await.inspect_err(|code| {
+                    }
+                    match shell_executable(&shell) {
+                        Ok((current, current_dialect))
+                            if current == executable && current_dialect == dialect => {}
+                        Ok(_) => {
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe(
+                                    "shell_executable",
+                                    ErrorCode::NotReady,
+                                    "none",
+                                );
+                            }
+                            return Err(ErrorCode::NotReady);
+                        }
+                        Err(error) => {
+                            let io = codex_invalidation_io(&error).0;
+                            let code = policy(error);
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe("shell_executable", code, io);
+                            }
+                            return Err(code);
+                        }
+                    }
+                    match self.idle_probe_shell_classified(&refreshed, &observed) {
+                        Ok((
+                            current_shell,
+                            current_reporter,
+                            current_executable,
+                            current_dialect,
+                        )) => {
+                            {
+                                let _guard =
+                                    security.native_guard(auth).await.inspect_err(|code| {
                                         if let Some(reporter) = reporter {
-                                            reporter.report_shell_probe("authorization", *code, "none");
+                                            reporter.report_shell_probe(
+                                                "authorization",
+                                                *code,
+                                                "none",
+                                            );
                                         }
                                     })?;
+                            }
+                            if tokio::time::Instant::now() >= deadline {
+                                if let Some(reporter) = reporter {
+                                    reporter.report_shell_probe(
+                                        "shell_not_idle",
+                                        ErrorCode::Timeout,
+                                        "none",
+                                    );
                                 }
-                                if tokio::time::Instant::now() >= deadline {
+                                return Err(ErrorCode::Timeout);
+                            }
+                            if let Err(code) = self.fresh_creation_root(&source, &resources, &focus)
+                            {
+                                if let Some(reporter) = reporter {
+                                    reporter.report_shell_probe("source_identity", code, "none");
+                                }
+                                return Err(code);
+                            }
+                            match process_evidence(shell_reporter.pid) {
+                                Ok(current) if current == shell_reporter => {}
+                                Ok(_) => {
                                     if let Some(reporter) = reporter {
-                                        reporter.report_shell_probe("shell_not_idle", ErrorCode::Timeout, "none");
+                                        reporter.report_shell_probe(
+                                            "shell_reporter_recheck",
+                                            ErrorCode::NotReady,
+                                            "none",
+                                        );
                                     }
-                                    return Err(ErrorCode::Timeout);
+                                    return Err(ErrorCode::NotReady);
                                 }
-                                if let Err(code) = self.fresh_creation_root(&source, &resources, &focus) {
+                                Err(error) => {
+                                    let io = codex_invalidation_io(&error).0;
+                                    let code = policy(error);
                                     if let Some(reporter) = reporter {
-                                        reporter.report_shell_probe("source_identity", code, "none");
+                                        reporter.report_shell_probe(
+                                            "shell_reporter_recheck",
+                                            code,
+                                            io,
+                                        );
                                     }
                                     return Err(code);
                                 }
-                                match process_evidence(shell_reporter.pid) {
-                                    Ok(current) if current == shell_reporter => {}
-                                    Ok(_) => {
-                                        if let Some(reporter) = reporter {
-                                            reporter.report_shell_probe("shell_reporter_recheck", ErrorCode::NotReady, "none");
-                                        }
-                                        return Err(ErrorCode::NotReady);
-                                    }
-                                    Err(error) => {
-                                        let io = codex_invalidation_io(&error).0;
-                                        let code = policy(error);
-                                        if let Some(reporter) = reporter {
-                                            reporter.report_shell_probe("shell_reporter_recheck", code, io);
-                                        }
-                                        return Err(code);
-                                    }
-                                }
-                                match process_evidence(shell.pid) {
-                                    Ok(current) if current == shell => {}
-                                    Ok(_) => {
-                                        if let Some(reporter) = reporter {
-                                            reporter.report_shell_probe("shell_process", ErrorCode::NotReady, "none");
-                                        }
-                                        return Err(ErrorCode::NotReady);
-                                    }
-                                    Err(error) => {
-                                        let io = codex_invalidation_io(&error).0;
-                                        let code = policy(error);
-                                        if let Some(reporter) = reporter {
-                                            reporter.report_shell_probe("shell_process", code, io);
-                                        }
-                                        return Err(code);
-                                    }
-                                }
-                                match shell_executable(&shell) {
-                                    Ok((current, current_dialect))
-                                        if current == executable && current_dialect == dialect => {}
-                                    Ok(_) => {
-                                        if let Some(reporter) = reporter {
-                                            reporter.report_shell_probe("shell_executable", ErrorCode::NotReady, "none");
-                                        }
-                                        return Err(ErrorCode::NotReady);
-                                    }
-                                    Err(error) => {
-                                        let io = codex_invalidation_io(&error).0;
-                                        let code = policy(error);
-                                        if let Some(reporter) = reporter {
-                                            reporter.report_shell_probe("shell_executable", code, io);
-                                        }
-                                        return Err(code);
-                                    }
-                                }
-                                if current_shell != shell || current_reporter != shell_reporter {
-                                    if let Some(reporter) = reporter {
-                                        reporter.report_shell_probe("shell_process", ErrorCode::NotReady, "none");
-                                    }
-                                    return Err(ErrorCode::NotReady);
-                                }
-                                if current_executable != executable || current_dialect != dialect {
-                                    if let Some(reporter) = reporter {
-                                        reporter.report_shell_probe("shell_executable", ErrorCode::NotReady, "none");
-                                    }
-                                    return Err(ErrorCode::NotReady);
-                                }
-                                if tokio::time::Instant::now() >= deadline {
-                                    if let Some(reporter) = reporter {
-                                        reporter.report_shell_probe("shell_not_idle", ErrorCode::Timeout, "none");
-                                    }
-                                    return Err(ErrorCode::Timeout);
-                                }
-                                break (shell, shell_reporter, executable, dialect);
                             }
-                            Err((_, _, ProbeShellGuard::ShellNotIdle)) => {}
-                            Err((code, io, guard)) => {
+                            match process_evidence(shell.pid) {
+                                Ok(current) if current == shell => {}
+                                Ok(_) => {
+                                    if let Some(reporter) = reporter {
+                                        reporter.report_shell_probe(
+                                            "shell_process",
+                                            ErrorCode::NotReady,
+                                            "none",
+                                        );
+                                    }
+                                    return Err(ErrorCode::NotReady);
+                                }
+                                Err(error) => {
+                                    let io = codex_invalidation_io(&error).0;
+                                    let code = policy(error);
+                                    if let Some(reporter) = reporter {
+                                        reporter.report_shell_probe("shell_process", code, io);
+                                    }
+                                    return Err(code);
+                                }
+                            }
+                            match shell_executable(&shell) {
+                                Ok((current, current_dialect))
+                                    if current == executable && current_dialect == dialect => {}
+                                Ok(_) => {
+                                    if let Some(reporter) = reporter {
+                                        reporter.report_shell_probe(
+                                            "shell_executable",
+                                            ErrorCode::NotReady,
+                                            "none",
+                                        );
+                                    }
+                                    return Err(ErrorCode::NotReady);
+                                }
+                                Err(error) => {
+                                    let io = codex_invalidation_io(&error).0;
+                                    let code = policy(error);
+                                    if let Some(reporter) = reporter {
+                                        reporter.report_shell_probe("shell_executable", code, io);
+                                    }
+                                    return Err(code);
+                                }
+                            }
+                            if current_shell != shell || current_reporter != shell_reporter {
                                 if let Some(reporter) = reporter {
-                                    reporter.report_shell_probe(guard.shell_probe_guard(), code, io);
+                                    reporter.report_shell_probe(
+                                        "shell_process",
+                                        ErrorCode::NotReady,
+                                        "none",
+                                    );
                                 }
-                                return Err(code);
+                                return Err(ErrorCode::NotReady);
                             }
+                            if current_executable != executable || current_dialect != dialect {
+                                if let Some(reporter) = reporter {
+                                    reporter.report_shell_probe(
+                                        "shell_executable",
+                                        ErrorCode::NotReady,
+                                        "none",
+                                    );
+                                }
+                                return Err(ErrorCode::NotReady);
+                            }
+                            if tokio::time::Instant::now() >= deadline {
+                                if let Some(reporter) = reporter {
+                                    reporter.report_shell_probe(
+                                        "shell_not_idle",
+                                        ErrorCode::Timeout,
+                                        "none",
+                                    );
+                                }
+                                return Err(ErrorCode::Timeout);
+                            }
+                            break (shell, shell_reporter, executable, dialect);
                         }
-                        tokio::time::sleep_until(
-                            deadline.min(tokio::time::Instant::now() + Duration::from_millis(200)),
-                        )
-                        .await;
+                        Err((_, _, ProbeShellGuard::ShellNotIdle)) => {}
+                        Err((code, io, guard)) => {
+                            if let Some(reporter) = reporter {
+                                reporter.report_shell_probe(guard.shell_probe_guard(), code, io);
+                            }
+                            return Err(code);
+                        }
                     }
+                    tokio::time::sleep_until(
+                        deadline.min(tokio::time::Instant::now() + Duration::from_millis(200)),
+                    )
+                    .await;
                 }
-                Err((code, io, guard)) => {
-                    if let Some(reporter) = reporter {
-                        reporter.report_shell_probe(guard.shell_probe_guard(), code, io);
-                    }
-                    return Err(code);
+            }
+            Err((code, io, guard)) => {
+                if let Some(reporter) = reporter {
+                    reporter.report_shell_probe(guard.shell_probe_guard(), code, io);
                 }
-            };
+                return Err(code);
+            }
+        };
         // This is independent kernel-cwd object proof, not a snapshot cwd or the
         // input-sending wrapper-resolution query. Failure cannot admit that query.
-        selection.validate(self,params).and_then(|_|selection.retain_shell(shell.clone())).inspect_err(|code| {
-            if let Some(reporter)=reporter {reporter.report_shell_probe("creation_directory",*code,"none");}
-        })?;
-        Ok(Some(PreparedShell{action,params,selection,deadline,resources,focus,source,info,
-            shell,original_reporter,executable,dialect}))
+        selection
+            .validate(self, params)
+            .and_then(|_| selection.retain_shell(shell.clone()))
+            .inspect_err(|code| {
+                if let Some(reporter) = reporter {
+                    reporter.report_shell_probe("creation_directory", *code, "none");
+                }
+            })?;
+        Ok(Some(PreparedShell {
+            action,
+            params,
+            selection,
+            deadline,
+            resources,
+            focus,
+            source,
+            info,
+            shell,
+            original_reporter,
+            executable,
+            dialect,
+        }))
     }
-    pub(crate) async fn uncertain_creation(&self,auth:&Authorized,action:&Uuid,code:ErrorCode)->SecurityResult<Receipt> {
-        let proof=auth.proof.clone();let id=action.clone();
-        self.storage.call(move|store| {
-            let current=store.status(&proof,&id,pairing::now_ms())?.ok_or(StorageError::Policy(ErrorCode::NotFound))?;
-            if !matches!(current.state,ReceiptState::Reserved|ReceiptState::Dispatching){return Ok(current)}
-            if current.creation.as_ref().is_none_or(|creation|creation.resources.workspace_id.is_none()) {
-                return Err(StorageError::Policy(code));
-            }
-            store.transition(&proof,&id,ReceiptTransition{state:ReceiptState::Uncertain,
-                proof:TransitionProof::LostOutcome,result:None,error:Some(crate::transport::wire_error(code)),at:pairing::now_ms()})
-        }).await.map_err(pairing::store_error)
+    pub(crate) async fn uncertain_creation(
+        &self,
+        auth: &Authorized,
+        action: &Uuid,
+        code: ErrorCode,
+    ) -> SecurityResult<Receipt> {
+        let proof = auth.proof.clone();
+        let id = action.clone();
+        self.storage
+            .call(move |store| {
+                let current = store
+                    .status(&proof, &id, pairing::now_ms())?
+                    .ok_or(StorageError::Policy(ErrorCode::NotFound))?;
+                if !matches!(
+                    current.state,
+                    ReceiptState::Reserved | ReceiptState::Dispatching
+                ) {
+                    return Ok(current);
+                }
+                if current
+                    .creation
+                    .as_ref()
+                    .is_none_or(|creation| creation.resources.workspace_id.is_none())
+                {
+                    return Err(StorageError::Policy(code));
+                }
+                store.transition(
+                    &proof,
+                    &id,
+                    ReceiptTransition {
+                        state: ReceiptState::Uncertain,
+                        proof: TransitionProof::LostOutcome,
+                        result: None,
+                        error: Some(crate::transport::wire_error(code)),
+                        at: pairing::now_ms(),
+                    },
+                )
+            })
+            .await
+            .map_err(pairing::store_error)
     }
     pub(crate) async fn shell_probe_once_reported(
         &self,
-        security:&Security,
-        auth:&Authorized,
-        prepared:PreparedShell<'_>,
-        reporter:Option<&OmpCreationReporter>,
-    )->SecurityResult<Receipt> {
-        let PreparedShell{action,params,selection,deadline,resources,focus,source,info,
-            shell,original_reporter,executable,dialect}=prepared;
-        let pane=source.snapshot.pane(resources.pane_id.as_ref().ok_or(ErrorCode::NotReady)?).map_err(policy)?;
+        security: &Security,
+        auth: &Authorized,
+        prepared: PreparedShell<'_>,
+        reporter: Option<&OmpCreationReporter>,
+    ) -> SecurityResult<Receipt> {
+        let PreparedShell {
+            action,
+            params,
+            selection,
+            deadline,
+            resources,
+            focus,
+            source,
+            info,
+            shell,
+            original_reporter,
+            executable,
+            dialect,
+        } = prepared;
+        let pane = source
+            .snapshot
+            .pane(resources.pane_id.as_ref().ok_or(ErrorCode::NotReady)?)
+            .map_err(policy)?;
         let attempt = Uuid::random();
         let mut artifact = match ProbeArtifact::create(&self.config, &attempt, &shell) {
             Ok(artifact) => artifact,
@@ -4976,7 +5530,9 @@ impl Topology {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(ErrorCode::Timeout.into());
                     }
-                    selection.validate(self,params).map_err(|code| CreationAdmissionFailure::guarded(code, CreationAdmissionGuard::Directory))?;
+                    selection.validate(self, params).map_err(|code| {
+                        CreationAdmissionFailure::guarded(code, CreationAdmissionGuard::Directory)
+                    })?;
                     self.fresh_creation_root(&source, &resources, &focus)
                         .map_err(|code| {
                             CreationAdmissionFailure::guarded(code, CreationAdmissionGuard::Root)
@@ -5128,16 +5684,19 @@ impl Topology {
         {
             return Ok(submitted);
         }
-        let capture_deadline=reporter.is_some_and(OmpCreationReporter::backend_capture);
-        let mut deadline_detail=None;
+        let capture_deadline = reporter.is_some_and(OmpCreationReporter::backend_capture);
+        let mut deadline_detail = None;
         let matched = loop {
-            let loop_now=tokio::time::Instant::now();
-            if capture_deadline&&deadline_detail.is_none() {
-                deadline_detail=Some((ProbeObservation::NotRead,probe_entry_budget(loop_now,deadline)));
+            let loop_now = tokio::time::Instant::now();
+            if capture_deadline && deadline_detail.is_none() {
+                deadline_detail = Some((
+                    ProbeObservation::NotRead,
+                    probe_entry_budget(loop_now, deadline),
+                ));
             }
             if loop_now >= deadline {
                 if let Some(reporter) = reporter {
-                    reporter.report_probe_deadline("loop_check",deadline_detail);
+                    reporter.report_probe_deadline("loop_check", deadline_detail);
                 }
                 self.report_codex_shell_probe(
                     params.provider,
@@ -5162,7 +5721,7 @@ impl Topology {
             }
             if tokio::time::Instant::now() >= deadline {
                 if let Some(reporter) = reporter {
-                    reporter.report_probe_deadline("after_authorization",deadline_detail);
+                    reporter.report_probe_deadline("after_authorization", deadline_detail);
                 }
                 self.report_codex_shell_probe(
                     params.provider,
@@ -5192,7 +5751,11 @@ impl Topology {
             })?;
             if current_shell != shell {
                 if let Some(reporter) = reporter {
-                    reporter.report_shell_probe("result_shell_changed", ErrorCode::NotReady, "none");
+                    reporter.report_shell_probe(
+                        "result_shell_changed",
+                        ErrorCode::NotReady,
+                        "none",
+                    );
                 }
                 self.report_codex_shell_probe(
                     params.provider,
@@ -5223,11 +5786,13 @@ impl Topology {
                     break None;
                 }
             };
-            if let Some((observation,_))=&mut deadline_detail {observation.observe(&bytes);}
+            if let Some((observation, _)) = &mut deadline_detail {
+                observation.observe(&bytes);
+            }
             if bytes.ends_with(b"\n") {
                 if tokio::time::Instant::now() >= deadline {
                     if let Some(reporter) = reporter {
-                        reporter.report_probe_deadline("complete_before_parse",deadline_detail);
+                        reporter.report_probe_deadline("complete_before_parse", deadline_detail);
                     }
                     self.report_codex_shell_probe(
                         params.provider,
@@ -5280,7 +5845,11 @@ impl Topology {
             }
             Some(ShellProbeResult::RejectedKind) => {
                 if let Some(reporter) = reporter {
-                    reporter.report_shell_probe("result_rejected_kind", ErrorCode::NotReady, "none");
+                    reporter.report_shell_probe(
+                        "result_rejected_kind",
+                        ErrorCode::NotReady,
+                        "none",
+                    );
                 }
                 self.report_codex_shell_probe(
                     params.provider,
@@ -5292,7 +5861,11 @@ impl Topology {
             }
             Some(ShellProbeResult::RejectedPath) => {
                 if let Some(reporter) = reporter {
-                    reporter.report_shell_probe("result_rejected_path", ErrorCode::NotReady, "none");
+                    reporter.report_shell_probe(
+                        "result_rejected_path",
+                        ErrorCode::NotReady,
+                        "none",
+                    );
                 }
                 self.report_codex_shell_probe(
                     params.provider,
@@ -5318,7 +5891,7 @@ impl Topology {
         };
         let matched = if matched == Some(true) && tokio::time::Instant::now() >= deadline {
             if let Some(reporter) = reporter {
-                reporter.report_probe_deadline("parsed_success",deadline_detail);
+                reporter.report_probe_deadline("parsed_success", deadline_detail);
             }
             self.report_codex_shell_probe(
                 params.provider,
@@ -5358,7 +5931,7 @@ impl Topology {
             ErrorCode::StaleSession
         };
         let final_scope = || -> SecurityResult<Source> {
-            selection.validate(self,params)?;
+            selection.validate(self, params)?;
             let refreshed = self
                 .fresh_creation_root_classified(&source, &resources, &focus)
                 .inspect_err(|(code, guard)| {
@@ -5371,24 +5944,29 @@ impl Topology {
                 })
                 .map_err(|(code, _)| code)?;
             if process_evidence(original_reporter.pid)
-                .map_err(|error| final_io("final_shell_reporter", error))? != original_reporter
+                .map_err(|error| final_io("final_shell_reporter", error))?
+                != original_reporter
             {
                 return Err(final_changed());
             }
             let pid = info.shell_pid.ok_or_else(final_changed)?;
             if process_evidence(shell.pid)
-                .map_err(|error| final_io("final_shell_process", error))? != shell
+                .map_err(|error| final_io("final_shell_process", error))?
+                != shell
                 || !reported_pid_matches(&original_reporter, &shell, pid)
             {
                 return Err(final_changed());
             }
             let (path, current_dialect) = shell_executable(&shell)
                 .map_err(|error| final_io("final_shell_executable", error))?;
-            if path != executable || current_dialect != dialect
+            if path != executable
+                || current_dialect != dialect
                 || process_evidence(shell.pid)
-                    .map_err(|error| final_io("final_shell_process", error))? != shell
+                    .map_err(|error| final_io("final_shell_process", error))?
+                    != shell
                 || process_evidence(original_reporter.pid)
-                    .map_err(|error| final_io("final_shell_reporter_recheck", error))? != original_reporter
+                    .map_err(|error| final_io("final_shell_reporter_recheck", error))?
+                    != original_reporter
             {
                 return Err(final_changed());
             }
@@ -5407,9 +5985,15 @@ impl Topology {
                 }
                 {
                     let _guard = tokio::time::timeout_at(deadline, security.native_guard(auth))
-                        .await.map_err(|_| final_deadline())?
+                        .await
+                        .map_err(|_| final_deadline())?
                         .inspect_err(|code| {
-                            self.report_codex_shell_probe(params.provider, "final_authorization", *code, "none");
+                            self.report_codex_shell_probe(
+                                params.provider,
+                                "final_authorization",
+                                *code,
+                                "none",
+                            );
                         })?;
                 }
                 if tokio::time::Instant::now() >= deadline {
@@ -5420,22 +6004,30 @@ impl Topology {
                     return Err(final_deadline());
                 }
                 let client = tokio::time::timeout_at(deadline, Client::connect_source(&refreshed))
-                    .await.map_err(|_| final_deadline())?
+                    .await
+                    .map_err(|_| final_deadline())?
                     .map_err(|error| final_io("final_connect", error))?;
                 if tokio::time::Instant::now() >= deadline {
                     return Err(final_deadline());
                 }
                 final_scope()?;
                 if client.evidence != source.evidence {
-                    self.report_codex_shell_probe(params.provider, "final_identity", ErrorCode::StaleSession, "none");
+                    self.report_codex_shell_probe(
+                        params.provider,
+                        "final_identity",
+                        ErrorCode::StaleSession,
+                        "none",
+                    );
                     return Err(ErrorCode::StaleSession);
                 }
                 if tokio::time::Instant::now() >= deadline {
                     return Err(final_deadline());
                 }
-                let observed = tokio::time::timeout_at(deadline, client.process_info(&probe.pane_id))
-                    .await.map_err(|_| final_deadline())?
-                    .map_err(|error| final_io("final_process_info", error))?;
+                let observed =
+                    tokio::time::timeout_at(deadline, client.process_info(&probe.pane_id))
+                        .await
+                        .map_err(|_| final_deadline())?
+                        .map_err(|error| final_io("final_process_info", error))?;
                 if tokio::time::Instant::now() >= deadline {
                     return Err(final_deadline());
                 }
@@ -5445,8 +6037,10 @@ impl Topology {
                 }
                 match self.idle_probe_shell_classified(&refreshed, &observed) {
                     Ok((actual, shell_reporter, path, current_dialect)) => {
-                        if actual != shell || shell_reporter != original_reporter
-                            || path != executable || current_dialect != dialect
+                        if actual != shell
+                            || shell_reporter != original_reporter
+                            || path != executable
+                            || current_dialect != dialect
                         {
                             return Err(final_changed());
                         }
@@ -5454,17 +6048,25 @@ impl Topology {
                             return Err(final_deadline());
                         }
                         {
-                            let _guard = tokio::time::timeout_at(deadline, security.native_guard(auth))
-                                .await.map_err(|_| final_deadline())?
-                                .inspect_err(|code| {
-                                    self.report_codex_shell_probe(params.provider, "final_authorization", *code, "none");
-                                })?;
+                            let _guard =
+                                tokio::time::timeout_at(deadline, security.native_guard(auth))
+                                    .await
+                                    .map_err(|_| final_deadline())?
+                                    .inspect_err(|code| {
+                                        self.report_codex_shell_probe(
+                                            params.provider,
+                                            "final_authorization",
+                                            *code,
+                                            "none",
+                                        );
+                                    })?;
                         }
                         if tokio::time::Instant::now() >= deadline {
                             return Err(final_deadline());
                         }
                         let refreshed = final_scope()?;
-                        artifact.recheck(&shell)
+                        artifact
+                            .recheck(&shell)
                             .map_err(|error| final_io("final_result_view", error))?;
                         break Some((refreshed, observed, shell_reporter));
                     }
@@ -5475,10 +6077,16 @@ impl Topology {
                         }
                         tokio::time::sleep_until(
                             deadline.min(tokio::time::Instant::now() + Duration::from_millis(200)),
-                        ).await;
+                        )
+                        .await;
                     }
                     Err((code, io, guard)) => {
-                        self.report_codex_shell_probe(params.provider, guard.final_shell_probe_guard(), code, io);
+                        self.report_codex_shell_probe(
+                            params.provider,
+                            guard.final_shell_probe_guard(),
+                            code,
+                            io,
+                        );
                         return Err(code);
                     }
                 }
@@ -5499,19 +6107,19 @@ impl Topology {
             tokio::time::timeout_at(deadline, security.native_guard(auth))
                 .await
                 .map_err(|_| {
-                    self.report_codex_shell_probe(params.provider, "final_deadline", ErrorCode::Timeout, "none");
+                    self.report_codex_shell_probe(
+                        params.provider,
+                        "final_deadline",
+                        ErrorCode::Timeout,
+                        "none",
+                    );
                     ErrorCode::Timeout
                 })?
         } else {
             security.native_guard(auth).await
         };
         let _guard = final_authorization.inspect_err(|code| {
-            self.report_codex_shell_probe(
-                params.provider,
-                "final_authorization",
-                *code,
-                "none",
-            );
+            self.report_codex_shell_probe(params.provider, "final_authorization", *code, "none");
         })?;
         if valid.is_some() && tokio::time::Instant::now() >= deadline {
             self.report_codex_shell_probe(
@@ -5588,7 +6196,7 @@ impl Topology {
         auth: &Authorized,
         action: &Uuid,
         params: &SessionCreateParams,
-        selection:&CreationSelection,
+        selection: &CreationSelection,
     ) -> SecurityResult<Receipt> {
         let current = self.receipt(security, auth, action).await?;
         let progress = current.creation.as_ref().ok_or(ErrorCode::InvalidRequest)?;
@@ -5604,10 +6212,10 @@ impl Topology {
         {
             return Err(ErrorCode::InvalidRequest);
         }
-        let source = selection.validate(self,params)?;
+        let source = selection.validate(self, params)?;
         self.validate_topology_stage(&source, params, None)?;
         let project = selection.directory(params)?;
-        let placement=selection.workspace().cloned();
+        let placement = selection.workspace().cloned();
         let client = Client::connect_source(&source).await.map_err(policy)?;
         if client.evidence != source.evidence {
             return Err(ErrorCode::StaleSession);
@@ -5616,10 +6224,11 @@ impl Topology {
         let mut metadata = client.metadata();
         metadata.socket_epoch = Some(source.incarnation.clone());
         metadata.focused_workspace_id = source.snapshot.focused_workspace_id.clone();
-        metadata.placement_workspace_id=placement.clone();
+        metadata.placement_workspace_id = placement.clone();
         let mut effect_metadata = metadata.clone();
         let label = params.name.clone();
-        self.begin_creation_shell_fence(auth,action,&source).await?;
+        self.begin_creation_shell_fence(auth, action, &source)
+            .await?;
         let entered=security
             .creation_boundary(
                 auth,
@@ -5686,21 +6295,33 @@ impl Topology {
             )
             .await;
         let receipt = self.receipt(security, auth, action).await?;
-        if let Err(code)=entered {
-            if matches!(receipt.state,ReceiptState::Reserved|ReceiptState::Failed)
-                &&receipt.creation.as_ref().is_some_and(|progress|progress.resources.workspace_id.is_none()
-                    &&progress.resources.pane_id.is_none()&&progress.resources.terminal_id.is_none())
-            {let _=self.release_creation_shell_fence(auth,action).await;}
+        if let Err(code) = entered {
+            if matches!(receipt.state, ReceiptState::Reserved | ReceiptState::Failed)
+                && receipt.creation.as_ref().is_some_and(|progress| {
+                    progress.resources.workspace_id.is_none()
+                        && progress.resources.pane_id.is_none()
+                        && progress.resources.terminal_id.is_none()
+                })
+            {
+                let _ = self.release_creation_shell_fence(auth, action).await;
+            }
             return Err(code);
         }
-        if let Some(progress)=&receipt.creation {
-            if progress.stage_state==StageState::Confirmed {
-                if let (Some(pane),Some(terminal))=(&progress.resources.pane_id,&progress.resources.terminal_id) {
-                    self.narrow_creation_shell_fence(auth,action,pane,terminal).await?;
+        if let Some(progress) = &receipt.creation {
+            if progress.stage_state == StageState::Confirmed {
+                if let (Some(pane), Some(terminal)) =
+                    (&progress.resources.pane_id, &progress.resources.terminal_id)
+                {
+                    self.narrow_creation_shell_fence(auth, action, pane, terminal)
+                        .await?;
                 }
-            }else if progress.stage_state==StageState::Failed&&progress.resources.workspace_id.is_none()
-                &&progress.resources.pane_id.is_none()&&progress.resources.terminal_id.is_none()
-            {self.release_creation_shell_fence(auth,action).await?;}
+            } else if progress.stage_state == StageState::Failed
+                && progress.resources.workspace_id.is_none()
+                && progress.resources.pane_id.is_none()
+                && progress.resources.terminal_id.is_none()
+            {
+                self.release_creation_shell_fence(auth, action).await?;
+            }
         }
         if receipt
             .creation
@@ -5746,7 +6367,7 @@ impl Topology {
         source: &Source,
         resources: &CreationResources,
         provider: Provider,
-        selection:&CreationSelection,
+        selection: &CreationSelection,
     ) -> io::Result<()> {
         let client = match Client::connect_source(source).await {
             Ok(client) => client,
@@ -5850,8 +6471,13 @@ impl Topology {
             return Err(error);
         }
         if !selection.matches_created(pane) {
-            let error=invalid("authoritative created tab membership changed");
-            self.report_codex_shell_probe_error(provider,"workspace_confirm_tab",ErrorCode::StaleSession,&error);
+            let error = invalid("authoritative created tab membership changed");
+            self.report_codex_shell_probe_error(
+                provider,
+                "workspace_confirm_tab",
+                ErrorCode::StaleSession,
+                &error,
+            );
             return Err(error);
         }
         Ok(())
@@ -5865,10 +6491,10 @@ impl Topology {
         auth: &Authorized,
         action: &Uuid,
         params: &SessionCreateParams,
-        selection:&CreationSelection,
+        selection: &CreationSelection,
         args: Vec<String>,
     ) -> SecurityResult<Receipt> {
-        self.launch_once_reported(security, auth, action, (params,selection), args, None)
+        self.launch_once_reported(security, auth, action, (params, selection), args, None)
             .await
     }
     pub(crate) async fn launch_once_reported(
@@ -5876,7 +6502,7 @@ impl Topology {
         security: &Security,
         auth: &Authorized,
         action: &Uuid,
-        (params,selection):(&SessionCreateParams,&CreationSelection),
+        (params, selection): (&SessionCreateParams, &CreationSelection),
         args: Vec<String>,
         reporter: Option<OmpCreationReporter>,
     ) -> SecurityResult<Receipt> {
@@ -5912,12 +6538,18 @@ impl Topology {
         let source = match self.source(&params.server_id) {
             Ok(source) => source,
             Err(code) => {
-                if let Some(reporter) = &reporter { reporter.report_launch_preflight("source_lookup", code, "none"); }
+                if let Some(reporter) = &reporter {
+                    reporter.report_launch_preflight("source_lookup", code, "none");
+                }
                 return Err(code);
             }
         };
-        if let Err((code, guard, io)) = self.validate_topology_stage_classified(&source, params, Some((&resources, action))) {
-            if let Some(reporter) = &reporter { reporter.report_launch_preflight(guard, code, io); }
+        if let Err((code, guard, io)) =
+            self.validate_topology_stage_classified(&source, params, Some((&resources, action)))
+        {
+            if let Some(reporter) = &reporter {
+                reporter.report_launch_preflight(guard, code, io);
+            }
             return Err(code);
         }
         let proof = auth.proof.clone();
@@ -5927,8 +6559,12 @@ impl Topology {
             .call(move |s| s.creation_probe(&proof, &id))
             .await
             .map_err(pairing::store_error)?;
-        if let Err((code, io, guard)) = self.fresh_probe_root_classified(&source, &resources, &probe.focused_workspace_id) {
-            if let Some(reporter) = &reporter { reporter.report_launch_preflight(guard.immediate_guard(), code, io); }
+        if let Err((code, io, guard)) =
+            self.fresh_probe_root_classified(&source, &resources, &probe.focused_workspace_id)
+        {
+            if let Some(reporter) = &reporter {
+                reporter.report_launch_preflight(guard.immediate_guard(), code, io);
+            }
             return Err(code);
         }
         if source
@@ -5942,14 +6578,26 @@ impl Topology {
         let pane = match resources.pane_id.clone() {
             Some(pane) => pane,
             None => {
-                if let Some(reporter) = &reporter { reporter.report_launch_preflight("resource_pane_absent", ErrorCode::NotReady, "none"); }
+                if let Some(reporter) = &reporter {
+                    reporter.report_launch_preflight(
+                        "resource_pane_absent",
+                        ErrorCode::NotReady,
+                        "none",
+                    );
+                }
                 return Err(ErrorCode::NotReady);
             }
         };
         let terminal = match resources.terminal_id.clone() {
             Some(terminal) => terminal,
             None => {
-                if let Some(reporter) = &reporter { reporter.report_launch_preflight("resource_terminal_absent", ErrorCode::NotReady, "none"); }
+                if let Some(reporter) = &reporter {
+                    reporter.report_launch_preflight(
+                        "resource_terminal_absent",
+                        ErrorCode::NotReady,
+                        "none",
+                    );
+                }
                 return Err(ErrorCode::NotReady);
             }
         };
@@ -5958,12 +6606,20 @@ impl Topology {
             Err(error) => {
                 let io = codex_invalidation_io(&error).0;
                 let code = policy(error);
-                if let Some(reporter) = &reporter { reporter.report_launch_preflight("process_connect", code, io); }
+                if let Some(reporter) = &reporter {
+                    reporter.report_launch_preflight("process_connect", code, io);
+                }
                 return Err(code);
             }
         };
         if process_client.evidence != source.evidence {
-            if let Some(reporter) = &reporter { reporter.report_launch_preflight("process_evidence", ErrorCode::StaleSession, "none"); }
+            if let Some(reporter) = &reporter {
+                reporter.report_launch_preflight(
+                    "process_evidence",
+                    ErrorCode::StaleSession,
+                    "none",
+                );
+            }
             return Err(ErrorCode::StaleSession);
         }
         let observed = match process_client.process_info(&pane).await {
@@ -5971,27 +6627,47 @@ impl Topology {
             Err(error) => {
                 let io = codex_invalidation_io(&error).0;
                 let code = policy(error);
-                if let Some(reporter) = &reporter { reporter.report_launch_preflight("process_info", code, io); }
+                if let Some(reporter) = &reporter {
+                    reporter.report_launch_preflight("process_info", code, io);
+                }
                 return Err(code);
             }
         };
         let (shell, _, executable, _) = match self.idle_probe_shell_classified(&source, &observed) {
             Ok(shell) => shell,
             Err((code, io, guard)) => {
-                if let Some(reporter) = &reporter { reporter.report_launch_preflight(guard.shell_probe_guard(), code, io); }
+                if let Some(reporter) = &reporter {
+                    reporter.report_launch_preflight(guard.shell_probe_guard(), code, io);
+                }
                 return Err(code);
             }
         };
         if shell != probe.shell {
-            if let Some(reporter) = &reporter { reporter.report_launch_preflight("original_shell_mismatch", ErrorCode::StaleSession, "none"); }
+            if let Some(reporter) = &reporter {
+                reporter.report_launch_preflight(
+                    "original_shell_mismatch",
+                    ErrorCode::StaleSession,
+                    "none",
+                );
+            }
             return Err(ErrorCode::StaleSession);
         }
         if executable.to_str() != Some(probe.executable.as_str()) {
-            if let Some(reporter) = &reporter { reporter.report_launch_preflight("original_executable_mismatch", ErrorCode::StaleSession, "none"); }
+            if let Some(reporter) = &reporter {
+                reporter.report_launch_preflight(
+                    "original_executable_mismatch",
+                    ErrorCode::StaleSession,
+                    "none",
+                );
+            }
             return Err(ErrorCode::StaleSession);
         }
-        if let Err((code, guard, io)) = self.validate_topology_stage_classified(&source, params, Some((&resources, action))) {
-            if let Some(reporter) = &reporter { reporter.report_launch_preflight(guard, code, io); }
+        if let Err((code, guard, io)) =
+            self.validate_topology_stage_classified(&source, params, Some((&resources, action)))
+        {
+            if let Some(reporter) = &reporter {
+                reporter.report_launch_preflight(guard, code, io);
+            }
             return Err(code);
         }
         let client = match Client::connect_source(&source).await {
@@ -5999,12 +6675,20 @@ impl Topology {
             Err(error) => {
                 let io = codex_invalidation_io(&error).0;
                 let code = policy(error);
-                if let Some(reporter) = &reporter { reporter.report_launch_preflight("launch_connect", code, io); }
+                if let Some(reporter) = &reporter {
+                    reporter.report_launch_preflight("launch_connect", code, io);
+                }
                 return Err(code);
             }
         };
         if client.evidence != source.evidence {
-            if let Some(reporter) = &reporter { reporter.report_launch_preflight("launch_evidence", ErrorCode::StaleSession, "none"); }
+            if let Some(reporter) = &reporter {
+                reporter.report_launch_preflight(
+                    "launch_evidence",
+                    ErrorCode::StaleSession,
+                    "none",
+                );
+            }
             return Err(ErrorCode::StaleSession);
         }
         let fd = match client.fence_socket() {
@@ -6012,7 +6696,9 @@ impl Topology {
             Err(error) => {
                 let io = codex_invalidation_io(&error).0;
                 let code = policy(error);
-                if let Some(reporter) = &reporter { reporter.report_launch_preflight("launch_socket_fence", code, io); }
+                if let Some(reporter) = &reporter {
+                    reporter.report_launch_preflight("launch_socket_fence", code, io);
+                }
                 return Err(code);
             }
         };
@@ -6178,9 +6864,11 @@ impl Topology {
         // A pin is captured only at installation. Later topology refreshes never replace it.
         let terminal_read_pin = pane.read_identity.clone();
         state.summary.capabilities.terminal_read = false;
-        state.summary.capabilities.terminal_create = self.terminal_creation_available(&source,&state.summary.workspace_id);
+        state.summary.capabilities.terminal_create =
+            self.terminal_creation_available(&source, &state.summary.workspace_id);
         state.summary.capabilities.workspace_rename = true;
-        state.summary.capabilities.agent_rename = positive_agent_alias(&source.snapshot,pane,state.summary.provider);
+        state.summary.capabilities.agent_rename =
+            positive_agent_alias(&source.snapshot, pane, state.summary.provider);
         let proven = key.clone();
         let target = self
             .storage
@@ -6536,18 +7224,32 @@ impl Topology {
             .filter_map(|r| r.source.as_ref())
             .map(|s| (&s.server_id, s))
             .collect();
-        let shells=self.shell_inventory(&inner);
-        for graph in &mut hierarchy {for pane in &mut graph.panes {
-            if pane.target.is_none() && pane.unbound_row_id.is_none() {
-                pane.shell_target=shells.iter().find(|(summary,_)|summary.server_id==graph.server_id && summary.pane_id==pane.pane_id && summary.terminal_id==pane.terminal_id && summary.workspace_id==pane.workspace_id && summary.tab_id==pane.tab_id && summary.connectivity==SessionConnectivity::Ready).map(|(summary,_)|summary.target.clone());
+        let shells = self.shell_inventory(&inner);
+        for graph in &mut hierarchy {
+            for pane in &mut graph.panes {
+                if pane.target.is_none() && pane.unbound_row_id.is_none() {
+                    pane.shell_target = shells
+                        .iter()
+                        .find(|(summary, _)| {
+                            summary.server_id == graph.server_id
+                                && summary.pane_id == pane.pane_id
+                                && summary.terminal_id == pane.terminal_id
+                                && summary.workspace_id == pane.workspace_id
+                                && summary.tab_id == pane.tab_id
+                                && summary.connectivity == SessionConnectivity::Ready
+                        })
+                        .map(|(summary, _)| summary.target.clone());
+                }
             }
-        }}
+        }
         self.state.replace_inventory(
-            servers,
-            self.config.projects(),
-            shells,
-            unbound,
-            hierarchy,
+            crate::state::NativeInventory {
+                servers,
+                projects: self.config.projects(),
+                shells,
+                unbound,
+                hierarchy,
+            },
             &association_epochs,
             |graphs| {
                 for h in graphs {
@@ -6941,11 +7643,19 @@ impl Topology {
                 .await?;
             tokio::select! { _ = stop.changed() => {}, _ = tokio::time::sleep(Duration::from_secs(5)) => {} }
         };
-        self.terminal_stopping.store(true,Ordering::Release);
+        self.terminal_stopping.store(true, Ordering::Release);
         // A permit covers precommit registration AND the actual job. Late SQLite callbacks
         // cannot escape shutdown merely because their original transport waiter disappeared.
-        let _all_terminal_jobs=self.terminal_slots.clone().acquire_many_owned(shells::CREATION_JOBS).await.map_err(|_|limit())?;
-        {let mut terminal_jobs=self.terminal_jobs.lock().expect("terminal creation jobs");while terminal_jobs.try_join_next().is_some(){}}
+        let _all_terminal_jobs = self
+            .terminal_slots
+            .clone()
+            .acquire_many_owned(shells::CREATION_JOBS)
+            .await
+            .map_err(|_| limit())?;
+        {
+            let mut terminal_jobs = self.terminal_jobs.lock().expect("terminal creation jobs");
+            while terminal_jobs.try_join_next().is_some() {}
+        }
         for (_, (job, _)) in jobs {
             job.abort();
             let _ = job.await;
@@ -6960,124 +7670,122 @@ impl Topology {
         discovered: io::Result<Vec<DiscoveredSlot>>,
     ) -> io::Result<()> {
         match discovered {
-                Ok(slots) => {
-                    let wanted: HashSet<_> = slots
-                        .iter()
-                        .map(|s| serde_json::to_string(&(&s.socket_path, &s.name)))
-                        .collect::<Result<_, _>>()?;
-                    let obsolete: Vec<_> = self
-                        .inner
-                        .lock()
-                        .expect("topology mutex")
-                        .servers
-                        .values()
-                        .filter(|s| !wanted.contains(&s.slot))
-                        .map(|s| (s.server_id.clone(), s.slot.clone()))
-                        .collect();
-                    for (server, slot) in obsolete {
-                        if let Some((job, _)) = jobs.remove(&server) {
-                            job.abort();
-                            let _ = job.await;
-                        }
-                        self.unavailable(&server, "Herdr logical slot is no longer discovered")
-                            .await
-                            .map_err(|_| limit())?;
-                        let removed = self
-                            .storage
-                            .call(move |s| s.retire_server_mapping(&slot, false, pairing::now_ms()))
-                            .await
-                            .map_err(store_io)?;
-                        if removed {
-                            self.inner
-                                .lock()
-                                .expect("topology mutex")
-                                .servers
-                                .remove(&server);
-                        }
+            Ok(slots) => {
+                let wanted: HashSet<_> = slots
+                    .iter()
+                    .map(|s| serde_json::to_string(&(&s.socket_path, &s.name)))
+                    .collect::<Result<_, _>>()?;
+                let obsolete: Vec<_> = self
+                    .inner
+                    .lock()
+                    .expect("topology mutex")
+                    .servers
+                    .values()
+                    .filter(|s| !wanted.contains(&s.slot))
+                    .map(|s| (s.server_id.clone(), s.slot.clone()))
+                    .collect();
+                for (server, slot) in obsolete {
+                    if let Some((job, _)) = jobs.remove(&server) {
+                        job.abort();
+                        let _ = job.await;
                     }
-                    let mut present = HashSet::new();
-                    for slot in slots {
-                        let logical =
-                            serde_json::to_string(&(slot.socket_path.clone(), slot.name.clone()))?;
-                        let name =
-                            Label::new(&slot.name).map_err(|_| invalid("invalid slot name"))?;
-                        let label = name.clone();
-                        let key = logical.clone();
-                        let id = self
-                            .storage
-                            .call(move |s| s.enroll_server(&key, &label))
-                            .await
-                            .map_err(store_io)?;
-                        present.insert(id.clone());
+                    self.unavailable(&server, "Herdr logical slot is no longer discovered")
+                        .await
+                        .map_err(|_| limit())?;
+                    let removed = self
+                        .storage
+                        .call(move |s| s.retire_server_mapping(&slot, false, pairing::now_ms()))
+                        .await
+                        .map_err(store_io)?;
+                    if removed {
                         self.inner
                             .lock()
                             .expect("topology mutex")
                             .servers
-                            .entry(id.clone())
-                            .or_insert(ServerRecord {
-                                slot: logical,
-                                name,
-                                path: slot.socket_path.clone(),
-                                server_id: id.clone(),
-                                source: None,
-                                reason: Some(
-                                    "Herdr process/socket/namespace evidence is not established"
-                                        .into(),
-                                ),
-                                coarse_shell: None,
-                            });
-                        if let Some((job, refresh)) = jobs.get(&id)
-                            && !job.is_finished()
-                        {
-                            refresh.send_replace(());
-                            continue;
-                        }
-                        let owner = self.clone();
-                        let server = id.clone();
-                        let rx = stop.clone();
-                        let (refresh, refresh_rx) = watch::channel(());
-                        jobs.insert(
-                            id,
-                            (
-                                tokio::spawn(async move {
-                                    owner.follow(server, slot.socket_path, rx, refresh_rx).await;
-                                }),
-                                refresh,
-                            ),
-                        );
+                            .remove(&server);
                     }
-                    for (id, (job, _)) in jobs.iter() {
-                        if !present.contains(id) {
-                            job.abort();
-                            let _ = self
-                                .unavailable(id, "Herdr source is absent from discovery")
-                                .await;
-                        }
-                    }
-                    self.publish().map_err(|_| limit())?;
                 }
-                Err(error) => {
-                    let ids: Vec<_> = self
-                        .inner
+                let mut present = HashSet::new();
+                for slot in slots {
+                    let logical =
+                        serde_json::to_string(&(slot.socket_path.clone(), slot.name.clone()))?;
+                    let name = Label::new(&slot.name).map_err(|_| invalid("invalid slot name"))?;
+                    let label = name.clone();
+                    let key = logical.clone();
+                    let id = self
+                        .storage
+                        .call(move |s| s.enroll_server(&key, &label))
+                        .await
+                        .map_err(store_io)?;
+                    present.insert(id.clone());
+                    self.inner
                         .lock()
                         .expect("topology mutex")
                         .servers
-                        .keys()
-                        .cloned()
-                        .collect();
-                    if error.kind() == io::ErrorKind::OutOfMemory {
-                        return Err(error);
+                        .entry(id.clone())
+                        .or_insert(ServerRecord {
+                            slot: logical,
+                            name,
+                            path: slot.socket_path.clone(),
+                            server_id: id.clone(),
+                            source: None,
+                            reason: Some(
+                                "Herdr process/socket/namespace evidence is not established".into(),
+                            ),
+                            coarse_shell: None,
+                        });
+                    if let Some((job, refresh)) = jobs.get(&id)
+                        && !job.is_finished()
+                    {
+                        refresh.send_replace(());
+                        continue;
                     }
-                    for (_, (job, _)) in jobs.drain() {
+                    let owner = self.clone();
+                    let server = id.clone();
+                    let rx = stop.clone();
+                    let (refresh, refresh_rx) = watch::channel(());
+                    jobs.insert(
+                        id,
+                        (
+                            tokio::spawn(async move {
+                                owner.follow(server, slot.socket_path, rx, refresh_rx).await;
+                            }),
+                            refresh,
+                        ),
+                    );
+                }
+                for (id, (job, _)) in jobs.iter() {
+                    if !present.contains(id) {
                         job.abort();
-                        let _ = job.await;
-                    }
-                    for id in ids {
                         let _ = self
-                            .unavailable(&id, "Configured Herdr discovery is unavailable")
+                            .unavailable(id, "Herdr source is absent from discovery")
                             .await;
                     }
                 }
+                self.publish().map_err(|_| limit())?;
+            }
+            Err(error) => {
+                let ids: Vec<_> = self
+                    .inner
+                    .lock()
+                    .expect("topology mutex")
+                    .servers
+                    .keys()
+                    .cloned()
+                    .collect();
+                if error.kind() == io::ErrorKind::OutOfMemory {
+                    return Err(error);
+                }
+                for (_, (job, _)) in jobs.drain() {
+                    job.abort();
+                    let _ = job.await;
+                }
+                for id in ids {
+                    let _ = self
+                        .unavailable(&id, "Configured Herdr discovery is unavailable")
+                        .await;
+                }
+            }
         }
         Ok(())
     }
@@ -7133,19 +7841,14 @@ impl Topology {
                 Ok(client) => Subscription::connect(client, &pane_ids).await,
                 Err(error) => Err(error),
             }
-                    .inspect_err(|error| {
-                        if let Ok(current) = codex_reporter.lock()
-                            && let Some(reporter) = current.as_ref()
-                        {
-                            reporter.subscription_error(
-                                server,
-                                None,
-                                "subscription_connect",
-                                error,
-                            );
-                        }
-                        self.report_omp_recovery_io(server, "subscription_connect", error)
-                    })?;
+            .inspect_err(|error| {
+                if let Ok(current) = codex_reporter.lock()
+                    && let Some(reporter) = current.as_ref()
+                {
+                    reporter.subscription_error(server, None, "subscription_connect", error);
+                }
+                self.report_omp_recovery_io(server, "subscription_connect", error)
+            })?;
             let evidence = subscription.client.evidence.clone();
             let pin = subscription
                 .client
@@ -7402,7 +8105,8 @@ impl Drop for DrainTask {
     }
 }
 pub fn empty_resources() -> CreationResources {
-    CreationResources { checkout: None,
+    CreationResources {
+        checkout: None,
         workspace_id: None,
         pane_id: None,
         terminal_id: None,
@@ -7416,7 +8120,10 @@ pub fn empty_resources() -> CreationResources {
 }
 /// Validate known returned IDs independently, retaining partial resources on malformed/change
 /// outcomes. Complete routing is required for a confirmed workspace stage.
-fn workspace_resources(value: &Value,placement:Option<&Id>) -> (CreationResources,Option<Id>,bool) {
+fn workspace_resources(
+    value: &Value,
+    placement: Option<&Id>,
+) -> (CreationResources, Option<Id>, bool) {
     let extract = |pointer: &str| {
         value
             .pointer(pointer)
@@ -7424,25 +8131,34 @@ fn workspace_resources(value: &Value,placement:Option<&Id>) -> (CreationResource
             .and_then(|s| Id::new(s).ok())
     };
     let mut resources = empty_resources();
-    let workspace=extract("/workspace/workspace_id");
-    let root_workspace=extract("/root_pane/workspace_id");
-    let tab_workspace=extract("/tab/workspace_id");
-    let tab=extract("/tab/tab_id");
-    let root_tab=extract("/root_pane/tab_id");
-    let routed_workspace=if placement.is_some(){root_workspace.as_ref().or(tab_workspace.as_ref())}else{workspace.as_ref()};
+    let workspace = extract("/workspace/workspace_id");
+    let root_workspace = extract("/root_pane/workspace_id");
+    let tab_workspace = extract("/tab/workspace_id");
+    let tab = extract("/tab/tab_id");
+    let root_tab = extract("/root_pane/tab_id");
+    let routed_workspace = if placement.is_some() {
+        root_workspace.as_ref().or(tab_workspace.as_ref())
+    } else {
+        workspace.as_ref()
+    };
     resources.pane_id = extract("/root_pane/pane_id");
     resources.terminal_id = extract("/root_pane/terminal_id");
     let complete = routed_workspace.is_some()
         && resources.pane_id.is_some()
         && resources.terminal_id.is_some()
-        && root_workspace.as_ref()==routed_workspace
-        && tab_workspace.as_ref()==routed_workspace
-        && placement.is_none_or(|expected|routed_workspace==Some(expected))
-        && tab.is_some()&&tab==root_tab;
-    resources.workspace_id=if placement.is_some(){root_workspace.or(tab_workspace)}else{workspace};
+        && root_workspace.as_ref() == routed_workspace
+        && tab_workspace.as_ref() == routed_workspace
+        && placement.is_none_or(|expected| routed_workspace == Some(expected))
+        && tab.is_some()
+        && tab == root_tab;
+    resources.workspace_id = if placement.is_some() {
+        root_workspace.or(tab_workspace)
+    } else {
+        workspace
+    };
     // A partial returned ID is a retained fact only. Admission still requires all
     // independent routing fields above, including the exact captured placement.
-    (resources,tab.or(root_tab),complete)
+    (resources, tab.or(root_tab), complete)
 }
 
 #[cfg(test)]
@@ -7452,136 +8168,186 @@ mod tests {
 
     #[test]
     fn probe_deadline_observation_is_monotone_and_entry_budget_uses_exact_boundaries() {
-        let mut observation=ProbeObservation::NotRead;
-        for (bytes,expected) in [
-            (b"" as &[u8],ProbeObservation::EmptyOnly),
-            (b"partial" as &[u8],ProbeObservation::PartialSeen),
-            (b"" as &[u8],ProbeObservation::PartialSeen),
-            (b"complete\n" as &[u8],ProbeObservation::CompleteSeen),
-            (b"partial" as &[u8],ProbeObservation::CompleteSeen),
-            (b"" as &[u8],ProbeObservation::CompleteSeen),
-        ] {observation.observe(bytes);assert_eq!(observation,expected);}
-        let now=tokio::time::Instant::now();
-        for (remaining,expected) in [
-            (Duration::ZERO,"expired"),(Duration::from_secs(1),"le_1s"),
-            (Duration::from_secs(1)+Duration::from_nanos(1),"le_5s"),
-            (Duration::from_secs(5),"le_5s"),(Duration::from_secs(5)+Duration::from_nanos(1),"gt_5s"),
-        ] {assert_eq!(probe_entry_budget(now,now+remaining),expected);}
-        let reporter=OmpCreationReporter::new_backend();
-        reporter.report_probe_deadline("loop_check",Some((ProbeObservation::NotRead,"expired")));
-        reporter.report_probe_deadline("parsed_success",Some((ProbeObservation::CompleteSeen,"gt_5s")));
-        assert_eq!(reporter.0.lock().unwrap().lines,1,"detail must not create another terminal line or dedupe key");
+        let mut observation = ProbeObservation::NotRead;
+        for (bytes, expected) in [
+            (b"" as &[u8], ProbeObservation::EmptyOnly),
+            (b"partial" as &[u8], ProbeObservation::PartialSeen),
+            (b"" as &[u8], ProbeObservation::PartialSeen),
+            (b"complete\n" as &[u8], ProbeObservation::CompleteSeen),
+            (b"partial" as &[u8], ProbeObservation::CompleteSeen),
+            (b"" as &[u8], ProbeObservation::CompleteSeen),
+        ] {
+            observation.observe(bytes);
+            assert_eq!(observation, expected);
+        }
+        let now = tokio::time::Instant::now();
+        for (remaining, expected) in [
+            (Duration::ZERO, "expired"),
+            (Duration::from_secs(1), "le_1s"),
+            (Duration::from_secs(1) + Duration::from_nanos(1), "le_5s"),
+            (Duration::from_secs(5), "le_5s"),
+            (Duration::from_secs(5) + Duration::from_nanos(1), "gt_5s"),
+        ] {
+            assert_eq!(probe_entry_budget(now, now + remaining), expected);
+        }
+        let reporter = OmpCreationReporter::new_backend();
+        reporter.report_probe_deadline("loop_check", Some((ProbeObservation::NotRead, "expired")));
+        reporter.report_probe_deadline(
+            "parsed_success",
+            Some((ProbeObservation::CompleteSeen, "gt_5s")),
+        );
+        assert_eq!(
+            reporter.0.lock().unwrap().lines,
+            1,
+            "detail must not create another terminal line or dedupe key"
+        );
     }
 
-    pub(super) async fn native_once_authorized()->(iroh::Endpoint,iroh::Endpoint,Arc<Security>,Arc<Authorized>) {
-        let host=crate::endpoint_builder(iroh::SecretKey::from_bytes(&[31;32]))
-            .relay_mode(iroh::RelayMode::Disabled).clear_address_lookup().bind().await.unwrap();
-        let phone=crate::endpoint_builder(iroh::SecretKey::from_bytes(&[32;32]))
-            .relay_mode(iroh::RelayMode::Disabled).clear_address_lookup().bind().await.unwrap();
-        let mut storage=Storage::memory([9;32],pairing::now_ms()).unwrap();
-        let device=PairedDevice{device_id:Uuid::random(),endpoint_id:EndpointId(phone.id().to_string()),
-            device_name:Label::new("phone").unwrap(),paired_at:Uint(pairing::now_ms()),last_seen_at:None};
+    pub(super) async fn native_once_authorized() -> (
+        iroh::Endpoint,
+        iroh::Endpoint,
+        Arc<Security>,
+        Arc<Authorized>,
+    ) {
+        let host = crate::endpoint_builder(iroh::SecretKey::from_bytes(&[31; 32]))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let phone = crate::endpoint_builder(iroh::SecretKey::from_bytes(&[32; 32]))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let mut storage = Storage::memory([9; 32], pairing::now_ms()).unwrap();
+        let device = PairedDevice {
+            device_id: Uuid::random(),
+            endpoint_id: EndpointId(phone.id().to_string()),
+            device_name: Label::new("phone").unwrap(),
+            paired_at: Uint(pairing::now_ms()),
+            last_seen_at: None,
+        };
         storage.pair_device(&device).unwrap();
-        let boot=storage.boot_id.clone();
-        let security=Security::new(StorageOwner::new(storage).unwrap(),Arc::new(State::default()),
-            EndpointId(host.id().to_string()),boot,vec![],None);
-        let endpoint=host.clone();
-        let incoming=tokio::spawn(async move{endpoint.accept().await.unwrap().await.unwrap()});
-        let connection=phone.connect(host.addr(),crate::ALPN).await.unwrap();
-        let server=incoming.await.unwrap();assert_eq!(server.remote_id(),phone.id());
-        let auth=Arc::new(security.hello(EndpointId(server.remote_id().to_string()),
-            HelloParams{app_version:"test".into(),device_name:Label::new("phone").unwrap()},server).await.unwrap());
+        let boot = storage.boot_id.clone();
+        let security = Security::new(
+            StorageOwner::new(storage).unwrap(),
+            Arc::new(State::default()),
+            EndpointId(host.id().to_string()),
+            boot,
+            vec![],
+            None,
+        );
+        let endpoint = host.clone();
+        let incoming = tokio::spawn(async move { endpoint.accept().await.unwrap().await.unwrap() });
+        let connection = phone.connect(host.addr(), crate::ALPN).await.unwrap();
+        let server = incoming.await.unwrap();
+        assert_eq!(server.remote_id(), phone.id());
+        let auth = Arc::new(
+            security
+                .hello(
+                    EndpointId(server.remote_id().to_string()),
+                    HelloParams {
+                        app_version: "test".into(),
+                        device_name: Label::new("phone").unwrap(),
+                    },
+                    server,
+                )
+                .await
+                .unwrap(),
+        );
         drop(connection);
-        (host,phone,security,auth)
+        (host, phone, security, auth)
     }
 
-#[tokio::test]
-async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_without_native_ready_claims()
-{
-    use serde_json::{Value, json};
-    use std::{
-        os::unix::fs::PermissionsExt,
-        path::PathBuf,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
-    use tokio::{
-        io::BufReader,
-        net::UnixListener,
-        sync::{Mutex, watch},
-        task::JoinSet,
-    };
-    let (host, phone, security, auth) = native_once_authorized().await;
-    let root = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(format!(".gc-{}", &Uuid::random().0[..8]));
-    fs::create_dir(&root).unwrap();
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-    let socket = root.join("h.sock");
-    let wrapper = root.join("omp");
-    let herdr = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
-    let interpreter = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|p| p.join("bash"))
-        .find(|p| p.is_file())
-        .expect("owned GNU Bash fixture is required");
-    fs::write(&wrapper, format!("#!{}\nexit 99\n", interpreter.display())).unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
-    let registry = root.join("r");
-    fs::create_dir(&registry).unwrap();
-    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
-    let project = Uuid::random();
-    let config = Config::parse(&format!(
+    #[tokio::test]
+    async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_without_native_ready_claims()
+     {
+        use serde_json::{Value, json};
+        use std::{
+            os::unix::fs::PermissionsExt,
+            path::PathBuf,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::{
+            io::BufReader,
+            net::UnixListener,
+            sync::{Mutex, watch},
+            task::JoinSet,
+        };
+        let (host, phone, security, auth) = native_once_authorized().await;
+        let root = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(format!(".gc-{}", &Uuid::random().0[..8]));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = root.join("h.sock");
+        let wrapper = root.join("omp");
+        let herdr = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let interpreter = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|p| p.join("bash"))
+            .find(|p| p.is_file())
+            .expect("owned GNU Bash fixture is required");
+        fs::write(&wrapper, format!("#!{}\nexit 99\n", interpreter.display())).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        let registry = root.join("r");
+        fs::create_dir(&registry).unwrap();
+        fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
+        let project = Uuid::random();
+        let config = Config::parse(&format!(
         "version=1\nruntime_dir={root:?}\nruntime_dir_agent={root:?}\nherdr_sockets=[{socket:?}]\nallow_scoped_shell_probe=true\nomp_registry_dir={registry:?}\nomp_session_roots=[{root:?}]\n[executables]\nherdr={herdr:?}\nomp={wrapper:?}\n[[projects]]\nid={:?}\nlabel=\"owned\"\npath={root:?}\n",
         project.0
     ))
     .unwrap();
-    fn shell(executable: &std::path::Path, root: &std::path::Path) -> tokio::process::Child {
-        tokio::process::Command::new(executable)
-            .args(["--noprofile", "--norc", "-i"])
-            .current_dir(root)
-            .env("PATH", root)
-            .env("HOME", root)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap()
-    }
-    let mut old_shell = shell(&interpreter, &root);
-    let mut new_shell = shell(&interpreter, &root);
-    let old_pid = old_shell.id().unwrap();
-    let new_pid = new_shell.id().unwrap();
-    let stdin = Arc::new(Mutex::new(new_shell.stdin.take().unwrap()));
-    let snapshot = Arc::new(Mutex::new(
-        json!({"version":"0.9.1","protocol":22,"focused_workspace_id":"desktop","workspaces":[{"workspace_id":"desktop","number":1,"label":"Desktop","focused":true,"active_tab_id":"desktop-tab","agent_status":"unknown"}],"tabs":[{"tab_id":"desktop-tab","workspace_id":"desktop","number":1,"label":"Desktop tab","focused":true,"agent_status":"unknown"}],"panes":[{"pane_id":"desktop-pane","terminal_id":"desktop-terminal","workspace_id":"desktop","tab_id":"desktop-tab","focused":false,"agent_status":"unknown"}],"agents":[]}),
-    ));
-    let listener = UnixListener::bind(&socket).unwrap();
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
-    let workspaces = Arc::new(AtomicUsize::new(0));
-    let launches = Arc::new(AtomicUsize::new(0));
-    let probes = Arc::new(AtomicUsize::new(0));
-    let (event, event_rx) = watch::channel(None::<Value>);
-    let (view, writes, starts, queries, input, project_path) = (
-        snapshot.clone(),
-        workspaces.clone(),
-        launches.clone(),
-        probes.clone(),
-        stdin.clone(),
-        root.clone(),
-    );
-    let fixture = tokio::spawn(async move {
-        let mut clients = JoinSet::new();
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (view, writes, starts, queries, input, project_path) = (
-                view.clone(),
-                writes.clone(),
-                starts.clone(),
-                queries.clone(),
-                input.clone(),
-                project_path.clone(),
-            );
-            let mut events = event_rx.clone();
-            clients.spawn(async move {
+        fn shell(executable: &std::path::Path, root: &std::path::Path) -> tokio::process::Child {
+            tokio::process::Command::new(executable)
+                .args(["--noprofile", "--norc", "-i"])
+                .current_dir(root)
+                .env("PATH", root)
+                .env("HOME", root)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        }
+        let mut old_shell = shell(&interpreter, &root);
+        let mut new_shell = shell(&interpreter, &root);
+        let old_pid = old_shell.id().unwrap();
+        let new_pid = new_shell.id().unwrap();
+        let stdin = Arc::new(Mutex::new(new_shell.stdin.take().unwrap()));
+        let snapshot = Arc::new(Mutex::new(
+            json!({"version":"0.9.1","protocol":22,"focused_workspace_id":"desktop","workspaces":[{"workspace_id":"desktop","number":1,"label":"Desktop","focused":true,"active_tab_id":"desktop-tab","agent_status":"unknown"}],"tabs":[{"tab_id":"desktop-tab","workspace_id":"desktop","number":1,"label":"Desktop tab","focused":true,"agent_status":"unknown"}],"panes":[{"pane_id":"desktop-pane","terminal_id":"desktop-terminal","workspace_id":"desktop","tab_id":"desktop-tab","focused":false,"agent_status":"unknown"}],"agents":[]}),
+        ));
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let workspaces = Arc::new(AtomicUsize::new(0));
+        let launches = Arc::new(AtomicUsize::new(0));
+        let probes = Arc::new(AtomicUsize::new(0));
+        let (event, event_rx) = watch::channel(None::<Value>);
+        let (view, writes, starts, queries, input, project_path) = (
+            snapshot.clone(),
+            workspaces.clone(),
+            launches.clone(),
+            probes.clone(),
+            stdin.clone(),
+            root.clone(),
+        );
+        let fixture = tokio::spawn(async move {
+            let mut clients = JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (view, writes, starts, queries, input, project_path) = (
+                    view.clone(),
+                    writes.clone(),
+                    starts.clone(),
+                    queries.clone(),
+                    input.clone(),
+                    project_path.clone(),
+                );
+                let mut events = event_rx.clone();
+                clients.spawn(async move {
                 let mut reader=BufReader::new(stream);let request:Value=serde_json::from_slice(&read_line(&mut reader).await.unwrap()).unwrap();let id=request["id"].clone();let p=&request["params"];
                 let result=match request["method"].as_str().unwrap() {
                     "events.subscribe"=>{reader.get_mut().write_all(format!("{}\n",json!({"id":id,"result":{"type":"subscription_started"}})).as_bytes()).await.unwrap();loop{if events.changed().await.is_err(){return;}let value=events.borrow().clone();if let Some(value)=value&&reader.get_mut().write_all(format!("{value}\n").as_bytes()).await.is_err(){return;}}}
@@ -7594,181 +8360,231 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
                 };
                 reader.get_mut().write_all(format!("{}\n",json!({"id":id,"result":result})).as_bytes()).await.unwrap();
             });
-        }
-    });
-    let relay = crate::backends::omp::Relay::bind(0).await.unwrap();
-    let overlay = crate::backends::omp::overlay(&config, relay.port()).unwrap();
-    let owner = Topology::new(
-        config,
-        security.storage.clone(),
-        security.state.clone(),
-        security.host.clone(),
-    )
-    .await
-    .unwrap();
-    let (stop, rx) = watch::channel(false);
-    let relay_job = tokio::spawn(relay.run(stop.subscribe()));
-    owner.omp_availability(None).unwrap();
-    let job = tokio::spawn(stock_compat_tests::run_source(owner.clone(), rx));
-    let server = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let request = Uuid::random();
-            security
-                .state
-                .host_snapshot(&auth.connection_id, request.clone())
-                .unwrap();
-            let snapshot = loop {
-                let (Some(bytes), closed) = security.state.pop_output(&auth.connection_id).unwrap()
-                else {
-                    panic!("host.snapshot response required")
-                };
-                assert!(!closed);
-                if let Envelope::Response(response) =
-                    decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
-                    && response.id == request
-                {
-                    let Ok(ResultBody::HostSnapshot(snapshot)) = response.outcome else {
-                        panic!("host.snapshot result required")
-                    };
-                    break snapshot;
-                }
-            };
-            assert!(
-                snapshot.sessions.is_empty(),
-                "creation eligibility is not native readiness"
-            );
-            if let Some(server) = snapshot.servers.iter().find(|server| {
-                server.connectivity == ServerConnectivity::Online && server.can_create.omp
-            }) {
-                assert!(
-                    snapshot
-                        .projects
-                        .iter()
-                        .any(|row| row.project_id == project && row.available)
-                );
-                break server.server_id.clone();
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("actual coarse shell/object-view preflight must settle");
-    let params = SessionCreateParams { directory_ref: None, placement: None, boot_id: security.boot.clone(),
-    server_id: server.clone(),
-    project_id: project,
-    provider: Provider::Omp,
-    name: Label::new("new desktop").unwrap(), };
-    let request = Request {
-        id: Uuid::random(),
-        body: RequestBody::SessionCreate(params.clone()),
-    };
-    // The original registered owner captures real selected-root authority before reserve.
-    let selection=owner.capture_creation(&auth,&params).await.unwrap();
-    let validator=owner.clone();
-    let validated_selection=selection.clone();
-    security
-        .reserve(&auth, request.clone(), move |request| {
-            validator.validate_create(request)?;
-            let RequestBody::SessionCreate(params)=&request.body else{return Err(ErrorCode::InvalidRequest)};
-            validated_selection.validate(&validator,params).map(|_|())
-        }, |_| {})
+        });
+        let relay = crate::backends::omp::Relay::bind(0).await.unwrap();
+        let overlay = crate::backends::omp::overlay(&config, relay.port()).unwrap();
+        let owner = Topology::new(
+            config,
+            security.storage.clone(),
+            security.state.clone(),
+            security.host.clone(),
+        )
         .await
         .unwrap();
-    let workspace = owner
-        .workspace_once(&security, &auth, &request.id, &params, &selection)
+        let (stop, rx) = watch::channel(false);
+        let relay_job = tokio::spawn(relay.run(stop.subscribe()));
+        owner.omp_availability(None).unwrap();
+        let job = tokio::spawn(stock_compat_tests::run_source(owner.clone(), rx));
+        let server = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let request = Uuid::random();
+                security
+                    .state
+                    .host_snapshot(&auth.connection_id, request.clone())
+                    .unwrap();
+                let snapshot = loop {
+                    let (Some(bytes), closed) =
+                        security.state.pop_output(&auth.connection_id).unwrap()
+                    else {
+                        panic!("host.snapshot response required")
+                    };
+                    assert!(!closed);
+                    if let Envelope::Response(response) =
+                        decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
+                        && response.id == request
+                    {
+                        let Ok(ResultBody::HostSnapshot(snapshot)) = response.outcome else {
+                            panic!("host.snapshot result required")
+                        };
+                        break snapshot;
+                    }
+                };
+                assert!(
+                    snapshot.sessions.is_empty(),
+                    "creation eligibility is not native readiness"
+                );
+                if let Some(server) = snapshot.servers.iter().find(|server| {
+                    server.connectivity == ServerConnectivity::Online && server.can_create.omp
+                }) {
+                    assert!(
+                        snapshot
+                            .projects
+                            .iter()
+                            .any(|row| row.project_id == project && row.available)
+                    );
+                    break server.server_id.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
         .await
-        .unwrap();
-    assert_eq!(
-        workspace
-            .creation
-            .as_ref()
-            .unwrap()
-            .resources
-            .terminal_id
-            .as_ref()
-            .unwrap()
-            .0,
-        "created-terminal"
-    );
-    let args = vec![
-        "--cwd".into(),
-        root.to_str().unwrap().into(),
-        "--config".into(),
-        overlay.to_str().unwrap().into(),
-    ];
-    assert_eq!(
-        owner
-            .launch_once(&security, &auth, &request.id, &params, &selection, args.clone())
+        .expect("actual coarse shell/object-view preflight must settle");
+        let params = SessionCreateParams {
+            directory_ref: None,
+            placement: None,
+            boot_id: security.boot.clone(),
+            server_id: server.clone(),
+            project_id: project,
+            provider: Provider::Omp,
+            name: Label::new("new desktop").unwrap(),
+        };
+        let request = Request {
+            id: Uuid::random(),
+            body: RequestBody::SessionCreate(params.clone()),
+        };
+        // The original registered owner captures real selected-root authority before reserve.
+        let selection = owner.capture_creation(&auth, &params).await.unwrap();
+        let validator = owner.clone();
+        let validated_selection = selection.clone();
+        security
+            .reserve(
+                &auth,
+                request.clone(),
+                move |request| {
+                    validator.validate_create(request)?;
+                    let RequestBody::SessionCreate(params) = &request.body else {
+                        return Err(ErrorCode::InvalidRequest);
+                    };
+                    validated_selection.validate(&validator, params).map(|_| ())
+                },
+                |_| {},
+            )
             .await
-            .err(),
-        Some(ErrorCode::NotReady)
-    );
-    assert_eq!(launches.load(Ordering::SeqCst), 0);
-    event
-        .send(Some(json!({"event":"pane_created","data":{}})))
-        .unwrap();
-    let prepared=owner.prepare_created_shell(
-        &security,&auth,(&request.id,&params,&selection),
-        tokio::time::Instant::now()+Duration::from_secs(10),None,
-    ).await.unwrap().expect("new original shell and actual selected cwd must prepare before input");
-    assert_eq!(prepared.shell.pid,new_pid);
-    assert_eq!(probes.load(Ordering::SeqCst),0,"actual-cwd preparation must not send the fixed query");
-    let probe=owner.shell_probe_once(&security,&auth,prepared).await.unwrap();
-    assert_eq!(
-        probe.creation.as_ref().unwrap().stage_state,
-        StageState::Confirmed
-    );
-    assert_eq!(probes.load(Ordering::SeqCst), 1);
-    assert!(owner.prepare_created_shell(
-        &security,&auth,(&request.id,&params,&selection),
-        tokio::time::Instant::now()+Duration::from_secs(10),None,
-    ).await.unwrap().is_none(),"the existing probe intent is status-only, not another prepared input owner");
-    assert_eq!(probes.load(Ordering::SeqCst), 1);
-    let submitted = owner
-        .launch_once(&security, &auth, &request.id, &params, &selection, args.clone())
-        .await
-        .unwrap();
-    let progress = submitted.creation.as_ref().unwrap();
-    assert_eq!(progress.stage, CreationStage::Launch);
-    assert_eq!(progress.stage_state, StageState::Dispatching);
-    assert!(progress.resources.native_id.is_none() && progress.resources.session_id.is_none());
-    fs::remove_file(&socket).unwrap();
-    owner
-        .workspace_once(&security, &auth, &request.id, &params, &selection)
-        .await
-        .unwrap();
-    owner
-        .launch_once(&security, &auth, &request.id, &params, &selection, args)
-        .await
-        .unwrap();
-    assert_eq!(workspaces.load(Ordering::SeqCst), 1);
-    assert_eq!(launches.load(Ordering::SeqCst), 1);
-    security
-        .revoke(auth.proof.peer_id().clone(), None)
-        .await
-        .unwrap();
-    assert_eq!(
+            .unwrap();
+        let workspace = owner
+            .workspace_once(&security, &auth, &request.id, &params, &selection)
+            .await
+            .unwrap();
+        assert_eq!(
+            workspace
+                .creation
+                .as_ref()
+                .unwrap()
+                .resources
+                .terminal_id
+                .as_ref()
+                .unwrap()
+                .0,
+            "created-terminal"
+        );
+        let args = vec![
+            "--cwd".into(),
+            root.to_str().unwrap().into(),
+            "--config".into(),
+            overlay.to_str().unwrap().into(),
+        ];
+        assert_eq!(
+            owner
+                .launch_once(
+                    &security,
+                    &auth,
+                    &request.id,
+                    &params,
+                    &selection,
+                    args.clone()
+                )
+                .await
+                .err(),
+            Some(ErrorCode::NotReady)
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        event
+            .send(Some(json!({"event":"pane_created","data":{}})))
+            .unwrap();
+        let prepared = owner
+            .prepare_created_shell(
+                &security,
+                &auth,
+                (&request.id, &params, &selection),
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("new original shell and actual selected cwd must prepare before input");
+        assert_eq!(prepared.shell.pid, new_pid);
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            0,
+            "actual-cwd preparation must not send the fixed query"
+        );
+        let probe = owner
+            .shell_probe_once(&security, &auth, prepared)
+            .await
+            .unwrap();
+        assert_eq!(
+            probe.creation.as_ref().unwrap().stage_state,
+            StageState::Confirmed
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert!(
+            owner
+                .prepare_created_shell(
+                    &security,
+                    &auth,
+                    (&request.id, &params, &selection),
+                    tokio::time::Instant::now() + Duration::from_secs(10),
+                    None,
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "the existing probe intent is status-only, not another prepared input owner"
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        let submitted = owner
+            .launch_once(
+                &security,
+                &auth,
+                &request.id,
+                &params,
+                &selection,
+                args.clone(),
+            )
+            .await
+            .unwrap();
+        let progress = submitted.creation.as_ref().unwrap();
+        assert_eq!(progress.stage, CreationStage::Launch);
+        assert_eq!(progress.stage_state, StageState::Dispatching);
+        assert!(progress.resources.native_id.is_none() && progress.resources.session_id.is_none());
+        fs::remove_file(&socket).unwrap();
         owner
             .workspace_once(&security, &auth, &request.id, &params, &selection)
             .await
-            .err(),
-        Some(ErrorCode::Unauthorized)
-    );
-    stop.send(true).unwrap();
-    job.await.unwrap().unwrap();
-    relay_job.await.unwrap().unwrap();
-    fixture.abort();
-    let _ = fixture.await;
-    old_shell.kill().await.unwrap();
-    new_shell.kill().await.unwrap();
-    old_shell.wait().await.unwrap();
-    new_shell.wait().await.unwrap();
-    drop(owner);
-    security.shutdown().await.unwrap();
-    crate::close_endpoint(&phone).await.unwrap();
-    crate::close_endpoint(&host).await.unwrap();
-    fs::remove_dir_all(root).unwrap();
-}
+            .unwrap();
+        owner
+            .launch_once(&security, &auth, &request.id, &params, &selection, args)
+            .await
+            .unwrap();
+        assert_eq!(workspaces.load(Ordering::SeqCst), 1);
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        security
+            .revoke(auth.proof.peer_id().clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner
+                .workspace_once(&security, &auth, &request.id, &params, &selection)
+                .await
+                .err(),
+            Some(ErrorCode::Unauthorized)
+        );
+        stop.send(true).unwrap();
+        job.await.unwrap().unwrap();
+        relay_job.await.unwrap().unwrap();
+        fixture.abort();
+        let _ = fixture.await;
+        old_shell.kill().await.unwrap();
+        new_shell.kill().await.unwrap();
+        old_shell.wait().await.unwrap();
+        new_shell.wait().await.unwrap();
+        drop(owner);
+        security.shutdown().await.unwrap();
+        crate::close_endpoint(&phone).await.unwrap();
+        crate::close_endpoint(&host).await.unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn stock_alias_confirmation_requires_effective_name_original_route_kind_and_session() {
@@ -7776,56 +8592,79 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
             "focused":false,"agent_status":"idle","agent":"omp","agent_session":{"source":"native","agent":"omp","kind":"session","value":"original"}})).unwrap();
         let reply:Agent=serde_json::from_value(json!({"pane_id":"w1:p1","terminal_id":"terminal","workspace_id":"w1","tab_id":"w1:t1",
             "name":"new-name","agent":"omp","agent_session":{"source":"native","agent":"omp","kind":"session","value":"original"}})).unwrap();
-        let context=RenameContext{source_epoch:Uuid::random(),pane:original.pane_id.clone(),terminal:original.terminal_id.clone(),
-            workspace:original.workspace_id.clone(),tab:original.tab_id.clone()};
-        let name=AgentName("new-name".into());
-        assert!(alias_ack_matches(&reply,&original,&context,&name));
+        let context = RenameContext {
+            source_epoch: Uuid::random(),
+            pane: original.pane_id.clone(),
+            terminal: original.terminal_id.clone(),
+            workspace: original.workspace_id.clone(),
+            tab: original.tab_id.clone(),
+        };
+        let name = AgentName("new-name".into());
+        assert!(alias_ack_matches(&reply, &original, &context, &name));
         for changed in 0..8 {
-            let mut wrong=reply.clone();
+            let mut wrong = reply.clone();
             match changed {
-                0=>wrong.name=Some("other".into()),
-                1=>wrong.pane_id=Id("w1:p2".into()),
-                2=>wrong.terminal_id=Id("replacement-terminal".into()),
-                3=>wrong.workspace_id=Id("w2".into()),
-                4=>wrong.tab_id=Id("w1:t2".into()),
-                5=>wrong.agent=Some("codex".into()),
-                6=>wrong.agent_session.as_mut().unwrap().value="replacement-session".into(),
-                _=>wrong.launch_pending=true,
+                0 => wrong.name = Some("other".into()),
+                1 => wrong.pane_id = Id("w1:p2".into()),
+                2 => wrong.terminal_id = Id("replacement-terminal".into()),
+                3 => wrong.workspace_id = Id("w2".into()),
+                4 => wrong.tab_id = Id("w1:t2".into()),
+                5 => wrong.agent = Some("codex".into()),
+                6 => wrong.agent_session.as_mut().unwrap().value = "replacement-session".into(),
+                _ => wrong.launch_pending = true,
             }
-            assert!(!alias_ack_matches(&wrong,&original,&context,&name));
+            assert!(!alias_ack_matches(&wrong, &original, &context, &name));
         }
     }
     #[test]
     fn stock_creation_replies_preserve_partial_ids_and_require_the_captured_workspace_and_tab() {
-        let workspace=Id("w1".into());
-        let tab=json!({
+        let workspace = Id("w1".into());
+        let tab = json!({
             "tab":{"workspace_id":"w1","tab_id":"w1:t2"},
             "root_pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","terminal_id":"terminal-two"}
         });
-        let (known,tab_id,complete)=workspace_resources(&tab,Some(&workspace));
+        let (known, tab_id, complete) = workspace_resources(&tab, Some(&workspace));
         assert!(complete);
-        assert_eq!(known.workspace_id,Some(workspace.clone()));
-        assert_eq!(known.pane_id,Some(Id("w1:p2".into())));
-        assert_eq!(tab_id,Some(Id("w1:t2".into())));
-        assert!(!workspace_resources(&tab,None).2,"a tab response is not a separate-workspace response");
-        let mut different=tab.clone();
-        different["root_pane"]["workspace_id"]=json!("w3");
-        let (known,_,complete)=workspace_resources(&different,Some(&workspace));
+        assert_eq!(known.workspace_id, Some(workspace.clone()));
+        assert_eq!(known.pane_id, Some(Id("w1:p2".into())));
+        assert_eq!(tab_id, Some(Id("w1:t2".into())));
+        assert!(
+            !workspace_resources(&tab, None).2,
+            "a tab response is not a separate-workspace response"
+        );
+        let mut different = tab.clone();
+        different["root_pane"]["workspace_id"] = json!("w3");
+        let (known, _, complete) = workspace_resources(&different, Some(&workspace));
         assert!(!complete);
-        assert_eq!(known.workspace_id,Some(Id("w3".into())),"reported partial facts must not be silently replaced with the requested workspace");
-        let mut partial=tab.clone();partial["root_pane"].as_object_mut().unwrap().remove("terminal_id");
-        let (known,tab_id,complete)=workspace_resources(&partial,Some(&workspace));
-        assert!(!complete);assert!(known.terminal_id.is_none());
-        assert_eq!(known.pane_id,Some(Id("w1:p2".into())));assert_eq!(tab_id,Some(Id("w1:t2".into())));
-        let mut wrong_tab=tab.clone();wrong_tab["root_pane"]["tab_id"]=json!("w1:t3");
-        assert!(!workspace_resources(&wrong_tab,Some(&workspace)).2);
-        let mut separate=tab;separate["workspace"]=json!({"workspace_id":"w1"});
-        assert!(workspace_resources(&separate,None).2);
+        assert_eq!(
+            known.workspace_id,
+            Some(Id("w3".into())),
+            "reported partial facts must not be silently replaced with the requested workspace"
+        );
+        let mut partial = tab.clone();
+        partial["root_pane"]
+            .as_object_mut()
+            .unwrap()
+            .remove("terminal_id");
+        let (known, tab_id, complete) = workspace_resources(&partial, Some(&workspace));
+        assert!(!complete);
+        assert!(known.terminal_id.is_none());
+        assert_eq!(known.pane_id, Some(Id("w1:p2".into())));
+        assert_eq!(tab_id, Some(Id("w1:t2".into())));
+        let mut wrong_tab = tab.clone();
+        wrong_tab["root_pane"]["tab_id"] = json!("w1:t3");
+        assert!(!workspace_resources(&wrong_tab, Some(&workspace)).2);
+        let mut separate = tab;
+        separate["workspace"] = json!({"workspace_id":"w1"});
+        assert!(workspace_resources(&separate, None).2);
     }
 
     #[test]
     fn coarse_shell_capture_is_backend_only_once_and_reserves_native_slots() {
-        for reporter in [OmpCreationReporter::new(), OmpCreationReporter::new_offline()] {
+        for reporter in [
+            OmpCreationReporter::new(),
+            OmpCreationReporter::new_offline(),
+        ] {
             reporter.report_coarse_shell(CoarseShellGuard::Installed, None, "none");
             assert_eq!(reporter.0.lock().unwrap().lines, 0);
             assert!(!reporter.0.lock().unwrap().coarse_shell_settled);
@@ -7835,12 +8674,20 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
             reporter.report("follower", "follower_other", Some(ErrorCode::NotReady));
         }
         reporter.report_coarse_shell(CoarseShellGuard::Installed, None, "none");
-        reporter.report_coarse_shell(CoarseShellGuard::ShellAbsent, Some(ErrorCode::NotReady), "none");
+        reporter.report_coarse_shell(
+            CoarseShellGuard::ShellAbsent,
+            Some(ErrorCode::NotReady),
+            "none",
+        );
         reporter.report_agent("ack_matched", None);
         reporter.report("omp_ready", "topology_not_ready", Some(ErrorCode::NotReady));
         let state = reporter.0.lock().unwrap();
         assert_eq!(state.lines, 3);
-        assert!(state.coarse_shell_settled && state.backend_launch_emitted && state.backend_readiness_emitted);
+        assert!(
+            state.coarse_shell_settled
+                && state.backend_launch_emitted
+                && state.backend_readiness_emitted
+        );
         assert!(state.seen.contains(&("coarse_shell", "installed")));
         assert!(!state.seen.contains(&("coarse_shell", "shell_absent")));
     }
@@ -8543,9 +9390,15 @@ async fn stock_herdr_workspace_cwd_probe_and_launch_are_receipt_once_only_withou
         assert!(omp_reporter.0.lock().unwrap().invalidated);
         let prompt = Request {
             id: Uuid::random(),
-            body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot,
-            target: target.clone(),
-            text: PromptText::new("fixture admission").unwrap(), }),
+            body: RequestBody::PromptSubmit(PromptSubmitParams {
+                delivery: None,
+                native_turn_id: None,
+                images: None,
+                skill: None,
+                boot_id: boot,
+                target: target.clone(),
+                text: PromptText::new("fixture admission").unwrap(),
+            }),
         };
         state.validate_session_mutation(&prompt).unwrap();
         let retained_history = state
@@ -8982,7 +9835,11 @@ mod probe_tests {
         }
     }
     impl CoarseRecoveryFixture {
-        async fn new(consent: bool, missing_first: bool, pause: Option<tokio::sync::oneshot::Receiver<()>>) -> Self {
+        async fn new(
+            consent: bool,
+            missing_first: bool,
+            pause: Option<tokio::sync::oneshot::Receiver<()>>,
+        ) -> Self {
             let root = Root::new();
             let path = root.0.join("h.sock");
             let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -8992,7 +9849,9 @@ mod probe_tests {
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .kill_on_drop(true).spawn().unwrap();
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
             let shell_pid = shell.id().unwrap();
             let (wrapper, _) = shell_executable(&process_evidence(shell_pid).unwrap()).unwrap();
             let binary = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
@@ -9002,23 +9861,38 @@ mod probe_tests {
             )).unwrap();
             config.projects.push(config::ConfiguredProject {
                 allow_read_tools: false,
-                id: Uuid::random(), label: Label::new("fixture").unwrap(), path: root.0.clone(),
+                id: Uuid::random(),
+                label: Label::new("fixture").unwrap(),
+                path: root.0.clone(),
             });
             let mut storage = Storage::memory([28; 32], 0).unwrap();
             let device = PairedDevice {
                 device_id: Uuid::random(),
-                endpoint_id: EndpointId(iroh::SecretKey::from_bytes(&[28; 32]).public().to_string()),
+                endpoint_id: EndpointId(
+                    iroh::SecretKey::from_bytes(&[28; 32]).public().to_string(),
+                ),
                 device_name: Label::new("coarse recovery fixture").unwrap(),
-                paired_at: Uint(0), last_seen_at: None,
+                paired_at: Uint(0),
+                last_seen_at: None,
             };
             let epoch = storage.pair_device(&device).unwrap();
-            let peer = storage.authenticated_hello(&device.device_id, epoch).unwrap();
+            let peer = storage
+                .authenticated_hello(&device.device_id, epoch)
+                .unwrap();
             let slot = serde_json::to_string(&(&path, "fixture")).unwrap();
-            let server = storage.enroll_server(&slot, &Label::new("fixture").unwrap()).unwrap();
+            let server = storage
+                .enroll_server(&slot, &Label::new("fixture").unwrap())
+                .unwrap();
             let state = Arc::new(State::default());
             let connection = state.connect(&peer);
-            let owner = Topology::new(config, Arc::new(StorageOwner::new(storage).unwrap()), state.clone(),
-                EndpointId(iroh::SecretKey::from_bytes(&[29; 32]).public().to_string())).await.unwrap();
+            let owner = Topology::new(
+                config,
+                Arc::new(StorageOwner::new(storage).unwrap()),
+                state.clone(),
+                EndpointId(iroh::SecretKey::from_bytes(&[29; 32]).public().to_string()),
+            )
+            .await
+            .unwrap();
             // The real backend callback supplies attempt availability; this fixture launches no provider.
             owner.omp_availability(None).unwrap();
             let wire = json!({
@@ -9082,13 +9956,28 @@ mod probe_tests {
                     }
                 })
             };
-            Self { owner, state, connection, server, snapshot, snapshots, probes, probe_started, native, shell, root }
+            Self {
+                owner,
+                state,
+                connection,
+                server,
+                snapshot,
+                snapshots,
+                probes,
+                probe_started,
+                native,
+                shell,
+                root,
+            }
         }
         fn inventory(&self) -> HostSnapshotResult {
             let request = Uuid::random();
-            self.state.host_snapshot(&self.connection, request.clone()).unwrap();
+            self.state
+                .host_snapshot(&self.connection, request.clone())
+                .unwrap();
             while let (Some(bytes), _) = self.state.pop_output(&self.connection).unwrap() {
-                if let Envelope::Response(response) = decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
+                if let Envelope::Response(response) =
+                    decode_payload(&bytes, Some(Method::HostSnapshot)).unwrap()
                     && response.id == request
                     && let Ok(ResultBody::HostSnapshot(snapshot)) = response.outcome
                 {
@@ -9097,13 +9986,23 @@ mod probe_tests {
             }
             panic!("fixture host snapshot missing")
         }
-        fn recover(&self) -> (watch::Sender<bool>, watch::Sender<()>, tokio::task::JoinHandle<io::Result<()>>) {
+        fn recover(
+            &self,
+        ) -> (
+            watch::Sender<bool>,
+            watch::Sender<()>,
+            tokio::task::JoinHandle<io::Result<()>>,
+        ) {
             let (stop, mut stopped) = watch::channel(false);
             let (refresh, mut refreshed) = watch::channel(());
             let owner = self.owner.clone();
             let server = self.server.clone();
             let path = self.root.0.join("h.sock");
-            let job = tokio::spawn(async move { owner.recover(&server, &path, &mut stopped, &mut refreshed).await });
+            let job = tokio::spawn(async move {
+                owner
+                    .recover(&server, &path, &mut stopped, &mut refreshed)
+                    .await
+            });
             (stop, refresh, job)
         }
         async fn finish(mut self) {
@@ -9115,8 +10014,12 @@ mod probe_tests {
     }
     async fn coarse_wait(mut ready: impl FnMut() -> bool) {
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !ready() { tokio::time::sleep(Duration::from_millis(10)).await; }
-        }).await.unwrap();
+            while !ready() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -9129,9 +10032,14 @@ mod probe_tests {
         // Retain an installed provider Target/source epoch across the metadata-only healing.
         let native_owner = process_evidence(std::process::id()).unwrap();
         let key = StableSessionKey {
-            host_id: fixture.owner.host_id.clone(), server_id: fixture.server.clone(),
-            server_incarnation: source.incarnation.clone(), terminal_id: Id("terminal".into()),
-            provider_owner_identity: Id(format!("{}:{}",native_owner.pid,native_owner.start_ticks)),
+            host_id: fixture.owner.host_id.clone(),
+            server_id: fixture.server.clone(),
+            server_incarnation: source.incarnation.clone(),
+            terminal_id: Id("terminal".into()),
+            provider_owner_identity: Id(format!(
+                "{}:{}",
+                native_owner.pid, native_owner.start_ticks
+            )),
             native_conversation_id: Id("/native.jsonl".into()),
         };
         let mut display: SessionState = serde_json::from_value(json!({
@@ -9142,12 +10050,29 @@ mod probe_tests {
                 "historyCoverage":{"scope":"all_branches","source":"persisted_and_live","olderAvailable":false,"sourceTruncated":false,"desktopBranchKnown":false}},
             "desktopSelection":"unknown","activity":{"state":"idle"}
         })).unwrap();
-        let (target, epoch) = fixture.owner.begin_native(key.clone(), native_owner.clone(), display.clone(), false).await.unwrap();
+        let (target, epoch) = fixture
+            .owner
+            .begin_native(key.clone(), native_owner.clone(), display.clone(), false)
+            .await
+            .unwrap();
         display.summary.session_id = target.session_id.clone();
         display.summary.generation = target.generation.clone();
-        fixture.owner.finish_native(&key, &native_owner, &epoch, ProviderSnapshot {
-            state: display, history: vec![], pending: vec![], older_available: false, native_older: None,
-        }).await.unwrap();
+        fixture
+            .owner
+            .finish_native(
+                &key,
+                &native_owner,
+                &epoch,
+                ProviderSnapshot {
+                    state: display,
+                    history: vec![],
+                    pending: vec![],
+                    older_available: false,
+                    native_older: None,
+                },
+            )
+            .await
+            .unwrap();
         // Same watch notification as the existing healthy five-second discovery owner.
         refresh.send_replace(());
         coarse_wait(|| fixture.inventory().servers[0].can_create.omp).await;
@@ -9167,9 +10092,17 @@ mod probe_tests {
         let next = fixture.snapshots.load(Ordering::SeqCst);
         refresh.send_replace(());
         coarse_wait(|| fixture.snapshots.load(Ordering::SeqCst) > next).await;
-        assert_eq!(fixture.probes.load(Ordering::SeqCst), 2, "installed proof was reprobed");
+        assert_eq!(
+            fixture.probes.load(Ordering::SeqCst),
+            2,
+            "installed proof was reprobed"
+        );
         stop.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(5), job).await.unwrap().unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), job)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         fixture.finish().await;
     }
 
@@ -9186,7 +10119,11 @@ mod probe_tests {
         assert_eq!(fixture.probes.load(Ordering::SeqCst), 0);
         assert!(!fixture.inventory().servers[0].can_create.omp);
         stop.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(5), job).await.unwrap().unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), job)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         fixture.finish().await;
     }
 
@@ -9197,11 +10134,9 @@ mod probe_tests {
             let fixture = CoarseRecoveryFixture::new(true, false, Some(waiting)).await;
             let path = fixture.root.0.join("h.sock");
             let evidence = Client::connect(&path).await.unwrap().evidence;
-            let executable = InstalledExecutablePin::capture(
-                &fixture.owner.config.executables.herdr,
-                &evidence,
-            )
-            .unwrap();
+            let executable =
+                InstalledExecutablePin::capture(&fixture.owner.config.executables.herdr, &evidence)
+                    .unwrap();
             let original_owner = Arc::new(AtomicU64::new(0));
             fixture
                 .owner
@@ -9217,11 +10152,19 @@ mod probe_tests {
                 .unwrap();
             let original = fixture.owner.source(&fixture.server).unwrap();
             let probe = {
-                let owner = fixture.owner.clone(); let server = fixture.server.clone(); let revision = original_owner.clone();
-                tokio::spawn(async move { owner.refresh_coarse(&server,0,&revision).await })
+                let owner = fixture.owner.clone();
+                let server = fixture.server.clone();
+                let revision = original_owner.clone();
+                tokio::spawn(async move { owner.refresh_coarse(&server, 0, &revision).await })
             };
-            tokio::time::timeout(Duration::from_secs(5), fixture.probe_started.notified()).await.unwrap();
-            let replacement_owner = if new_recovery_owner { Arc::new(AtomicU64::new(0)) } else { original_owner.clone() };
+            tokio::time::timeout(Duration::from_secs(5), fixture.probe_started.notified())
+                .await
+                .unwrap();
+            let replacement_owner = if new_recovery_owner {
+                Arc::new(AtomicU64::new(0))
+            } else {
+                original_owner.clone()
+            };
             fixture
                 .owner
                 .apply_snapshot(
@@ -9234,15 +10177,28 @@ mod probe_tests {
                 )
                 .await
                 .unwrap();
-            assert!(original.recheck().is_ok(), "physical/revision check alone must not admit the stale completion");
+            assert!(
+                original.recheck().is_ok(),
+                "physical/revision check alone must not admit the stale completion"
+            );
             release.send(()).unwrap();
-            tokio::time::timeout(Duration::from_secs(5), probe).await.unwrap().unwrap();
-            assert!(fixture.owner.inner.lock().unwrap().servers[&fixture.server].coarse_shell.is_none());
+            tokio::time::timeout(Duration::from_secs(5), probe)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                fixture.owner.inner.lock().unwrap().servers[&fixture.server]
+                    .coarse_shell
+                    .is_none()
+            );
             assert!(!fixture.inventory().servers[0].can_create.omp);
             // A later admitted observation can still heal; discarding stale I/O must not latch failure.
-            fixture.owner.refresh_coarse(&fixture.server,0,&replacement_owner).await;
+            fixture
+                .owner
+                .refresh_coarse(&fixture.server, 0, &replacement_owner)
+                .await;
             assert!(fixture.inventory().servers[0].can_create.omp);
-            assert_eq!(fixture.probes.load(Ordering::SeqCst),2);
+            assert_eq!(fixture.probes.load(Ordering::SeqCst), 2);
             fixture.finish().await;
         }
     }
@@ -9300,7 +10256,8 @@ mod probe_tests {
             .await
             .unwrap();
         let original = owner.source(&server).unwrap();
-        let resources = CreationResources { checkout: None,
+        let resources = CreationResources {
+            checkout: None,
             workspace_id: Some(Id("owned".into())),
             pane_id: Some(Id("owned-pane".into())),
             terminal_id: Some(Id("owned-terminal".into())),
@@ -9852,7 +10809,12 @@ mod probe_tests {
                         measured.as_ref().ok().copied(),
                         Some(matches!(
                             case,
-                            "plain" | "same_object_outer" | "hashed" | "automatic_hash" | "version_5_9" | "version_5_9_1"
+                            "plain"
+                                | "same_object_outer"
+                                | "hashed"
+                                | "automatic_hash"
+                                | "version_5_9"
+                                | "version_5_9_1"
                         )),
                         "{name} {kind} synthetic {case}: status={:?}; finite diagnostics={}; synthetic stderr={}; result category={:?}",
                         output.status.code(),
@@ -9868,102 +10830,308 @@ mod probe_tests {
     }
 }
 
-fn alias_ack_matches(reply:&Agent,original:&Pane,context:&RenameContext,name:&AgentName)->bool {
-    reply.name.as_deref()==Some(name.0.as_str())&&!reply.launch_pending
-        &&reply.pane_id==context.pane&&reply.terminal_id==context.terminal
-        &&reply.workspace_id==context.workspace&&reply.tab_id==context.tab
-        &&reply.agent==original.agent&&reply.agent_session==original.agent_session
+fn alias_ack_matches(
+    reply: &Agent,
+    original: &Pane,
+    context: &RenameContext,
+    name: &AgentName,
+) -> bool {
+    reply.name.as_deref() == Some(name.0.as_str())
+        && !reply.launch_pending
+        && reply.pane_id == context.pane
+        && reply.terminal_id == context.terminal
+        && reply.workspace_id == context.workspace
+        && reply.tab_id == context.tab
+        && reply.agent == original.agent
+        && reply.agent_session == original.agent_session
 }
-fn positive_agent_alias(snapshot:&Snapshot,pane:&Pane,provider:Provider)->bool {
-    let kind=match provider {Provider::Omp=>"omp",Provider::Codex=>"codex"};
-    pane.agent.as_deref()==Some(kind) && snapshot.agents.iter().filter(|agent|agent.pane_id==pane.pane_id).count()==1 && snapshot.agents.iter().any(|agent|agent.pane_id==pane.pane_id && agent.terminal_id==pane.terminal_id && agent.workspace_id==pane.workspace_id && agent.tab_id==pane.tab_id && agent.agent.as_deref()==Some(kind) && agent.agent_session==pane.agent_session && !agent.launch_pending)
+fn positive_agent_alias(snapshot: &Snapshot, pane: &Pane, provider: Provider) -> bool {
+    let kind = match provider {
+        Provider::Omp => "omp",
+        Provider::Codex => "codex",
+    };
+    pane.agent.as_deref() == Some(kind)
+        && snapshot
+            .agents
+            .iter()
+            .filter(|agent| agent.pane_id == pane.pane_id)
+            .count()
+            == 1
+        && snapshot.agents.iter().any(|agent| {
+            agent.pane_id == pane.pane_id
+                && agent.terminal_id == pane.terminal_id
+                && agent.workspace_id == pane.workspace_id
+                && agent.tab_id == pane.tab_id
+                && agent.agent.as_deref() == Some(kind)
+                && agent.agent_session == pane.agent_session
+                && !agent.launch_pending
+        })
 }
 impl Topology {
-    pub(crate) async fn agent_alias_context(&self,target:&Target)->SecurityResult<(Source,RenameContext)> {
-        let _update=self.updates.lock().await;
-        let (source,context,summary)=self.logical_rename_context(target)?;
-        let pane=source.snapshot.pane(&context.pane).map_err(policy)?;
-        if !summary.capabilities.agent_rename||!positive_agent_alias(&source.snapshot,pane,summary.provider) {
+    pub(crate) async fn agent_alias_context(
+        &self,
+        target: &Target,
+    ) -> SecurityResult<(Source, RenameContext)> {
+        let _update = self.updates.lock().await;
+        let (source, context, summary) = self.logical_rename_context(target)?;
+        let pane = source.snapshot.pane(&context.pane).map_err(policy)?;
+        if !summary.capabilities.agent_rename
+            || !positive_agent_alias(&source.snapshot, pane, summary.provider)
+        {
             return Err(ErrorCode::NotReady);
         }
-        Ok((source,context))
+        Ok((source, context))
     }
     /// Before effect this is full readiness admission. After a correlated ack only
     /// the original authority survives; our own PaneUpdated may advance inventory.
-    pub(crate) fn validate_agent_alias_context(&self,target:&Target,original:&Source,context:&RenameContext,ack:bool)->SecurityResult<()> {
-        let (source,summary)=self.validate_logical_rename_context(target,original,context,ack)?;
-        if !ack&&!summary.capabilities.agent_rename{return Err(ErrorCode::NotReady)}
-        let pane=source.snapshot.pane(&context.pane).map_err(policy)?;
-        let initial=original.snapshot.pane(&context.pane).map_err(policy)?;
-        if !positive_agent_alias(&source.snapshot,pane,summary.provider)
-            ||!positive_agent_alias(&original.snapshot,initial,summary.provider)
-            ||pane.agent_session!=initial.agent_session {return Err(ErrorCode::StaleSession)}
+    pub(crate) fn validate_agent_alias_context(
+        &self,
+        target: &Target,
+        original: &Source,
+        context: &RenameContext,
+        ack: bool,
+    ) -> SecurityResult<()> {
+        let (source, summary) =
+            self.validate_logical_rename_context(target, original, context, ack)?;
+        if !ack && !summary.capabilities.agent_rename {
+            return Err(ErrorCode::NotReady);
+        }
+        let pane = source.snapshot.pane(&context.pane).map_err(policy)?;
+        let initial = original.snapshot.pane(&context.pane).map_err(policy)?;
+        if !positive_agent_alias(&source.snapshot, pane, summary.provider)
+            || !positive_agent_alias(&original.snapshot, initial, summary.provider)
+            || pane.agent_session != initial.agent_session
+        {
+            return Err(ErrorCode::StaleSession);
+        }
         Ok(())
     }
 }
 
 impl Topology {
-    pub(crate) async fn agent_alias_once(&self,security:&Security,auth:&Authorized,action:&Uuid,params:&AgentRenameParams)->SecurityResult<()> {
-        let (source,context)=self.agent_alias_context(&params.target).await?;
+    pub(crate) async fn agent_alias_once(
+        &self,
+        security: &Security,
+        auth: &Authorized,
+        action: &Uuid,
+        params: &AgentRenameParams,
+    ) -> SecurityResult<()> {
+        let (source, context) = self.agent_alias_context(&params.target).await?;
         let client = Client::connect_source(&source).await.map_err(policy)?;
-        if client.evidence!=source.evidence {return Err(ErrorCode::StaleSession)}
-        self.validate_agent_alias_context(&params.target,&source,&context,false)?;
-        let fd=client.fence_socket().map_err(policy)?;
-        let admission_source=source.clone();let admission_context=context.clone();
-        security.agent_alias_boundary(auth,action.clone(),params.target.clone(),context.source_epoch.clone(),fd,|| {
-            let _update=self.updates.try_lock().map_err(|_|ErrorCode::Busy)?;
-            self.validate_agent_alias_context(&params.target,&admission_source,&admission_context,false)?;
-            security.state.validate_session_mutation(&Request {id:action.clone(),body:RequestBody::AgentRename(params.clone())})
-        },|checkpoint|async move {
-            let lost=|result|crate::storage::ReceiptTransition {state:ReceiptState::Uncertain,proof:crate::storage::TransitionProof::LostOutcome,result,error:None,at:pairing::now_ms()};
-            let response=client.agent_rename(&context.pane,&params.name).await;
-            let (reply,normal)=match response {
-                Ok(reply)=>(Some(reply),true),
-                Err(ApiError::Changed(mut value))=>(value.get_mut("agent").and_then(|agent|serde_json::from_value(agent.take()).ok()),false),
-                Err(ApiError::Rejected(code)) if matches!(code.as_str(),"invalid_agent_name"|"agent_name_taken"|"agent_launch_pending"|"agent_not_found"|"agent_target_ambiguous")=>return crate::storage::ReceiptTransition {state:ReceiptState::Failed,proof:crate::storage::TransitionProof::DefinitiveNoEffect(Id("native alias refused before mutation".into())),result:None,error:Some(crate::protocol::WireError {code:ErrorCode::NotReady,message:SafeMessage("Agent alias was refused before mutation".into())}),at:pairing::now_ms()},
-                Err(_)=>(None,false),
-            };
-            let Some(reply)=reply else {return lost(None)};
-            let Ok(original)=source.snapshot.pane(&context.pane) else{return lost(None)};
-            if !alias_ack_matches(&reply,original,&context,&params.name){return lost(None)}
-            let facts=ActionResultAgentRenamed {target:params.target.clone(),terminal_id:context.terminal.clone()};
-            if checkpoint.retain(&params.target,&context.source_epoch,facts.clone()).is_err() {return lost(None)}
-            let result=Some(ActionResult::AgentRenamed(facts));
-            if checkpoint.checkpoint().await.is_err() || !normal || self.validate_agent_alias_context(&params.target,&source,&context,true).is_err() {return lost(result)}
-            crate::storage::ReceiptTransition {state:ReceiptState::Succeeded,proof:crate::storage::TransitionProof::CorrelatedAcknowledgement(Id("native alias mutation acknowledged".into())),result,error:None,at:pairing::now_ms()}
-        }).await
+        if client.evidence != source.evidence {
+            return Err(ErrorCode::StaleSession);
+        }
+        self.validate_agent_alias_context(&params.target, &source, &context, false)?;
+        let fd = client.fence_socket().map_err(policy)?;
+        let admission_source = source.clone();
+        let admission_context = context.clone();
+        security
+            .agent_alias_boundary(
+                crate::pairing::NativeBoundary {
+                    auth,
+                    action: action.clone(),
+                    connection: fd,
+                },
+                params.target.clone(),
+                context.source_epoch.clone(),
+                || {
+                    let _update = self.updates.try_lock().map_err(|_| ErrorCode::Busy)?;
+                    self.validate_agent_alias_context(
+                        &params.target,
+                        &admission_source,
+                        &admission_context,
+                        false,
+                    )?;
+                    security.state.validate_session_mutation(&Request {
+                        id: action.clone(),
+                        body: RequestBody::AgentRename(params.clone()),
+                    })
+                },
+                |checkpoint| async move {
+                    let lost = |result| crate::storage::ReceiptTransition {
+                        state: ReceiptState::Uncertain,
+                        proof: crate::storage::TransitionProof::LostOutcome,
+                        result,
+                        error: None,
+                        at: pairing::now_ms(),
+                    };
+                    let response = client.agent_rename(&context.pane, &params.name).await;
+                    let (reply, normal) = match response {
+                        Ok(reply) => (Some(reply), true),
+                        Err(ApiError::Changed(mut value)) => (
+                            value
+                                .get_mut("agent")
+                                .and_then(|agent| serde_json::from_value(agent.take()).ok()),
+                            false,
+                        ),
+                        Err(ApiError::Rejected(code))
+                            if matches!(
+                                code.as_str(),
+                                "invalid_agent_name"
+                                    | "agent_name_taken"
+                                    | "agent_launch_pending"
+                                    | "agent_not_found"
+                                    | "agent_target_ambiguous"
+                            ) =>
+                        {
+                            return crate::storage::ReceiptTransition {
+                                state: ReceiptState::Failed,
+                                proof: crate::storage::TransitionProof::DefinitiveNoEffect(Id(
+                                    "native alias refused before mutation".into(),
+                                )),
+                                result: None,
+                                error: Some(crate::protocol::WireError {
+                                    code: ErrorCode::NotReady,
+                                    message: SafeMessage(
+                                        "Agent alias was refused before mutation".into(),
+                                    ),
+                                }),
+                                at: pairing::now_ms(),
+                            };
+                        }
+                        Err(_) => (None, false),
+                    };
+                    let Some(reply) = reply else {
+                        return lost(None);
+                    };
+                    let Ok(original) = source.snapshot.pane(&context.pane) else {
+                        return lost(None);
+                    };
+                    if !alias_ack_matches(&reply, original, &context, &params.name) {
+                        return lost(None);
+                    }
+                    let facts = ActionResultAgentRenamed {
+                        target: params.target.clone(),
+                        terminal_id: context.terminal.clone(),
+                    };
+                    if checkpoint
+                        .retain(&params.target, &context.source_epoch, facts.clone())
+                        .is_err()
+                    {
+                        return lost(None);
+                    }
+                    let result = Some(ActionResult::AgentRenamed(facts));
+                    if checkpoint.checkpoint().await.is_err()
+                        || !normal
+                        || self
+                            .validate_agent_alias_context(&params.target, &source, &context, true)
+                            .is_err()
+                    {
+                        return lost(result);
+                    }
+                    crate::storage::ReceiptTransition {
+                        state: ReceiptState::Succeeded,
+                        proof: crate::storage::TransitionProof::CorrelatedAcknowledgement(Id(
+                            "native alias mutation acknowledged".into(),
+                        )),
+                        result,
+                        error: None,
+                        at: pairing::now_ms(),
+                    }
+                },
+            )
+            .await
     }
-    pub(crate) async fn workspace_rename_once(&self,security:&Security,auth:&Authorized,action:&Uuid,params:&WorkspaceRenameParams)->SecurityResult<()> {
-        let (source,context)=self.workspace_rename_context(&params.target).await?;
+    pub(crate) async fn workspace_rename_once(
+        &self,
+        security: &Security,
+        auth: &Authorized,
+        action: &Uuid,
+        params: &WorkspaceRenameParams,
+    ) -> SecurityResult<()> {
+        let (source, context) = self.workspace_rename_context(&params.target).await?;
         let client = Client::connect_source(&source).await.map_err(policy)?;
-        if client.evidence!=source.evidence{return Err(ErrorCode::StaleSession)}
-        let fd=client.fence_socket().map_err(policy)?;
-        let admission_source=source.clone();let admission_context=context.clone();
-        security.boundary(auth,action.clone(),|| {
-            self.validate_workspace_rename_context_now(&params.target,&admission_source,&admission_context)?;
-            security.state.validate_session_mutation(&Request{id:action.clone(),body:RequestBody::WorkspaceRename(params.clone())})
-        },fd,async move {
-            let response=client.workspace_rename(&context.workspace,&params.label).await;
-            let (reply,normal)=match response {
-                Ok(reply)=>(Some(reply),true),
-                Err(ApiError::Changed(mut value))=>(value.get_mut("workspace").and_then(|workspace|serde_json::from_value(workspace.take()).ok()),false),
-                Err(ApiError::Rejected(code)) if matches!(code.as_str(),"workspace_not_found"|"invalid_request"|"invalid_params")=>{
-                    return ReceiptTransition{state:ReceiptState::Failed,
-                        proof:TransitionProof::DefinitiveNoEffect(Id("native workspace rename refused before mutation".into())),
-                        result:None,error:Some(crate::transport::wire_error(ErrorCode::NotReady)),at:pairing::now_ms()};
-                }
-                Err(_)=>(None,false),
-            };
-            let matched=reply.as_ref().is_some_and(|reply|reply.workspace_id==context.workspace&&reply.label==params.label.0);
-            let result=matched.then(||ActionResult::WorkspaceRenamed(ActionResultWorkspaceRenamed{
-                target:params.target.clone(),workspace_id:context.workspace.clone(),
-            }));
-            if !normal||!matched||self.validate_logical_rename_context(&params.target,&source,&context,true).is_err() {
-                return ReceiptTransition{state:ReceiptState::Uncertain,proof:TransitionProof::LostOutcome,result,error:None,at:pairing::now_ms()};
-            }
-            ReceiptTransition{state:ReceiptState::Succeeded,
-                proof:TransitionProof::CorrelatedAcknowledgement(Id("native workspace effective label confirmed".into())),
-                result,error:None,at:pairing::now_ms()}
-        }).await
+        if client.evidence != source.evidence {
+            return Err(ErrorCode::StaleSession);
+        }
+        let fd = client.fence_socket().map_err(policy)?;
+        let admission_source = source.clone();
+        let admission_context = context.clone();
+        security
+            .boundary(
+                auth,
+                action.clone(),
+                || {
+                    self.validate_workspace_rename_context_now(
+                        &params.target,
+                        &admission_source,
+                        &admission_context,
+                    )?;
+                    security.state.validate_session_mutation(&Request {
+                        id: action.clone(),
+                        body: RequestBody::WorkspaceRename(params.clone()),
+                    })
+                },
+                fd,
+                async move {
+                    let response = client
+                        .workspace_rename(&context.workspace, &params.label)
+                        .await;
+                    let (reply, normal) = match response {
+                        Ok(reply) => (Some(reply), true),
+                        Err(ApiError::Changed(mut value)) => (
+                            value.get_mut("workspace").and_then(|workspace| {
+                                serde_json::from_value(workspace.take()).ok()
+                            }),
+                            false,
+                        ),
+                        Err(ApiError::Rejected(code))
+                            if matches!(
+                                code.as_str(),
+                                "workspace_not_found" | "invalid_request" | "invalid_params"
+                            ) =>
+                        {
+                            return ReceiptTransition {
+                                state: ReceiptState::Failed,
+                                proof: TransitionProof::DefinitiveNoEffect(Id(
+                                    "native workspace rename refused before mutation".into(),
+                                )),
+                                result: None,
+                                error: Some(crate::transport::wire_error(ErrorCode::NotReady)),
+                                at: pairing::now_ms(),
+                            };
+                        }
+                        Err(_) => (None, false),
+                    };
+                    let matched = reply.as_ref().is_some_and(|reply| {
+                        reply.workspace_id == context.workspace && reply.label == params.label.0
+                    });
+                    let result = matched.then(|| {
+                        ActionResult::WorkspaceRenamed(ActionResultWorkspaceRenamed {
+                            target: params.target.clone(),
+                            workspace_id: context.workspace.clone(),
+                        })
+                    });
+                    if !normal
+                        || !matched
+                        || self
+                            .validate_logical_rename_context(
+                                &params.target,
+                                &source,
+                                &context,
+                                true,
+                            )
+                            .is_err()
+                    {
+                        return ReceiptTransition {
+                            state: ReceiptState::Uncertain,
+                            proof: TransitionProof::LostOutcome,
+                            result,
+                            error: None,
+                            at: pairing::now_ms(),
+                        };
+                    }
+                    ReceiptTransition {
+                        state: ReceiptState::Succeeded,
+                        proof: TransitionProof::CorrelatedAcknowledgement(Id(
+                            "native workspace effective label confirmed".into(),
+                        )),
+                        result,
+                        error: None,
+                        at: pairing::now_ms(),
+                    }
+                },
+            )
+            .await
     }
 }

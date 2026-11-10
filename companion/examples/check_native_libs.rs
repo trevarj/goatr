@@ -4,7 +4,7 @@
 mod native_inventory;
 use clap::{Arg, Command, value_parser};
 use serde_json::{Value, json};
-use std::{fs,io,path::PathBuf};
+use std::{fs, io, path::PathBuf};
 fn fail(s: &str) -> io::Error {
     io::Error::other(s)
 }
@@ -56,12 +56,19 @@ fn run() -> io::Result<Value> {
         .cloned()
         .map(Ok)
         .unwrap_or_else(|| cached("androidx.graphics", "graphics-path", "1.0.1"))?;
-    let sdk=std::env::var_os("ANDROID_HOME").or_else(||std::env::var_os("ANDROID_SDK_ROOT"))
-        .map(PathBuf::from).ok_or_else(||fail("pinned Android SDK unavailable"))?;
+    let sdk = std::env::var_os("ANDROID_HOME")
+        .or_else(|| std::env::var_os("ANDROID_SDK_ROOT"))
+        .map(PathBuf::from)
+        .ok_or_else(|| fail("pinned Android SDK unavailable"))?;
     native_inventory::inspect(&native_inventory::InventoryInputs {
-        apk,native:fs::canonicalize(native)?,jna:fs::canonicalize(jna)?,camera:fs::canonicalize(camera)?,
-        graphics:fs::canonicalize(graphics)?,sdk:fs::canonicalize(sdk)?,
-        retained_source:fs::canonicalize("third_party/iroh-ffi/source.json")?,scratch_parent:fs::canonicalize(std::env::temp_dir())?,
+        apk,
+        native: fs::canonicalize(native)?,
+        jna: fs::canonicalize(jna)?,
+        camera: fs::canonicalize(camera)?,
+        graphics: fs::canonicalize(graphics)?,
+        sdk: fs::canonicalize(sdk)?,
+        retained_source: fs::canonicalize("third_party/iroh-ffi/source.json")?,
+        scratch_parent: fs::canonicalize(std::env::temp_dir())?,
     })
 }
 fn main() -> std::process::ExitCode {

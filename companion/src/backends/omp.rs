@@ -69,9 +69,11 @@ pub const FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const QUEUE_FRAMES: usize = 32;
 pub const QUEUE_BYTES: usize = 16 * 1024 * 1024;
 pub const BRANCH_NOTICE: &str = "All branches; desktop-selected branch unavailable.";
-#[path="omp_skills.rs"]
+#[path = "omp_skills.rs"]
 mod skills;
-pub(crate) fn qualify_extension_package(path:&Path)->io::Result<()> {skills::qualify_package_root(path)}
+pub(crate) fn qualify_extension_package(path: &Path) -> io::Result<()> {
+    skills::qualify_package_root(path)
+}
 const PRODUCER_HOOK_NAME: &str = "goatr-omp-producer-state.ts";
 const PRODUCER_OVERLAY_NAME: &str = "omp-collab-producer.yml";
 const PRODUCER_CAPTURE: &str = "GOATR_OWNED_OMP_PRODUCER_CAPTURE";
@@ -2191,7 +2193,7 @@ struct Connection {
     registry_snapshot: RegistrySnapshot,
     desktop_attention: Uuid,
     attention_open: AtomicBool,
-    controls:Mutex<crate::backends::ControlsObservation>,
+    controls: Mutex<crate::backends::ControlsObservation>,
 }
 impl Connection {
     fn validate_native(&self, state: &State) -> SecurityResult<()> {
@@ -2279,11 +2281,13 @@ impl Connection {
     }
 }
 struct OriginalMutation {
-    request:Request,connection:Option<Arc<Connection>>,creation:Option<Arc<herdr::CreationSelection>>,
-    controls:Option<Arc<crate::backends::ControlsPublication>>,
+    request: Request,
+    connection: Option<Arc<Connection>>,
+    creation: Option<Arc<herdr::CreationSelection>>,
+    controls: Option<Arc<crate::backends::ControlsPublication>>,
 }
 pub struct Runtime {
-    skills:Arc<skills::Manager>,
+    skills: Arc<skills::Manager>,
     topology: Arc<Topology>,
     security: Arc<Security>,
     connections: Mutex<HashMap<Uuid, Arc<Connection>>>,
@@ -2345,7 +2349,7 @@ impl Runtime {
         }
         let producer_capture_authorized = owned_relay.is_some() && first_guard.is_some();
         let (relay_ready, _) = watch::channel(None);
-        let skills=skills::Manager::new(&topology.config);
+        let skills = skills::Manager::new(&topology.config);
         Arc::new(Self {
             skills,
             topology,
@@ -2410,7 +2414,7 @@ impl Runtime {
         }
     }
     pub async fn run(self: Arc<Self>, mut stop: watch::Receiver<bool>) -> io::Result<()> {
-        let skills_job=tokio::spawn(self.skills.clone().run(Arc::downgrade(&self),stop.clone()));
+        let skills_job = tokio::spawn(self.skills.clone().run(Arc::downgrade(&self), stop.clone()));
         let mut relay_job = None;
         if diagnostic_overlay_environment(&self.topology.config)?.is_some()
             && !self.producer_capture_authorized
@@ -2485,7 +2489,7 @@ impl Runtime {
             }}
         }
         self.stopping.store(true, Ordering::Release);
-        let _=skills_job.await;
+        let _ = skills_job.await;
         self.relay_ready.send_replace(None);
         let _ = self.topology.omp_availability(Some(
             "OMP creation unavailable: foreground companion is stopping",
@@ -2539,49 +2543,130 @@ impl Runtime {
         }
         Ok(connection)
     }
-    pub(crate) fn project_context(self:&Arc<Self>,target:&Target)->SecurityResult<crate::project_read::ProjectReadContext> {
-        let connection=self.connection(target)?;
-        let original=self.original_context(target)?;
-        if original.epoch!=connection.epoch||!Arc::ptr_eq(&connection,&self.connection(target)?) {return Err(ErrorCode::StaleSession);}
-        let retained=Arc::new((original,connection));
-        let checked=retained.clone();
-        let validate=Arc::new(move||checked.0.recheck());
-        let checked=retained.clone();
-        let publish=Arc::new(move|commit:&mut dyn FnMut()->SecurityResult<()>|checked.0.with_current(||commit()));
-        self.topology.capture_project_context(crate::project_read::ProjectReadOrigin {source:ArtifactSource::Session{target:target.clone()},epoch:retained.0.epoch.clone(),
-            physical:retained.0.source.clone(),validate,publish,captured:std::time::Instant::now()},retained.0.process.clone(),Path::new(&retained.1.registry_snapshot.cwd),false)
-    }
-    pub(crate) fn original_context(self:&Arc<Self>,target:&Target)->SecurityResult<crate::backends::OriginalContext> {
-        let original=self.connection(target)?;let runtime=Arc::downgrade(self);let retained=original.clone();
-        let validate=Arc::new(move||{
-            let runtime=runtime.upgrade().ok_or(ErrorCode::NotReady)?;
-            let current=runtime.connections.lock().get(&retained.target.session_id).cloned().ok_or(ErrorCode::StaleSession)?;
-            if !Arc::ptr_eq(&current,&retained){return Err(ErrorCode::StaleSession)}
-            retained.validate(&runtime.security.state,&runtime.topology)
+    pub(crate) fn project_context(
+        self: &Arc<Self>,
+        target: &Target,
+    ) -> SecurityResult<crate::project_read::ProjectReadContext> {
+        let connection = self.connection(target)?;
+        let original = self.original_context(target)?;
+        if original.epoch != connection.epoch
+            || !Arc::ptr_eq(&connection, &self.connection(target)?)
+        {
+            return Err(ErrorCode::StaleSession);
+        }
+        let retained = Arc::new((original, connection));
+        let checked = retained.clone();
+        let validate = Arc::new(move || checked.0.recheck());
+        let checked = retained.clone();
+        let publish = Arc::new(move |commit: &mut dyn FnMut() -> SecurityResult<()>| {
+            checked.0.with_current(commit)
         });
-        let runtime=Arc::downgrade(self);let retained=original.clone();
-        let publish=Arc::new(move|enqueue:&mut dyn FnMut()->SecurityResult<()>|{
-            let runtime=runtime.upgrade().ok_or(ErrorCode::NotReady)?;
-            let connections=runtime.connections.lock();
-            if !connections.get(&retained.target.session_id).is_some_and(|current|Arc::ptr_eq(current,&retained)){return Err(ErrorCode::StaleSession)}
-            retained.validate(&runtime.security.state,&runtime.topology)?;
+        self.topology.capture_project_context(
+            crate::project_read::ProjectReadOrigin {
+                source: ArtifactSource::Session {
+                    target: target.clone(),
+                },
+                epoch: retained.0.epoch.clone(),
+                physical: retained.0.source.clone(),
+                validate,
+                publish,
+                captured: std::time::Instant::now(),
+            },
+            retained.0.process.clone(),
+            Path::new(&retained.1.registry_snapshot.cwd),
+            false,
+        )
+    }
+    pub(crate) fn original_context(
+        self: &Arc<Self>,
+        target: &Target,
+    ) -> SecurityResult<crate::backends::OriginalContext> {
+        let original = self.connection(target)?;
+        let runtime = Arc::downgrade(self);
+        let retained = original.clone();
+        let validate = Arc::new(move || {
+            let runtime = runtime.upgrade().ok_or(ErrorCode::NotReady)?;
+            let current = runtime
+                .connections
+                .lock()
+                .get(&retained.target.session_id)
+                .cloned()
+                .ok_or(ErrorCode::StaleSession)?;
+            if !Arc::ptr_eq(&current, &retained) {
+                return Err(ErrorCode::StaleSession);
+            }
+            retained.validate(&runtime.security.state, &runtime.topology)
+        });
+        let runtime = Arc::downgrade(self);
+        let retained = original.clone();
+        let publish = Arc::new(move |enqueue: &mut dyn FnMut() -> SecurityResult<()>| {
+            let runtime = runtime.upgrade().ok_or(ErrorCode::NotReady)?;
+            let connections = runtime.connections.lock();
+            if !connections
+                .get(&retained.target.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &retained))
+            {
+                return Err(ErrorCode::StaleSession);
+            }
+            retained.validate(&runtime.security.state, &runtime.topology)?;
             enqueue()
         });
-        crate::backends::OriginalContext::capture(Provider::Omp,original.target.clone(),original.epoch.clone(),
-            original.source.clone(),original.owner.clone(),original.key.native_conversation_id.clone(),validate,publish)
+        crate::backends::OriginalContext::capture(
+            crate::backends::OriginalIdentity {
+                provider: Provider::Omp,
+                target: original.target.clone(),
+                epoch: original.epoch.clone(),
+                source: original.source.clone(),
+                process: original.owner.clone(),
+                native: original.key.native_conversation_id.clone(),
+            },
+            validate,
+            publish,
+        )
     }
-    pub(crate) fn attachment_context(self:&Arc<Self>,target:&Target)->SecurityResult<crate::attachments::ProviderContext> {
-        let original=self.connection(target)?;let runtime=Arc::downgrade(self);let retained=original.clone();
-        let validate=Arc::new(move||{let runtime=runtime.upgrade().ok_or(ErrorCode::NotReady)?;let current=runtime.connections.lock().get(&retained.target.session_id).cloned().ok_or(ErrorCode::NotReady)?;if !Arc::ptr_eq(&current,&retained){return Err(ErrorCode::StaleSession)}retained.validate(&runtime.security.state,&runtime.topology)});
-        let runtime=Arc::downgrade(self);let retained=original.clone();
-        let publish=Arc::new(move|enqueue:&mut dyn FnMut()->SecurityResult<()>|{
-            let runtime=runtime.upgrade().ok_or(ErrorCode::NotReady)?;
-            let connections=runtime.connections.lock();
-            if !connections.get(&retained.target.session_id).is_some_and(|current|Arc::ptr_eq(current,&retained)){return Err(ErrorCode::StaleSession)}
-            retained.validate(&runtime.security.state,&runtime.topology)?;
+    pub(crate) fn attachment_context(
+        self: &Arc<Self>,
+        target: &Target,
+    ) -> SecurityResult<crate::attachments::ProviderContext> {
+        let original = self.connection(target)?;
+        let runtime = Arc::downgrade(self);
+        let retained = original.clone();
+        let validate = Arc::new(move || {
+            let runtime = runtime.upgrade().ok_or(ErrorCode::NotReady)?;
+            let current = runtime
+                .connections
+                .lock()
+                .get(&retained.target.session_id)
+                .cloned()
+                .ok_or(ErrorCode::NotReady)?;
+            if !Arc::ptr_eq(&current, &retained) {
+                return Err(ErrorCode::StaleSession);
+            }
+            retained.validate(&runtime.security.state, &runtime.topology)
+        });
+        let runtime = Arc::downgrade(self);
+        let retained = original.clone();
+        let publish = Arc::new(move |enqueue: &mut dyn FnMut() -> SecurityResult<()>| {
+            let runtime = runtime.upgrade().ok_or(ErrorCode::NotReady)?;
+            let connections = runtime.connections.lock();
+            if !connections
+                .get(&retained.target.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &retained))
+            {
+                return Err(ErrorCode::StaleSession);
+            }
+            retained.validate(&runtime.security.state, &runtime.topology)?;
             enqueue()
         });
-        crate::attachments::ProviderContext::capture(&self.topology.config,original.target.clone(),original.epoch.clone(),original.source.clone(),original.owner.clone(),validate,publish)
+        crate::attachments::ProviderContext::capture(
+            &self.topology.config,
+            original.target.clone(),
+            original.epoch.clone(),
+            original.source.clone(),
+            original.owner.clone(),
+            validate,
+            publish,
+        )
     }
     pub fn validate(&self, request: &Request) -> SecurityResult<()> {
         self.validate_checked(request, None, false)
@@ -2596,7 +2681,9 @@ impl Runtime {
         if self.stopping.load(Ordering::Acquire) {
             return Err(("stopping", ErrorCode::NotReady));
         }
-        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some()) {return Err(("skill_provider",ErrorCode::NotReady))}
+        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some()) {
+            return Err(("skill_provider", ErrorCode::NotReady));
+        }
         self.security.state.validate_session_mutation_checked(
             request,
             if allow_pending {
@@ -2606,7 +2693,7 @@ impl Runtime {
             },
         )?;
         let target = match &request.body {
-            RequestBody::SessionControlsApply(p)=>&p.target,
+            RequestBody::SessionControlsApply(p) => &p.target,
             RequestBody::PromptSubmit(p) => &p.target,
             RequestBody::TurnCancel(p) => &p.target,
             RequestBody::RequestRespond(p) => &p.target,
@@ -2953,11 +3040,17 @@ impl Runtime {
             ));
         }
         let mut state = initial_state(&source, &agent, &snapshot, &welcome, &history);
-        state.summary.capabilities.artifacts=self.topology.project_reads_available(&owner,Path::new(&snapshot.cwd));
-        state.summary.capabilities.worktrees_read=state.summary.capabilities.artifacts&&crate::project_read::git::available();
-        state.summary.capabilities.changes_read=state.summary.capabilities.worktrees_read;
-        state.summary.capabilities.terminal_create=self.topology.terminal_creation_available(&source,&state.summary.workspace_id);
-        state.summary.capabilities.attachments=crate::attachments::Namespace::capture(&self.topology.config,&owner).is_ok();
+        state.summary.capabilities.artifacts = self
+            .topology
+            .project_reads_available(&owner, Path::new(&snapshot.cwd));
+        state.summary.capabilities.worktrees_read =
+            state.summary.capabilities.artifacts && crate::project_read::git::available();
+        state.summary.capabilities.changes_read = state.summary.capabilities.worktrees_read;
+        state.summary.capabilities.terminal_create = self
+            .topology
+            .terminal_creation_available(&source, &state.summary.workspace_id);
+        state.summary.capabilities.attachments =
+            crate::attachments::Namespace::capture(&self.topology.config, &owner).is_ok();
         if let Some(title) = &history.title {
             state.summary.title = title.clone();
         }
@@ -2997,7 +3090,9 @@ impl Runtime {
             registry_snapshot: snapshot,
             desktop_attention: Uuid::random(),
             attention_open: AtomicBool::new(false),
-            controls:Mutex::new(crate::backends::ControlsObservation::new(omp_effective_controls(welcome.get("state").unwrap_or(&Value::Null)))),
+            controls: Mutex::new(crate::backends::ControlsObservation::new(
+                omp_effective_controls(welcome.get("state").unwrap_or(&Value::Null)),
+            )),
         });
         let install = self
             .clone()
@@ -3035,13 +3130,23 @@ impl Runtime {
         if install.is_err() {
             let _ = self.security.state.abort_install(&target, &epoch);
         }
-        let retired_target=target.clone();let retired_epoch=epoch.clone();let retired_connection=connection.desktop_attention.clone();
-        let retired=self.security.storage.call(move|store|{
-            store.retire_image_source(&retired_target,&retired_epoch);
-            store.omp_cycle_retire(&retired_target,&retired_epoch,&retired_connection)
-        }).await;
+        let retired_target = target.clone();
+        let retired_epoch = epoch.clone();
+        let retired_connection = connection.desktop_attention.clone();
+        let retired = self
+            .security
+            .storage
+            .call(move |store| {
+                store.retire_image_source(&retired_target, &retired_epoch);
+                store.omp_cycle_retire(&retired_target, &retired_epoch, &retired_connection)
+            })
+            .await;
         let _=self.security.state.binding_offline(&target,&epoch,"Stock collaboration/file/topology source disconnected or replaced; reopen after authoritative final snapshot");
-        if retired.is_err(){return Err(unbound("Durable attention source retirement is unavailable"))}
+        if retired.is_err() {
+            return Err(unbound(
+                "Durable attention source retirement is unavailable",
+            ));
+        }
         install.map_err(|_| {
             unbound("Stock guest snapshot, history, crypto or source identity became unavailable")
         })
@@ -3168,9 +3273,20 @@ impl Runtime {
             .lock()
             .insert(target.session_id.clone(), connection.clone());
         self.refresh_skills_capabilities();
-        let status=state.session_state(target,epoch)?.summary.status;
-        let installed_target=target.clone();let installed_epoch=epoch.clone();let installed_connection=connection.desktop_attention.clone();
-        self.attention_commit(&connection,move|store|store.omp_cycle_install(&installed_target,&installed_epoch,&installed_connection,status,crate::pairing::now_ms())).await?;
+        let status = state.session_state(target, epoch)?.summary.status;
+        let installed_target = target.clone();
+        let installed_epoch = epoch.clone();
+        let installed_connection = connection.desktop_attention.clone();
+        self.attention_commit(&connection, move |store| {
+            store.omp_cycle_install(
+                &installed_target,
+                &installed_epoch,
+                &installed_connection,
+                status,
+                crate::pairing::now_ms(),
+            )
+        })
+        .await?;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut observation: Option<RegistryObservation> = None;
@@ -3368,50 +3484,151 @@ impl Runtime {
         })
     }
 
-    async fn attention_commit<T:Send+'static>(self:&Arc<Self>,c:&Arc<Connection>,commit:impl FnOnce(&mut crate::storage::Storage)->crate::storage::StoreResult<T>+Send+'static)->SecurityResult<T>{
-        let runtime=self.clone();let original=c.clone();
-        self.security.storage.call(move|store|{
-            original.validate_read(&runtime.security.state,&runtime.topology).map_err(crate::storage::StorageError::Policy)?;
-            let connections=runtime.connections.lock();
-            if !connections.get(&original.target.session_id).is_some_and(|current|Arc::ptr_eq(current,&original)){return Err(crate::storage::StorageError::Policy(ErrorCode::StaleSession))}
-            runtime.security.state.with_attention_source(&original.target,&original.epoch,Provider::Omp,||commit(store)).map_err(crate::storage::StorageError::Policy)?
-        }).await.map_err(store_error)
+    async fn attention_commit<T: Send + 'static>(
+        self: &Arc<Self>,
+        c: &Arc<Connection>,
+        commit: impl FnOnce(&mut crate::storage::Storage) -> crate::storage::StoreResult<T>
+        + Send
+        + 'static,
+    ) -> SecurityResult<T> {
+        let runtime = self.clone();
+        let original = c.clone();
+        self.security
+            .storage
+            .call(move |store| {
+                original
+                    .validate_read(&runtime.security.state, &runtime.topology)
+                    .map_err(crate::storage::StorageError::Policy)?;
+                let connections = runtime.connections.lock();
+                if !connections
+                    .get(&original.target.session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &original))
+                {
+                    return Err(crate::storage::StorageError::Policy(
+                        ErrorCode::StaleSession,
+                    ));
+                }
+                runtime
+                    .security
+                    .state
+                    .with_attention_source(&original.target, &original.epoch, Provider::Omp, || {
+                        commit(store)
+                    })
+                    .map_err(crate::storage::StorageError::Policy)?
+            })
+            .await
+            .map_err(store_error)
     }
-    async fn attention_before_frame(self:&Arc<Self>,c:&Arc<Connection>,frame:&Value)->SecurityResult<()>{
+    async fn attention_before_frame(
+        self: &Arc<Self>,
+        c: &Arc<Connection>,
+        frame: &Value,
+    ) -> SecurityResult<()> {
         // Called only for source-ordered post-install frames, never snapshot replay.
-        c.validate_read(&self.security.state,&self.topology)?;
-        if frame.get("t").and_then(Value::as_str)==Some("state") {
-            self.observe_controls(c,frame.get("state").unwrap_or(&Value::Null))?;
+        c.validate_read(&self.security.state, &self.topology)?;
+        if frame.get("t").and_then(Value::as_str) == Some("state") {
+            self.observe_controls(c, frame.get("state").unwrap_or(&Value::Null))?;
         }
-        if frame["t"]=="event"&&matches!(frame["event"]["type"].as_str(),Some("agent_start"|"agent_end")){
-            let target=c.target.clone();let epoch=c.epoch.clone();let connection=c.desktop_attention.clone();let start=frame["event"]["type"]=="agent_start";
-            let events=self.attention_commit(c,move|store|store.omp_cycle(&target,&epoch,&connection,start,crate::pairing::now_ms())).await?;
-            self.security.publish_attention(events).await?;return Ok(())
+        if frame["t"] == "event"
+            && matches!(
+                frame["event"]["type"].as_str(),
+                Some("agent_start" | "agent_end")
+            )
+        {
+            let target = c.target.clone();
+            let epoch = c.epoch.clone();
+            let connection = c.desktop_attention.clone();
+            let start = frame["event"]["type"] == "agent_start";
+            let events = self
+                .attention_commit(c, move |store| {
+                    store.omp_cycle(
+                        &target,
+                        &epoch,
+                        &connection,
+                        start,
+                        crate::pairing::now_ms(),
+                    )
+                })
+                .await?;
+            self.security.publish_attention(events).await?;
+            return Ok(());
         }
-        let before=self.security.state.session_state(&c.target,&c.epoch)?;let current;let mut native=None;let mut actionable=false;
-        match frame.get("t").and_then(Value::as_str){
-            Some("ui-request")=>{
-                let request=frame.get("request").ok_or(ErrorCode::InvalidRequest)?;let id=native_json::rpc_id(request.get("reqId").ok_or(ErrorCode::InvalidRequest)?).map_err(policy)?;
-                if !matches!(&id,NativeRpcId::Number(_)){return Err(ErrorCode::InvalidRequest)}
-                {let dialogs=c.dialogs.lock();if dialogs.len()>=64||dialogs.values().any(|d|d.native==id){return Ok(())}}
-                project_form(&self.security.state,&c.target,request)?;
-                native=Some(serde_json::to_string(&id).map_err(policy)?);current=SessionStatus::Attention;actionable=true;
-            },
-            Some("state")=>{let mut display=before.clone();apply_native_state(&mut display,frame.get("state").unwrap_or(&Value::Null));current=display.summary.status;},
-            Some("event")=>{let event=&frame["event"];match event.get("type").and_then(Value::as_str){
-                Some("agent_start"|"turn_start")=>current=SessionStatus::Working,
-                Some("agent_end"|"turn_end")=>current=SessionStatus::Idle,
-                _=>return Ok(())
-            }},_=>return Ok(())
+        let before = self.security.state.session_state(&c.target, &c.epoch)?;
+        let current;
+        let mut native = None;
+        let mut actionable = false;
+        match frame.get("t").and_then(Value::as_str) {
+            Some("ui-request") => {
+                let request = frame.get("request").ok_or(ErrorCode::InvalidRequest)?;
+                let id =
+                    native_json::rpc_id(request.get("reqId").ok_or(ErrorCode::InvalidRequest)?)
+                        .map_err(policy)?;
+                if !matches!(&id, NativeRpcId::Number(_)) {
+                    return Err(ErrorCode::InvalidRequest);
+                }
+                {
+                    let dialogs = c.dialogs.lock();
+                    if dialogs.len() >= 64 || dialogs.values().any(|d| d.native == id) {
+                        return Ok(());
+                    }
+                }
+                project_form(&self.security.state, &c.target, request)?;
+                native = Some(serde_json::to_string(&id).map_err(policy)?);
+                current = SessionStatus::Attention;
+                actionable = true;
+            }
+            Some("state") => {
+                let mut display = before.clone();
+                apply_native_state(&mut display, frame.get("state").unwrap_or(&Value::Null));
+                current = display.summary.status;
+            }
+            Some("event") => {
+                let event = &frame["event"];
+                match event.get("type").and_then(Value::as_str) {
+                    Some("agent_start" | "turn_start") => current = SessionStatus::Working,
+                    Some("agent_end" | "turn_end") => current = SessionStatus::Idle,
+                    _ => return Ok(()),
+                }
+            }
+            _ => return Ok(()),
         }
-        let snapshot=native.is_none();let correlation=native.as_deref().map(|native|crate::push::correlation(&c.target,"omp",native,if actionable{"request"}else{"completed"})).unwrap_or_else(||Id("native-checkpoint".into()));
-        let change=crate::storage::AttentionTransition{target:c.target.clone(),correlation,previous:before.summary.status,current,snapshot,new_actionable:actionable};
-        let events=self.attention_commit(c,move|store|store.attention_transition(&change,crate::pairing::now_ms())).await?;
+        let snapshot = native.is_none();
+        let correlation = native
+            .as_deref()
+            .map(|native| {
+                crate::push::correlation(
+                    &c.target,
+                    "omp",
+                    native,
+                    if actionable { "request" } else { "completed" },
+                )
+            })
+            .unwrap_or_else(|| Id("native-checkpoint".into()));
+        let change = crate::storage::AttentionTransition {
+            target: c.target.clone(),
+            correlation,
+            previous: before.summary.status,
+            current,
+            snapshot,
+            new_actionable: actionable,
+        };
+        let events = self
+            .attention_commit(c, move |store| {
+                store.attention_transition(&change, crate::pairing::now_ms())
+            })
+            .await?;
         self.security.publish_attention(events).await
     }
-    fn observe_controls(&self,connection:&Connection,native:&Value)->SecurityResult<()> {
-        let changed=connection.controls.lock().update(omp_effective_controls(native));
-        if changed {self.security.state.controls_changed(&connection.target,&connection.epoch)?;}
+    fn observe_controls(&self, connection: &Connection, native: &Value) -> SecurityResult<()> {
+        let changed = connection
+            .controls
+            .lock()
+            .update(omp_effective_controls(native));
+        if changed {
+            self.security
+                .state
+                .controls_changed(&connection.target, &connection.epoch)?;
+        }
         Ok(())
     }
     fn apply_frame(&self, connection: &Connection, frame: Value) -> SecurityResult<()> {
@@ -3444,7 +3661,7 @@ impl Runtime {
                 }
             }
             Some("state") => {
-                self.observe_controls(connection,frame.get("state").unwrap_or(&Value::Null))?;
+                self.observe_controls(connection, frame.get("state").unwrap_or(&Value::Null))?;
                 let mut display = state.session_state(target, epoch)?;
                 apply_native_state(&mut display, frame.get("state").unwrap_or(&Value::Null));
                 state.update_from_source(target, epoch, SessionUpdate::State(display))?;
@@ -3677,42 +3894,54 @@ impl Runtime {
     ) -> SecurityResult<Receipt> {
         let create = matches!(&request.body, RequestBody::SessionCreate(_));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-        let (request,existing)=self.security.preflight_request(&auth,request).await?;
-        if let Some(receipt)=existing{return Ok(receipt)}
-        let selection=if let RequestBody::SessionCreate(params)=&request.body {
-            Some(self.topology.capture_creation(&auth,params).await)
-        } else {None};
-        let admitted_selection=selection.clone();
-        let controls=if let RequestBody::SessionControlsApply(params)=&request.body {
-            Some(self.security.state.controls_publication(&auth,&params.target,&params.catalogue_generation))
-        } else {None};
-        let admitted_controls=controls.clone();let admission_authorization=auth.clone();
+        let (request, existing) = self.security.preflight_request(&auth, request).await?;
+        if let Some(receipt) = existing {
+            return Ok(receipt);
+        }
+        let selection = if let RequestBody::SessionCreate(params) = &request.body {
+            Some(self.topology.capture_creation(&auth, params).await)
+        } else {
+            None
+        };
+        let admitted_selection = selection.clone();
+        let controls = if let RequestBody::SessionControlsApply(params) = &request.body {
+            Some(self.security.state.controls_publication(
+                &auth,
+                &params.target,
+                &params.catalogue_generation,
+            ))
+        } else {
+            None
+        };
+        let admitted_controls = controls.clone();
+        let admission_authorization = auth.clone();
         let (request, readiness) = if create {
             (request, None)
         } else {
-            let ready=if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some()) {
-                Err(("skill_provider",ErrorCode::NotReady))
+            let ready = if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some())
+            {
+                Err(("skill_provider", ErrorCode::NotReady))
             } else {
-            let target = match &request.body {
-                RequestBody::SessionControlsApply(p)=>&p.target,
-                RequestBody::PromptSubmit(p) => &p.target,
-                RequestBody::TurnCancel(p) => &p.target,
-                RequestBody::RequestRespond(p) => &p.target,
-                _ => return Err(ErrorCode::InvalidRequest),
-            };
-            let captured = self
-                .security
-                .state
-                .source_epoch(target)
-                .map_err(|code| ("native_identity", code))
-                .and_then(|_| self.connection_instance(target));
-            match captured {
-                Ok(connection) => {
-                    self.wait_connection(&auth, &request, target, deadline, connection)
-                        .await
+                let target = match &request.body {
+                    RequestBody::SessionControlsApply(p) => &p.target,
+                    RequestBody::PromptSubmit(p) => &p.target,
+                    RequestBody::TurnCancel(p) => &p.target,
+                    RequestBody::RequestRespond(p) => &p.target,
+                    _ => return Err(ErrorCode::InvalidRequest),
+                };
+                let captured = self
+                    .security
+                    .state
+                    .source_epoch(target)
+                    .map_err(|code| ("native_identity", code))
+                    .and_then(|_| self.connection_instance(target));
+                match captured {
+                    Ok(connection) => {
+                        self.wait_connection(&auth, &request, target, deadline, connection)
+                            .await
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            }
             };
             // Still perform the one final atomic matching lookup if a concurrent original won.
             // An unseen request retains its original readiness failure without a reserve retry.
@@ -3737,9 +3966,15 @@ impl Runtime {
                 move |r| {
                     if create {
                         validator.validate_create(r)?;
-                        let RequestBody::SessionCreate(params)=&r.body else{return Err(ErrorCode::InvalidRequest)};
-                        admitted_selection.as_ref().ok_or(ErrorCode::NotReady)?.as_ref().map_err(|code|*code)?
-                            .validate(&validator.topology,params)?;
+                        let RequestBody::SessionCreate(params) = &r.body else {
+                            return Err(ErrorCode::InvalidRequest);
+                        };
+                        admitted_selection
+                            .as_ref()
+                            .ok_or(ErrorCode::NotReady)?
+                            .as_ref()
+                            .map_err(|code| *code)?
+                            .validate(&validator.topology, params)?;
                     } else {
                         let checked = match &readiness {
                             Some(Ok(connection)) => {
@@ -3753,11 +3988,26 @@ impl Runtime {
                             None => Err(("method", ErrorCode::InvalidRequest)),
                         };
                         checked.map_err(|(_, code)| code)?;
-                        if let RequestBody::SessionControlsApply(params)=&r.body {
-                            let publication=admitted_controls.as_ref().ok_or(ErrorCode::NotReady)?.as_ref().map_err(|code|*code)?;
-                            validator.security.state.controls_publication_current(&admission_authorization,publication)?;
-                            let connection=readiness.as_ref().ok_or(ErrorCode::NotReady)?.as_ref().map_err(|(_,code)|*code)?;
-                            validator.validate_controls_selection(connection,publication,params)?;
+                        if let RequestBody::SessionControlsApply(params) = &r.body {
+                            let publication = admitted_controls
+                                .as_ref()
+                                .ok_or(ErrorCode::NotReady)?
+                                .as_ref()
+                                .map_err(|code| *code)?;
+                            validator.security.state.controls_publication_current(
+                                &admission_authorization,
+                                publication,
+                            )?;
+                            let connection = readiness
+                                .as_ref()
+                                .ok_or(ErrorCode::NotReady)?
+                                .as_ref()
+                                .map_err(|(_, code)| *code)?;
+                            validator.validate_controls_selection(
+                                connection,
+                                publication,
+                                params,
+                            )?;
                         }
                     }
                     if validator.jobs.lock().len() >= 64 {
@@ -3768,7 +4018,12 @@ impl Runtime {
                 move |committed| {
                     owner.register_committed_original(
                         authorization,
-                        OriginalMutation {request:original,connection:pinned,creation:selection.and_then(Result::ok),controls:controls.and_then(Result::ok)},
+                        OriginalMutation {
+                            request: original,
+                            connection: pinned,
+                            creation: selection.and_then(Result::ok),
+                            controls: controls.and_then(Result::ok),
+                        },
                         committed,
                         deadline,
                         tx,
@@ -3788,13 +4043,18 @@ impl Runtime {
     fn register_committed_original(
         self: &Arc<Self>,
         authorization: Arc<Authorized>,
-        original:OriginalMutation,
+        original: OriginalMutation,
         committed: Receipt,
         deadline: tokio::time::Instant,
         tx: oneshot::Sender<SecurityResult<Receipt>>,
         handle: tokio::runtime::Handle,
     ) {
-        let OriginalMutation {request:original,connection,creation:selection,controls}=original;
+        let OriginalMutation {
+            request: original,
+            connection,
+            creation: selection,
+            controls,
+        } = original;
         let worker = self.clone();
         self.jobs.lock().spawn_on(
             async move {
@@ -3803,21 +4063,31 @@ impl Runtime {
                 let action = committed.action_id;
                 let outcome = if let RequestBody::SessionCreate(params) = &original.body {
                     match selection.as_deref() {
-                        Some(selection)=>worker.clone()
-                            .creation_job(&authorization,&action,params,selection,deadline).await,
-                        None=>Err(ErrorCode::NotReady),
+                        Some(selection) => {
+                            worker
+                                .clone()
+                                .creation_job(&authorization, &action, params, selection, deadline)
+                                .await
+                        }
+                        None => Err(ErrorCode::NotReady),
                     }
                 } else if let Some(connection) = connection {
                     worker
-                        .write_once(&authorization, original, deadline, connection,controls)
+                        .write_once(&authorization, original, deadline, connection, controls)
                         .await
                         .map(|_| ())
                 } else {
                     Err(ErrorCode::NotReady)
                 };
                 if let Err(code) = outcome {
-                    if selection.as_ref().is_some_and(|selection|selection.unproved()) {
-                        let _=worker.topology.uncertain_creation(&authorization,&action,code).await;
+                    if selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.unproved())
+                    {
+                        let _ = worker
+                            .topology
+                            .uncertain_creation(&authorization, &action, code)
+                            .await;
                     }
                     let _ = worker.fail_unentered(&authorization, &action, code).await;
                 }
@@ -3845,19 +4115,32 @@ impl Runtime {
         }
     }
     async fn write_once(
-        self:&Arc<Self>,
+        self: &Arc<Self>,
         auth: &Arc<Authorized>,
         request: Request,
         deadline: tokio::time::Instant,
         original_connection: Arc<Connection>,
-        controls:Option<Arc<crate::backends::ControlsPublication>>,
+        controls: Option<Arc<crate::backends::ControlsPublication>>,
     ) -> SecurityResult<Receipt> {
-        if matches!(&request.body,RequestBody::SessionControlsApply(_)) {
-            return self.write_controls_once(auth,request,deadline,original_connection,controls.ok_or(ErrorCode::NotReady)?).await;
+        if matches!(&request.body, RequestBody::SessionControlsApply(_)) {
+            return self
+                .write_controls_once(
+                    auth,
+                    request,
+                    deadline,
+                    original_connection,
+                    controls.ok_or(ErrorCode::NotReady)?,
+                )
+                .await;
         }
-        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some()) {return Err(ErrorCode::NotReady)}
-        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.images.is_some()||params.delivery.is_some_and(|delivery|delivery!=PromptDelivery::Native)) {
-            return self.write_prompt_extension(auth,request,deadline,original_connection).await;
+        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.skill.is_some()) {
+            return Err(ErrorCode::NotReady);
+        }
+        if matches!(&request.body,RequestBody::PromptSubmit(params) if params.images.is_some()||params.delivery.is_some_and(|delivery|delivery!=PromptDelivery::Native))
+        {
+            return self
+                .write_prompt_extension(auth, request, deadline, original_connection)
+                .await;
         }
         let mut boundary = None;
         let outcome = async {
@@ -4185,16 +4468,24 @@ fn initial_state(
             title: agent.title.clone().unwrap_or_else(|| "OMP".into()),
             status: SessionStatus::Unknown,
             connectivity: SessionConnectivity::Synchronizing,
-            capabilities: Capabilities { controls: false, terminal_create:false,artifacts:false, attachments:false, history: true,
-            prompt: true,
-            cancel: true,
-            respond: true,
-            prompt_mode: PromptMode::SubmitOrSteer,
-            cancel_mode: CancelMode::CurrentWork,
-            terminal_read: false,
-            worktrees_read: false,
-            changes_read: false,
-            workspace_rename: false, agent_rename: false, skills_read: false, },
+            capabilities: Capabilities {
+                controls: false,
+                terminal_create: false,
+                artifacts: false,
+                attachments: false,
+                history: true,
+                prompt: true,
+                cancel: true,
+                respond: true,
+                prompt_mode: PromptMode::SubmitOrSteer,
+                cancel_mode: CancelMode::CurrentWork,
+                terminal_read: false,
+                worktrees_read: false,
+                changes_read: false,
+                workspace_rename: false,
+                agent_rename: false,
+                skills_read: false,
+            },
             skills_generation: None,
             history_coverage: HistoryCoverage {
                 scope: HistoryScope::AllBranches,
@@ -4222,14 +4513,31 @@ fn initial_state(
     apply_native_state(&mut state, welcome.get("state").unwrap_or(&Value::Null));
     state
 }
-fn omp_effective_controls(native:&Value)->crate::backends::EffectiveControls {
-    let model=native.get("model").and_then(Value::as_object).and_then(|model|{
-        let provider=model.get("provider")?.as_str()?;let id=model.get("id")?.as_str()?;
-        if provider.is_empty()||id.is_empty()||provider.len()>512||id.len()>512 {return None}
-        Some(crate::backends::NativeModelIdentity {provider:provider.to_owned(),model:id.to_owned()})
-    });
-    let effort=native.get("thinkingLevel").and_then(Value::as_str).filter(|effort|effort.len()<=FRAME_MAX).map(str::to_owned);
-    crate::backends::EffectiveControls {model,effort,mode:None}
+fn omp_effective_controls(native: &Value) -> crate::backends::EffectiveControls {
+    let model = native
+        .get("model")
+        .and_then(Value::as_object)
+        .and_then(|model| {
+            let provider = model.get("provider")?.as_str()?;
+            let id = model.get("id")?.as_str()?;
+            if provider.is_empty() || id.is_empty() || provider.len() > 512 || id.len() > 512 {
+                return None;
+            }
+            Some(crate::backends::NativeModelIdentity {
+                provider: provider.to_owned(),
+                model: id.to_owned(),
+            })
+        });
+    let effort = native
+        .get("thinkingLevel")
+        .and_then(Value::as_str)
+        .filter(|effort| effort.len() <= FRAME_MAX)
+        .map(str::to_owned);
+    crate::backends::EffectiveControls {
+        model,
+        effort,
+        mode: None,
+    }
 }
 fn apply_native_state(state: &mut SessionState, native: &Value) {
     let busy = native.get("isStreaming").and_then(Value::as_bool);
@@ -4302,14 +4610,15 @@ impl Runtime {
         auth: &Authorized,
         action: &Uuid,
         params: &SessionCreateParams,
-        selection:&herdr::CreationSelection,
+        selection: &herdr::CreationSelection,
         deadline: tokio::time::Instant,
     ) -> SecurityResult<()> {
         if self.stopping.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline {
             return Err(ErrorCode::NotReady);
         }
         let workspace = self
-            .topology.workspace_once(&self.security, auth, action, params, selection)
+            .topology
+            .workspace_once(&self.security, auth, action, params, selection)
             .await?;
         if !matches!(workspace.state, ReceiptState::Dispatching) {
             return Ok(());
@@ -4319,17 +4628,28 @@ impl Runtime {
         }) {
             return Ok(());
         }
-        let prepared=match self.topology.prepare_created_shell(
-            &self.security,auth,(action,params,selection),deadline,self.first_guard.as_ref(),
-        ).await {
-            Ok(Some(prepared))=>prepared,
-            Ok(None)=>return Ok(()),
-            Err(code)=>{
-                self.topology.uncertain_creation(auth,action,code).await?;
+        let prepared = match self
+            .topology
+            .prepare_created_shell(
+                &self.security,
+                auth,
+                (action, params, selection),
+                deadline,
+                self.first_guard.as_ref(),
+            )
+            .await
+        {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return Ok(()),
+            Err(code) => {
+                self.topology.uncertain_creation(auth, action, code).await?;
                 return Ok(());
             }
         };
-        let probed=self.topology.shell_probe_once_reported(&self.security,auth,prepared,self.first_guard.as_ref()).await?;
+        let probed = self
+            .topology
+            .shell_probe_once_reported(&self.security, auth, prepared, self.first_guard.as_ref())
+            .await?;
         if probed.state != ReceiptState::Dispatching {
             return Ok(());
         }
@@ -4346,57 +4666,93 @@ impl Runtime {
         let resources = progress.resources;
         let mut relay_resources = resources.clone();
         relay_resources.relay_started = Some(true);
-        self.security.start_boundary(auth, action.clone(), (CreationStage::Relay, StageMetadata::default()), || { selection.validate(&self.topology, params).map_err(|code| crate::pairing::CreationAdmissionFailure::guarded(code, crate::pairing::CreationAdmissionGuard::Directory))?; let checked: crate::pairing::SecurityResult<()> = (|| {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(ErrorCode::Timeout);
-            }
-            self.topology
-                .validate_provider_stage(action, params, &resources)?;
-            if *self.relay_ready.borrow() != Some(port) {
-                return Err(ErrorCode::NotReady);
-            }
-            Ok(())
-        })(); checked.map_err(Into::into) }, || {
-            let provider_path = overlay(&self.topology.config, port).map_err(policy)?;
-            Ok((
-                provider_path,
-                CreationOutcome {
-                    resources: relay_resources,
-                    metadata: StageMetadata::default(),
-                    state: StageState::Confirmed,
-                    definitive: Some(Id(
-                        "Private overlay and companion-owned loopback relay ready".into(),
-                    )),
-                    at: pairing::now_ms(),
+        self.security
+            .start_boundary(
+                auth,
+                action.clone(),
+                (CreationStage::Relay, StageMetadata::default()),
+                || {
+                    selection.validate(&self.topology, params).map_err(|code| {
+                        crate::pairing::CreationAdmissionFailure::guarded(
+                            code,
+                            crate::pairing::CreationAdmissionGuard::Directory,
+                        )
+                    })?;
+                    let checked: crate::pairing::SecurityResult<()> = (|| {
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(ErrorCode::Timeout);
+                        }
+                        self.topology
+                            .validate_provider_stage(action, params, &resources)?;
+                        if *self.relay_ready.borrow() != Some(port) {
+                            return Err(ErrorCode::NotReady);
+                        }
+                        Ok(())
+                    })();
+                    checked.map_err(Into::into)
                 },
-            ))
-        })
+                || {
+                    let provider_path = overlay(&self.topology.config, port).map_err(policy)?;
+                    Ok((
+                        provider_path,
+                        CreationOutcome {
+                            resources: relay_resources,
+                            metadata: StageMetadata::default(),
+                            state: StageState::Confirmed,
+                            definitive: Some(Id(
+                                "Private overlay and companion-owned loopback relay ready".into(),
+                            )),
+                            at: pairing::now_ms(),
+                        },
+                    ))
+                },
+            )
             .await?;
         // New root-pane shell measurement is mandatory. Never borrow another pane's proof.
         let project = match self.topology.execution_directory(selection, params) {
             Ok(project) => match project.to_str() {
                 Some(path) => path.to_owned(),
                 None => {
-                    if let Some(reporter) = &self.first_guard { reporter.report_launch_preflight("project_path", ErrorCode::NotReady, "none"); }
+                    if let Some(reporter) = &self.first_guard {
+                        reporter.report_launch_preflight(
+                            "project_path",
+                            ErrorCode::NotReady,
+                            "none",
+                        );
+                    }
                     return Err(ErrorCode::NotReady);
                 }
             },
             Err(code) => {
-                if let Some(reporter) = &self.first_guard { reporter.report_launch_preflight("project_lookup", code, "none"); }
+                if let Some(reporter) = &self.first_guard {
+                    reporter.report_launch_preflight("project_lookup", code, "none");
+                }
                 return Err(code);
             }
         };
-        let overlay = match creation_overlay(&self.topology.config, port, self.producer_capture_authorized) {
+        let overlay = match creation_overlay(
+            &self.topology.config,
+            port,
+            self.producer_capture_authorized,
+        ) {
             Ok(overlay) => match overlay.to_str() {
                 Some(path) => path.to_owned(),
                 None => {
-                    if let Some(reporter) = &self.first_guard { reporter.report_launch_preflight("creation_overlay_path", ErrorCode::NotReady, "none"); }
+                    if let Some(reporter) = &self.first_guard {
+                        reporter.report_launch_preflight(
+                            "creation_overlay_path",
+                            ErrorCode::NotReady,
+                            "none",
+                        );
+                    }
                     return Err(ErrorCode::NotReady);
                 }
             },
             Err(error) => {
                 let code = policy(&error);
-                if let Some(reporter) = &self.first_guard { reporter.report_launch_preflight("creation_overlay", code, io_kind(&error)); }
+                if let Some(reporter) = &self.first_guard {
+                    reporter.report_launch_preflight("creation_overlay", code, io_kind(&error));
+                }
                 return Err(code);
             }
         };
@@ -4408,13 +4764,19 @@ impl Runtime {
             Ok(args) => launch_args.extend(args),
             Err(error) => {
                 let code = policy(&error);
-                if let Some(reporter) = &self.first_guard { reporter.report_launch_preflight("diagnostic_extension_args", code, io_kind(&error)); }
+                if let Some(reporter) = &self.first_guard {
+                    reporter.report_launch_preflight(
+                        "diagnostic_extension_args",
+                        code,
+                        io_kind(&error),
+                    );
+                }
                 return Err(code);
             }
         }
         // Optional Skills support never changes the approved outer wrapper or
         // the normal provider creation path when source/grant proof is absent.
-        if let Some(pane)=&resources.pane_id{
+        if let Some(pane) = &resources.pane_id {
             // The already-admitted creation request owns the original server ID;
             // result resources carry only the action's produced native IDs.
             if let Ok(source) = self.topology.source(&params.server_id)
@@ -4429,7 +4791,7 @@ impl Runtime {
                 &self.security,
                 auth,
                 action,
-                (params,selection),
+                (params, selection),
                 launch_args,
                 self.first_guard.clone(),
             )
@@ -5468,9 +5830,15 @@ mod tests {
         fn prompt(&self, text: &str) -> Request {
             Request {
                 id: Uuid::random(),
-                body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: self.runtime.security.boot.clone(),
-                target: self.connection.target.clone(),
-                text: PromptText::new(text).unwrap(), }),
+                body: RequestBody::PromptSubmit(PromptSubmitParams {
+                    delivery: None,
+                    native_turn_id: None,
+                    images: None,
+                    skill: None,
+                    boot_id: self.runtime.security.boot.clone(),
+                    target: self.connection.target.clone(),
+                    text: PromptText::new(text).unwrap(),
+                }),
             }
         }
         async fn refresh(&self, event: &str, snapshot: Value) -> Source {
@@ -5521,15 +5889,35 @@ mod tests {
 
     #[tokio::test]
     async fn codex_skill_selector_never_becomes_an_omp_text_prompt_or_native_readiness_wait() {
-        let mut fixture=NativeFixture::new(None).await;
-        let mut request=fixture.prompt("");
-        let RequestBody::PromptSubmit(params)=&mut request.body else {unreachable!()};
-        params.skill=Some(SkillSelector{catalogue_generation:Uuid::random(),reference:Uuid::random()});
-        let action=request.id.clone();
-        assert_eq!(fixture.runtime.clone().mutate(fixture.auth.clone(),request).await,Err(ErrorCode::NotReady));
+        let mut fixture = NativeFixture::new(None).await;
+        let mut request = fixture.prompt("");
+        let RequestBody::PromptSubmit(params) = &mut request.body else {
+            unreachable!()
+        };
+        params.skill = Some(SkillSelector {
+            catalogue_generation: Uuid::random(),
+            reference: Uuid::random(),
+        });
+        let action = request.id.clone();
+        assert_eq!(
+            fixture
+                .runtime
+                .clone()
+                .mutate(fixture.auth.clone(), request)
+                .await,
+            Err(ErrorCode::NotReady)
+        );
         assert!(fixture.runtime.jobs.lock().is_empty());
-        assert!(receipt(&fixture.runtime.security,&fixture.auth,&action).await.is_err());
-        assert!(tokio::time::timeout(Duration::from_millis(100),fixture.host_socket.next()).await.is_err());
+        assert!(
+            receipt(&fixture.runtime.security, &fixture.auth, &action)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), fixture.host_socket.next())
+                .await
+                .is_err()
+        );
         fixture.close().await;
     }
 
@@ -5960,11 +6348,18 @@ mod tests {
         // Installing Source precedes awaited shell enrollment and State publication.
         // Hold the original snapshot gate, but wait for this exact published overflow.
         let captured = fixture_until(|| {
-            let inventory=fixture_inventory(&state,&connection);
-            inventory.hierarchy.iter().any(|graph|graph.server_id==source.server_id
-                &&graph.server_incarnation==source.incarnation
-                &&graph.reason==Some(NativeUnavailableReason::TooLarge)).then_some(inventory)
-        }).await;
+            let inventory = fixture_inventory(&state, &connection);
+            inventory
+                .hierarchy
+                .iter()
+                .any(|graph| {
+                    graph.server_id == source.server_id
+                        && graph.server_incarnation == source.incarnation
+                        && graph.reason == Some(NativeUnavailableReason::TooLarge)
+                })
+                .then_some(inventory)
+        })
+        .await;
 
         assert!(captured.sessions.is_empty() && captured.unbound.is_empty());
         assert!(captured.projects.is_empty());
@@ -6032,11 +6427,13 @@ mod tests {
 
         state
             .replace_inventory(
-                captured.servers,
-                captured.projects,
-                vec![],
-                captured.unbound,
-                captured.hierarchy,
+                crate::state::NativeInventory {
+                    servers: captured.servers,
+                    projects: captured.projects,
+                    shells: vec![],
+                    unbound: captured.unbound,
+                    hierarchy: captured.hierarchy,
+                },
                 &[],
                 |graphs| source.fence_inventory(&mut graphs[0]),
             )
@@ -6066,11 +6463,18 @@ mod tests {
         recovered.recheck().unwrap();
         // A replacement Source is also installed before its recovered State display.
         let current = fixture_until(|| {
-            let inventory=fixture_inventory(&state,&connection);
-            inventory.hierarchy.iter().any(|graph|graph.server_id==recovered.server_id
-                &&graph.server_incarnation==recovered.incarnation
-                &&graph.reason==Some(NativeUnavailableReason::TooLarge)).then_some(inventory)
-        }).await;
+            let inventory = fixture_inventory(&state, &connection);
+            inventory
+                .hierarchy
+                .iter()
+                .any(|graph| {
+                    graph.server_id == recovered.server_id
+                        && graph.server_incarnation == recovered.incarnation
+                        && graph.reason == Some(NativeUnavailableReason::TooLarge)
+                })
+                .then_some(inventory)
+        })
+        .await;
 
         assert!(current.sessions.is_empty() && current.unbound.is_empty());
         assert_eq!(current.servers[0].connectivity, ServerConnectivity::Online);
@@ -6126,11 +6530,13 @@ mod tests {
 
         state
             .replace_inventory(
-                captured.servers,
-                captured.projects,
-                vec![],
-                captured.unbound,
-                captured.hierarchy,
+                crate::state::NativeInventory {
+                    servers: captured.servers,
+                    projects: captured.projects,
+                    shells: vec![],
+                    unbound: captured.unbound,
+                    hierarchy: captured.hierarchy,
+                },
                 &[(target, epoch)],
                 |graphs| source.fence_inventory(&mut graphs[0]),
             )
@@ -6202,11 +6608,13 @@ mod tests {
         // the drain's stale transition. It must not reinstall current associations.
         state
             .replace_inventory(
-                captured.servers,
-                captured.projects,
-                vec![],
-                captured.unbound,
-                captured.hierarchy,
+                crate::state::NativeInventory {
+                    servers: captured.servers,
+                    projects: captured.projects,
+                    shells: vec![],
+                    unbound: captured.unbound,
+                    hierarchy: captured.hierarchy,
+                },
                 &[(target, epoch)],
                 |graphs| previous.fence_inventory(&mut graphs[0]),
             )
@@ -6714,7 +7122,19 @@ mod tests {
                         Ok(())
                     },
                     move |committed| {
-                        owner.register_committed_original(authorization,OriginalMutation {request:original,connection:Some(original_connection),creation:None,controls:None}, committed, tokio::time::Instant::now() + Duration::from_secs(120), result_tx, handle);
+                        owner.register_committed_original(
+                            authorization,
+                            OriginalMutation {
+                                request: original,
+                                connection: Some(original_connection),
+                                creation: None,
+                                controls: None,
+                            },
+                            committed,
+                            tokio::time::Instant::now() + Duration::from_secs(120),
+                            result_tx,
+                            handle,
+                        );
                     },
                 )
                 .await
@@ -6904,11 +7324,15 @@ mod tests {
         let fixture = NativeFixture::new(Some(vec![])).await;
         let request = Request {
             id: Uuid::random(),
-            body: RequestBody::SessionCreate(SessionCreateParams { directory_ref: None, placement: None, boot_id: fixture.runtime.security.boot.clone(),
-            server_id: fixture.connection.source.server_id.clone(),
-            project_id: Uuid::random(),
-            provider: Provider::Omp,
-            name: Label::new("parked component creation").unwrap(), }),
+            body: RequestBody::SessionCreate(SessionCreateParams {
+                directory_ref: None,
+                placement: None,
+                boot_id: fixture.runtime.security.boot.clone(),
+                server_id: fixture.connection.source.server_id.clone(),
+                project_id: Uuid::random(),
+                provider: Provider::Omp,
+                name: Label::new("parked component creation").unwrap(),
+            }),
         };
         let security = fixture.runtime.security.clone();
         let auth = fixture.auth.clone();
@@ -7490,7 +7914,19 @@ mod tests {
                             .map_err(|(_, code)| code)
                     },
                     move |committed| {
-                        owner.register_committed_original(authorization,OriginalMutation {request:original,connection:Some(original_connection),creation:None,controls:None}, committed, deadline, result_tx, handle)
+                        owner.register_committed_original(
+                            authorization,
+                            OriginalMutation {
+                                request: original,
+                                connection: Some(original_connection),
+                                creation: None,
+                                controls: None,
+                            },
+                            committed,
+                            deadline,
+                            result_tx,
+                            handle,
+                        )
                     },
                 )
                 .await
@@ -7743,9 +8179,15 @@ mod tests {
             let second = if matches!(case, "race_match" | "race_conflict") {
                 let mut second = request.clone();
                 if case == "race_conflict" {
-                    second.body = RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: fixture.runtime.security.boot.clone(),
-                    target: target.clone(),
-                    text: PromptText::new("conflicting original body").unwrap(), });
+                    second.body = RequestBody::PromptSubmit(PromptSubmitParams {
+                        delivery: None,
+                        native_turn_id: None,
+                        images: None,
+                        skill: None,
+                        boot_id: fixture.runtime.security.boot.clone(),
+                        target: target.clone(),
+                        text: PromptText::new("conflicting original body").unwrap(),
+                    });
                 }
                 let owner = fixture.runtime.clone();
                 let auth = fixture.auth.clone();
@@ -7757,7 +8199,10 @@ mod tests {
             };
             tokio::time::timeout(Duration::from_secs(5), async {
                 for _ in 0..1 + usize::from(second.is_some()) {
-                    waits.recv().await.expect("original must enter real Core wait");
+                    waits
+                        .recv()
+                        .await
+                        .expect("original must enter real Core wait");
                 }
             })
             .await
@@ -7899,9 +8344,15 @@ mod tests {
                         terminal
                     );
                     let mut conflict = request.clone();
-                    conflict.body = RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: fixture.runtime.security.boot.clone(),
-                    target: target.clone(),
-                    text: PromptText::new("different fingerprint").unwrap(), });
+                    conflict.body = RequestBody::PromptSubmit(PromptSubmitParams {
+                        delivery: None,
+                        native_turn_id: None,
+                        images: None,
+                        skill: None,
+                        boot_id: fixture.runtime.security.boot.clone(),
+                        target: target.clone(),
+                        text: PromptText::new("different fingerprint").unwrap(),
+                    });
                     assert_eq!(
                         fixture
                             .runtime
@@ -7999,9 +8450,15 @@ mod tests {
             for _ in 1..crate::storage::PEER_CAPACITY {
                 let request = Request {
                     id: Uuid::random(),
-                    body: RequestBody::PromptSubmit(PromptSubmitParams { delivery: None, native_turn_id: None, images: None, skill: None, boot_id: boot.clone(),
-                    target: target.clone(),
-                    text: PromptText::new("capacity fixture").unwrap(), }),
+                    body: RequestBody::PromptSubmit(PromptSubmitParams {
+                        delivery: None,
+                        native_turn_id: None,
+                        images: None,
+                        skill: None,
+                        boot_id: boot.clone(),
+                        target: target.clone(),
+                        text: PromptText::new("capacity fixture").unwrap(),
+                    }),
                 };
                 let fingerprint = hmac_sha256(&[23; 32], &canonical_request(&request).unwrap());
                 let mut receipt = template.clone();

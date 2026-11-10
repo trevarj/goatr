@@ -25,10 +25,10 @@ use std::{
 };
 #[path = "smoke/live.rs"]
 mod live;
-#[path = "smoke/review.rs"]
-mod review;
 #[path = "smoke/native_inventory.rs"]
 mod native_inventory;
+#[path = "smoke/review.rs"]
+mod review;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HelperLocation {
     file: &'static str,
@@ -46,7 +46,9 @@ impl HelperLocation {
                 "smoke/paging_proof.rs"
             }
             "examples/smoke/ui.rs" | "companion/examples/smoke/ui.rs" => "smoke/ui.rs",
-            "examples/smoke/physical.rs" | "companion/examples/smoke/physical.rs" => "smoke/physical.rs",
+            "examples/smoke/physical.rs" | "companion/examples/smoke/physical.rs" => {
+                "smoke/physical.rs"
+            }
             "examples/smoke/camera.rs" | "companion/examples/smoke/camera.rs" => "smoke/camera.rs",
             "examples/smoke/review.rs" | "companion/examples/smoke/review.rs" => "smoke/review.rs",
             "examples/smoke/setup_acceptance.rs"
@@ -456,7 +458,8 @@ fn retained_resource(path: &Path, original: Option<&Value>) -> Value {
     let current = fs::symlink_metadata(path)
         .map(|metadata| transport_identity(path, &metadata))
         .map_err(|error| error.kind());
-    let matches = original.is_some_and(|original| current.as_ref().is_ok_and(|current| current == original));
+    let matches =
+        original.is_some_and(|original| current.as_ref().is_ok_and(|current| current == original));
     json!({"original":original,"current":current.as_ref().ok(),"matchesOriginal":matches,
         "captureErrorKind":current.as_ref().err().map(|kind|format!("{kind:?}"))})
 }
@@ -469,21 +472,42 @@ struct OwnedRun {
     admin_original: Value,
 }
 impl OwnedRun {
-    fn spawn(command: &mut std::process::Command, root: PathBuf, root_original: Value, admin_parent: PathBuf, admin_original: Value) -> io::Result<Self> {
+    fn spawn(
+        command: &mut std::process::Command,
+        root: PathBuf,
+        root_original: Value,
+        admin_parent: PathBuf,
+        admin_original: Value,
+    ) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         // SAFETY: the hook only clears capabilities with async-signal-safe syscalls.
         unsafe {
             command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
         }
         let child = command.process_group(0).spawn()?;
-        let original_process = goatr::herdr::process_evidence(child.id()).map_err(|error| error.kind());
-        Ok(Self { child, original_process, root, root_original, admin_parent, admin_original })
+        let original_process =
+            goatr::herdr::process_evidence(child.id()).map_err(|error| error.kind());
+        Ok(Self {
+            child,
+            original_process,
+            root,
+            root_original,
+            admin_parent,
+            admin_original,
+        })
     }
     fn matches_process(&self, current: &goatr::herdr::ProcessEvidence) -> bool {
-        self.original_process.as_ref().is_ok_and(|original| original == current)
+        self.original_process
+            .as_ref()
+            .is_ok_and(|original| original == current)
     }
-    fn process_comparison(&self, current: Result<goatr::herdr::ProcessEvidence, io::ErrorKind>) -> Value {
-        let matches = current.as_ref().is_ok_and(|current| self.matches_process(current));
+    fn process_comparison(
+        &self,
+        current: Result<goatr::herdr::ProcessEvidence, io::ErrorKind>,
+    ) -> Value {
+        let matches = current
+            .as_ref()
+            .is_ok_and(|current| self.matches_process(current));
         json!({"original":self.original_process.as_ref().ok(),"current":current.as_ref().ok(),
             "matchesOriginal":matches,
             "originalCaptureErrorKind":self.original_process.as_ref().err().map(|kind|format!("{kind:?}")),
@@ -493,7 +517,9 @@ impl OwnedRun {
         let current = goatr::herdr::process_evidence(self.child.id()).map_err(|error| error.kind());
         let child_state = match self.child.try_wait() {
             Ok(None) => json!({"state":"running"}),
-            Ok(Some(status)) => json!({"state":"exited","code":status.code(),"signal":status.signal()}),
+            Ok(Some(status)) => {
+                json!({"state":"exited","code":status.code(),"signal":status.signal()})
+            }
             Err(error) => json!({"state":"unavailable","errorKind":format!("{:?}",error.kind())}),
         };
         json!({"childPid":self.child.id(),"childState":child_state,"process":self.process_comparison(current),
@@ -549,9 +575,19 @@ fn drain_terminal_pair_stderr(
 }
 /// libc PTY only: pair insists on terminal stdout; invitations never reach argv/env/files.
 /// Controller Linux capabilities are dropped before exec.
-fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>, deadline: Option<Instant>) -> io::Result<String> {
-    let deadline=deadline.unwrap_or_else(||Instant::now()+Duration::from_secs(60));
-    if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pair terminal deadline exceeded before spawn"));}
+fn terminal_pair(
+    binary: &Path,
+    root: Option<&Path>,
+    socket: Option<&Path>,
+    deadline: Option<Instant>,
+) -> io::Result<String> {
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(60));
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "original pair terminal deadline exceeded before spawn",
+        ));
+    }
     // SAFETY: these POSIX calls allocate/configure an owned PTY descriptor and bounded name buffer.
     let fd = unsafe {
         libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
@@ -590,13 +626,18 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>, dead
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave))
         .stderr(Stdio::piped());
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
         // The existing helper uses only async-signal-safe capability syscalls.
         command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
     }
-    if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pair terminal deadline exceeded before spawn"));}
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "original pair terminal deadline exceeded before spawn",
+        ));
+    }
     let mut child = command.spawn()?;
     let mut stderr = None;
     let mut stderr_nonblocking = false;
@@ -613,7 +654,12 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>, dead
         stderr_nonblocking = true;
         let mut pty_finished = false;
         loop {
-            if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pair terminal deadline exceeded"));}
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "original pair terminal deadline exceeded",
+                ));
+            }
             drain_terminal_pair_stderr(stderr, &mut stderr_classifier);
             if !pty_finished {
                 match master.read(&mut chunk) {
@@ -642,7 +688,9 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>, dead
             if pty_finished && exited {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())));
+            std::thread::sleep(
+                Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+            );
         }
         let status = child.wait()?;
         drain_terminal_pair_stderr(stderr, &mut stderr_classifier);
@@ -657,15 +705,20 @@ fn terminal_pair(binary: &Path, root: Option<&Path>, socket: Option<&Path>, dead
             .trim_end_matches('\r')
             .to_owned();
         PairInvite::parse(&uri).map_err(|_| failure("invalid terminal URI"))?;
-        if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"original pair terminal deadline exceeded after proof"));}
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "original pair terminal deadline exceeded after proof",
+            ));
+        }
         Ok(uri)
     })();
     bytes.fill(0);
-    if !matches!(child.try_wait(),Ok(Some(_))) {
+    if !matches!(child.try_wait(), Ok(Some(_))) {
         if stderr_nonblocking && let Some(stderr) = stderr.as_mut() {
             drain_terminal_pair_stderr(stderr, &mut stderr_classifier);
         }
-        let _=child.kill();
+        let _ = child.kill();
         child.wait()?;
         if stderr_nonblocking && let Some(stderr) = stderr.as_mut() {
             drain_terminal_pair_stderr(stderr, &mut stderr_classifier);
@@ -968,65 +1021,90 @@ mod terminal_pair_tests {
 mod transport_retention_tests {
     use super::*;
 
-    fn fixture() -> (OwnedRun, std::process::ChildStdin, PathBuf, goatr::herdr::ProcessEvidence) {
-        let parent = std::env::temp_dir().join(format!("goatr-transport-retention-{}",Uuid::random().0));
+    fn fixture() -> (
+        OwnedRun,
+        std::process::ChildStdin,
+        PathBuf,
+        goatr::herdr::ProcessEvidence,
+    ) {
+        let parent =
+            std::env::temp_dir().join(format!("goatr-transport-retention-{}", Uuid::random().0));
         let root = parent.join("root");
         let admin = parent.join("admin");
-        for directory in [&parent,&root,&admin] {
+        for directory in [&parent, &root, &admin] {
             fs::DirBuilder::new().mode(0o700).create(directory).unwrap();
         }
-        let root_original = transport_identity(&root,&fs::symlink_metadata(&root).unwrap());
-        let admin_original = transport_identity(&admin,&fs::symlink_metadata(&admin).unwrap());
+        let root_original = transport_identity(&root, &fs::symlink_metadata(&root).unwrap());
+        let admin_original = transport_identity(&admin, &fs::symlink_metadata(&admin).unwrap());
         // Keep stdin outside OwnedRun: dropping Child must not make this fixture exit.
         let mut command = std::process::Command::new("cat");
-        command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
-        let mut owned = OwnedRun::spawn(&mut command,root,root_original,admin,admin_original).unwrap();
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut owned =
+            OwnedRun::spawn(&mut command, root, root_original, admin, admin_original).unwrap();
         let input = owned.child.stdin.take().unwrap();
         let original = owned.original_process.as_ref().unwrap().clone();
-        (owned,input,parent,original)
+        (owned, input, parent, original)
     }
 
     fn finish_fixture(input: std::process::ChildStdin, parent: &Path, pid: u32) {
         drop(input); // EOF, not a signal or unreviewed stop of the retained owner.
         let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(pid as libc::pid_t,&mut status,0) },pid as libc::pid_t);
+        assert_eq!(
+            unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) },
+            pid as libc::pid_t
+        );
         assert!(libc::WIFEXITED(status));
-        assert_eq!(libc::WEXITSTATUS(status),0);
+        assert_eq!(libc::WEXITSTATUS(status), 0);
         fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
     fn transport_owner_drop_retains_original_child_and_private_roots() {
-        let (owned,input,parent,original) = fixture();
+        let (owned, input, parent, original) = fixture();
         let root_original = owned.root_original.clone();
         let admin_original = owned.admin_original.clone();
         drop(owned);
-        assert_eq!(goatr::herdr::process_evidence(original.pid).unwrap(),original);
-        assert_eq!(retained_resource(&parent.join("root"),Some(&root_original))["matchesOriginal"],true);
-        assert_eq!(retained_resource(&parent.join("admin"),Some(&admin_original))["matchesOriginal"],true);
-        finish_fixture(input,&parent,original.pid);
+        assert_eq!(
+            goatr::herdr::process_evidence(original.pid).unwrap(),
+            original
+        );
+        assert_eq!(
+            retained_resource(&parent.join("root"), Some(&root_original))["matchesOriginal"],
+            true
+        );
+        assert_eq!(
+            retained_resource(&parent.join("admin"), Some(&admin_original))["matchesOriginal"],
+            true
+        );
+        finish_fixture(input, &parent, original.pid);
     }
 
     #[test]
     fn retained_transport_launcher_isolates_child_from_controller_process_group() {
         let controller_group = unsafe { libc::getpgrp() };
         assert!(controller_group > 0);
-        let (owned,input,parent,original) = fixture();
+        let (owned, input, parent, original) = fixture();
         let child_group = unsafe { libc::getpgid(original.pid as libc::pid_t) };
-        assert_eq!(child_group,original.pid as libc::pid_t);
-        assert_ne!(child_group,controller_group);
-        assert_eq!(unsafe { libc::getpgrp() },controller_group);
+        assert_eq!(child_group, original.pid as libc::pid_t);
+        assert_ne!(child_group, controller_group);
+        assert_eq!(unsafe { libc::getpgrp() }, controller_group);
         drop(owned);
-        assert_eq!(goatr::herdr::process_evidence(original.pid).unwrap(),original);
-        finish_fixture(input,&parent,original.pid);
+        assert_eq!(
+            goatr::herdr::process_evidence(original.pid).unwrap(),
+            original
+        );
+        finish_fixture(input, &parent, original.pid);
     }
 
     #[tokio::test]
     async fn cancelled_transport_owner_retains_original_child_and_private_roots() {
-        let (owned,input,parent,original) = fixture();
+        let (owned, input, parent, original) = fixture();
         let root_original = owned.root_original.clone();
         let admin_original = owned.admin_original.clone();
-        let (entered,ready) = tokio::sync::oneshot::channel();
+        let (entered, ready) = tokio::sync::oneshot::channel();
         let owner = tokio::spawn(async move {
             let retained = owned;
             entered.send(()).unwrap();
@@ -1036,47 +1114,65 @@ mod transport_retention_tests {
         ready.await.unwrap();
         owner.abort();
         assert!(owner.await.unwrap_err().is_cancelled());
-        assert_eq!(goatr::herdr::process_evidence(original.pid).unwrap(),original);
-        assert_eq!(retained_resource(&parent.join("root"),Some(&root_original))["matchesOriginal"],true);
-        assert_eq!(retained_resource(&parent.join("admin"),Some(&admin_original))["matchesOriginal"],true);
-        finish_fixture(input,&parent,original.pid);
+        assert_eq!(
+            goatr::herdr::process_evidence(original.pid).unwrap(),
+            original
+        );
+        assert_eq!(
+            retained_resource(&parent.join("root"), Some(&root_original))["matchesOriginal"],
+            true
+        );
+        assert_eq!(
+            retained_resource(&parent.join("admin"), Some(&admin_original))["matchesOriginal"],
+            true
+        );
+        finish_fixture(input, &parent, original.pid);
     }
 
     #[test]
     fn retained_comparisons_do_not_adopt_changed_or_previously_unproved_identities() {
-        let (mut owned,input,parent,original) = fixture();
+        let (mut owned, input, parent, original) = fixture();
         let root_original = owned.root_original.clone();
         let mut changed = original.clone();
         changed.namespaces.mount.1 ^= 1;
         let changed_observation = owned.process_comparison(Ok(changed.clone()));
-        assert_eq!(changed_observation["matchesOriginal"],false);
-        assert_eq!(changed_observation["original"],json!(original));
-        assert_eq!(changed_observation["current"],json!(changed));
-        assert_eq!(owned.original_process.as_ref().unwrap(),&original);
-        assert_eq!(owned.process_comparison(Err(io::ErrorKind::NotFound))["matchesOriginal"],false);
+        assert_eq!(changed_observation["matchesOriginal"], false);
+        assert_eq!(changed_observation["original"], json!(original));
+        assert_eq!(changed_observation["current"], json!(changed));
+        assert_eq!(owned.original_process.as_ref().unwrap(), &original);
+        assert_eq!(
+            owned.process_comparison(Err(io::ErrorKind::NotFound))["matchesOriginal"],
+            false
+        );
 
-        fs::rename(&owned.root,parent.join("original-root")).unwrap();
-        fs::DirBuilder::new().mode(0o700).create(&owned.root).unwrap();
+        fs::rename(&owned.root, parent.join("original-root")).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&owned.root)
+            .unwrap();
         let socket = owned.admin_parent.join("admin.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let observed = owned.retained_resources(&socket,None);
-        assert_eq!(observed["root"]["matchesOriginal"],false);
-        assert_eq!(observed["root"]["original"],root_original);
-        assert_eq!(owned.root_original,root_original);
-        assert_eq!(observed["adminSocket"]["matchesOriginal"],false);
+        let observed = owned.retained_resources(&socket, None);
+        assert_eq!(observed["root"]["matchesOriginal"], false);
+        assert_eq!(observed["root"]["original"], root_original);
+        assert_eq!(owned.root_original, root_original);
+        assert_eq!(observed["adminSocket"]["matchesOriginal"], false);
         assert!(observed["adminSocket"]["original"].is_null());
-        assert_eq!(observed["adminSocket"]["current"]["kind"],"socket");
-        assert_eq!(observed["cleanupAuthority"],false);
-        assert_eq!(observed["cleanupPerformed"],false);
+        assert_eq!(observed["adminSocket"]["current"]["kind"], "socket");
+        assert_eq!(observed["cleanupAuthority"], false);
+        assert_eq!(observed["cleanupPerformed"], false);
 
         owned.original_process = Err(io::ErrorKind::PermissionDenied);
         let unproved = owned.process_comparison(Ok(original.clone()));
-        assert_eq!(unproved["matchesOriginal"],false);
+        assert_eq!(unproved["matchesOriginal"], false);
         assert!(unproved["original"].is_null());
-        assert_eq!(unproved["current"],json!(original));
-        assert_eq!(owned.original_process.as_ref().unwrap_err(),&io::ErrorKind::PermissionDenied);
+        assert_eq!(unproved["current"], json!(original));
+        assert_eq!(
+            owned.original_process.as_ref().unwrap_err(),
+            &io::ErrorKind::PermissionDenied
+        );
         drop(owned);
-        finish_fixture(input,&parent,original.pid);
+        finish_fixture(input, &parent, original.pid);
     }
 }
 async fn run() -> io::Result<bool> {
@@ -1129,12 +1225,9 @@ async fn run() -> io::Result<bool> {
     unsafe {
         command.pre_exec(goatr::codex_relay::drop_inherited_capabilities);
     }
-    let version = tokio::time::timeout(
-        Duration::from_secs(5),
-        command.output(),
-    )
-    .await
-    .map_err(|_| failure("packaged version deadline exceeded"))??;
+    let version = tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .map_err(|_| failure("packaged version deadline exceeded"))??;
     if !version.status.success() || version.stdout.len() > 4096 {
         return Err(failure("packaged version unavailable"));
     }
@@ -1195,7 +1288,13 @@ async fn run() -> io::Result<bool> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let mut owned = OwnedRun::spawn(&mut cmd, root.clone(), root_original, admin_parent.clone(), admin_original)?;
+    let mut owned = OwnedRun::spawn(
+        &mut cmd,
+        root.clone(),
+        root_original,
+        admin_parent.clone(),
+        admin_original,
+    )?;
     let process_record = write_json(
         &process_path,
         &json!({"runId":run_id,"linuxBoot":linux_boot,"pid":owned.child.id(),
@@ -1257,13 +1356,21 @@ async fn run() -> io::Result<bool> {
     let transport_observation = if result.is_ok() {
         "pass"
     } else if owned.original_process.is_err()
-        || (mode == "relay" && result.as_ref().err().is_some_and(|error|error.to_string().contains("unavailable")))
+        || (mode == "relay"
+            && result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("unavailable")))
     {
         "blocked"
     } else {
         "fail"
     };
-    let status = if transport_observation == "pass" { "pending_owner_review" } else { transport_observation };
+    let status = if transport_observation == "pass" {
+        "pending_owner_review"
+    } else {
+        transport_observation
+    };
     let retained = owned.retained_resources(&socket, admin_identity.as_ref());
     let package_sha256 = binary_sha256(&binary);
     let report = json!({"gate":format!("transport-{mode}"),"status":status,
@@ -1282,61 +1389,102 @@ async fn run() -> io::Result<bool> {
         "ownershipRecord":ownership_path,"processRecord":process_path,"cleanupCandidate":candidate_path});
     let gate_record = write_json(&gate_path, &report);
     // This is passive evidence, never approval or a substitute for fresh owner revalidation.
-    let candidate_record = write_json(&candidate_path, &json!({"runId":run_id,
+    let candidate_record = write_json(
+        &candidate_path,
+        &json!({"runId":run_id,
         "kind":"retained_transport_resources","transportObservation":transport_observation,
         "cleanup":"pending_owner_review","cleanupPerformed":false,"cleanupAuthority":false,
         "fullGateComplete":false,"ownershipRecord":ownership_path,"processRecord":process_path,
         "processRecordWritten":process_record_written,"outcomeRecord":gate_path,
         "outcomeRecordWritten":gate_record.is_ok(),"resources":retained,
-        "hostEndpoint":host_identity,"phoneEndpoint":phone_identity}));
+        "hostEndpoint":host_identity,"phoneEndpoint":phone_identity}),
+    );
     gate_record?;
     candidate_record?;
-    println!("{}",json!({"gate":format!("transport-{mode}"),"status":status,
+    println!(
+        "{}",
+        json!({"gate":format!("transport-{mode}"),"status":status,
         "transportObservation":transport_observation,"cleanup":"pending_owner_review",
         "fullGateComplete":false,"exitStatusScope":"transport_observation_only",
-        "evidence":gate_path,"cleanupCandidate":candidate_path}));
+        "evidence":gate_path,"cleanupCandidate":candidate_path})
+    );
     Ok(transport_observation == "pass")
 }
-fn early_live_argument(argument:&std::ffi::OsStr)->bool {
-    argument.to_str().is_some_and(|argument|["--physical-mvp","--expected-controller-unit","--expected-controller-sha256","--prepared-fresh-install","--expected-prepared-install-sha256","--physical-host-preflight","--physical-host-wake-preflight","--background"].iter()
-        .any(|selector|argument==*selector||argument.strip_prefix(*selector).is_some_and(|suffix|suffix.starts_with('='))))
+fn early_live_argument(argument: &std::ffi::OsStr) -> bool {
+    argument.to_str().is_some_and(|argument| {
+        [
+            "--physical-mvp",
+            "--expected-controller-unit",
+            "--expected-controller-sha256",
+            "--prepared-fresh-install",
+            "--expected-prepared-install-sha256",
+            "--physical-host-preflight",
+            "--physical-host-wake-preflight",
+            "--background",
+        ]
+        .iter()
+        .any(|selector| {
+            argument == *selector
+                || argument
+                    .strip_prefix(*selector)
+                    .is_some_and(|suffix| suffix.starts_with('='))
+        })
+    })
 }
-fn mode_exit(result:io::Result<bool>,output:&mut impl io::Write)->std::process::ExitCode {
+fn mode_exit(result: io::Result<bool>, output: &mut impl io::Write) -> std::process::ExitCode {
     match result {
-        Ok(true)=>std::process::ExitCode::SUCCESS,
-        Ok(false)=>std::process::ExitCode::FAILURE,
-        Err(error)=>{
-            let mut outcome=json!({"gate":"selected-smoke-mode","status":if matches!(error.kind(),io::ErrorKind::NotFound|io::ErrorKind::NotConnected|io::ErrorKind::ConnectionRefused|io::ErrorKind::TimedOut|io::ErrorKind::PermissionDenied){"blocked"}else{"fail"},"reason":error.to_string()});
-            outcome.as_object_mut().expect("object").extend(helper_error_metadata(&error).as_object().expect("object").clone());
-            let _=writeln!(output,"{outcome}");
+        Ok(true) => std::process::ExitCode::SUCCESS,
+        Ok(false) => std::process::ExitCode::FAILURE,
+        Err(error) => {
+            let mut outcome = json!({"gate":"selected-smoke-mode","status":if matches!(error.kind(),io::ErrorKind::NotFound|io::ErrorKind::NotConnected|io::ErrorKind::ConnectionRefused|io::ErrorKind::TimedOut|io::ErrorKind::PermissionDenied){"blocked"}else{"fail"},"reason":error.to_string()});
+            outcome.as_object_mut().expect("object").extend(
+                helper_error_metadata(&error)
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+            );
+            let _ = writeln!(output, "{outcome}");
             std::process::ExitCode::FAILURE
         }
     }
 }
 fn main() -> std::process::ExitCode {
-    let early_live=std::env::args_os().skip(1).any(|argument|early_live_argument(&argument));
+    let early_live = std::env::args_os()
+        .skip(1)
+        .any(|argument| early_live_argument(&argument));
     // Closed frontend parsing and actual unit/capability admission precede BOTH Tokio workers.
-    let admitted=if early_live {
+    let admitted = if early_live {
         match live::admit_arguments() {
-            Ok(admitted)=>Some(admitted),
-            Err(error)=>return mode_exit(Err(error),&mut io::stdout()),
+            Ok(admitted) => Some(admitted),
+            Err(error) => return mode_exit(Err(error), &mut io::stdout()),
         }
     } else {
-        if let Err(error)=goatr::codex_relay::prepare_current_executable(true,None) {
-            return mode_exit(Err(error),&mut io::stdout());
+        if let Err(error) = goatr::codex_relay::prepare_current_executable(true, None) {
+            return mode_exit(Err(error), &mut io::stdout());
         }
         None
     };
-    let runtime=match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
-        Ok(runtime)=>runtime,
-        Err(error)=>return mode_exit(Err(error),&mut io::stdout()),
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return mode_exit(Err(error), &mut io::stdout()),
     };
-    runtime.block_on(async_main(early_live,admitted))
+    runtime.block_on(async_main(early_live, admitted))
 }
-async fn async_main(early_live:bool,admitted:Option<live::LiveAdmission>) -> std::process::ExitCode {
+async fn async_main(
+    early_live: bool,
+    admitted: Option<live::LiveAdmission>,
+) -> std::process::ExitCode {
     let mut native_args = std::env::args_os().skip(1);
-    if !early_live&&native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio")) {
-        if std::env::args_os().any(|arg|arg==std::ffi::OsStr::new("--project-read-only")){return std::process::ExitCode::FAILURE;}
+    if !early_live
+        && native_args.next().as_deref() == Some(std::ffi::OsStr::new("--owned-mcp-stdio"))
+    {
+        if std::env::args_os().any(|arg| arg == std::ffi::OsStr::new("--project-read-only")) {
+            return std::process::ExitCode::FAILURE;
+        }
         let Some(lease) = native_args.next() else {
             return std::process::ExitCode::FAILURE;
         };
@@ -1351,7 +1499,12 @@ async fn async_main(early_live:bool,admitted:Option<live::LiveAdmission>) -> std
             }
         };
     }
-    let result = if early_live {live::run(admitted).await} else if !std::env::args().any(|arg|matches!(arg.as_str(),"--terminal-only"|"--project-read-only"))&&std::env::args().any(|arg| arg == "--review-fixture") {
+    let result = if early_live {
+        live::run(admitted).await
+    } else if !std::env::args()
+        .any(|arg| matches!(arg.as_str(), "--terminal-only" | "--project-read-only"))
+        && std::env::args().any(|arg| arg == "--review-fixture")
+    {
         review::run().await
     } else if std::env::args().any(|arg| {
         matches!(
@@ -1376,5 +1529,5 @@ async fn async_main(early_live:bool,admitted:Option<live::LiveAdmission>) -> std
     } else {
         run().await
     };
-    mode_exit(result,&mut io::stdout())
+    mode_exit(result, &mut io::stdout())
 }
