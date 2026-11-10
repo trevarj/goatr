@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: goatr-${{ github.ref }}
+  group: goatr-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

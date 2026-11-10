@@ -211,6 +211,8 @@ HC_SESSION rather than adding a second configuration interface.
 `.github/workflows/ci.yml` retains the ordinary push/PR core and Android gates.
 Signing additionally requires both jobs to succeed, and runs only in
 `trevarj/goatr` for manual dispatch on `refs/heads/main` or pushed `v*` tags.
+Concurrency groups include the event type so push checks cannot cancel a manual
+signing run for the same branch.
 Before secrets are available, it verifies the checked-out commit is an ancestor
 of canonical `main`, builds the pinned unsigned release with strict verification,
 checks 16-KiB ZIP alignment and reads the actual APK version metadata. A tag must
