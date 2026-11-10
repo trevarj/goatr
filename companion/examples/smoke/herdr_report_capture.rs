@@ -2825,34 +2825,6 @@ mod tests {
     }
 
     #[test]
-    fn omp_producer_generated_hook_preserves_stock_delivery_calls_and_closed_fallback() {
-        let token = "b".repeat(64);
-        let hook = String::from_utf8(
-            instrumented_hook(
-                Path::new("/tmp/goatr-producer.sock"),
-                Path::new("/tmp/goatr-producer-fallback.jsonl"),
-                &token,
-            )
-            .expect("generated hook"),
-        )
-        .expect("hook UTF-8");
-        assert_eq!(
-            hook.matches("await sendRequestAttempt(request, 500)")
-                .count(),
-            1
-        );
-        assert_eq!(
-            hook.matches("await sendRequestAttempt(request, 1500)")
-                .count(),
-            1
-        );
-        assert!(hook.contains("goatrFallback(\"module_entered\")"));
-        assert!(hook.contains("goatrFallback(\"factory_entered\")"));
-        assert!(hook.contains("O_EXCL | fs.constants.O_NOFOLLOW"));
-        assert!(hook.contains("goatrSocketOutcome(\"connected\")"));
-    }
-
-    #[test]
     #[ignore = "requires GOATR_HOOK_TEST_NODE and executes only the generated private fixture"]
     fn omp_producer_generated_hook_reports_local_and_absent_socket_once() {
         use std::os::unix::process::ExitStatusExt;

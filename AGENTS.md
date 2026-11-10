@@ -219,6 +219,10 @@ metadata is versionName `0.2.0`, versionCode `2`; update app metadata before
 choosing another release tag. Core/native/Android gate failures block signing;
 never skip or suppress a gate to publish.
 
+Default CI tests must be hermetic and assert behavior, not generated source
+substrings or files from an agent's installed OMP tree. Explicit native-hook
+runtime tests remain opt-in and require their qualified installed artifacts.
+
 The owner must independently generate and back up a **new Goatr release key**,
 not reuse MOTD's key. The intended private file is
 `~/secrets/goatr-release.jks`, alias `goatr`; it must never enter Git or the Nix
