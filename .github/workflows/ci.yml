@@ -21,12 +21,49 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - name: Rust product gates and formatting
-        run: nix develop --cores 2 --max-jobs 1 -c make check
-      - name: Locked direct Rust package
-        run: nix build --cores 2 --max-jobs 1 .#goatr --no-link
-      - name: Authorized real hc bridge and revocation
-        run: nix develop --cores 2 --max-jobs 1 -c cargo test --locked --manifest-path companion/Cargo.toml -j 2 --test hc_bridge real_hc_pair_stream_legacy_refusal_and_active_revocation -- --ignored --test-threads=1
+      - name: Qualified Rust product, locked package, and real hc gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export TMPDIR
+          TMPDIR="$(mktemp -d /tmp/gc.XXXXXX)"
+          trap 'rm -rf -- "$TMPDIR"' EXIT
+          runner_groups="$(id -G)"
+          sudo -E /usr/bin/unshare --mount --propagation private /bin/bash -s -- \
+            "$(id -u)" "$(id -g)" "${runner_groups// /,}" "$HOME" "$PATH" "$TMPDIR" <<'NAMESPACE'
+          set -euo pipefail
+          # Only this frontend namespace sees the same store objects read-only.
+          # The already-running Nix daemon and its builders keep their writable view.
+          mount --bind /nix/store /nix/store
+          mount -o remount,bind,ro /nix/store
+          exec /usr/bin/setpriv --reuid "$1" --regid "$2" --groups "$3" \
+            /usr/bin/env HOME="$4" PATH="$5" TMPDIR="$6" NIX_REMOTE=daemon \
+            /bin/bash -s -- "$1" "$2" "$3" <<'RUNNER'
+          set -euo pipefail
+          [[ "$(id -u)" == "$1" && "$1" != 0 && "$(id -g)" == "$2" ]]
+          groups="$(id -G)"
+          [[ "${groups// /,}" == "$3" ]]
+          [[ "$TMPDIR" == /tmp/gc.?????? && "${#TMPDIR}" -eq 14 ]]
+          [[ "$(stat -c %u "$TMPDIR")" == "$1" && "$(stat -c %a "$TMPDIR")" == 700 ]]
+          store_options="$(findmnt --noheadings --output VFS-OPTIONS --target /nix/store)"
+          [[ ",$store_options," == *,ro,* ]]
+          [[ -S /nix/var/nix/daemon-socket/socket && "$NIX_REMOTE" == daemon ]]
+          printf 'runner uid=%s gid=%s groups=%s; private TMPDIR mode=700; store VFS=%s; Nix store=daemon\n' \
+            "$1" "$2" "$3" "$store_options"
+          stat -Lc '%n mode=%a uid=%u gid=%g' / /nix /nix/store
+          nix develop --cores 2 --max-jobs 1 -c env TMPDIR="$TMPDIR" bash -s <<'PRODUCT'
+          set -euo pipefail
+          for tool in bash zsh cat; do
+            executable="$(readlink -f -- "$(command -v "$tool")")"
+            stat -Lc '%n mode=%a uid=%u gid=%g' "$executable"
+          done
+          make check < /dev/null
+          PRODUCT
+          nix build --cores 2 --max-jobs 1 .#goatr --no-link < /dev/null
+          nix develop --cores 2 --max-jobs 1 -c env TMPDIR="$TMPDIR" cargo test --locked --manifest-path companion/Cargo.toml -j 2 --test hc_bridge real_hc_pair_stream_legacy_refusal_and_active_revocation -- --ignored --test-threads=1 < /dev/null
+          RUNNER
+          NAMESPACE
 
   android-bindings:
     runs-on: ubuntu-24.04

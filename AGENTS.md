@@ -179,6 +179,15 @@ endpoints; it checks legacy-grant refusal, fresh consent, raw native hello and
 terminal.list, then active revocation. `GOATR_HC` is supplied by the core shell;
 never point the test at an existing socket/session. It creates no desktop terminal.
 
+Hosted core CI uses an ephemeral private mount namespace with a read-only bind
+view of the same `/nix/store` objects, then restores the original non-root runner
+credentials before any Nix frontend or test runs. The existing Nix daemon/builders
+remain outside that namespace with their writable view; executable safety checks
+are not relaxed. A short runner-owned mode-0700 `/tmp/gc.XXXXXX` directory is
+passed through `nix develop` so Unix-socket fixtures retain their length checks.
+The full product, locked package and real HC gates remain required; this setup
+needs hosted-run evidence, not a claim that all prior failures share one cause.
+
 Core's optional `IntegrationTest` is skipped unless `HERDR_IT=1`; enable it only
 with an explicitly owned core and terminal. A default JVM pass is not that native gate.
 
