@@ -53,7 +53,7 @@ In GitHub, open **Actions → Goatr → Run workflow**, select `main`, and run i
 produce a signed APK artifact without publishing a release. Trusted `v*` tags on `main`
 publish the verified signed `goatr.apk`, `SHA256SUMS` and license/notices as GitHub
 Release assets. The tag must match the built APK's `versionName` (currently
-`v0.2.0`, version code `2`). Both paths require the existing core/native/Android
+`v0.2.1`, version code `3`). Both paths require the existing core/native/Android
 gates and the repository's four production signing secrets; see
 [release safety](AGENTS.md#release-ci-and-signing-safety). No keys or release
 credentials are needed for ordinary builds or pull requests.
