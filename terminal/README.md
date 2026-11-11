@@ -2,6 +2,10 @@
 
 The terminal view: libghostty-vt drawn by an Android `View`.
 
+Soft-keyboard input uses normal text so compatible keyboards can offer swipe
+typing. Composing text stays local until committed; personalized keyboard
+learning is disabled by request to the IME.
+
 - Ghostty source is pinned in the root flake to
   `0fa3d577a5614150ff8e2c152de5fb9d5c6d2dec`; no submodule initialization
   or network dependency fetching occurs in Gradle/Zig.

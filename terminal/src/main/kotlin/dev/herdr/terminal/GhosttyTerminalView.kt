@@ -1290,14 +1290,11 @@ internal class GhosttyTerminalView(context: Context) : View(context) {
   override fun onCheckIsTextEditor(): Boolean = true
 
   override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-    // Visible-password + no-suggestions keeps IMEs in send-as-you-type mode
-    // (no autocorrect batching) while still allowing CJK composition.
-    outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
-      InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
-      InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+    outAttrs.inputType = InputType.TYPE_CLASS_TEXT
     outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE or
       EditorInfo.IME_FLAG_NO_FULLSCREEN or
-      EditorInfo.IME_FLAG_NO_EXTRACT_UI
+      EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+      EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
     val connection = TerminalInputConnection()
     // The keyboard may offer images (its clipboard's, screenshots, stickers) when the host takes them.
     val types = ViewCompat.getOnReceiveContentMimeTypes(this) ?: return connection
