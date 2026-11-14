@@ -217,7 +217,7 @@ Before secrets are available, it verifies the checked-out commit is an ancestor
 of canonical `main`, builds the pinned unsigned release with strict verification,
 checks 16-KiB ZIP alignment and reads the actual APK version metadata. A tag must
 equal `v` plus the APK versionName; versionCode must be positive. Current app
-metadata is versionName `0.2.1`, versionCode `3`; update app metadata before
+metadata is versionName `0.2.2`, versionCode `4`; update app metadata before
 choosing another release tag. Core/native/Android gate failures block signing;
 never skip or suppress a gate to publish.
 
