@@ -135,7 +135,9 @@ class GoatrConnection(context: Context, private val store: Store) {
         val address = EndpointAddr(id, null, emptyList())
         var connection: Connection? = null
         try {
-            val c = withIrohDeadline(15000, "Desktop connection timed out") { owner().connect(address, alpn) }
+            val endpoint = owner()
+            val timeoutMillis = store.currentPrefs().irohConnectTimeoutSeconds * 1000L
+            val c = withIrohDeadline(timeoutMillis, "Desktop connection timed out") { endpoint.connect(address, alpn) }
             connection = c
             require(c.alpn().contentEquals(alpn) && c.remoteId().use { it.toString() } == peer) { "Desktop identity mismatch" }
             val bi = withIrohDeadline(10000, "Desktop stream opening timed out") { c.openBi() }

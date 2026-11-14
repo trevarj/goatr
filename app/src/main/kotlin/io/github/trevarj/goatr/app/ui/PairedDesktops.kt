@@ -6,8 +6,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
@@ -16,6 +18,7 @@ import io.github.trevarj.goatr.PairingGate
 import io.github.trevarj.goatr.PairingPreview
 import io.github.trevarj.goatr.PairScanner
 import io.github.trevarj.goatr.app.container
+import io.github.trevarj.goatr.app.session.IROH_CONNECT_TIMEOUT_SECONDS
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -64,6 +67,23 @@ fun PairedDesktops() {
         }
         Text("Removing here does not revoke the phone on the desktop. Use goatr devices / goatr revoke there.", style = MaterialTheme.typography.bodySmall)
         Button(onClick = { pairing = true }) { Text("Pair a desktop") }
+        Text("Iroh connection timeout", style = MaterialTheme.typography.titleSmall)
+        Text("5–300 seconds, in 5-second steps. Saved for the next iroh desktop connection attempt, including pairing. Does not change an attempt in progress or reconnect automatically; SSH and invitation expiry are unchanged.", style = MaterialTheme.typography.bodySmall)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            FilledTonalIconButton(
+                onClick = { scope.launch {
+                    app.store.setPrefs { it.copy(irohConnectTimeoutSeconds = (it.irohConnectTimeoutSeconds - 5).coerceIn(IROH_CONNECT_TIMEOUT_SECONDS)) }
+                } },
+                enabled = prefs.irohConnectTimeoutSeconds > IROH_CONNECT_TIMEOUT_SECONDS.first,
+            ) { Icon(Lucide.Minus, "Decrease iroh connection timeout by 5 seconds") }
+            Text("${prefs.irohConnectTimeoutSeconds} seconds", Modifier.weight(1f), textAlign = TextAlign.Center)
+            FilledTonalIconButton(
+                onClick = { scope.launch {
+                    app.store.setPrefs { it.copy(irohConnectTimeoutSeconds = (it.irohConnectTimeoutSeconds + 5).coerceIn(IROH_CONNECT_TIMEOUT_SECONDS)) }
+                } },
+                enabled = prefs.irohConnectTimeoutSeconds < IROH_CONNECT_TIMEOUT_SECONDS.last,
+            ) { Icon(Lucide.Plus, "Increase iroh connection timeout by 5 seconds") }
+        }
         Text("Home relay region", style = MaterialTheme.typography.titleSmall)
         Text("Saved for this phone; changing it disconnects and reconnects every iroh link. SSH is unchanged.", style = MaterialTheme.typography.bodySmall)
         for ((url, label) in listOf(null to "Automatic (recommended)") + regions.map { it.key to it.value }) {

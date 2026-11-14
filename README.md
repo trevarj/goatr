@@ -91,6 +91,12 @@ expire in five minutes and are single-use; preview alone never pairs. Select the
 paired desktop to connect. Reachable machines are listed separately, and changing
 desktops never silently retargets an action. SSH hosts can stay connected alongside.
 
+The **Iroh connection timeout** on that page defaults to **45 seconds**, adjustable
+from **5 to 300 seconds** in 5-second steps. It is saved on the phone and applies
+to the next iroh desktop connection attempt, including pairing, without changing
+an attempt already in progress or reconnecting automatically. It does not change
+SSH, stream/handshake deadlines, or the invitation's five-minute lifetime.
+
 Pairing grants **full same-user Herdr control**: terminal commands, uploads,
 history, notifications, and closing tabs/spaces on every reachable machine. Old
 pairings require a fresh invitation for HC access. List phones with

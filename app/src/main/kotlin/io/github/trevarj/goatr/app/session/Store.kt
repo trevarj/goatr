@@ -13,6 +13,7 @@ import herdr.core.PRESET_NAMES
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.serialization.Serializable
@@ -71,6 +72,7 @@ data class Prefs(
     val clipboardWrite: Boolean = true,
     /** Selected paired desktop, distinct from the downstream Herdr machine/terminal address. */
     val desktop: String? = null,
+    val irohConnectTimeoutSeconds: Int = 45,
 )
 
 data class FontChoice(val family: String?, val label: String, val ligatures: Boolean)
@@ -95,6 +97,7 @@ val FONTS = listOf(
 )
 
 val FONT_SIZES = 9..22
+val IROH_CONNECT_TIMEOUT_SECONDS = 5..300
 
 /**
  * The line for the host's ~/.ssh/authorized_keys. `restrict` + a forced
@@ -118,13 +121,14 @@ private fun Preferences.hosts(): List<Host> =
     this[HOSTS]?.let { json.decodeFromString<List<Host>>(it) } ?: emptyList()
 
 // A font or theme this version no longer has falls back to the default.
-private fun Preferences.prefs(): Prefs {
+internal fun Preferences.prefs(): Prefs {
     val default = Prefs()
     val p = this[PREFS]?.let { runCatching { json.decodeFromString<Prefs>(it) }.getOrNull() } ?: default
     return p.copy(
         font = if (FONTS.any { it.family == p.font }) p.font else default.font,
         theme = if (p.theme == "system" || p.theme == "material" || p.theme in PRESET_NAMES) p.theme else default.theme,
         fontSize = p.fontSize.coerceIn(FONT_SIZES),
+        irohConnectTimeoutSeconds = p.irohConnectTimeoutSeconds.coerceIn(IROH_CONNECT_TIMEOUT_SECONDS),
     )
 }
 
@@ -138,6 +142,8 @@ class Store(context: Context, scope: CoroutineScope) {
     /** The hosts, null until read: "none yet" told apart from "none". */
     val savedHosts: StateFlow<List<Host>?> = data.data.map<Preferences, List<Host>?> { it.hosts() }.stateIn(scope, SharingStarted.Eagerly, null)
     val prefs: StateFlow<Prefs> = data.data.map { it.prefs() }.stateIn(scope, SharingStarted.Eagerly, Prefs())
+
+    suspend fun currentPrefs(): Prefs = data.data.first().prefs()
 
     private suspend fun editHosts(change: (List<Host>) -> List<Host>) {
         data.edit { it[HOSTS] = json.encodeToString(change(it.hosts())) }
