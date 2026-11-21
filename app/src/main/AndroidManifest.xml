@@ -41,7 +41,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps encrypted iroh and SSH connections to paired desktops open for agent alerts" />
+                android:value="Maintains encrypted desktop sessions during short app switches and for opted-in agent alerts" />
         </service>
     </application>
 </manifest>

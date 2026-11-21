@@ -10,8 +10,10 @@ import io.github.trevarj.goatr.app.notify.Notifier
 import io.github.trevarj.goatr.app.session.Actions
 import io.github.trevarj.goatr.app.session.Live
 import io.github.trevarj.goatr.app.session.LocalNetwork
+import io.github.trevarj.goatr.app.session.Reviews
 import io.github.trevarj.goatr.app.session.SpaceGit
 import io.github.trevarj.goatr.app.session.Store
+import io.github.trevarj.goatr.app.session.activeHosts
 import dev.herdr.ssh.PhoneKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.MainScope
@@ -56,20 +58,20 @@ class AppContainer(context: Context) {
     val actions = Actions(live)
     val selection = Selection(store, scope)
     val git = SpaceGit(live, scope)
+    val reviews = Reviews(live, store, context.noBackupFilesDir.resolve("reviews"), scope)
 
     /** Past the opening screen: once per run, not again each time the activity is made. */
     val started = MutableStateFlow(false)
     val notifier = Notifier(context, live, store, scope)
 
     init {
-        // Opted in, on screen, with a host to reach: keep it reached once out of
-        // sight too. (A foreground service may only start while the app is in front.)
+        scope.launch { live.retention.foreground.collect { if (!it) reviews.flushPending() } }
         scope.launch {
-            combine(notifier.foreground, store.hosts, store.prefs) { front, hosts, prefs ->
-                prefs.notifications && front && hosts.any { !it.off }
+            combine(live.retention.foreground, store.hosts, store.prefs) { front, hosts, prefs ->
+                prefs.notifications.takeIf { front && activeHosts(hosts, prefs.desktop).isNotEmpty() }
             }
                 .distinctUntilChanged()
-                .collect { if (it) HerdrService.start(context) }
+                .collect { if (it != null && live.retention.foreground.value) HerdrService.start(context) }
         }
     }
 }

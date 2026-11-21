@@ -1,8 +1,4 @@
-// Keeps the hosts connected while the app is out of sight, so alerts still
-// come: Android freezes a background app's sockets, not a foreground
-// service's. Its notification is the one that's always there: the agents
-// working now, else where the phone is connected; expanded, it has Exit,
-// which ends the app until it's opened again.
+// Keeps live connections through a brief app switch or for opted-in alerts.
 
 package io.github.trevarj.goatr.app.notify
 
@@ -20,6 +16,7 @@ import androidx.core.app.ServiceCompat
 import io.github.trevarj.goatr.app.R
 import io.github.trevarj.goatr.app.container
 import io.github.trevarj.goatr.app.session.Session
+import io.github.trevarj.goatr.app.session.activeHosts
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
@@ -35,16 +32,28 @@ class HerdrService : Service() {
     override fun onCreate() {
         super.onCreate()
         // Android wants the notification at once; the flows refine it.
-        ServiceCompat.startForeground(this, ID, notification(emptyList(), container.live.session.value), type)
+        ServiceCompat.startForeground(this, ID, notification(emptyList(), container.live.session.value, false), type)
         scope.launch {
-            combine(container.notifier.working, container.live.session) { w, s -> w to s }
-                .distinctUntilChanged { a, b -> a.first == b.first && a.second.host == b.second.host && a.second.connection == b.second.connection }
-                .collect { (w, s) -> getSystemService(NotificationManager::class.java).notify(ID, notification(w, s)) }
+            combine(container.notifier.working, container.live.session, container.store.prefs) { working, session, prefs ->
+                Triple(working, session, prefs.notifications)
+            }.distinctUntilChanged { a, b ->
+                a.third == b.third && (!a.third ||
+                    a.first == b.first && a.second.host == b.second.host && a.second.connection == b.second.connection)
+            }.collect { (working, session, alerts) ->
+                getSystemService(NotificationManager::class.java).notify(ID, notification(working, session, alerts))
+            }
         }
-        // Switched off, or no host left to stay connected to: nothing to keep alive.
         scope.launch {
-            combine(container.store.hosts, container.store.prefs) { hosts, prefs -> !prefs.notifications || hosts.none { !it.off } }
-                .collect { done -> if (done && container.store.loaded.value) stopSelf() }
+            val app = container
+            combine(app.store.loaded, app.store.hosts, app.store.prefs, app.live.retention.lease) { loaded, hosts, prefs, _ ->
+                if (loaded) activeHosts(hosts, prefs.desktop).isNotEmpty() to prefs.notifications else null
+            }.collect { state ->
+                if (state != null) {
+                    val (hasHosts, alerts) = state
+                    app.live.retention.keepForAlerts(hasHosts && alerts)
+                    if (!hasHosts || !app.live.retention.active) stopSelf()
+                }
+            }
         }
     }
 
@@ -56,12 +65,13 @@ class HerdrService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        return START_STICKY
+        return if (intent == null || container.store.prefs.value.notifications) START_STICKY else START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        container.live.retention.keepForAlerts(false)
         scope.cancel()
         super.onDestroy()
         if (exiting) Process.killProcess(Process.myPid())
@@ -76,7 +86,7 @@ class HerdrService : Service() {
         )
     }
 
-    private fun notification(working: List<Working>, session: Session) =
+    private fun notification(working: List<Working>, session: Session, alerts: Boolean) =
         NotificationCompat.Builder(this, Notifier.WORKING)
             .setSmallIcon(R.drawable.ic_notification_goat)
             .setOngoing(true)
@@ -87,7 +97,11 @@ class HerdrService : Service() {
             // Shown when the notification is expanded.
             .addAction(0, "Exit", exit)
             .apply {
-                if (working.isEmpty()) {
+                if (!alerts) {
+                    setContentTitle("Goatr")
+                    setContentText("Keeps your connection during short app switches")
+                    setContentIntent(Notifier.open(this@HerdrService, null))
+                } else if (working.isEmpty()) {
                     setContentTitle(session.host.ifEmpty { "Goatr" })
                     setContentText("${session.connection.label} · no agent working")
                     setContentIntent(Notifier.open(this@HerdrService, null))
@@ -107,7 +121,11 @@ class HerdrService : Service() {
         private val type = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
 
         fun start(context: Context) {
-            context.startForegroundService(Intent(context, HerdrService::class.java))
+            try {
+                context.startForegroundService(Intent(context, HerdrService::class.java))
+            } catch (_: IllegalStateException) {
+                // Android can reject a start if the activity has just left the foreground.
+            }
         }
     }
 }

@@ -53,7 +53,7 @@ In GitHub, open **Actions → Goatr → Run workflow**, select `main`, and run i
 produce a signed APK artifact without publishing a release. Trusted `v*` tags on `main`
 publish the verified signed `goatr.apk`, `SHA256SUMS` and license/notices as GitHub
 Release assets. The tag must match the built APK's `versionName` (currently
-`v0.2.2`, version code `4`). Both paths require the existing core/native/Android
+`v0.3.0`, version code `5`). Both paths require the existing core/native/Android
 gates and the repository's four production signing secrets; see
 [release safety](AGENTS.md#release-ci-and-signing-safety). No keys or release
 credentials are needed for ordinary builds or pull requests.
@@ -97,6 +97,12 @@ to the next iroh desktop connection attempt, including pairing, without changing
 an attempt already in progress or reconnecting automatically. It does not change
 SSH, stream/handshake deadlines, or the invitation's five-minute lifetime.
 
+Goatr keeps established SSH and iroh connections when you briefly switch apps.
+After **three minutes in the background**, it disconnects and stops retrying.
+Open Goatr again to reconnect; desktop jobs keep running. Opting in to agent
+notifications keeps the connections open for alerts instead. Android may show
+an ongoing connection notification and can still stop the app or its network.
+
 Pairing grants **full same-user Herdr control**: terminal commands, uploads,
 history, notifications, and closing tabs/spaces on every reachable machine. Old
 pairings require a fresh invitation for HC access. List phones with
@@ -116,6 +122,23 @@ fingerprint, and follow the protected phone-key setup. The host needs compatible
 `hc connect` on its SSH command path. Agent notifications are opt-in and subject
 to Android background/network limits; the replaced app's ntfy/UnifiedPush interface
 is not part of this Android product.
+
+## Review changes in a Space
+
+Choose **Review changes** from a Space's menu. **Working tree** shows staged,
+unstaged, and untracked changes separately. **Branch** compares committed HEAD
+with the merge base of a locally available branch; it does not fetch.
+
+Use the hunk buttons and Files sheet to move through the diff. Tap line numbers
+to select a line or a range within one hunk, or add a file comment from its
+header. Drafts, including unfinished comments, are saved on this device. If
+changes move before submission, refresh and re-anchor or remove stale comments.
+
+Choose an existing idle or done agent in that Space and send **Discuss** or
+**Apply**. Goatr submits the review as input to the selected terminal and stays
+on the diff. **Open agent** takes you to that terminal for replies. If delivery
+is unknown, check the agent before creating another review; Goatr never
+retries the submission automatically.
 
 ## Optional NixOS manual user service
 

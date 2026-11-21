@@ -29,6 +29,14 @@ import io.github.trevarj.goatr.app.session.hostOf
 import io.github.trevarj.goatr.app.session.localOf
 import io.github.trevarj.goatr.app.session.parseTarget
 import io.github.trevarj.goatr.app.session.reason
+import io.github.trevarj.goatr.app.session.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.combine
 import dev.herdr.ssh.PhoneKey
 import dev.herdr.ssh.Seen
 import herdr.core.Checkout
@@ -300,9 +308,291 @@ class MainViewModel(
     }
 }
 
+class ReviewViewModel(private val reviews: Reviews) : ViewModel() {
+    private val screen = MutableStateFlow(ReviewUiState())
+    val state: StateFlow<ReviewUiState> = screen
+    private var operation: Job? = null
+    private var request = 0L
+    private var requestedSpace: String? = null
+    private var detached = false
+    private var pinnedRepo: ReviewRepo? = null
+
+    private var observation: Job? = null
+    private fun observe() {
+        if (observation != null) return
+        observation = viewModelScope.launch {
+            combine(reviews.history, reviews.metadataError, reviews.writes, reviews.connections) { _, _, _, _ -> Unit }
+                .collect { indicators() }
+        }
+    }
+
+    private fun indicators() {
+        val s = screen.value
+        val space = s.spaceId ?: return
+        val (current, working) = reviews.recipients(space)
+        val missing = s.recipients.filter { old -> current.none { it.address == old.address } }.map {
+            it.copy(rawStatus = if (reviews.connected(space)) "unavailable" else "disconnected", canSend = false)
+        }
+        val recipients = (current + missing).toMutableList()
+        val r = s.record
+        if (r?.recipientAddress != null && recipients.none { it.address == r.recipientAddress })
+            recipients.add(ReviewRecipient(r.recipientAddress, r.recipientAgent.orEmpty(), r.recipientAddress, null, "unavailable", false))
+        val write = reviews.writes.value[r?.id]
+        screen.value = s.copy(connected = reviews.connected(space), recipients = recipients, workingAgents = working,
+            history = reviews.history.value.orEmpty().filter { it.spaceId == space }.map { it.recovered() }.sortedByDescending { it.updatedAtMs },
+            unreadableMetadata = reviews.metadataError.value == "Saved review metadata is unreadable.",
+            saving = write != null && write.error == null, saveError = write?.error ?: s.saveError,
+            error = reviews.metadataError.value ?: s.error)
+    }
+
+    private fun runOperation(submit: Boolean = false, resuming: Boolean = false, block: suspend () -> Unit) {
+        if (screen.value.submitting && !resuming) return
+        val previous = operation
+        val myRequest = ++request
+        previous?.cancel()
+        screen.value = screen.value.copy(loading = !submit, submitting = submit, error = null)
+        operation = viewModelScope.launch {
+            try {
+                previous?.join()
+                block()
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (request == myRequest) screen.value = screen.value.copy(error = e.message ?: "Could not complete this review action.")
+            } finally {
+                if (request == myRequest) {
+                    screen.value = screen.value.copy(loading = false, submitting = false)
+                    requestedSpace = null
+                    indicators()
+                }
+            }
+        }
+    }
+
+    private suspend fun flush(): Boolean {
+        val r = screen.value.record ?: return true
+        if (r.phase == ReviewPhase.DeliveryUnknown && screen.value.saveError != null) return false
+        val ok = reviews.flush(r.id)
+        screen.value = screen.value.copy(saving = false, saveError = if (ok) null else reviews.writes.value[r.id]?.error ?: "Could not save the review.")
+        return ok
+    }
+    suspend fun prepareToLeave(): Boolean {
+        operation?.cancelAndJoin()
+        return flush()
+    }
+    fun detach(spaceId: String) {
+        if (spaceId != (requestedSpace ?: screen.value.spaceId)) return
+        detached = true
+        observation?.cancel()
+        observation = null
+        operation?.cancel()
+        reviews.flushPending()
+    }
+    fun leaveWithoutSaving() {
+        val r = screen.value.record
+        val last = reviews.writes.value[r?.id]?.expected
+        if (r != null) reviews.abandon(r)
+        screen.value = screen.value.copy(record = last ?: r, saving = false, saveError = null)
+        requestedSpace = null
+    }
+
+    private suspend fun display(r: ReviewRecord, content: ReviewContent? = null) {
+        val restored = (reviews.writes.value[r.id]?.desired ?: r).recovered()
+        pinnedRepo = restored.repo
+        screen.value = screen.value.copy(record = restored, comparison = restored.comparison, snapshot = null, files = emptyList(),
+            oldFiles = emptyMap(), saveError = null, error = if (restored.phase == ReviewPhase.DeliveryUnknown) "Delivery unknown. Open the agent before sending again." else null)
+        val loaded = content ?: reviews.content(restored)
+        currentCoroutineContext().ensureActive()
+        screen.value = screen.value.copy(snapshot = loaded.snapshot, files = loaded.files, oldFiles = loaded.oldFiles)
+        indicators()
+    }
+
+    fun open(spaceId: String) {
+        if (!detached && (screen.value.submitting || requestedSpace == spaceId || screen.value.spaceId == spaceId && requestedSpace == null)) return
+        val resuming = detached
+        detached = false
+        observe()
+        requestedSpace = spaceId
+        runOperation(resuming = resuming) {
+            if (!flush()) return@runOperation
+            require(' ' in spaceId && hostOf(spaceId).isNotEmpty() && localOf(spaceId).isNotEmpty()) { "Invalid original Space." }
+            pinnedRepo = null
+            screen.value = ReviewUiState(spaceId = spaceId, loading = true)
+            indicators()
+            val saved = reviews.records(spaceId).firstOrNull()
+            if (saved != null) {
+                display(saved)
+                if (reviews.connected(spaceId)) {
+                    val p = reviews.placeFor(spaceId)
+                    if (saved.comparison.mode == ReviewMode.Branch) screen.value = screen.value.copy(branches = reviewBranches(p.client, p.machine, p.folder))
+                    val fresh = captureReview(p.client, p.machine, p.folder, saved.comparison)
+                    check(fresh.repo == saved.repo) { "This Space now points to another checkout. Start a new review to use it." }
+                }
+            } else captureDraft(spaceId, screen.value.comparison, null)
+        }
+    }
+
+    private suspend fun captureDraft(space: String, wanted: ReviewComparison, pin: ReviewRepo?, requireNew: Boolean = false) {
+        val p = reviews.placeFor(space)
+        var cmp = wanted
+        val branches = if (wanted.mode == ReviewMode.Branch) reviewBranches(p.client, p.machine, p.folder) else emptyList()
+        if (wanted.mode == ReviewMode.Branch && branches.none { it.ref == wanted.baseRef }) {
+            val last = reviews.records(space).firstOrNull { it.repo == pin && it.comparison.mode == ReviewMode.Branch &&
+                branches.any { b -> b.ref == it.comparison.baseRef } }
+            cmp = wanted.copy(baseRef = last?.comparison?.baseRef ?: branches.singleOrNull { it.suggested }?.ref)
+        }
+        if (cmp != screen.value.comparison) {
+            screen.value = screen.value.copy(record = null, comparison = cmp, branches = branches, snapshot = null, files = emptyList(), oldFiles = emptyMap())
+        } else screen.value = screen.value.copy(branches = branches)
+        if (cmp.mode == ReviewMode.Branch && cmp.baseRef == null) return
+        val s = captureReview(p.client, p.machine, p.folder, cmp)
+        check(pin == null || pin == s.repo) { "The Space points to another checkout. Start a new review to use it." }
+        currentCoroutineContext().ensureActive()
+        val opened = reviews.create(space, s, requireNew = requireNew)
+        currentCoroutineContext().ensureActive()
+        screen.value = screen.value.copy(branches = branches)
+        display(opened)
+    }
+
+    fun chooseComparison(comparison: ReviewComparison) {
+        val s = screen.value
+        val space = s.spaceId ?: return
+        if (s.comparison == comparison && s.snapshot != null) return
+        runOperation {
+            if (!flush()) return@runOperation
+            val saved = reviews.records(space).firstOrNull { it.phase == ReviewPhase.Draft && it.repo == pinnedRepo && it.comparison == comparison }
+            if (!reviews.connected(space) && saved != null) display(saved)
+            else captureDraft(space, comparison, pinnedRepo)
+        }
+    }
+    fun refresh() {
+        val s = screen.value
+        val space = s.spaceId ?: return
+        val r = s.record
+        if (r?.composer != null) { screen.value = s.copy(error = "Save or discard the unfinished comment before refreshing."); return }
+        if (r != null && r.phase != ReviewPhase.Draft) return
+        runOperation {
+            if (!flush()) return@runOperation
+            if (r == null) { captureDraft(space, s.comparison, pinnedRepo); return@runOperation }
+            val old = s.snapshot ?: error("Saved snapshot is unreadable. Delete the review to start again.")
+            val p = reviews.placeFor(space)
+            val fresh = captureReview(p.client, p.machine, p.folder, r.comparison)
+            val files = if (fresh.id == old.id) s.files else withContext(Dispatchers.Default) { reviewFiles(fresh) }
+            currentCoroutineContext().ensureActive()
+            val updated = reviews.refresh(r, fresh, s.files, files)
+            currentCoroutineContext().ensureActive()
+            val oldFiles = (s.oldFiles + (old.id to s.files)).filterKeys { it != fresh.id && it in updated.snapshots() }
+            display(updated, ReviewContent(fresh, files, oldFiles))
+        }
+    }
+
+    private fun edit(immediate: Boolean = true, change: (ReviewRecord) -> ReviewRecord) {
+        val s = screen.value; val r = s.record ?: return
+        if (r.phase != ReviewPhase.Draft || s.loading || s.submitting || s.snapshot?.id != r.snapshotId) return
+        try {
+            val next = change(r)
+            if (next == r) return
+            val desired = next.copy(updatedAtMs = System.currentTimeMillis())
+            reviews.queue(r, desired, immediate)
+            screen.value = s.copy(record = desired, saving = true, error = null, saveError = null)
+        } catch (e: IllegalStateException) { screen.value = s.copy(error = e.message) }
+    }
+    fun beginComment(anchor: ReviewAnchor, commentId: String? = null) = edit { r ->
+        check(validReviewAnchor(anchor, r.snapshotId, screen.value.files)) { "Select a range within one displayed hunk." }
+        val composer = r.composer
+        if (composer != null) {
+            check(composer.commentId == commentId && composer.anchor == anchor) { "Resume or discard the unfinished comment first." }
+            r
+        } else {
+            val text = commentId?.let { id -> r.comments.singleOrNull { it.id == id }?.text ?: error("Comment no longer exists.") }.orEmpty()
+            r.copy(composer = ReviewComposer(commentId, anchor, text))
+        }
+    }
+    fun updateComment(text: String) = edit(false) { r -> r.copy(composer = r.composer?.copy(text = text)) }
+    fun saveComment() = edit { it.saveReviewComment(screen.value.files) }
+    fun dismissComposer(discard: Boolean = false) {
+        if (discard) edit { it.copy(composer = null) }
+        else reviews.flushPending()
+    }
+    fun removeComment(commentId: String) = edit { r ->
+        check(r.composer?.commentId != commentId) { "Save or discard the unfinished edit first." }
+        r.copy(comments = r.comments.filterNot { it.id == commentId })
+    }
+    fun updateMessage(text: String) = edit(false) { it.copy(message = text) }
+    fun chooseRecipient(address: String) = edit { r ->
+        val recipient = reviews.recipients(r.spaceId).first.singleOrNull { it.address == address && it.canSend } ?: error("This agent is not ready.")
+        r.copy(recipientAddress = address, recipientAgent = recipient.agent)
+    }
+    fun chooseIntent(intent: ReviewIntent) = edit { it.copy(intent = intent) }
+
+    fun showRecord(recordId: String) {
+        val space = screen.value.spaceId ?: return
+        runOperation {
+            if (flush()) display(reviews.records(space).singleOrNull { it.id == recordId } ?: error("This review no longer exists."))
+        }
+    }
+    fun newDraft(copyFromId: String? = null) {
+        val s = screen.value; val space = s.spaceId ?: return
+        runOperation {
+            if (!flush()) return@runOperation
+            if (copyFromId == null) captureDraft(space, s.comparison, null, requireNew = true)
+            else {
+                val source = reviews.records(space).singleOrNull { it.id == copyFromId }?.recovered() ?: error("The original review no longer exists.")
+                check(source.phase != ReviewPhase.Draft) { "Open the existing draft instead." }
+                val content = reviews.content(source)
+                val draft = reviews.create(space, content.snapshot, source)
+                display(draft, content)
+            }
+        }
+    }
+    fun deleteRecord(recordId: String) {
+        val space = screen.value.spaceId ?: return
+        runOperation {
+            if (recordId != screen.value.record?.id && !flush()) return@runOperation
+            reviews.delete(reviews.records(space).singleOrNull { it.id == recordId } ?: error("This review no longer exists."))
+            if (screen.value.record?.id == recordId) {
+                screen.value = ReviewUiState(spaceId = space, loading = true)
+                val next = reviews.records(space).firstOrNull()
+                if (next != null) display(next)
+            }
+        }
+    }
+    fun deleteUnreadableReviews() = runOperation {
+        reviews.deleteUnreadable()
+        screen.value = ReviewUiState(spaceId = screen.value.spaceId)
+    }
+
+    fun submit() {
+        val s = screen.value; val r = s.record ?: return; val snapshot = s.snapshot ?: return
+        if (s.submitting || s.loading || r.phase != ReviewPhase.Draft) return
+        if (r.composer != null) { screen.value = s.copy(error = "Save or discard the unfinished comment before sending."); return }
+        runOperation(submit = true) {
+            if (!flush()) return@runOperation
+            val saved = reviews.records(r.spaceId).singleOrNull { it.id == r.id }
+            check(saved == r) { "The review changed. Reopen the latest draft." }
+            try {
+                val result = reviews.submit(r, snapshot, s.files)
+                if (result.record.phase == ReviewPhase.Draft && result.error != null) {
+                    val latest = reviews.records(r.spaceId).find { it.id == r.id }
+                    if (latest != null && (latest != r || reviews.writes.value[r.id] != null)) display(latest)
+                    screen.value = screen.value.copy(error = result.error, saveError = result.saveError)
+                } else screen.value = screen.value.copy(record = result.record, error = result.error, saveError = result.saveError)
+            } catch (e: CancellationException) {
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    val last = runCatching { reviews.records(r.spaceId).find { it.id == r.id } }.getOrNull()
+                    if (last != null && last.phase != ReviewPhase.Draft)
+                        screen.value = screen.value.copy(record = last.recovered(),
+                            saveError = if (last.phase == ReviewPhase.Sending) "Could not save the delivery outcome." else null)
+                }
+                throw e
+            }
+        }
+    }
+}
+
 val AppViewModels: ViewModelProvider.Factory = viewModelFactory {
     fun container(extras: CreationExtras) = (extras[APPLICATION_KEY] as HerdrApp).container
     initializer { container(this).run { MainViewModel(live, store, selection, started, localNetwork) } }
+    initializer { container(this).run { ReviewViewModel(reviews) } }
     initializer { container(this).run { AgentsViewModel(live, actions, store, selection) } }
     initializer { container(this).run { SpacesViewModel(live, actions, store, selection, git) } }
     initializer { container(this).run { TerminalViewModel(live, actions, store, selection) } }

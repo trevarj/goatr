@@ -44,6 +44,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -295,19 +296,20 @@ private fun AgentRow(
 }
 
 @Composable
-fun SpacesScreen(vm: SpacesViewModel, onOpen: (String) -> Unit) {
+fun SpacesScreen(vm: SpacesViewModel, onOpen: (String) -> Unit, onReview: (String) -> Unit) {
     val session by vm.session.collectAsStateWithLifecycle()
-    TabScreen("Spaces", Lucide.Layers, session) { SpacesList(vm, onOpen) }
+    TabScreen("Spaces", Lucide.Layers, session) { SpacesList(vm, onOpen, onReview) }
 }
 
 /** Each machine's spaces: the Spaces tab, or the sidebar's upper half, `dense`, or its `rail`. */
 @Composable
-fun SpacesList(vm: SpacesViewModel, onOpen: (String) -> Unit, dense: Boolean = false, rail: Boolean = false) {
+fun SpacesList(vm: SpacesViewModel, onOpen: (String) -> Unit, onReview: (String) -> Unit, dense: Boolean = false, rail: Boolean = false) {
     val session by vm.session.collectAsStateWithLifecycle()
     val current by vm.current.collectAsStateWithLifecycle()
     val dialog by vm.dialog.collectAsStateWithLifecycle()
     val git by vm.git.collectAsStateWithLifecycle()
-    LaunchedEffect(vm) { vm.opened.collect(onOpen) }
+    val open by rememberUpdatedState(onOpen)
+    LaunchedEffect(vm) { vm.opened.collect { open(it) } }
     AppDialog(dialog, vm::dismiss)
     var folded by rememberSaveable { mutableStateOf(listOf<String>()) }
     val now = rememberNow()
@@ -369,7 +371,7 @@ fun SpacesList(vm: SpacesViewModel, onOpen: (String) -> Unit, dense: Boolean = f
                     )
                 }
             }
-            if (!shut) spaceRows(session.spaces.filter { it.host == m.host && it.machine == m.name }, git, session.terminals, here, vm, onOpen, reorder, dense, rail)
+            if (!shut) spaceRows(session.spaces.filter { it.host == m.host && it.machine == m.name }, git, session.terminals, here, vm, onOpen, onReview, reorder, dense, rail)
         }
     }
 }
@@ -455,6 +457,7 @@ private fun LazyListScope.spaceRows(
     here: String?,
     vm: LayoutViewModel,
     onOpen: (String) -> Unit,
+    onReview: (String) -> Unit,
     reorder: Reorder,
     dense: Boolean = false,
     rail: Boolean = false,
@@ -567,6 +570,7 @@ private fun LazyListScope.spaceRows(
                 menu,
                 { menu = false },
                 buildList {
+                    add(MenuItem("Review changes", { Lucide.FileCode }) { onReview(space.id) })
                     add(MenuItem("Rename", { Lucide.SquarePen }) { renaming = true })
                     repo?.let { checkout ->
                         add(MenuItem("New worktree", { Lucide.GitBranch }) { worktree = WorktreeAction.New to checkout })

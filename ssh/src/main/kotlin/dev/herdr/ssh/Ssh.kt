@@ -141,32 +141,40 @@ object Ssh {
         command: String = "hc connect",
     ): Duplex {
         val private = key.privateBytes()
-        return io("open", t) {
-            val jsch = JSch()
-            // JSch parses it into its own copy; ours goes at once.
-            try {
-                jsch.addIdentity("goatr", private, null, null)
-            } finally {
-                private.fill(0)
-            }
-            val session = jsch.session(t, pinned(hostKey), Quiet(), auth = "publickey")
-            session.setServerAliveInterval(15_000)
-            try {
-                session.connect(10_000)
-            } catch (e: JSchException) {
-                val message = e.message.orEmpty()
-                throw when {
-                    KEY_REFUSED.containsMatchIn(message) -> Refused.Key(e)
-                    message.contains("HostKey", ignoreCase = true) -> Refused.HostKeyChanged(e)
-                    else -> e
+        var session: Session? = null
+        try {
+            return io("open", t) {
+                val jsch = JSch()
+                // JSch parses it into its own copy; ours goes at once.
+                try {
+                    jsch.addIdentity("goatr", private, null, null)
+                } finally {
+                    private.fill(0)
                 }
+                val connected = jsch.session(t, pinned(hostKey), Quiet(), auth = "publickey").also { session = it }
+                connected.setServerAliveInterval(15_000)
+                try {
+                    connected.connect(10_000)
+                } catch (e: JSchException) {
+                    val message = e.message.orEmpty()
+                    throw when {
+                        KEY_REFUSED.containsMatchIn(message) -> Refused.Key(e)
+                        message.contains("HostKey", ignoreCase = true) -> Refused.HostKeyChanged(e)
+                        else -> e
+                    }
+                }
+                val channel = connected.openChannel("exec") as ChannelExec
+                channel.setCommand(command)
+                val output = channel.inputStream
+                val input = channel.outputStream
+                channel.connect(10_000)
+                ChannelDuplex(connected, channel, output, input)
             }
-            val channel = session.openChannel("exec") as ChannelExec
-            channel.setCommand(command)
-            val output = channel.inputStream
-            val input = channel.outputStream
-            channel.connect(10_000)
-            ChannelDuplex(session, channel, output, input)
+        } catch (e: Throwable) {
+            session?.disconnect()
+            throw e
+        } finally {
+            private.fill(0)
         }
     }
 

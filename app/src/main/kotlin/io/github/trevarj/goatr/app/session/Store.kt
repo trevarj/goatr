@@ -11,6 +11,9 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import herdr.core.PRESET_NAMES
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -116,6 +119,10 @@ private val Context.dataStore by preferencesDataStore("herdr")
 
 private val HOSTS = stringPreferencesKey("hosts")
 private val PREFS = stringPreferencesKey("prefs")
+private val REVIEWS = stringPreferencesKey("reviews")
+
+private fun Preferences.reviewRecords(): List<ReviewRecord> =
+    this[REVIEWS]?.let { json.decodeFromString<List<ReviewRecord>>(it) } ?: emptyList()
 
 private fun Preferences.hosts(): List<Host> =
     this[HOSTS]?.let { json.decodeFromString<List<Host>>(it) } ?: emptyList()
@@ -134,6 +141,34 @@ internal fun Preferences.prefs(): Prefs {
 
 class Store(context: Context, scope: CoroutineScope) {
     private val data = context.dataStore
+    private val _reviewsError = MutableStateFlow<String?>(null)
+    val reviewsError: StateFlow<String?> = _reviewsError
+    val reviews = data.data.map<Preferences, List<ReviewRecord>?> {
+        try {
+            it.reviewRecords().also { _reviewsError.value = null }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            _reviewsError.value = "Saved review metadata is unreadable."
+            null
+        }
+    }.catch {
+        _reviewsError.value = "Could not read saved reviews."
+        emit(null)
+    }.stateIn(scope, SharingStarted.Eagerly, null)
+
+    internal suspend fun currentReviews() = data.data.first().reviewRecords()
+
+    suspend fun editReviews(change: (List<ReviewRecord>) -> List<ReviewRecord>) {
+        data.edit { it[REVIEWS] = json.encodeToString(change(it.reviewRecords())) }
+    }
+
+    internal suspend fun deleteUnreadableReviews() {
+        data.edit {
+            check(runCatching { it.reviewRecords() }.isFailure) { "Saved reviews changed. Reopen Reviews." }
+            it.remove(REVIEWS)
+        }
+    }
 
     /** False until the saved values are read. */
     val loaded: StateFlow<Boolean> = data.data.map { true }.stateIn(scope, SharingStarted.Eagerly, false)

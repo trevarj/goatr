@@ -121,9 +121,6 @@ class Watch {
 }
 
 class Notifier(private val context: Context, private val live: Live, private val store: Store, private val scope: CoroutineScope) {
-    /** Whether the app is on screen (MainActivity started). */
-    val foreground = MutableStateFlow(false)
-
     private val _working = MutableStateFlow<List<Working>>(emptyList())
 
     /** Agents working now, across hosts: the service's notification lists them. */
@@ -150,7 +147,7 @@ class Notifier(private val context: Context, private val live: Live, private val
 
     private fun tend(snaps: List<Pair<String, SessionSnapshot>>) {
         val visible = live.visible.value
-        val t = watch.tend(snaps) { foreground.value && it in visible }
+        val t = watch.tend(snaps) { live.retention.foreground.value && it in visible }
         t.settled.forEach(::cancel)
         for (r in t.rings.takeIf { on }.orEmpty()) {
             // Looking at one that needs you: the desktop rings, but there's nothing to show.

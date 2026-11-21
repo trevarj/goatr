@@ -95,7 +95,7 @@ fun PairedDesktops() {
             val selected = draftRelay
             changing = true
             scope.launch {
-                try { app.iroh.saveRelay(selected); relay = selected; app.live.foreground() }
+                try { app.iroh.saveRelay(selected); relay = selected; app.live.wake() }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { message = "Relay change failed; choose an available built-in region." }
                 finally { changing = false }

@@ -6,6 +6,7 @@
 
 package io.github.trevarj.goatr.app.session
 
+import android.os.SystemClock
 import dev.herdr.ssh.PhoneKey
 import dev.herdr.ssh.Refused
 import dev.herdr.ssh.Seen
@@ -13,6 +14,7 @@ import dev.herdr.ssh.Ssh
 import dev.herdr.ssh.Target
 import herdr.core.Client
 import herdr.core.ConnectionState
+import herdr.core.Duplex
 import herdr.core.MismatchError
 import herdr.core.Reach
 import herdr.core.SessionSnapshot
@@ -21,7 +23,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -169,9 +173,9 @@ private class Link(
 
     private var attempt = 0
     private var job: Job? = null
-    private var opening = false
+    private var opening: Job? = null
     private var closed = false
-    private var closeCurrent: (() -> Unit)? = null
+    private var current: Duplex? = null
 
     private fun host() = store.hosts.value.find { it.id == id }
 
@@ -179,8 +183,8 @@ private class Link(
     fun reconnect() {
         if (closed) return
         job?.cancel()
-        closeCurrent?.invoke()
-        closeCurrent = null
+        current?.close()
+        current = null
         client.value = null
         problem.value = null
         // Asked again if the key's still refused: the host's setup may have changed.
@@ -194,7 +198,7 @@ private class Link(
      * host key): trying again would only spend a login attempt.
      */
     fun wake() {
-        if (closed || opening || client.value != null) return
+        if (closed || opening?.isActive == true || client.value != null) return
         val p = problem.value
         if (probe.value is Probe.Got || p is Refused || p is MismatchError) return
         restart()
@@ -209,7 +213,8 @@ private class Link(
     fun close() {
         closed = true
         job?.cancel()
-        closeCurrent?.invoke()
+        current?.close()
+        current = null
         client.value = null
         core.dispose()
     }
@@ -224,12 +229,14 @@ private class Link(
         // Allowed now; a new host's key fetch doesn't clear problems itself.
         if (problem.value is LocalNetworkBlocked) problem.value = null
         if (host.peer == null && host.hostKey == null) return probe(host)
-        opening = true
+        val mine = currentCoroutineContext()[Job]
+        opening = mine
         try {
             open(host)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             problem.value = e
             // A refused key, a changed host key or a core to update won't fix itself by retrying.
             when (e) {
@@ -238,7 +245,7 @@ private class Link(
                 else -> retry()
             }
         } finally {
-            opening = false
+            if (opening === mine) opening = null
         }
     }
 
@@ -252,18 +259,29 @@ private class Link(
     private suspend fun open(host: Host) {
         core.connecting()
         val duplex = host.peer?.let { iroh.open(it) } ?: Ssh.open(host.target, key, checkNotNull(host.hostKey))
-        closeCurrent = { duplex.close() }
         if (closed) return duplex.close()
-        val next = connect(duplex)
-        scope.launch {
-            next.state.first { it == ConnectionState.Lost }
-            if (client.value === next) client.value = null
-            if (!closed) retry()
+        current = duplex
+        val next = try {
+            connect(duplex).also { core.use(it) }
+        } catch (e: Exception) {
+            if (current === duplex) {
+                current = null
+                duplex.close()
+            }
+            throw e
         }
-        core.use(next)
         client.value = next
         attempt = 0
         problem.value = null
+        scope.launch {
+            next.state.first { it == ConnectionState.Lost }
+            if (client.value === next) {
+                client.value = null
+                current = null
+                duplex.close()
+                if (!closed) retry()
+            }
+        }
     }
 
     private fun retry() {
@@ -301,17 +319,29 @@ class Live(
     private val iroh: io.github.trevarj.goatr.GoatrConnection,
 ) {
     private val links = MutableStateFlow<Map<String, Link>>(emptyMap())
+    private val _visible = MutableStateFlow<Set<String>>(emptySet())
+    internal val retention = ConnectionRetention(scope, SystemClock::elapsedRealtime) {
+        links.value.values.forEach { it.close() }
+        links.value = emptyMap()
+    }
 
     init {
         // Allowed at last: the hosts it blocked connect now.
-        scope.launch { localNetwork.allowed.collect { if (it) foreground() } }
+        scope.launch { localNetwork.allowed.collect { if (it) wake() } }
         // A link per host that's on, made (and connecting) as hosts are added or switched on.
         scope.launch {
-            combine(store.hosts, store.prefs) { hosts, prefs -> hosts to prefs.desktop }.collect { (hosts, desktop) ->
+            combine(store.hosts, store.prefs, retention.lease) { hosts, prefs, lease ->
+                if (lease != null) activeHosts(hosts, prefs.desktop) else emptyList()
+            }.collect { want ->
                 val had = links.value
-                val want = activeHosts(hosts, desktop)
                 for ((id, l) in had) if (want.none { it.id == id }) l.close()
-                links.value = want.associate { h -> h.id to (had[h.id] ?: Link(h.id, store, key, localNetwork.allowed, scope, iroh).also { it.reconnect() }) }
+                links.value = want.associate { host ->
+                    val link = had[host.id] ?: Link(host.id, store, key, localNetwork.allowed, scope, iroh).also {
+                        it.core.setVisible(_visible.value.filter { ref -> hostOf(ref) == host.id }.map(::localOf))
+                        it.reconnect()
+                    }
+                    host.id to link
+                }
             }
         }
     }
@@ -357,8 +387,7 @@ class Live(
         scope.launch { runCatching { key.publicKey() } }
     }
 
-    /** The app opened or came back to the front: every host that's down tries now. */
-    fun foreground() = links.value.values.forEach { it.wake() }
+    internal fun wake() = links.value.values.forEach { it.wake() }
 
     /** The phone's key changed: every host logs in again with it. */
     fun reconnectAll() = links.value.values.forEach { it.reconnect() }
@@ -394,8 +423,6 @@ class Live(
 
     /** Each host's core session as it comes, by host id: what notifications watch. */
     val snapshots: Flow<List<Pair<String, SessionSnapshot>>> = perLink { it.core.snapshot }
-
-    private val _visible = MutableStateFlow<Set<String>>(emptySet())
 
     /** The terminals on screen now (app-wide addresses). */
     val visible: StateFlow<Set<String>> = _visible

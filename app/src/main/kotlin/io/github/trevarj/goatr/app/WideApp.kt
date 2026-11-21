@@ -55,6 +55,8 @@ import io.github.trevarj.goatr.app.session.Prefs
 import io.github.trevarj.goatr.app.ui.AgentsList
 import io.github.trevarj.goatr.app.ui.ConnectionBadge
 import io.github.trevarj.goatr.app.ui.Lucide
+import io.github.trevarj.goatr.app.ui.ReviewScreen
+import io.github.trevarj.goatr.app.ui.rememberReviewLeave
 import io.github.trevarj.goatr.app.ui.SettingsScreen
 import io.github.trevarj.goatr.app.ui.SpacesList
 import io.github.trevarj.goatr.app.ui.TerminalHost
@@ -68,25 +70,37 @@ private val RAIL = 64.dp
 fun WideApp(main: MainViewModel, host: TerminalHost, prefs: Prefs) {
     val session by main.session.collectAsStateWithLifecycle()
     var settings by rememberSaveable { mutableStateOf(false) }
+    var reviewSpace by rememberSaveable { mutableStateOf<String?>(null) }
+    val review: ReviewViewModel = appViewModel()
+    val leave = rememberReviewLeave(review)
+    fun switchPane(change: () -> Unit) {
+        if (reviewSpace != null) leave(change) else change()
+    }
+    fun showSettings(show: Boolean) = switchPane { reviewSpace = null; settings = show }
     val rail = !prefs.sidebar
     val width by animateDpAsState(if (rail) RAIL else SIDEBAR, label = "sidebar")
-    val open: (String) -> Unit = { address ->
+    fun openTerminal(address: String) {
+        reviewSpace = null
         main.select(address)
         main.start()
         settings = false
+    }
+    val open: (String) -> Unit = { address -> switchPane { openTerminal(address) } }
+    val openReview: (String) -> Unit = { id ->
+        if (reviewSpace != id) switchPane { settings = false; reviewSpace = id; main.start() }
     }
 
     // Links (a notification, goatr://…) pick what the one screen shows.
     fun follow(intent: Intent?) {
         val uri = intent?.data?.takeIf { it.scheme == BuildConfig.SCHEME } ?: return
         when (uri.host) {
-            "terminal" -> uri.getQueryParameter("address")?.let(open) ?: run { settings = false }
-            "settings" -> settings = true
-            else -> settings = false
+            "terminal" -> uri.getQueryParameter("address")?.let(open) ?: showSettings(false)
+            "settings" -> showSettings(true)
+            else -> showSettings(false)
         }
     }
     // Back closes Settings first, as leaving it on the phone does.
-    BackHandler(enabled = settings) { settings = false }
+    BackHandler(enabled = settings && reviewSpace == null) { settings = false }
     val activity = LocalActivity.current
     LaunchedEffect(Unit) { follow(activity?.intent) }
     OnNewIntent(::follow)
@@ -113,13 +127,13 @@ fun WideApp(main: MainViewModel, host: TerminalHost, prefs: Prefs) {
                     Icon(Lucide.PanelLeft, if (rail) "Show sidebar" else "Hide sidebar", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Section("Spaces", rail, Modifier.weight(1f)) { SpacesList(appViewModel(), open, dense = true, rail = rail) }
+            Section("Spaces", rail, Modifier.weight(1f)) { SpacesList(appViewModel(), open, openReview, dense = true, rail = rail) }
             HorizontalDivider()
             Section("Agents", rail, Modifier.weight(1f)) {
-                AgentsList(appViewModel(), open, onAddHost = { settings = true }, dense = true, rail = rail)
+                AgentsList(appViewModel(), open, onAddHost = { showSettings(true) }, dense = true, rail = rail)
             }
             HorizontalDivider()
-            val footer = Modifier.selectable(settings, role = Role.Tab) { settings = !settings }
+            val footer = Modifier.selectable(settings, role = Role.Tab) { showSettings(!settings) }
             val on = if (settings) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface
             if (rail) {
                 Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
@@ -141,11 +155,14 @@ fun WideApp(main: MainViewModel, host: TerminalHost, prefs: Prefs) {
         // Settings sits on the surface its rows and fields are drawn on, as on the phone.
         val pane = if (settings) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceDim
         Surface(Modifier.weight(1f).fillMaxHeight(), color = pane) {
-            if (settings) {
+            val id = reviewSpace
+            if (id != null) {
+                ReviewScreen(review, id, { reviewSpace = null }, ::openTerminal)
+            } else if (settings) {
                 SettingsScreen(appViewModel())
             } else {
                 Box {
-                    TerminalScreen(appViewModel(), host, prefs, open, onBack = {}, header = false)
+                    TerminalScreen(appViewModel(), host, prefs, open, openReview, onBack = {}, header = false)
                     Opening(main)
                 }
             }

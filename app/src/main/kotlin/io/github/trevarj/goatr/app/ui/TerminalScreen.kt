@@ -71,6 +71,7 @@ fun TerminalScreen(
     host: TerminalHost,
     prefs: Prefs,
     onOpen: (String) -> Unit,
+    onReview: (String) -> Unit,
     onBack: () -> Unit,
     /** The space's bar on top; the tablet's sidebar already says where you are. */
     header: Boolean = true,
@@ -144,7 +145,10 @@ fun TerminalScreen(
                     else Icon(Lucide.SquareTerminal, null, Modifier.size(20.dp))
                 }
             },
-            actions = { machine?.let { MachineBadge(it) } },
+            actions = {
+                if (space != null) IconButton({ onReview(space.id) }) { Icon(Lucide.FileCode, "Review changes") }
+                machine?.let { MachineBadge(it) }
+            },
             expandedHeight = 44.dp,
         )
 

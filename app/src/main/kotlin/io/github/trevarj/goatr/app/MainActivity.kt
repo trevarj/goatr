@@ -70,6 +70,8 @@ import io.github.trevarj.goatr.app.ui.AgentsScreen
 import io.github.trevarj.goatr.app.ui.HerdrTheme
 import io.github.trevarj.goatr.app.ui.LoadingScreen
 import io.github.trevarj.goatr.app.ui.Lucide
+import io.github.trevarj.goatr.app.ui.ReviewScreen
+import io.github.trevarj.goatr.app.ui.rememberReviewLeave
 import io.github.trevarj.goatr.app.ui.SettingsScreen
 import io.github.trevarj.goatr.app.ui.SpacesScreen
 import io.github.trevarj.goatr.app.ui.TerminalHost
@@ -88,6 +90,9 @@ object Spaces
 /** `address`: a terminal to show (from a link); without it, the one last opened. */
 @Serializable
 data class Terminal(val address: String? = null)
+
+@Serializable
+data class Review(val spaceId: String)
 
 @Serializable
 object Settings
@@ -173,14 +178,13 @@ class MainActivity : FragmentActivity() {
 
     override fun onStart() {
         super.onStart()
-        // Back in front: a dropped connection tries again at once.
-        container.live.foreground()
-        container.notifier.foreground.value = true
+        container.live.retention.enterForeground()
+        container.live.wake()
     }
 
     override fun onStop() {
         super.onStop()
-        container.notifier.foreground.value = false
+        container.live.retention.leaveForeground()
     }
 }
 
@@ -254,11 +258,12 @@ private fun App(main: MainViewModel) {
         main.select(address)
         nav.tab(Terminal())
     }
-    OnNewIntent { nav.handleDeepLink(it) }
+    val openReview: (String) -> Unit = { nav.navigate(Review(it)) }
     val entry by nav.currentBackStackEntryAsState()
+    if (entry?.destination?.hasRoute<Review>() != true) OnNewIntent { nav.handleDeepLink(it) }
     Scaffold(
         bottomBar = {
-            if (!WindowInsets.isImeVisible) {
+            if (!WindowInsets.isImeVisible && entry?.destination?.hasRoute<Review>() != true) {
                 val needs = session.agents().count { it.attention == Attention.Blocked }
                 NavigationBar {
                     for (d in TABS) {
@@ -290,14 +295,23 @@ private fun App(main: MainViewModel) {
                     AgentsScreen(appViewModel(), openTerminal) { nav.tab(Settings) }
                 }
                 composable<Spaces>(deepLinks = links<Spaces>("spaces")) {
-                    SpacesScreen(appViewModel(), openTerminal)
+                    SpacesScreen(appViewModel(), openTerminal, openReview)
                 }
                 composable<Terminal>(deepLinks = links<Terminal>("terminal")) { e ->
                     // A link names its terminal once; after that, the tab shows whatever is opened.
                     // Picked while composing (not in an effect), so the screen's first frame already shows it.
                     val asked = e.toRoute<Terminal>().address
                     remember(asked) { asked?.also(main::select) }
-                    TerminalScreen(appViewModel(), host, prefs, openTerminal, onBack = { nav.popBackStack() })
+                    TerminalScreen(appViewModel(), host, prefs, openTerminal, openReview, onBack = { nav.popBackStack() })
+                }
+                composable<Review> { e ->
+                    val vm: ReviewViewModel = appViewModel()
+                    val leave = rememberReviewLeave(vm)
+                    OnNewIntent { intent -> leave { nav.handleDeepLink(intent) } }
+                    ReviewScreen(vm, e.toRoute<Review>().spaceId, { nav.popBackStack() }) { address ->
+                        nav.popBackStack()
+                        openTerminal(address)
+                    }
                 }
                 composable<Settings>(deepLinks = links<Settings>("settings")) {
                     SettingsScreen(appViewModel())
