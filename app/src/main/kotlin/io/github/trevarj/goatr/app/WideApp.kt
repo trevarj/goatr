@@ -113,7 +113,7 @@ fun WideApp(main: MainViewModel, host: TerminalHost, prefs: Prefs) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (!rail) {
-                    Image(painterResource(R.drawable.ic_goatr), null, Modifier.size(20.dp))
+                    Image(painterResource(R.mipmap.ic_launcher_foreground), null, Modifier.size(20.dp))
                     Text(
                         "Goatr",
                         Modifier.padding(start = 8.dp).weight(1f),
